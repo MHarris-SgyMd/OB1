@@ -288,8 +288,27 @@ export function keyFromFile(text: string): string {
   return key;
 }
 
+/** A file's JSON, or a thrown error naming the file and never the parser's words: they quote what they could not read, so a
+ *  key file given where a JSON file belongs, or a ~/.claude.json broken at its key, would be printed (review passes 3 and 4). */
+export function jsonOf(text: string, what: string): unknown {
+  try { return JSON.parse(text); } catch { throw new Error(`${what} is not JSON`); }
+}
+
+/** Why a file could not be read or written, as its code alone (ENOENT): the message quotes the path, and a key typed where
+ *  a path belongs would be printed (review pass 4; cli.ts's rule, a refusal never repeats what the operator typed). */
+export function fileProblem(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : "an error";
+}
+
+/** What `read` reads, or a thrown error naming `what` (a flag, a file the harness knows) and the code, never the path. */
+export function textOf(read: () => string, what: string): string {
+  try { return read(); } catch (e) { throw new Error(`${what} could not be read (${fileProblem(e)})`); }
+}
+
 function connectorFrom(name: string, mcp: string | undefined): { mcp: string; key: string } {
-  return connectorOf(JSON.parse(readFileSync(join(homedir(), ".claude.json"), "utf8"))?.mcpServers?.[name], name, mcp);
+  const claude = jsonOf(textOf(() => readFileSync(join(homedir(), ".claude.json"), "utf8"), "~/.claude.json"), "~/.claude.json") as { mcpServers?: Record<string, unknown> } | null;
+  return connectorOf(claude?.mcpServers?.[name], name, mcp);
 }
 
 async function main(): Promise<void> {
@@ -325,11 +344,17 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const keyFile = cli.value("key-file");
-  // A key file that is not there, or holds no one key, is said in a line (review pass 2: it was a stack trace), never its content.
-  const fromFile = (path: string): string => {
-    try { return keyFromFile(readFileSync(path, "utf8")); } catch (e) { console.error(`bench-live.ts: --key-file: ${(e as Error).message}`); process.exit(2); }
+  // A key file or ~/.claude.json that is not there, is not JSON or holds no one key is said in a line of the harness's own
+  // words (review passes 2 to 4: it was a stack trace, then the file system's and the parser's words, which quote a path
+  // or a token — a key, when one was typed or sits where the JSON breaks).
+  const endpoint = (): { mcp: string; key: string } => {
+    try {
+      return keyFile
+        ? { mcp: cli.value("mcp")!, key: keyFromFile(textOf(() => readFileSync(keyFile, "utf8"), "--key-file's file")) }
+        : connectorFrom(cli.value("key-from") ?? "open-brain-canary", cli.value("mcp"));
+    } catch (e) { console.error(`bench-live.ts: ${(e as Error).message}`); process.exit(2); }
   };
-  const { mcp, key } = keyFile ? { mcp: cli.value("mcp")!, key: fromFile(keyFile) } : connectorFrom(cli.value("key-from") ?? "open-brain-canary", cli.value("mcp"));
+  const { mcp, key } = endpoint();
   // Fail before the first call, not after a capture has landed, if either file cannot be written.
   appendFileSync(out, "");
   appendFileSync(ids, "");
@@ -691,6 +716,13 @@ export function selfCheck(): number {
   ok(keySourceProblem(undefined, undefined, undefined) === null && keySourceProblem("u", "c", undefined) === null && keySourceProblem("u", undefined, "f") === null, "the canary's connector, --mcp with --key-from, and --mcp with --key-file are each one key");
   ok(/give --key-from with the connector/.test(keySourceProblem("u", undefined, undefined) ?? "") && /give --mcp too/.test(keySourceProblem(undefined, undefined, "f") ?? "") && /not both/.test(keySourceProblem("u", "c", "f") ?? ""), "--mcp with no key, --key-file with no --mcp, and both key flags are refused");
   ok(keyFromFile("abc123\n") === "abc123" && (() => { try { keyFromFile("two words\n"); return false; } catch (e) { return !/two words/.test((e as Error).message); } })(), "a key file's one line is its key; anything else is refused without naming it");
+  // What a refusal may say of a file (review pass 4): never the parser's words, never the path.
+  const said = (f: () => unknown) => { try { f(); return ""; } catch (e) { return (e as Error).message; } };
+  const KEYISH = "abcdef0123456789abcdef0123456789";
+  ok(said(() => jsonOf(`{"x-brain-key": ${KEYISH}}`, "~/.claude.json")) === "~/.claude.json is not JSON" && said(() => jsonOf(KEYISH, "f")) === "f is not JSON" && (jsonOf('{"a":1}', "f") as { a: number }).a === 1, "a file that is not JSON is named, and nothing of it is said");
+  const enoent = Object.assign(new Error(`ENOENT: no such file or directory, open '${KEYISH}'`), { code: "ENOENT" });
+  ok(fileProblem(enoent) === "ENOENT" && fileProblem(new Error(KEYISH)) === "an error" && fileProblem({ code: `x ${KEYISH}` }) === "an error" && fileProblem(null) === "an error", "a file's failure is its code alone, and no code is no words of its own");
+  ok(said(() => textOf(() => { throw enoent; }, "--key-file's file")) === "--key-file's file could not be read (ENOENT)" && textOf(() => "t", "f") === "t", "a file that cannot be read is named by its flag, never by the path typed");
   const noKey = (text: string) => { try { keyFromFile(text); return false; } catch { return true; } };
   ok(noKey("") && noKey("\n") && noKey("kéy\n") && !noKey("  abc123\n") && keyFromFile("  abc123\n") === "abc123", "an empty key file, or one whose line is not printable ASCII, is no key; spaces around the line are trimmed");
   ok(typeof conn(undefined) === "string", "no such entry is refused");

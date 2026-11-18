@@ -19,7 +19,11 @@
  * --brains names each brain, by a JSON file:
  *   { "canary":  { "connector": "open-brain-canary" },                          ~/.claude.json's entry: its url and key
  *     "scratch": { "mcp": "http://127.0.0.1:18379/mcp", "keyFile": "/path/key" } a url and a file holding the key alone }
- * The key is never printed, nor a url's query (a ?key= url carries one).
+ * The key is never printed, nor a url's query (a ?key= url carries one). A
+ * refusal names a flag or a brain and a file's failure by its code, never the
+ * path typed, a file's text or a parser's words: a key put in the wrong place
+ * (a key file as --brains, --ids or --out, a key as keyFile's path) is not said,
+ * and load and sample append only to a file that is new or holds what they write.
  *
  * load    captures the arm's notes (notesFor: the same text for every brain,
  *         another for each arm, so no arm's capture is a re-capture of
@@ -42,8 +46,10 @@
  *         (noteKind): the arm's alone with --arm, else every measure note on
  *         the brain, any arm's or run's. A listed id whose text is none is left
  *         and said; one of another arm is left and counted; one the brain does
- *         not hold is counted not on the brain. A text that starts with a note's
- *         heading and then differs is never deleted, and said. Only a canary or
+ *         not hold is counted not on the brain; a line that is no thought id is
+ *         counted and sent nowhere. A text that starts with a note's heading
+ *         and then differs is never deleted, and said on every run that meets
+ *         it (delete it by its id, or name another arm). Only a canary or
  *         working brain, as load. A last search finds what is left, and it
  *         exits 1 if anything is, or a delete, a read or that search failed. Run it once load has ended: a capture
  *         still on its way lands after, for another run to find. The notes
@@ -87,7 +93,7 @@ import { appendFileSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { commandLine } from "./cli.ts";
-import { answerTo, connectorOf, errorKind, keyFromFile, outcomeOf, percentile, shownUrl, tierRefusal } from "./bench-live.ts";
+import { answerTo, connectorOf, errorKind, fileProblem, jsonOf, keyFromFile, outcomeOf, percentile, shownUrl, textOf, tierRefusal } from "./bench-live.ts";
 import { INGESTED_NOTICE } from "../server-portable/render.ts";
 
 /** Every measure note starts with this, then `(arm <A> #<i>). `. */
@@ -110,36 +116,60 @@ export function brainOf(name: string, entry: unknown, claude: () => unknown, rea
     return { name, ...c };
   }
   if (typeof e.mcp === "string" && e.mcp !== "" && typeof e.keyFile === "string" && e.keyFile !== "") {
-    try { return { name, mcp: e.mcp, key: keyFromFile(readKey(e.keyFile)) }; } catch (x) { throw new Error(`brain ${name}: ${(x as Error).message}`); }
+    // The read apart from the key's reading: Node's words for a missing file quote the path, and a key written where the
+    // path belongs was printed (review pass 4).
+    const text = textOf(() => readKey(e.keyFile as string), `brain ${name}: its keyFile`);
+    try { return { name, mcp: e.mcp, key: keyFromFile(text) }; } catch (x) { throw new Error(`brain ${name}: ${(x as Error).message}`); }
   }
   throw new Error(`brain ${name}: give "connector" (a ~/.claude.json mcpServers name), or "mcp" and "keyFile"`);
 }
 
-/** A file's JSON, or a thrown error naming the file and never the parser's words: they quote what they could not read, and a
- *  key file given where a JSON file belongs would be printed (review pass 3). */
-export function jsonOf(text: string, what: string): unknown {
-  try { return JSON.parse(text); } catch { throw new Error(`${what} is not JSON`); }
-}
-
-const claudeJson = () => jsonOf(readFileSync(join(homedir(), ".claude.json"), "utf8"), "~/.claude.json");
+const claudeJson = () => jsonOf(textOf(() => readFileSync(join(homedir(), ".claude.json"), "utf8"), "~/.claude.json"), "~/.claude.json");
 const readKeyFile = (p: string) => readFileSync(p, "utf8");
+const BRAINS = "--brains' file";
 
 /** --brains' file: a JSON object, a brain a name. */
-export function brainsOf(text: string, path: string): Record<string, unknown> {
-  const raw = jsonOf(text, `--brains ${path}`);
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`--brains ${path} holds no JSON object of brains`);
+export function brainsOf(text: string): Record<string, unknown> {
+  const raw = jsonOf(text, BRAINS);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`${BRAINS} holds no JSON object of brains`);
   return raw as Record<string, unknown>;
 }
 
 /** Every brain --brains names. */
 function brainsFrom(path: string): Brain[] {
-  return Object.entries(brainsOf(readFileSync(path, "utf8"), path)).map(([name, entry]) => brainOf(name, entry, claudeJson, readKeyFile));
+  return Object.entries(brainsOf(textOf(() => readFileSync(path, "utf8"), BRAINS))).map(([name, entry]) => brainOf(name, entry, claudeJson, readKeyFile));
 }
 
 /** The one brain named, its entry alone resolved (another's broken entry does not block it); null when none is. */
 function brainFrom(path: string, name: string): Brain | null {
-  const raw = brainsOf(readFileSync(path, "utf8"), path);
+  const raw = brainsOf(textOf(() => readFileSync(path, "utf8"), BRAINS));
   return Object.hasOwn(raw, name) ? brainOf(name, raw[name], claudeJson, readKeyFile) : null;
+}
+
+/** A thought's id, as the brain makes them. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** An --ids file's ids, each once, and how many of its lines are no id: those are never sent to a brain nor printed, so a
+ *  key file given as --ids goes nowhere (review pass 4). */
+export function idsOf(text: string): { ids: string[]; junk: number } {
+  const lines = text.split("\n").map((s) => s.trim()).filter(Boolean);
+  return { ids: [...new Set(lines.filter((l) => UUID.test(l)))], junk: lines.filter((l) => !UUID.test(l)).length };
+}
+
+/** Why a file that load or sample appends to must not be written, or null: one holding anything but what they write there
+ *  (ids a line; samples, each a JSON object) is another kind of file — a key file, which an appended line would break. */
+export function appendProblem(kind: "ids" | "samples", text: string): string | null {
+  if (kind === "ids") return idsOf(text).junk ? "--ids' file holds a line that is no thought id: load appends ids to it, and writes into no other kind of file" : null;
+  return text.split("\n").some((l) => l.trim() !== "" && !l.trimStart().startsWith("{")) ? "--out's file holds a line that is no sample: sample appends to it, and writes into no other kind of file" : null;
+}
+
+/** A file's text, "" where there is none yet. */
+function existing(path: string, what: string): string {
+  try { return readFileSync(path, "utf8"); } catch (e) { if (fileProblem(e) === "ENOENT") return ""; throw new Error(`${what} could not be read (${fileProblem(e)})`); }
+}
+
+function append(path: string, text: string, what: string): void {
+  try { appendFileSync(path, text); } catch (e) { throw new Error(`${what} could not be written (${fileProblem(e)})`); }
 }
 
 /** A small seeded generator (mulberry32), so an arm's notes are the same text on every run and in every brain. */
@@ -186,7 +216,7 @@ const FOLLOWUPS = [
   "draft a short note for the customer success team",
 ];
 
-/** The arm's i-th note: the same text in every brain and on every run, about 700–900 characters. */
+/** The arm's i-th note: the same text in every brain and on every run, about 820–960 characters. */
 export function notesFor(arm: string, i: number): string {
   let h = 2166136261;
   for (const ch of `${arm}#${i}`) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
@@ -261,20 +291,22 @@ async function tool(b: Brain, rpc: ReturnType<typeof rpcFor>, name: string, args
 
 async function writable(b: Brain, rpc: ReturnType<typeof rpcFor>): Promise<void> {
   const info = await tool(b, rpc, "brain_info", {});
-  const refusal = tierRefusal(info.tier);
-  if (refusal) throw new Error(`${b.name}: ${refusal}`);
+  // The latency harness's rule, in this one's words: its own speak of probe captures.
+  if (tierRefusal(info.tier)) throw new Error(`${b.name}: this brain's tier is not canary or working: load and clean write to a brain, so they run on no other`);
 }
 
 async function load(b: Brain, arm: string, n: number, parallel: number, ids: string): Promise<number> {
   const rpc = rpcFor(b);
   await writable(b, rpc);
-  appendFileSync(ids, "");
+  const problem = appendProblem("ids", existing(ids, "--ids' file"));
+  if (problem) throw new Error(problem);
+  append(ids, "", "--ids' file");
   let next = 0, ok = 0, degraded = 0, unsaved = 0;
   const t0 = performance.now();
   const worker = async () => {
     for (let i = next++; i < n; i = next++) {
       const r = await tool(b, rpc, "capture_thought", { content: notesFor(arm, i), source: NOTE_SOURCE }, CAPTURE_MS).catch((e) => ({ _ok: false, _error: (e as Error).message, _id: undefined }));
-      if (typeof r._id === "string") appendFileSync(ids, r._id + "\n");
+      if (typeof r._id === "string") append(ids, r._id + "\n", "--ids' file");
       if (r._ok) ok++;
       else {
         // Saved but degraded (no vector, no tags) is in the backlog all the same; no id back is not saved, or not known to be.
@@ -304,7 +336,7 @@ export type Cleaned = { deleted: number; absent: number; found: number; otherArm
 export async function cleanWith(call: Call, listed: readonly string[], arm?: string): Promise<Cleaned> {
   const left = new Map<string, string>();
   const tried = new Set<string>();
-  let deleted = 0, absent = 0, found = 0, otherArm = 0;
+  let deleted = 0, absent = 0, found = 0, otherArm = 0, met = 0;
   const consider = async (id: string, fromList: boolean) => {
     tried.add(id);
     const f = await call("fetch", { id });
@@ -314,6 +346,7 @@ export async function cleanWith(call: Call, listed: readonly string[], arm?: str
     if (kind === "lookalike") { left.set(id, LOOKALIKE); return; }
     if (kind === "none") { if (fromList) left.set(id, "listed, but its text is no measure note's: not deleted"); return; }
     if (kind === "other-arm") { if (fromList) otherArm++; return; }
+    if (!fromList) met++;
     const r = await call("delete_thought", { id });
     // Found by content counts the notes that went, as the line says "of them": a refused delete is in `left`, not here.
     if (r.ok) { deleted++; if (!fromList) found++; }
@@ -334,13 +367,13 @@ export async function cleanWith(call: Call, listed: readonly string[], arm?: str
     }
     return { ids, failed: null, capped: true };
   };
-  // Notes whose ids never came back: by content, each read back. A round that deletes no new note ends it, and so does a
-  // failed search; a round capped at 5,000 matches deletes its notes and the next reads on.
+  // Notes whose ids never came back: by content, each read back. A round that meets no new note ends it, and so does a
+  // failed search; a round capped at 5,000 matches deletes its notes and the next reads on, whatever each delete answered.
   for (let round = 0; round < 20; round++) {
     const s = await search();
-    const before = found;
+    const before = met;
     for (const id of s.ids) if (!tried.has(id)) await consider(id, false);
-    if (found === before || s.failed !== null) break;
+    if (met === before || s.failed !== null) break;
   }
   // What is left, by a search of its own: a delete that answered but did not delete shows here, and only this search's
   // failing or stopping short is a reason to doubt the brain is clean.
@@ -360,10 +393,10 @@ export async function cleanWith(call: Call, listed: readonly string[], arm?: str
 }
 
 /** clean's lines and its exit code: 1 when anything is left, or not known to be gone. */
-export function cleanLines(name: string, listed: number, r: Cleaned, arm?: string): { lines: string[]; code: number } {
+export function cleanLines(name: string, listed: number, r: Cleaned, arm?: string, junk = 0): { lines: string[]; code: number } {
   const lines = [
     `${name}: ${r.deleted} measure notes deleted${arm === undefined ? "" : ` (arm ${arm})`}, ${r.found} of them found by content` +
-    `; ${listed} ids listed, ${r.absent} not on the brain${r.otherArm ? `, ${r.otherArm} another arm's notes and left` : ""}`,
+    `; ${listed} ids listed${junk ? ` and ${junk} lines that are no id, not sent` : ""}, ${r.absent} not on the brain${r.otherArm ? `, ${r.otherArm} another arm's notes and left` : ""}`,
   ];
   if (r.left.size) lines.push(`  NOT deleted, or not known to be: ${[...r.left].map(([id, why]) => `${id} (${why})`).join(", ")}`);
   return { lines, code: r.left.size ? 1 : 0 };
@@ -372,14 +405,14 @@ export function cleanLines(name: string, listed: number, r: Cleaned, arm?: strin
 async function clean(b: Brain, ids: string, arm: string | undefined): Promise<number> {
   const rpc = rpcFor(b);
   await writable(b, rpc);
-  const listed = new Set(readFileSync(ids, "utf8").split("\n").map((s) => s.trim()).filter(Boolean));
+  const { ids: listed, junk } = idsOf(textOf(() => readFileSync(ids, "utf8"), "--ids' file"));
   const call: Call = async (name, args) => {
     let a: Answer;
     try { a = await rpc("tools/call", { name, arguments: args }); } catch (e) { return { ok: false, error: `no answer from ${shownUrl(b.mcp)} (${errorKind(e)})`, sc: {} }; }
     const o = outcomeOf(a.status, a.msg, name);
     return { ok: o.ok, error: o.error, sc: a.msg?.result?.structuredContent ?? {} };
   };
-  const { lines, code } = cleanLines(b.name, listed.size, await cleanWith(call, [...listed], arm), arm);
+  const { lines, code } = cleanLines(b.name, listed.length, await cleanWith(call, listed, arm), arm, junk);
   for (const line of lines) console.log(line);
   return code;
 }
@@ -411,7 +444,9 @@ export function backlogOf(status: Record<string, any>): Record<string, number> {
 }
 
 async function sample(brains: Brain[], arm: string, minutes: number, everyS: number, out: string, ollama: string | undefined): Promise<number> {
-  appendFileSync(out, "");
+  const problem = appendProblem("samples", existing(out, "--out's file"));
+  if (problem) throw new Error(problem);
+  append(out, "", "--out's file");
   const rpcs = new Map(brains.map((b) => [b.name, rpcFor(b)]));
   const end = Date.now() + minutes * 60_000;
   let stop: "SIGINT" | "SIGTERM" | null = null;
@@ -444,7 +479,7 @@ async function sample(brains: Brain[], arm: string, minutes: number, everyS: num
         }
       })());
     }
-    for (const line of await Promise.all(round)) appendFileSync(out, JSON.stringify(line) + "\n");
+    for (const line of await Promise.all(round)) append(out, JSON.stringify(line) + "\n", "--out's file");
     const wait = Math.min(everyS * 1000, end - Date.now());
     if (wait > 0 && !stop) await new Promise<void>((r) => { const tm = setTimeout(r, wait); wake = () => { clearTimeout(tm); r(); }; });
   }
@@ -541,7 +576,11 @@ export function summaryLines(lines: readonly Record<string, any>[], splitMin: nu
         const w = windowOf(inWindow);
         if (w === null) {
           const sleeping = rows.filter((r) => Date.parse(r.t) >= lo && Date.parse(r.t) < hi);
-          if (!sleeping.length && !inWindow.length) { out.push(`  ${brain.padEnd(10)} ${name.padEnd(8)} no sample of it ${name} the split`); continue; }
+          if (!sleeping.length && !inWindow.length) {
+            const unanswered = asked.filter((l) => l.error && Date.parse(l.t) >= lo && Date.parse(l.t) < hi).length;
+            out.push(`  ${brain.padEnd(10)} ${name.padEnd(8)} ${unanswered ? `none of its ${unanswered} samples ${name} the split answered` : `no sample of it ${name} the split`}`);
+            continue;
+          }
           const working = sleeping.filter((r) => (r.heartbeats ?? []).some((h: Record<string, any>) => h.worker === "sleep" && h.running && h.slept && h.slept.to === null)).length;
           const why = all.length === 0 ? "no model tallies stamped in the arm (a build before SMD-3379 PR 2b-2a, no sleep, or a sleep that had made no model call)" : `${inWindow.length} sleep stamp(s) in the window, fewer than two`;
           out.push(`  ${brain.padEnd(10)} ${name.padEnd(8)} ${why}; sleep working in ${working} of ${sleeping.length} samples`);
@@ -562,7 +601,7 @@ export function summaryLines(lines: readonly Record<string, any>[], splitMin: nu
       const sets = new Map<string, number>();
       let swaps = 0;
       ol.forEach((l, k) => { const s = l.loaded.join(" + ") || "(none)"; sets.set(s, (sets.get(s) ?? 0) + 1); if (k && s !== (ol[k - 1].loaded.join(" + ") || "(none)")) swaps++; });
-      out.push(`  ollama: ${[...sets].map(([s, n]) => `${s} in ${n}`).join("; ")} of ${ol.length} samples; the loaded set differed from the sample before ${swaps} times${olAsked.length > ol.length ? `; ${olAsked.length - ol.length} more samples failed` : ""}`);
+      out.push(`  ollama: ${[...sets].map(([s, n]) => `${s} in ${n}`).join("; ")} of ${ol.length} samples; the loaded set differed from the sample before ${swaps} times${olAsked.length > ol.length ? `; ${olAsked.length - ol.length} more failed` : ""}`);
     }
   }
   if (arms.length) out.push("", LEGEND);
@@ -584,12 +623,34 @@ export function summaryLines(lines: readonly Record<string, any>[], splitMin: nu
   return out;
 }
 
+/** A file's lines as JSON objects, numbered as the file numbers them; a thrown error names `what` and the line, never its text. */
+function linesOf(text: string, what: string, shape: (v: Record<string, any>) => boolean, kind: string): Record<string, any>[] {
+  const out: Record<string, any>[] = [];
+  text.split("\n").forEach((l, k) => {
+    if (l.trim() === "") return;
+    const v = jsonOf(l, `${what} line ${k + 1}`);
+    if (v === null || typeof v !== "object" || Array.isArray(v) || !shape(v as Record<string, any>)) throw new Error(`${what} line ${k + 1} is no ${kind}`);
+    out.push(v as Record<string, any>);
+  });
+  return out;
+}
+
+/** sample's --out as samples: each a time, an arm and a brain. */
+export function samplesOf(text: string, what: string): Record<string, any>[] {
+  return linesOf(text, what, (v) => typeof v.t === "string" && !Number.isNaN(Date.parse(v.t)) && typeof v.arm === "string" && typeof v.brain === "string", "sample");
+}
+
+/** A --live file as bench-live.ts's samples: each a label, a kind, its milliseconds and whether it was ok. */
+export function liveOf(text: string, what: string): Live[] {
+  return linesOf(text, what, (v) => typeof v.label === "string" && typeof v.kind === "string" && typeof v.ms === "number" && typeof v.ok === "boolean", "bench-live.ts sample") as Live[];
+}
+
 function summary(out: string, splitMin: number, live: readonly string[]): number {
-  const read = (file: string) => readFileSync(file, "utf8").split("\n").filter(Boolean).map((l, k) => jsonOf(l, `${file} line ${k + 1}`) as Record<string, any>);
-  const lines = read(out);
-  if (!lines.length) console.error(`bench-brains.ts summary: no samples in ${out}`);
-  for (const line of summaryLines(lines, splitMin, live.map((file) => read(file) as Live[]))) console.log(line);
-  return lines.length || live.length ? 0 : 1;
+  const lines = samplesOf(textOf(() => readFileSync(out, "utf8"), "--out's file"), "--out's file");
+  if (!lines.length) console.error("bench-brains.ts summary: --out's file holds no samples");
+  const lives = live.map((file, k) => liveOf(textOf(() => readFileSync(file, "utf8"), `--live's file ${k + 1}`), `--live's file ${k + 1}`));
+  for (const line of summaryLines(lines, splitMin, lives)) console.log(line);
+  return lines.length ? 0 : 1;
 }
 
 /** The pure parts, and clean against a brain in memory, checked without a brain or a provider: what CI runs (--self-check). */
@@ -696,7 +757,7 @@ export async function selfCheck(): Promise<number> {
   ok(table.includes(`  ${"".padEnd(10)} extraction rows pending or claimed: 0 first, 0 last, 150 most; ran dry at ${iso(300)}`) && table.some((l) => l.endsWith("0 first, 0 last, 0 most; empty throughout; 1 of 15 samples failed")),
     "the backlog line reads the extraction pools alone, and says a brain's failed samples");
   ok(table.includes(`  ${"dead".padEnd(10)} never answered in the arm: 14 of 14 samples failed`) && !table.some((l) => l.includes("dead") && l.includes("tallies")), "a brain that never answered is said so, never as a sleep that stamped nothing");
-  ok(table.includes("  ollama: a + b in 11; a in 3 of 14 samples; the loaded set differed from the sample before 2 times; 1 more samples failed") && !table.some((l) => l.trim().startsWith("(ollama)")) && table[table.length - 1] === LEGEND,
+  ok(table.includes("  ollama: a + b in 11; a in 3 of 14 samples; the loaded set differed from the sample before 2 times; 1 more failed") && !table.some((l) => l.trim().startsWith("(ollama)")) && table[table.length - 1] === LEGEND,
     "the loaded sets are counted, and their changes from one sample to the next, a failed read of them said and no brain's row; the legend ends the table");
   // Review pass 3's rows.
   ok(table[0] === `\narm X: ${iso(0)} to ${iso(390)} (6.5 min); windows: before 3 min, and after`, "an arm's heading: its first and last sample and the minutes between");
@@ -708,8 +769,31 @@ export async function selfCheck(): Promise<number> {
   const wl = waits.find((l) => l.trim().startsWith("canary") && l.includes(" before ")) ?? "";
   ok(cells(wl).slice(0, 8).join(" ") === "canary before 60 0 0 0.00 40 173.0" && wl.endsWith("   consolidate 0/0s (40 waited 173s)") && !wl.includes("extract"), "a pass whose asks waited while none of its calls ended is listed by its waits; a pass with no increase is not");
   ok(summaryLines([{ t: iso(0), arm: "O", brain: "(ollama)", error: "x" }], 1, []).includes("  ollama: never answered in the arm: 1 of 1 samples failed"), "a model server that never answered its loaded models is said");
-  ok(throws(() => jsonOf("abcdef0123456789abcdef", "--brains f"), /^--brains f is not JSON$/) && throws(() => brainsOf("abcdef0123456789abcdef\n", "f"), /^--brains f is not JSON$/) && throws(() => brainsOf("[]", "f"), /holds no JSON object/) && throws(() => brainsOf('"k"', "f"), /holds no JSON object/) && Object.keys(brainsOf('{"a":{}}', "f")).join() === "a",
-    "a file that is not JSON is named and nothing of it printed (a key file given as --brains); a brains file is a JSON object");
+  const KEYISH = "abcdef0123456789abcdef0123456789";
+  ok(throws(() => brainsOf(`${KEYISH}\n`), /^--brains' file is not JSON$/) && throws(() => brainsOf("[]"), /^--brains' file holds no JSON object of brains$/) && throws(() => brainsOf('"k"'), /holds no JSON object/) && throws(() => brainsOf("null"), /holds no JSON object/) && throws(() => brainsOf("7"), /holds no JSON object/) && Object.keys(brainsOf('{"a":{}}')).join() === "a",
+    "a brains file that is not JSON is named by its flag and nothing of it printed (a key file given as --brains); it is a JSON object, no array, string, number or null");
+
+  // Review pass 4's rows: a refusal names a flag or a brain and a code, never a path, a parser's words or a line's text.
+  const noFile = () => { throw Object.assign(new Error(`ENOENT: no such file or directory, open '${KEYISH}'`), { code: "ENOENT" }); };
+  ok(throws(() => brainOf("s", { mcp: "http://h/mcp", keyFile: KEYISH }, claude, noFile), /^brain s: its keyFile could not be read \(ENOENT\)$/), "a key written where keyFile's path belongs is not printed: the brain is named, and the file system's code");
+  const ID = "0123abcd-0123-4abc-8def-0123456789ab";
+  const listedIds = idsOf(`${ID}\n\n  ${ID.toUpperCase()}  \r\n${ID}\nnot-a-uuid\n${KEYISH}\nhttp://h/mcp?key=${KEYISH}\n`);
+  ok(JSON.stringify(listedIds.ids) === JSON.stringify([ID, ID.toUpperCase()]) && listedIds.junk === 3 && idsOf(`x${ID}\n${ID}x\n`).ids.length === 0 && idsOf(`x${ID}\n${ID}x\n`).junk === 2 && idsOf("").ids.length === 0 && idsOf("\n\n").junk === 0, "an ids file's ids are its lines that are thought ids, each once, spaces and blank lines aside; the others are counted, to be sent nowhere");
+  ok(appendProblem("ids", "") === null && appendProblem("ids", `${ID}\n${ID}\n`) === null && /is no thought id/.test(appendProblem("ids", `${KEYISH}\n`) ?? "") && !(appendProblem("ids", `${KEYISH}\n`) ?? "").includes(KEYISH), "load appends ids to an empty file or one of ids alone, never to another kind of file (a key file), and says none of it");
+  ok(appendProblem("samples", "") === null && appendProblem("samples", '{"t":"x"}\n\n{"t":"y"}\n') === null && /is no sample/.test(appendProblem("samples", `${KEYISH}\n`) ?? "") && /is no sample/.test(appendProblem("samples", `{"t":"x"}\n${KEYISH}\n`) ?? "") && !(appendProblem("samples", `${KEYISH}\n`) ?? "").includes(KEYISH), "sample appends to an empty file or one of JSON objects alone, likewise");
+  const sample1 = `{"t":"${iso(0)}","arm":"X","brain":"b"}`;
+  ok(!throws(() => samplesOf(`${sample1}\n\n${sample1}\n`, "f"), /./) && samplesOf(`${sample1}\n\n${sample1}\n`, "--out's file").length === 2 && throws(() => samplesOf(`{"t":"${iso(0)}","arm":"X"}\n`, "f"), /^f line 1 is no sample$/) && throws(() => samplesOf(`${sample1}\n\n${KEYISH}\n`, "--out's file"), /^--out's file line 3 is not JSON$/) && throws(() => samplesOf(`${sample1}\n12345\n`, "f"), /^f line 2 is no sample$/) && throws(() => samplesOf('"k"\n', "f"), /^f line 1 is no sample$/) && throws(() => samplesOf('{"t":"never","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/) && samplesOf("", "f").length === 0,
+    "a samples file's line that is not JSON, or no sample (a time, an arm, a brain), is named by flag and by the file's own line number, its text unsaid");
+  ok(!throws(() => liveOf('{"label":"l","kind":"search","ms":5,"ok":true}\n', "f"), /./) && liveOf('{"label":"l","kind":"search","ms":5,"ok":true}\n', "f").length === 1 &&throws(() => liveOf("12345\n", "--live's file 1"), /^--live's file 1 line 1 is no bench-live\.ts sample$/) && throws(() => liveOf(`${KEYISH}\n`, "f"), /^f line 1 is not JSON$/), "a --live file's lines likewise");
+  ok(cleanLines("x", 2, { deleted: 2, absent: 0, found: 0, otherArm: 0, left: new Map() }, undefined, 3).lines[0] === "x: 2 measure notes deleted, 0 of them found by content; 2 ids listed and 3 lines that are no id, not sent, 0 not on the brain", "clean's line counts the listed lines that were no id, sent nowhere");
+  ok(new Bun.CryptoHasher("sha256").update(`${notesFor("A", 0)}\n${notesFor("fixed-2", 4999)}`).digest("hex").slice(0, 16) === "fb472cdb73cb2be9",
+    "the generator's text is pinned: clean deletes by it, so a note it wrote before an edit to its words would read as a lookalike and stay");
+  ok(noteKind(`${INGESTED_NOTICE}\n\n${INGESTED_NOTICE}\n\n${a0}`) === "none" && noteKind(`${INGESTED_NOTICE}\n${a0}`) === "none" && noteKind(`${INGESTED_NOTICE}xx${a0}`) === "none" && noteKind(`${NOTE_PREFIX} (arm A #). x`) === "none",
+    "the ingested notice is read past once, with its blank line, and nothing else before a heading is; a heading without an index is none");
+  ok(!waits.some((l) => l.includes("ollama")) && summaryLines([0, 15].map((s) => ({ t: iso(s), arm: "O", brain: "(ollama)", loaded: ["a"] })), 1, []).includes("  ollama: a in 2 of 2 samples; the loaded set differed from the sample before 0 times"), "an arm with no model server sampled has no line for one, and one that always answered has no failed count");
+  const down = safely(() => summaryLines([...[0, 30, 60, 90].map((s) => ({ t: iso(s), arm: "D", brain: "b", backlog: {}, heartbeats: [] })), ...[120, 150, 180].map((s) => ({ t: iso(s), arm: "D", brain: "b", error: "b: brain_info got no answer" }))], 2, []));
+  ok(down.includes(`  ${"b".padEnd(10)} after    none of its 3 samples after the split answered`) && !down.some((l) => l.includes(" after ") && l.includes("sleep working")),
+    "a window whose samples all failed says so, apart from one the arm never reached, and prints no count of none beside it");
   ok(noteKind(a0) === "note" && noteKind(`${a0} more`) === "lookalike" && noteKind(`${NOTE_PREFIX} (arm A #0). my own words`) === "lookalike" && noteKind(a0.replace("#0)", "#00)")) === "lookalike" && noteKind(notesFor("B", 1), "A") === "other-arm" && noteKind(`${NOTE_PREFIX} (arm B #1). my own words`, "A") === "lookalike" && noteKind(`quote: ${a0}`) === "none" && noteKind(a0.slice(0, -1)) === "lookalike" && noteKind(`${NOTE_PREFIX} (arm A #1x). `) === "none" && noteKind(`${NOTE_PREFIX} (arm A #1) more`) === "none",
     "a measure note is the generator's whole text for the arm and index its heading names: a longer, shorter or other text behind the heading is a lookalike, whatever the arm");
   ok(!READ_GONE.test("x Fetch error: no thought with id y") && !READ_GONE.test("fetch error: no thought with id y"), "a read's gone is the server's words from their first character");
@@ -719,7 +803,7 @@ export async function selfCheck(): Promise<number> {
   const lt = summaryLines([], 3, [[...okMs.map((ms) => ({ label: "rv", kind: "search", ms, ok: true })), ...[9000, 9000].map((ms) => ({ label: "rv", kind: "search", ms, ok: false })), { label: "rv", kind: "metadata", ms: 7, ok: true }]]);
   ok(cells(lt.find((l) => l.includes(" search ")) ?? "").join(" ") === `rv search 20 18 ${Math.round(percentile(okMs, 50))} ${Math.round(percentile(okMs, 90))} 180` && percentile(okMs, 50) !== percentile(okMs, 90) && lt.some((l) => l.includes(" metadata ")) && !lt.includes(LEGEND),
     "the live table counts every call and reads its percentiles and its longest from the ok calls alone, a kind a row");
-  ok(brief.some((l) => l === `  ${"canary".padEnd(10)} after    no sample of it after the split`), "a window the arm never reached says so, not a count of none");
+  ok(brief.some((l) => l === `  ${"canary".padEnd(10)} after    no sample of it after the split`) && brief.filter((l) => l.trim().startsWith("canary") && l.includes(" after ")).length === 1, "a window the arm never reached says so, not a count of none beside it");
   ok(!lt.some((l) => l.includes(" capture ") || l.includes(" embed ")), "a kind with no call has no row");
   await cleanChecks(ok);
   return finish();
@@ -729,11 +813,11 @@ export async function selfCheck(): Promise<number> {
 const NO_SCOPE = '{"code":-32602,"message":"Tool delete_thought not found"}';
 
 /**
- * A brain of thoughts in memory, answering clean's four tools as the server does (render.ts's NOT_FOUND texts, a keyword
+ * A brain of thoughts in memory, answering clean's three tools as the server does (render.ts's NOT_FOUND texts, a keyword
  * search blind to case); `scope` false answers as a key without write scope. `deleteGone` is a thought another caller
  * deletes between its read and its delete; `searchFails` says which search calls fail, by their count from 1.
  */
-function fakeBrain(texts: Record<string, string>, scope = true, opts: { deleteLies?: string; deleteGone?: string; fetchFails?: string; fetchNoText?: string; searchFails?: (nth: number) => boolean; noTotal?: boolean } = {}): { call: Call; held: Map<string, string>; deletes: string[] } {
+function fakeBrain(texts: Record<string, string>, scope = true, opts: { deleteLies?: string; deleteGone?: string; deleteGoneAll?: boolean; fetchFails?: string; fetchNoText?: string; searchFails?: (nth: number) => boolean; noTotal?: boolean } = {}): { call: Call; held: Map<string, string>; deletes: string[] } {
   const held = new Map(Object.entries(texts));
   const deletes: string[] = [];
   let searches = 0;
@@ -742,7 +826,7 @@ function fakeBrain(texts: Record<string, string>, scope = true, opts: { deleteLi
     if (name === "delete_thought") {
       deletes.push(id);
       if (!scope) return { ok: false, error: NO_SCOPE, sc: {} };
-      if (id === opts.deleteGone) held.delete(id);
+      if (id === opts.deleteGone || opts.deleteGoneAll) held.delete(id);
       if (!held.has(id)) return { ok: false, error: `No thought with id ${id}. It may already have been deleted`, sc: {} };
       if (id !== opts.deleteLies) held.delete(id);
       return { ok: true, sc: {} };
@@ -812,6 +896,12 @@ export async function cleanChecks(ok: (pass: boolean, what: string) => void): Pr
   b = fakeBrain({ ...notes("A", 2) }, true, { deleteGone: "A-1" });
   r = await cleanWith(b.call, ["A-1"]);
   ok(r.deleted === 1 && r.absent === 1 && r.found === 1 && r.left.size === 0 && b.held.size === 0 && cleanLines("x", 1, r).code === 0, "a note another caller deletes between its read and its delete is counted not on the brain, not deleted (exit 0)");
+  b = fakeBrain({ ...notes("A", 2) }, true, { deleteGone: "A-1" });
+  r = await cleanWith(b.call, []);
+  ok(r.deleted === 1 && r.found === 1 && r.absent === 1 && r.left.size === 0 && b.held.size === 0, "a found note gone by its delete is not on the brain, and no note found: found counts what a search found and clean deleted");
+  b = fakeBrain(notes("G", 5100), true, { deleteGoneAll: true });
+  r = await cleanWith(b.call, []);
+  ok(r.left.size === 0 && r.absent === 5100 && r.deleted === 0 && b.held.size === 0, "the rounds go on while a round meets new notes, whatever their deletes answered: 5,100 notes all gone by their deletes leave none untried");
   b = fakeBrain(base, true, { fetchFails: "B-0" });
   r = await cleanWith(b.call, []);
   ok(/its read failed/.test(r.left.get("B-0") ?? "") && b.held.has("B-0"), "a note whose read fails is said, not skipped in silence");
@@ -890,7 +980,7 @@ async function main(): Promise<number> {
   };
   const one = (name: string) => {
     const b = brainFrom(cli.value("brains")!, name);
-    if (!b) { console.error(`bench-brains.ts: no brain ${JSON.stringify(name)} in ${cli.value("brains")}`); process.exit(2); }
+    if (!b) { console.error("bench-brains.ts: --brain names no brain in --brains' file"); process.exit(2); }
     return b;
   };
   const arm = cli.value("arm");

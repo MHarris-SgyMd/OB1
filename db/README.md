@@ -6046,9 +6046,10 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
 "open-brain-canary"}}` takes the url and key from that `~/.claude.json` entry, as
 `bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
 "keyFile": "…"}}` takes a url and a file holding the key alone. Only the brain a
-command names is read from it. No key is printed, and a file that is not JSON is
-named without quoting it. Each subcommand refuses a flag
-it does not read.
+command names is read from it. No key is printed. A refusal names a flag or a
+brain and, for a file, the file system's code (`ENOENT`): never the path typed,
+a file's text or a parser's words, any of which could be a key put in the wrong
+place. Each subcommand refuses a flag it does not read.
 
 - **load** captures the arm's notes, generated from the arm's name and the index,
   so every brain gets the same text and no arm's note is another's. Each starts
@@ -6058,13 +6059,15 @@ it does not read.
   `working` takes them. A capture that answers no id is counted apart: it was not
   saved, or the brain already held the note (an arm loaded twice), or it was cut
   off and may land yet. `load` exits 1 on any of those, or on a note saved
-  without a vector or tags.
+  without a vector or tags. It appends to `--ids` only where that file is new or
+  holds thought ids alone, so a key file named there by mistake is not written.
 - **sample** reads every brain's `brain_info` and `worker_status` each `--every`
   seconds (15), and, with `--ollama`, the model server's loaded models from
   Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
-  if a brain never answered. A signal ends the wait and the round in hand, and it
-  then exits 128 plus the signal's number, whatever the brains answered; a second
-  signal exits at once, the round in hand unwritten.
+  if a brain never answered. A signal ends the wait; the round in hand is finished
+  and written, and it then exits 128 plus the signal's number, whatever the
+  brains answered. A second signal exits at once, the round in hand unwritten. It
+  appends to `--out` only where that file is new or holds samples alone.
 - **clean** reads back each listed id, then searches for measure notes whose ids
   never came back and reads those back too. It deletes a thought only when its
   whole text is the generator's own for the arm and index its heading names: the
@@ -6074,12 +6077,17 @@ it does not read.
   - one whose text is no measure note's is left, said, and exits 1;
   - one that is another arm's note, under `--arm`, is left and counted;
   - one the brain does not hold, gone already or never an id of its own, is
-    counted as not on the brain, not as deleted.
+    counted as not on the brain, not as deleted. So is a found note gone by the
+    time of its delete;
+  - a line that is no thought id is counted and sent nowhere.
 
   A thought that starts with a note's heading and then differs, someone's own
-  words after it, is never deleted, listed or found: clean says it and exits 1.
+  words after it, is never deleted, listed or found: clean says it and exits 1,
+  on every run that meets it. A note written by another version of the generator
+  reads the same way. To clear one, delete that thought by its id, or name the
+  arm you mean with `--arm`: another arm's search never meets it.
   A last search finds any note still there. It exits 1 if one is left, or if a
-  delete, a read or that search failed. Run it after `load` has ended: a capture
+  delete, a read or that search failed or stopped at 5,000 matches. Run it after `load` has ended: a capture
   still on its way lands afterwards, and a second run finds it. It deletes the
   notes alone. The entities extraction drew from them stay until an operator
   prunes the orphans (`prune_orphan_entities()`), and the audit log keeps each
@@ -6098,7 +6106,8 @@ it does not read.
   and when they ran dry), how many of its samples failed, how often the model
   server's loaded models differed from one sample to the next, and each `--live`
   file's latencies by label. A brain that never answered in an arm is said so.
-  Two runs of one arm name appended to one `--out` read as one arm.
+  Two runs of one arm name appended to one `--out` read as one arm. An `--out`
+  with no samples exits 1.
 
 **Reading "in flight".** It is near the slots the sleep held on average, with
 these limits:
