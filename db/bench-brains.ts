@@ -115,6 +115,8 @@ type Answer = { status: number; msg: Record<string, any> | null };
 /** A brain's url and key from its entry in --brains: a connector's, or a url beside a key file. */
 export function brainOf(name: string, entry: unknown, claude: () => unknown, readKey: (path: string) => string): Brain {
   const e = (entry ?? {}) as { connector?: unknown; mcp?: unknown; keyFile?: unknown };
+  // A field that is there and no string is no entry: it was passed over unsaid, a `keyFile: 9` beside a connector among them.
+  if ([e.connector, e.mcp, e.keyFile].some((v) => v !== undefined && typeof v !== "string")) throw new Error(`brain ${name}: give "connector" (a ~/.claude.json mcpServers name), or "mcp" and "keyFile", each a string`);
   const connector = typeof e.connector === "string" && e.connector !== "" ? e.connector : null;
   const keyFile = typeof e.keyFile === "string" && e.keyFile !== "" ? e.keyFile : null;
   // One key's source an entry: a connector's key beside a key file would be one of them ignored, unsaid (bench-live.ts
@@ -125,7 +127,7 @@ export function brainOf(name: string, entry: unknown, claude: () => unknown, rea
     // printed (review pass 5). Its own entry alone: `constructor` names no connector.
     const servers = (claude() as { mcpServers?: Record<string, unknown> } | null)?.mcpServers;
     if (!servers || !Object.hasOwn(servers, connector)) throw new Error(`brain ${name}: ~/.claude.json has no mcpServers entry of its connector's name`);
-    try { return { name, ...connectorOf(servers[connector], connector, typeof e.mcp === "string" ? e.mcp : undefined) }; } catch {
+    try { return { name, ...connectorOf(servers[connector], connector, typeof e.mcp === "string" && e.mcp !== "" ? e.mcp : undefined) }; } catch {
       throw new Error(`brain ${name}: its connector's entry in ~/.claude.json has no key (an x-brain-key header, or on its url), or no url where the brain's entry gives no "mcp"`);
     }
   }
@@ -312,14 +314,27 @@ async function tool(b: Brain, rpc: ReturnType<typeof rpcFor>, name: string, args
 /** The latency harness's tier rule, in this one's words: its own speak of probe captures. */
 const tierWords = (name: string) => `${name}: this brain's tier is not canary or working: load and clean write to a brain, so they run on no other`;
 
-async function writable(b: Brain, rpc: ReturnType<typeof rpcFor>): Promise<void> {
-  const info = await tool(b, rpc, "brain_info", {});
-  if (tierRefusal(info.tier)) throw new Error(tierWords(b.name));
+/** A brain's tools as load's guard and clean read them: a structured answer, or why not. Never throws, never a url's query. */
+function callOf(b: Brain, rpc: ReturnType<typeof rpcFor>): Call {
+  return async (name, args) => {
+    let a: Answer;
+    try { a = await rpc("tools/call", { name, arguments: args }); } catch (e) { return { ok: false, error: `no answer from ${shownUrl(b.mcp)} (${errorKind(e)})`, sc: {} }; }
+    const o = outcomeOf(a.status, a.msg, name);
+    return { ok: o.ok, error: o.error, sc: a.msg?.result?.structuredContent ?? {} };
+  };
+}
+
+/** load's and clean's guard, through `call`: only a brain that says its tier is canary or working is written to — not one
+ *  that says another, says none, or cannot be asked. */
+export async function tierGuard(call: Call, name: string): Promise<void> {
+  const info = await call("brain_info", {});
+  if (!info.ok) throw new Error(`${name}: brain_info failed (${info.error})`);
+  if (tierRefusal(info.sc.tier)) throw new Error(tierWords(name));
 }
 
 async function load(b: Brain, arm: string, n: number, parallel: number, ids: string): Promise<number> {
   const rpc = rpcFor(b);
-  await writable(b, rpc);
+  await tierGuard(callOf(b, rpc), b.name);
   const before = existing(ids, "--ids' file");
   const problem = appendProblem("ids", before);
   if (problem) throw new Error(problem);
@@ -431,23 +446,14 @@ export function cleanLines(name: string, listed: number, r: Cleaned, arm?: strin
  * the arm's passing with the rest (review pass 5: both sat in wiring no row reached).
  */
 export async function cleanOn(call: Call, name: string, idsText: string, arm?: string): Promise<{ lines: string[]; code: number }> {
-  const info = await call("brain_info", {});
-  if (!info.ok) throw new Error(`${name}: brain_info failed (${info.error})`);
-  if (tierRefusal(info.sc.tier)) throw new Error(tierWords(name));
+  await tierGuard(call, name);
   const { ids, junk } = idsOf(idsText);
   return cleanLines(name, ids.length, await cleanWith(call, ids, arm), arm, junk);
 }
 
 async function clean(b: Brain, ids: string, arm: string | undefined): Promise<number> {
-  const rpc = rpcFor(b);
   const idsText = textOf(() => readFileSync(ids, "utf8"), "--ids' file");
-  const call: Call = async (name, args) => {
-    let a: Answer;
-    try { a = await rpc("tools/call", { name, arguments: args }); } catch (e) { return { ok: false, error: `no answer from ${shownUrl(b.mcp)} (${errorKind(e)})`, sc: {} }; }
-    const o = outcomeOf(a.status, a.msg, name);
-    return { ok: o.ok, error: o.error, sc: a.msg?.result?.structuredContent ?? {} };
-  };
-  const { lines, code } = await cleanOn(call, b.name, idsText, arm);
+  const { lines, code } = await cleanOn(callOf(b, rpcFor(b)), b.name, idsText, arm);
   for (const line of lines) console.log(line);
   return code;
 }
@@ -459,7 +465,7 @@ export function keptOf(info: Record<string, any>): Record<string, unknown> {
     tier: info?.tier ?? null,
     commit: info?.commit ?? null,
     provider: info?.provider?.status ?? null,
-    heartbeats: (Array.isArray(w.heartbeats) ? w.heartbeats : []).map((h: Record<string, any>) => ({
+    heartbeats: (Array.isArray(w.heartbeats) ? w.heartbeats : []).filter((h: unknown) => h !== null && typeof h === "object").map((h: Record<string, any>) => ({
       worker: h.worker, at: h.at, running: h.running, slept: h.slept ?? null, models: h.models ?? null, answers: h.malformed?.answers ?? null,
     })),
     relay: w.coordinator?.relay ?? null,
@@ -522,6 +528,11 @@ async function sample(brains: Brain[], arm: string, minutes: number, everyS: num
   const silent = brains.filter((b) => !answered.has(b.name)).map((b) => b.name);
   console.log(`sampled arm ${arm}${stop ? ` (stopped early by ${stop})` : ""}${silent.length ? `; never answered: ${silent.join(", ")}` : ""}`);
   return sampleExit(stop, silent.length);
+}
+
+/** Whether a sample has nothing to read: no brain and no model server. A model server alone is a sample, which summary reads (review pass 6: pass 5 refused it). */
+export function nothingToSample(brains: number, ollama: string | undefined): boolean {
+  return brains === 0 && !ollama;
 }
 
 /** sample's exit code: 128 + the first signal's number when one cut it short, whatever the brains answered (so `sample && summary` stops there), else 1 when a brain never answered. */
@@ -691,12 +702,17 @@ function summary(out: string, splitMin: number, live: readonly string[]): number
 }
 
 /** The pure parts, and clean against a brain in memory, checked without a brain or a provider: what CI runs (--self-check). */
+/** A floor under the self-check's rows, raised as it grows: fewer means some of it did not run. */
+const ROWS_AT_LEAST = 120;
+
 export async function selfCheck(): Promise<number> {
   const rows: [string, boolean][] = [];
   const ok = (pass: boolean, what: string) => { rows.push([what, pass]); };
   // A row that throws is a row that fails, said with the rows before it, not a self-check that ends with none printed
   // (review pass 5: three mutants ended it so).
-  try { await selfRows(ok); } catch (e) { ok(false, `the self-check ended on a throw after ${rows.length} rows: ${(e as Error).message}`); }
+  try { await selfRows(ok); } catch (e) { ok(false, `the self-check ended on a throw after ${rows.length} rows: ${String((e as Error | null)?.message ?? e)}`); }
+  // CI reads the exit code alone: a self-check cut short by a stray return would pass with a handful of rows.
+  if (rows.length < ROWS_AT_LEAST) ok(false, `the self-check ran ${rows.length} rows, fewer than the ${ROWS_AT_LEAST} it has had`);
   for (const [what, pass] of rows) console.log((pass ? "ok   " : "FAIL ") + what);
   return rows.every(([, p]) => p) ? 0 : 1;
 }
@@ -836,8 +852,8 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
   ok(!throws(() => liveOf('{"label":"l","kind":"search","ms":5,"ok":true}\n', "f"), /./) && liveOf('{"label":"l","kind":"search","ms":5,"ok":true}\n', "f").length === 1 &&throws(() => liveOf("12345\n", "--live's file 1"), /^--live's file 1 line 1 is no bench-live\.ts sample$/) && throws(() => liveOf(`${KEYISH}\n`, "f"), /^f line 1 is not JSON$/), "a --live file's lines likewise");
   ok(cleanLines("x", 2, { deleted: 2, absent: 0, found: 0, otherArm: 0, left: new Map() }, undefined, 3).lines[0] === "x: 2 measure notes deleted, 0 of them found by content; 2 ids listed and 3 lines that are no id, not sent, 0 not on the brain", "clean's line counts the listed lines that were no id, sent nowhere");
   const armA = Array.from({ length: 150 }, (_, i) => notesFor("A", i)).join("\n");
-  ok(new Bun.CryptoHasher("sha256").update(armA).digest("hex").slice(0, 16) === "17b5c6087e19ad32" && [...PEOPLE, ...PROJECTS, ...TOOLS, ...ISSUES, ...DECISIONS, ...FOLLOWUPS].every((w) => armA.includes(w)),
-    "the generator's text is pinned, every word of its lists: clean deletes by it, so a note it wrote before an edit to its words would read as a lookalike and stay");
+  ok(new Bun.CryptoHasher("sha256").update([armA, notesFor("fixed-2", 4999), notesFor("C3", 199)].join("\n")).digest("hex").slice(0, 16) === "6fc050428bf9eaff" && [...PEOPLE, ...PROJECTS, ...TOOLS, ...ISSUES, ...DECISIONS, ...FOLLOWUPS].every((w) => armA.includes(w)),
+    "the generator's text is pinned — every word of its lists, and how an arm's whole name and an index past 150 seed it: clean deletes by it, so a note it wrote before an edit would read as a lookalike and stay");
   ok(noteKind(`${INGESTED_NOTICE}\n\n${INGESTED_NOTICE}\n\n${a0}`) === "none" && noteKind(`${INGESTED_NOTICE}\n${a0}`) === "none" && noteKind(`${INGESTED_NOTICE}xx${a0}`) === "none" && noteKind(`${NOTE_PREFIX} (arm A #). x`) === "none",
     "the ingested notice is read past once, with its blank line, and nothing else before a heading is; a heading without an index is none");
   ok(!waits.some((l) => l.includes("ollama")) && summaryLines([0, 15].map((s) => ({ t: iso(s), arm: "O", brain: "(ollama)", loaded: ["a"] })), 1, []).includes("  ollama: a in 2 of 2 samples; the loaded set differed from the sample before 0 times"), "an arm with no model server sampled has no line for one, and one that always answered has no failed count");
@@ -890,6 +906,21 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
     && noLine(() => samplesOf(`{"t":"${iso(0)}","arm":"X","brain":"b","heartbeats":"x"}\n`, "f"), /^f line 1 is no sample$/) && noLine(() => samplesOf('{"t":"2026-13-45T99:99","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/),
     "a live sample wants its milliseconds and its ok; a sample its arm, an ISO time, and heartbeats that are a list");
 
+  // Review pass 6's rows.
+  ok(lineEnd(`${smp}\n${smp}`) === "\n" && lineEnd("a\nb\n") === "", "a line end is owed by the file's last character, not by any before it");
+  ok(throws(() => brainOf("s", { connector: "open-brain-canary", keyFile: "/k" }, claude, () => "k"), /not both$/) && throws(() => brainOf("s", { connector: 5, mcp: "http://h/mcp", keyFile: "/k" }, claude, () => "k"), /each a string$/) && throws(() => brainOf("s", { connector: "open-brain-canary", keyFile: 9 }, claude, () => "k"), /each a string$/)
+    && throws(() => brainOf("s", { connector: "open-brain-canary" }, () => ({}), () => ""), /has no mcpServers entry/) && throws(() => brainOf("s", { connector: "open-brain-canary" }, () => null, () => ""), /has no mcpServers entry/)
+    && brainOf("c", { connector: "open-brain-canary", mcp: "" }, claude, () => "").mcp === "http://127.0.0.1:8011/mcp",
+    "a connector beside a key file is refused with or without a url; a field that is no string is no entry; a ~/.claude.json with no servers has no entry; a connector entry's blank url is the connector's own");
+  const paths: string[] = [];
+  ok(brainOf("s", { mcp: "http://h/mcp", keyFile: "/the/one/path" }, claude, (p) => { paths.push(p); return p === "/the/one/path" ? "k1\n" : "other\n"; }).key === "k1" && paths.join() === "/the/one/path", "a brain's key is read from its entry's keyFile, that path and once");
+  ok(throws(() => samplesOf('{"t":"2026-11-16","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/) && throws(() => samplesOf(`{"t":"${iso(0)}","arm":"X","brain":"b","heartbeats":{}}\n`, "f"), /is no sample$/) && throws(() => samplesOf(`{"t":"${iso(0)}","arm":"X","brain":"b","heartbeats":null}\n`, "f"), /is no sample$/),
+    "a sample's time has a time of day; its heartbeats, where there, are a list — no object, no null");
+  const shared = summaryLines([], 3, [[{ label: "same", kind: "search", ms: 10, ok: true }], [{ label: "same", kind: "search", ms: 900, ok: true }]]);
+  ok(shared.filter((l) => l.trim().startsWith("same")).map((l) => cells(l).join(" ")).join("|") === "same search 1 1 10 10 10|same search 1 1 900 900 900", "two --live files are two tables' rows, a label they share not merged");
+  ok(JSON.stringify(keptOf({ database: { workers: { heartbeats: [null, "x", { worker: "sleep", at: "t" }] } } }).heartbeats) === '[{"worker":"sleep","at":"t","slept":null,"models":null,"answers":null}]', "a heartbeat that is no object is not kept, and no throw: a sample of the brain all the same");
+  ok(nothingToSample(0, undefined) && nothingToSample(0, "") && !nothingToSample(0, "http://127.0.0.1:11434") && !nothingToSample(1, undefined), "a model server may be sampled alone; no brain and no model server is nothing to sample");
+
   // The server's own words (render.ts), read as the harness reads them: a change to them fails here, not on a brain.
   const read = (reply: unknown, name: string) => outcomeOf(200, { jsonrpc: "2.0", id: 1, result: reply } as never, name);
   const goneDelete = read(renderDelete(refuse({ code: "NOT_FOUND", retryable: false, id: ID }) as never), "delete_thought");
@@ -910,13 +941,13 @@ const NO_SCOPE = '{"code":-32602,"message":"Tool delete_thought not found"}';
  * search blind to case); `scope` false answers as a key without write scope. `deleteGone` is a thought another caller
  * deletes between its read and its delete; `searchFails` says which search calls fail, by their count from 1.
  */
-function fakeBrain(texts: Record<string, string>, scope = true, opts: { deleteLies?: string; deleteGone?: string; deleteGoneAll?: boolean; fetchFails?: string; fetchNoText?: string; searchFails?: (nth: number) => boolean; noTotal?: boolean; tier?: string; infoFails?: boolean } = {}): { call: Call; held: Map<string, string>; deletes: string[]; searched: () => number } {
+function fakeBrain(texts: Record<string, string>, scope = true, opts: { deleteLies?: string; deleteGone?: string; deleteGoneAll?: boolean; fetchFails?: string; fetchNoText?: string; searchFails?: (nth: number) => boolean; noTotal?: boolean; tier?: string; noTier?: boolean; infoFails?: boolean } = {}): { call: Call; held: Map<string, string>; deletes: string[]; searched: () => number } {
   const held = new Map(Object.entries(texts));
   const deletes: string[] = [];
   let searches = 0;
   const call: Call = async (name, args) => {
     const id = String(args.id ?? "");
-    if (name === "brain_info") return opts.infoFails ? { ok: false, error: "HTTP 500", sc: {} } : { ok: true, sc: { tier: opts.tier ?? "canary" } };
+    if (name === "brain_info") return opts.infoFails ? { ok: false, error: "HTTP 500", sc: {} } : { ok: true, sc: opts.noTier ? {} : { tier: opts.tier ?? "canary" } };
     if (name === "delete_thought") {
       deletes.push(id);
       if (!scope) return { ok: false, error: NO_SCOPE, sc: {} };
@@ -1047,6 +1078,17 @@ export async function cleanChecks(ok: (pass: boolean, what: string) => void): Pr
   const on = await cleanOn(b.call, "x", `not-an-id\n${KEYISH}\n`, "A").catch(() => null);
   ok(on !== null && on.code === 0 && on.lines.join("|") === "x: 3 measure notes deleted (arm A), 3 of them found by content; 0 ids listed and 2 lines that are no id, not sent, 0 not on the brain" && b.held.has("B-0") && b.held.has("B-1") && !b.deletes.includes(KEYISH),
     "clean on a canary passes its arm and its ids on: arm A's notes alone go, and a line that is no id is counted and sent nowhere");
+  // Review pass 6's rows: the guard alone, and clean with ids a brain makes.
+  const guard = (o: Parameters<typeof fakeBrain>[2]) => { const f = fakeBrain(base, true, o); return tierGuard(f.call, "g").then(() => "", (e) => (e as Error).message).then((said) => ({ said, f })); };
+  const [onCanary, onStable, onNone, onDown] = [await guard({}), await guard({ tier: "stable" }), await guard({ noTier: true }), await guard({ infoFails: true })];
+  ok(onCanary.said === "" && /tier is not canary or working/.test(onStable.said) && /tier is not canary or working/.test(onNone.said) && onDown.said === "g: brain_info failed (HTTP 500)" && [onStable, onNone, onDown].every((x) => x.f.deletes.length === 0 && x.f.searched() === 0),
+    "the tier guard lets a canary through and refuses a stable brain, a brain that says no tier, and one that cannot be asked");
+  const U = (n: number) => `0123abcd-0123-4abc-8def-${String(n).padStart(12, "0")}`;
+  b = fakeBrain({ [U(1)]: "an ordinary thought", [U(2)]: notesFor("B", 0), [U(3)]: notesFor("A", 0) });
+  const listedOn = await cleanOn(b.call, "x", `${U(1)}\n${U(2)}\n`, "A").catch(() => null);
+  ok(listedOn !== null && listedOn.code === 1 && listedOn.lines[0] === "x: 1 measure notes deleted (arm A), 1 of them found by content; 2 ids listed, 0 not on the brain, 1 another arm's notes and left"
+    && listedOn.lines[1] === `  NOT deleted, or not known to be: ${U(1)} (listed, but its text is no measure note's: not deleted)` && keys(b) === `${U(1)},${U(2)}`,
+    "clean passes the listed ids on, and counts them: an ordinary thought listed is read back and said, another arm's note left and counted, the arm's own found and deleted");
   let asks = 0;
   const many: Call = async (name) => name === "search_thoughts_keyword"
     ? (asks++, { ok: true, sc: { hits: Array.from({ length: 100 }, (_, i) => ({ id: `quote-${i}` })), total: 1_000_000 } })
@@ -1108,7 +1150,7 @@ async function main(): Promise<number> {
       return load(one(cli.value("brain")!), arm!, cli.int("notes", { absent: 150, min: 1, max: 5000 }), cli.int("parallel", { absent: 2, min: 1, max: 8 }), cli.value("ids")!);
     case "sample":
       need("brains", "arm", "out");
-      if (!Object.keys(brainsOf(textOf(() => readFileSync(cli.value("brains")!, "utf8"), BRAINS))).length) { console.error("bench-brains.ts sample: --brains' file names no brain"); return 2; }
+      if (nothingToSample(Object.keys(brainsOf(textOf(() => readFileSync(cli.value("brains")!, "utf8"), BRAINS))).length, cli.value("ollama"))) { console.error("bench-brains.ts sample: --brains' file names no brain, and no --ollama names a model server: nothing to sample"); return 2; }
       return sample(brainsFrom(cli.value("brains")!), arm!, cli.int("minutes", { absent: 20, min: 1, max: 600 }), cli.int("every", { absent: 15, min: 5, max: 600 }), cli.value("out")!, cli.value("ollama"));
     case "clean":
       need("brains", "brain", "ids");

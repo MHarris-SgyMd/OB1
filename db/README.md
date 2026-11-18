@@ -6046,7 +6046,8 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
 "open-brain-canary"}}` takes the url and key from that `~/.claude.json` entry, as
 `bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
 "keyFile": "…"}}` takes a url and a file holding the key alone. An entry gives
-one or the other, not both. Only the brain a command names is read from it. No key is printed. A refusal names a flag or a
+a connector or a key file, not both; a connector's entry may add `mcp` to send
+that key to another url. Only the brain a command names is read from it. No key is printed. A refusal names a flag or a
 brain and, for a file, the file system's code (`ENOENT`): never the path typed,
 a file's text, a connector's name or a parser's words, any of which could be a
 key put in the wrong place. Each subcommand refuses a flag it does not read.
@@ -6072,7 +6073,8 @@ key put in the wrong place. Each subcommand refuses a flag it does not read.
   appends to `--out` only where that file is new or holds samples alone, each a
   JSON object with a time, an arm and a brain: not a brains file, nor
   `bench-live.ts`'s samples, nor a file whose last sample was cut short. A
-  `--brains` file that names no brain is refused.
+  `--brains` file that names no brain is refused, unless `--ollama` names a
+  model server to sample alone.
 - **clean** reads back each listed id, then searches for measure notes whose ids
   never came back and reads those back too. It deletes a thought only when its
   whole text is the generator's own for the arm and index its heading names: the
