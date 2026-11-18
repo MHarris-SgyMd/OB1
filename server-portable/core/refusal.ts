@@ -124,7 +124,8 @@ export type Refusal =
   | { code: "REFUSED_WEIGHTS"; retryable: false; problem: "rule" | "unranked"; message: string; named: string[] }
   // review_priority_finding (142, SMD-3671 PR 2): `problem` is 142's own error. REFUSED_FINDING_INPUT, a decision's
   // arguments that do not go together, 142's rules alone, asked after who may decide (a settled finding's level above 0 among them);
-  // REFUSED_FINDING_DECISION, the finding's state: decided or moot already (`status`), nothing of the operator's to
+  // REFUSED_FINDING_DECISION, the finding's state: decided or moot already (`status`, `statusUnread` for a status this
+  // server does not know), nothing of the operator's to
   // clear, or the writer refusing the outcome (`writerCode`, its own code), the finding left pending. `message`: 142's
   // words, or the core's.
   | { code: "REFUSED_FINDING_INPUT"; retryable: false; problem: FindingInputError; message: string }

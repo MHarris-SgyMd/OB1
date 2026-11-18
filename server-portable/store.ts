@@ -1733,17 +1733,27 @@ function findingStatements(evidence: Record<string, unknown>): { statements: Fin
     const at = typeof s.asserted_at === "string" && !Number.isNaN(Date.parse(s.asserted_at)) ? new Date(s.asserted_at).toISOString() : null;
     return { id: s.id, level: typeof s.level === "number" ? s.level : null, maker: typeof s.maker === "string" ? s.maker : null, assertedAt: at, role };
   };
-  const read = (s: FindingStatement | null): s is FindingStatement => s !== null;
+  const isStatement = (s: FindingStatement | null): s is FindingStatement => s !== null;
   if (Array.isArray(evidence.statements)) {
     const listed = evidence.statements.map((s) => one(s, null));
-    const statements = listed.filter(read);
+    const statements = listed.filter(isStatement);
     return { statements, read: statements.length === listed.length ? ["statements"] : [] };
   }
   const op = one(evidence.operator, "operator"), src = one(evidence.source, "source");
-  return { statements: [op, src].filter(read), read: [...(op ? ["operator"] : []), ...(src ? ["source"] : [])] };
+  return { statements: [op, src].filter(isStatement), read: [...(op ? ["operator"] : []), ...(src ? ["source"] : [])] };
 }
 
-/** One priority_findings row as the list reads it: a kind, status or answer this server does not know marked unread; a row with no id or item a fault. */
+/**
+ * A finding's item as 142 wrote it, the list's row's and the review's answer's alike: one of PRIORITY_KINDS and its key;
+ * else, with a key, its kind as written and `unread`; with no key, none and `unread`. Never one made up.
+ */
+function findingItemOf(kind: unknown, key: unknown): { item: FindingItem | null; unread: boolean } {
+  const known = priorityItemOf({ kind, key });
+  if (known) return { item: known, unread: false };
+  return { item: typeof key === "string" ? { kind: typeof kind === "string" ? kind : "?", key } : null, unread: true };
+}
+
+/** One priority_findings row as the list reads it: a kind, status, item kind or answer this server does not know marked unread; a row with no id or no item key a fault. */
 export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFinding {
   // History outlives the server that reads it: a finding a brain migrated ahead of this server wrote — a fifth kind, a
   // status, an item kind, a writer's answer in a later shape — is listed with that part marked unread, never the list's
@@ -1752,8 +1762,7 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
   if (typeof r.id !== "string" || typeof r.item_key !== "string" || typeof r.kind !== "string" || typeof r.status !== "string") {
     throw new Error(`priority_findings answered a row this server cannot read: ${JSON.stringify({ kind: r.kind, status: r.status, item_kind: r.item_kind })}`);
   }
-  const known = priorityItemOf({ kind: r.item_kind, key: r.item_key });
-  const item: FindingItem = known ?? { kind: typeof r.item_kind === "string" ? r.item_kind : "?", key: r.item_key };
+  const { item, unread: itemUnread } = findingItemOf(r.item_kind, r.item_key) as { item: FindingItem; unread: boolean };
   const kindUnread = !isFindingKind(r.kind), statusUnread = !isFindingStatus(r.status);
   const stored = isRecord(r.evidence) ? r.evidence : {};
   // The statements are read out of the evidence once (`statements`), and the evidence sent keeps what they do not
@@ -1762,7 +1771,7 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
   const { statements, read } = findingStatements(stored);
   const evidence = Object.fromEntries(Object.entries(stored).filter(([k]) => !read.includes(k)));
   return {
-    id: r.id, kind: r.kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(known ? {} : { itemUnread: true as const }),
+    id: r.id, kind: r.kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(itemUnread ? { itemUnread: true as const } : {}),
     status: r.status, ...(statusUnread ? { statusUnread: true as const } : {}),
     statements, evidence,
     windowDays: Number(r.window_days), foundAt: isoTimestamp(r.found_at), refreshedAt: isoTimestamp(r.refreshed_at), mootAt: isoTimestampOrNull(r.moot_at),
@@ -1773,10 +1782,10 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
 
 /**
  * review_priority_finding's answer (142, SMD-3671). Decided: the finding's id, kind (`kindUnread` for one this server does
- * not know), item and status now, the writer's answer to an accept (assert_priority's or clear_priority's; null for a
+ * not know), item (as written, or null, with `itemUnread`, when this server does not read it) and status now, the writer's answer to an accept (assert_priority's or clear_priority's; null for a
  * reject, or with `answerUnread` for one this server does not read), and until when the decision holds the
  * same finding back. Refused, by 142's error: NOT_OPERATOR (`kind` the key's registry kind), NOT_PENDING (`status`
- * the finding's), NOTHING_TO_CLEAR and WRITER_REFUSED (`writerCode` the writer's own code, if it named one), and the
+ * the finding's, `statusUnread` for one this server does not know), NOTHING_TO_CLEAR and WRITER_REFUSED (`writerCode` the writer's own code, if it named one), and the
  * rest in `message` alone.
  */
 export type ReviewFindingResult =
@@ -1788,8 +1797,8 @@ export type ReviewFindingResult =
 const FINDING_PLAIN_ERRORS = new Set<string>(["NOT_WRITE_SCOPE", "NOT_FOUND", ...FINDING_INPUT_ERRORS]);
 
 /**
- * review_priority_finding's jsonb (142) as the store's union. A decision 142 made is never a fault: its kind and its writer's
- * answer are read leniently (marked unread). A refusal it does not name, or no envelope, throws: one this server cannot word is a fault.
+ * review_priority_finding's jsonb (142) as the store's union. A decision 142 made is never a fault: its kind, its item
+ * and its writer's answer are read leniently (marked unread), as a refused decision's status is. A refusal it does not name, or no envelope, throws: one this server cannot word is a fault.
  */
 export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
   const o = isRecord(r) ? r : undefined;
@@ -1799,18 +1808,15 @@ export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
     // 142 committed the decision: nothing in its answer reports it failed — a retry would meet NOT_PENDING. The finding's
     // kind and the writer's answer, which a brain migrated ahead of this server may give in a shape it does not know,
     // are read as the list reads them (marked unread); the decision itself, its id and its status, strictly.
-    // The item as written when its kind is not one this server reads, none when there is no key: never one made up.
-    const known = priorityItemOf(o.item);
-    const written = isRecord(o.item) && typeof o.item.key === "string" ? { kind: typeof o.item.kind === "string" ? o.item.kind : "?", key: o.item.key } : null;
-    const item: FindingItem | null = known ?? written;
+    const { item, unread: itemUnread } = isRecord(o.item) ? findingItemOf(o.item.kind, o.item.key) : { item: null, unread: true };
     // An accept wrote through a writer, so an accept with no answer is one this server did not read.
-    const read = readAnswerLeniently(o.answer, what);
-    const answerUnread = read.unread || (o.status === "accepted" && o.answer == null);
+    const answered = readAnswerLeniently(o.answer, what);
+    const answerUnread = answered.unread || (o.status === "accepted" && o.answer == null);
     const kind = typeof o.kind === "string" ? o.kind : "?";
     const kindUnread = !isFindingKind(kind);
     return {
-      ok: true, id: o.id, kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(known ? {} : { itemUnread: true as const }), status: o.status,
-      answer: read.answer, ...(answerUnread ? { answerUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null),
+      ok: true, id: o.id, kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(itemUnread ? { itemUnread: true as const } : {}), status: o.status,
+      answer: answered.answer, ...(answerUnread ? { answerUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null),
     };
   }
   const message = word(o?.message) ?? "";

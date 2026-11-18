@@ -41,7 +41,8 @@ export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { st
 }
 
 /**
- * What an operator's decision did: the finding, its status now, what the accept's writer did (`outcome`: the operator's
+ * What an operator's decision did: the finding (its item as written, or null, with `itemUnread`, when this server does
+ * not read it), its status now, what the accept's writer did (`outcome`: the operator's
  * statement asserted, the same one re-confirmed unchanged, or the operator's own cleared; null for a reject), the
  * statement it wrote or the newest it closed (`assertion`), every one it closed, the item's winner after, and until
  * when the decision holds the same finding back.
