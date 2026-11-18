@@ -3672,6 +3672,31 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   } finally {
     embedFailOn = null;
   }
+  // no_vector is what each memory's own capture in this request did, not its thought's (review pass 2): a memory answered
+  // from its idempotency key beside a new memory of the same text is not named, nor a memory whose capture made the vector.
+  embedDown = true;
+  try {
+    const once = await am("writeback", { ...base, workspace_id: "ws-am-nv", task_id: "task-held", memory_payload: { lessons: ["am_ledger am_held the same words twice."] } });
+    const heldId = mems(once)[0]?.memory_id;
+    const twice = await am("writeback", { ...base, workspace_id: "ws-am-nv", task_id: "task-held", memory_payload: { lessons: ["am_ledger am_held the same words twice."], constraints: ["am_ledger am_held the same words twice."] } });
+    const tnv = (twice.body.no_vector ?? []) as { memory_id: string; why: string }[];
+    const fresh = mems(twice).find((m) => m.memory_id !== heldId);
+    assert(twice.status === 200 && mems(twice).length === 2 && tnv.length === 1 && tnv[0].memory_id === fresh?.memory_id && tnv[0].why === "provider_down",
+      `…a memory answered from its idempotency key is not named beside a new memory of its text, one thought between them (${twice.status} ${JSON.stringify(tnv)})`);
+  } finally {
+    embedDown = false;
+  }
+  let flaps = 0;
+  embedFailOn = (input) => input.includes("am_flap") && ++flaps === 1;
+  try {
+    const f = await am("writeback", { ...base, workspace_id: "ws-am-nv", task_id: "task-flap", memory_payload: { lessons: ["am_ledger am_flap one text, two memories."], constraints: ["am_ledger am_flap one text, two memories."] } });
+    const fnv = (f.body.no_vector ?? []) as { memory_id: string; why: string }[];
+    const lesson = mems(f).find((m) => m.memory_type === "lesson");
+    assert(f.status === 200 && flaps === 2 && fnv.length === 1 && fnv[0].memory_id === lesson?.memory_id && (await thoughtOf(lesson?.thought_id ?? null))?.vector === true,
+      `…of one text's two memories, the one whose capture met the provider down is named, not the one whose capture made the vector (${f.status} ${flaps} ${JSON.stringify(fnv)})`);
+  } finally {
+    embedFailOn = null;
+  }
   // ── The egress policy keeping the text in (SMD-3984) ──
   // A provider that is not local, under deny with no term for this key: the core makes no embedding request for a recall
   // or a write-back. The recall is refused REFUSED_EGRESS; the write-back keeps its memory, its thought without a vector,
