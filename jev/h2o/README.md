@@ -197,8 +197,10 @@ H2O_REVISION=v1.4.2 H2O_ATTENTION=two-way JEV_PORT=8023 \
   always was, and `72fa9c992f907dc0` two-way, so a judgement's lineage says how
   it was read.
 
-Whether two-way judges this brain's pairs better than `v1.2.3` read one-way is
-not measured yet, so the pin and decide mode's settings stay as they are.
+That this read is H2O's two-way read at the length of our pairs is held by
+`conformance.py --two-way` (under "Conformance"). Whether two-way judges this
+brain's pairs better than `v1.2.3` read one-way is not measured yet, so the pin
+and decide mode's settings stay as they are.
 
 ## How the contract maps onto H2O's questions
 
@@ -249,6 +251,56 @@ at 98% of top answers agreeing and a median gap of at most 0.01. The routing set
 is on the model's repository: Plumb (Apache-2.0) and Eikos (CC-BY-4.0)
 questions, with sources in its `ATTRIBUTION.md`. Fetch it into a directory of its
 own; it is only read.
+
+**The two-way read has a reference of its own** (SMD-4369). H2O publishes its
+per-row results on the Decision Index 0.3 public suite, the dataset
+`h2oai/h2o-lightning-4b-decision-index`: each request as sent and the
+probabilities answered, read two-way on vLLM at v1.4.1, whose weights v1.4.2
+keeps. `--two-way` draws choice questions from it by seed in four strata of
+prompt length, reads each two-way, and compares the probabilities at the
+shipped temperature. A stratum is counted in this tokenizer's tokens, on the
+whole prompt, and the last runs to the tier's own two-way limit
+(`H2O_TWO_WAY_MAX_TOKENS`, read as the tier reads it). The start-up guard holds the read on three probes of
+about a hundred tokens; this holds it at the length of the pairs decide mode
+sends.
+
+```bash
+H2O_REVISION=v1.4.2 <venv>/bin/python -I jev/h2o/conformance.py \
+  --two-way runs/h2o-lightning-4b/results.jsonl.gz
+```
+
+On 240 questions (2026-11-18, v1.4.2, float16 with decider's kernels), top
+answers agree on all 240:
+
+| Prompt tokens | Questions | Gap: median | Largest | A read |
+|---|---|---|---|---|
+| under 500 | 60 | 0.0006 | 0.0155 | 0.29 s |
+| 500 to 2,000 | 60 | 0.0008 | 0.0168 | 1.01 s |
+| 2,000 to 4,300 | 60 | 0.0029 | 0.0130 | 2.21 s |
+| 4,300 to 8,000 | 60 | 0.0003 | 0.0172 | 7.02 s |
+| all | 240 | 0.0010 | 0.0172 | |
+
+It passes at the same bar, over the whole sample and in each of the two long
+strata on its own, and each of those must be full: a stratum of one question
+would pass on it, so `--n` is at least 50. Two more things fail the arm
+outright: a read that is not a probability per option, and a request this port
+counts, in tokens, otherwise than H2O's engine read it. A row carries what the
+engine read (`usage.processed_input_tokens`): every question of the request a
+prompt of its own, the record read again under each. The port renders and
+counts the same, so a prompt it renders differently, or a record the engine
+read in part, shows there and not as a gap blamed on the read. A row with no
+such count fails too. On this sample all 240 requests count the same, among
+them requests of up to 32 questions.
+
+Left out, each counted in the run's first lines: yes/no questions (that run
+applied the shim's yes/no floor, 0.801, which this port never applies); a row
+read one-way; a row whose record or question H2O cut to fit
+(`effort_used.state_selection`); a question answered from two reads blended
+(`effort_used.reread`, the Decision Index profile's); a row holding a lone
+surrogate; and a line that is no row. A prompt over the two-way limit is
+counted and not read. This file has none of the middle four. The file is 115 MB of public benchmark
+rows under each benchmark's own licence (the dataset's `LICENSE.md`); fetch it
+into a directory of its own, and it is only read.
 
 ## SMD-3058: in front of the consolidation judge
 
