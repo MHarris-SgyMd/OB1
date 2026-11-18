@@ -995,12 +995,15 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
   let refused: { id: string; result: Extract<Awaited<ReturnType<ThoughtStore["forgetThought"]>>, { ok: false }> } | undefined;
   const also: string[] = [];
   const missed: { id: string; code: string; errno?: string }[] = [];
+  // Refused before the first thought forgotten, holding its text: named too if a later one is (review pass 5).
+  const heldBefore: { id: string; code: string }[] = [];
   for (const id of ids) {
     if (!first) {
       // The thought's own key before its forget redacts it: the reply names it.
       const key = canRead(principal) ? await store.clientKeyOf(id) : null;
       const r = await store.forgetThought({ id, actor, detach });
-      if (r.ok) { first = { id, key, result: r }; continue; }
+      if (r.ok) { first = { id, key, result: r }; missed.push(...heldBefore); continue; }
+      if (refusalRank(r.error) === 2 && r.error !== "CITED") heldBefore.push({ id, code: r.error });
       // A refusal that leaves a text here outranks FORGOTTEN, which outranks NOT_FOUND: a call sent again after a
       // partial forget, its first thought forgotten already, answers what still holds the text, never "nothing is
       // left" (review pass 4).
