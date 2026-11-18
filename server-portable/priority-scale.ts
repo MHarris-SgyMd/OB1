@@ -46,7 +46,6 @@ export function levelOf(scale: PriorityScale, value: string | null | undefined, 
   return Object.hasOwn(MAPPINGS[scale], word) ? MAPPINGS[scale][word] : null;
 }
 
-/** A calendar day's end: the next day's start in UTC, as an ISO instant (SMD-3778). */
 /** The scale's words, 0 to 5, as the replies say a level (render.ts) and the weekly digest does (SMD-4112). */
 export const LEVEL_WORDS = ["none", "low", "medium", "high", "urgent", "critical"];
 /**
@@ -60,7 +59,17 @@ export const dueText = (iso: string) => {
   return Number.isFinite(ms) && ms % 86_400_000 === 0 ? `by the end of ${new Date(ms - 86_400_000).toISOString().slice(0, 10)} (UTC)` : iso;
 };
 
+/** A calendar day's end: the next day's start in UTC, as an ISO instant (SMD-3778). */
 export const endOfDay = (day: string) => new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString();
+
+/**
+ * A time as 116 takes it, whatever the database's time zone: a time with its offset is that instant. A date alone is
+ * a due time's end of that day — the next day's start in UTC (SMD-3778: due on the 1st is due by the end of the 1st) —
+ * and a not_before's start of it. set_priority's and review_priority_finding's (SMD-3671 PR 2), one rule.
+ */
+const BARE_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const dueBy = (t: string | undefined) => (t === undefined ? undefined : BARE_DATE.test(t) ? endOfDay(t) : t);
+export const startOf = (t: string | undefined) => (t === undefined ? undefined : BARE_DATE.test(t) ? `${t}T00:00:00Z` : t);
 
 /** Each scale's name as a reason says it. */
 const SCALE_NAMES: Record<PriorityScale, string> = { linear: "Linear", frontmatter: "frontmatter", github: "GitHub label", "home-maintenance": "home-maintenance" };

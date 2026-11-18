@@ -18,8 +18,12 @@
 // deadline keeps what was read and names the rest. (A transaction per read,
 // each with its own budget, added past one deadline and lost every fact at it.)
 //
-// No imports: the SQL client is taken structurally rather than from "bun", so a
-// suite can hand it a fake.
+// No imports but priority-kinds.ts and is-record.ts, leaves that import nothing
+// (142's finding kinds and the plain-object guard, SMD-3671 PR 2): the SQL client is taken structurally rather
+// than from "bun", so a suite can hand it a fake.
+
+import { FINDING_KINDS, isFindingKind, type FindingKind } from "./priority-kinds.ts";
+import { isRecord } from "./is-record.ts";
 
 /** A tagged-template SQL client — Bun's `SQL`, structurally. */
 export type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Promise<any[]>;
@@ -47,7 +51,7 @@ export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "o
 export type CountedTable = (typeof COUNTED_TABLES)[number];
 
 /** The tables the read asks after: the counted ones, the config, the ledger, where consolidation's findings stand (SMD-2680) and what became of those posted to the board (SMD-2682). */
-const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings", "work_claim_cap_settings"] as const;
+const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings", "work_claim_cap_settings", "priority_findings"] as const;
 type KnownTable = (typeof KNOWN_TABLES)[number];
 
 export interface HnswIndex {
@@ -187,6 +191,13 @@ export interface DatabaseFacts {
    * `unread` entry: before 140, the built-in 50) or not read (`unread` names it). Not a stats read.
    */
   workClaimCap: WorkClaimCapSetting | null;
+  /**
+   * The priority review's findings (SMD-3671 PR 2, migration 142): how many are pending, the oldest pending one's age
+   * in seconds since it was found (null when none is pending), the pending by kind, and how many an operator decided in
+   * the last 30 days. Null when the table is absent (no `unread` entry: before 142) or not read (`unread` names it). Not
+   * a stats read: preflight's priority findings row reads it.
+   */
+  priorityFindings: PriorityFindingsFact | null;
   /**
    * What became of the findings db/board-findings.ts posted to the board
    * (087, SMD-2682): each (ticket pair, word) this brain posted, as accepted,
@@ -1111,6 +1122,22 @@ const PROPOSALS_SQL = (sql: SqlTag) => sql`
     FROM supersession_proposals p
    WHERE p.status IN ('pending', 'stale')`;
 
+/**
+ * The priority review's findings (SMD-3671 PR 2): the pending by kind, the oldest pending one's age, and the decided in
+ * 30 days — the rows it counts alone: decided findings stay as history, so the table grows while these do not. Read
+ * once, grouped by kind.
+ */
+const PRIORITY_FINDINGS_SQL = (sql: SqlTag) => sql`
+  SELECT COALESCE(sum(g.n), 0)::int AS pending,
+         extract(epoch FROM now() - min(g.oldest))::float8 AS oldest_s,
+         COALESCE(jsonb_object_agg(g.kind, g.n) FILTER (WHERE g.n > 0), '{}'::jsonb) AS by_kind,
+         COALESCE(sum(g.decided), 0)::int AS decided_30d
+    FROM (SELECT f.kind, count(*) FILTER (WHERE f.status = 'pending')::int AS n, min(f.found_at) FILTER (WHERE f.status = 'pending') AS oldest,
+                 count(*) FILTER (WHERE f.decided_at >= now() - interval '30 days')::int AS decided
+            FROM priority_findings f
+           WHERE f.status = 'pending' OR f.decided_at >= now() - interval '30 days'
+           GROUP BY f.kind) g`;
+
 /** The pending rows that pair two tickets the board does not link. */
 const PROPOSALS_BOARD_SQL = (sql: SqlTag) => sql`
   SELECT count(*) FILTER (WHERE x.ka <> x.kb
@@ -1302,6 +1329,67 @@ export function proposalsValue(row: { pending?: unknown; stale?: unknown; oldest
   // judged_at defaults to now(); a clock moved back can leave it ahead of the read's.
   // The board pairs are their own read's (boardPairsValue), filled in after.
   return { pending, stale: countOf("proposals", row.stale), oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)), boardPairs: null };
+}
+
+/** `byKind.other`: pending findings of kinds this server does not know (a brain migrated ahead), so the counts sum to `pending`. */
+export type PriorityFindingsFact = { pending: number; oldestPendingS: number | null; byKind: Record<FindingKind, number> & { other: number }; decided30d: number };
+/**
+ * The priority review's findings as the record carries them (SMD-3671 PR 2): counts, the pending by kind, and a whole
+ * number of seconds for the oldest pending one (found_at defaults to the scan's now, which a clock moved back can leave
+ * ahead of the read's: held at 0).
+ */
+export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unknown; by_kind?: unknown; decided_30d?: unknown } | undefined): PriorityFindingsFact {
+  if (!row) throw new Error("the priority findings read answered no row");
+  const pending = countOf("priority findings", row.pending);
+  const age = row.oldest_s == null ? null : Number(row.oldest_s);
+  if (age !== null && !Number.isFinite(age)) throw new Error("the priority findings read answered an age that is not a number");
+  const by = isRecord(row.by_kind) ? row.by_kind : null;
+  if (!by) throw new Error("the priority findings read answered no counts by kind");
+  // Each of 142's kinds, none pending a 0; any other kind's count summed into `other`.
+  const known = Object.fromEntries(FINDING_KINDS.map((k) => [k, countOf("priority findings", by[k] ?? 0)])) as Record<FindingKind, number>;
+  const other = Object.entries(by).filter(([k]) => !isFindingKind(k)).reduce((n, [, v]) => n + countOf("priority findings", v), 0);
+  return {
+    pending, oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)),
+    byKind: { ...known, other },
+    decided30d: countOf("priority findings", row.decided_30d),
+  };
+}
+
+/**
+ * A preflight row for a fact its read did not get (`unread`): a warning with the remedy for its reason — the grant the
+ * read needs when refused, the search path when its table is out of the role's sight, a wait when a lock or the cap
+ * stopped it or the whole read's deadline came first, else the tables it reads. One shape for the rows read off these facts (threadsRow, priorityFindingsRow).
+ */
+export function unreadRow(u: Unread, fixes: { refused: string; timeout: string; reads: string }): { status: "warn"; detail: string; fix: string } {
+  return {
+    status: "warn", detail: `could not verify: ${u.message}`,
+    fix: u.reason === "refused" ? fixes.refused
+      : u.reason === "invisible" ? "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it."
+      : u.reason === "timeout" ? fixes.timeout
+      : u.reason === "deadline" ? "The whole read's time ran out before this read was reached: run again once the slower reads before it have finished."
+      : `The check reads ${fixes.reads}; the message says why it failed.`,
+  };
+}
+
+/** The priority group's grant, as preflight's priority row and the priority findings row name it: one remedy. */
+export const PRIORITY_GRANT_FIX = "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).";
+
+/**
+ * The priority findings, in one wording for brain_info's row and preflight's (SMD-3671 PR 2): ok with the pending by
+ * kind and the oldest's age, and the decided in 30 days; a skip before 142; a warning when the read was refused or did
+ * not answer — a queue, not a fault, so pending findings never warn. A function of the fact alone, as threadsRow is.
+ */
+export function priorityFindingsRow(f: PriorityFindingsFact | null, u: Unread | undefined): { status: "ok" | "warn" | "skip"; detail: string; fix?: string } {
+  if (f === null) {
+    if (!u) return { status: "skip", detail: "not checked — priority_findings does not exist (migration 142 not applied)" };
+    return unreadRow(u, { refused: PRIORITY_GRANT_FIX, timeout: "A migration or a long transaction may hold priority_findings; run preflight again once it has finished.", reads: "priority_findings" });
+  }
+  const decided = f.decided30d ? `; ${f.decided30d} decided in the last 30 days` : "";
+  if (f.pending === 0) return { status: "ok", detail: `none pending${decided}` };
+  const kinds = [...FINDING_KINDS.filter((k) => f.byKind[k] > 0).map((k) => `${f.byKind[k]} ${k}`),
+    ...(f.byKind.other > 0 ? [`${f.byKind.other} of kinds this server does not know`] : [])].join(", ");
+  const oldest = f.oldestPendingS === null ? "at an unknown time" : `${ago(f.oldestPendingS)} ago`;
+  return { status: "ok", detail: `${f.pending} pending (${kinds}), the oldest found ${oldest}${decided} — an operator key reviews them: list_priority_findings, then review_priority_finding for each` };
 }
 
 /** The standing relations as the record carries them. */
@@ -1698,12 +1786,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                'thought_facets', to_regclass('thought_facets') IS NOT NULL,
                'board_findings_posted', to_regclass('board_findings_posted') IS NOT NULL,
                'priority_weight_settings', to_regclass('priority_weight_settings') IS NOT NULL,
-               'work_claim_cap_settings', to_regclass('work_claim_cap_settings') IS NOT NULL) AS resolved,
+               'work_claim_cap_settings', to_regclass('work_claim_cap_settings') IS NOT NULL,
+               'priority_findings', to_regclass('priority_findings') IS NOT NULL) AS resolved,
              (SELECT COALESCE(jsonb_object_agg(relname, schemas), '{}'::jsonb) FROM (
                 SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
-                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'work_claim_cap_settings')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'work_claim_cap_settings', 'priority_findings')
                    -- Another tool's schema_migrations (Supabase's auth and
                    -- supabase_migrations, Rails, dbmate) is not this ledger:
                    -- only one carrying migrate.ts's sha256 column counts
@@ -1737,6 +1826,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       threads: null,
       priorityWeights: null,
       workClaimCap: null,
+      priorityFindings: null,
       findings: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
       unread: {},
@@ -1814,6 +1904,14 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         table: "work_claim_cap_settings",
         read: async (sp) => { facts.workClaimCap = capSettingValue((await sp`SELECT work_claim_cap_setting() AS s`)[0]?.s); },
         clear: () => { facts.workClaimCap = null; },
+      },
+      // The priority review's findings (SMD-3671 PR 2, migration 142): the pending and the decided in 30 days alone, as
+      // decided ones stay as history. Not a stats read: preflight's priority findings row reads it.
+      {
+        field: "priorityFindings",
+        table: "priority_findings",
+        read: async (sp) => { facts.priorityFindings = priorityFindingsValue((await PRIORITY_FINDINGS_SQL(sp))[0]); },
+        clear: () => { facts.priorityFindings = null; },
       },
       // Not a stats read either: preflight's threads row reads it (SMD-3306 PR 7a-2c). Bounded: two index walks of at
       // most THREAD_CENSUS_BOUND rows each, and the thoughts they name.
@@ -2450,6 +2548,17 @@ function proposalsLine(db: DatabaseSummary): string {
   return `${p.pending} pending (the oldest judged ${p.oldestPendingS === null ? "?" : `${ago(p.oldestPendingS)} ago`}${boardTail(p.boardPairs, db.unread["proposals.boardPairs"])})${stale}`;
 }
 
+/** The Priority findings row (SMD-3671 PR 2): the pending by kind and the oldest's age, none, or why not read. */
+export function priorityFindingsLine(db: Pick<DatabaseSummary, "priorityFindings" | "unread">): string {
+  const f = db.priorityFindings;
+  if (f === null) {
+    const u = db.unread.priorityFindings;
+    return u ? `? (${deniedObject(u.message)?.name ?? "priority_findings"} ${unreadWords(u)})` : "no table — migration 142 is not applied";
+  }
+  // Read, the words are preflight's row's (priorityFindingsRow): one wording.
+  return priorityFindingsRow(f, undefined).detail;
+}
+
 /** The Vectors row: how many thoughts wait for a vector, none, or why not read (SMD-2889). */
 export function vectorsLine(db: Pick<DatabaseSummary, "vectorless" | "unread">): string {
   const n = db.vectorless;
@@ -2556,15 +2665,11 @@ export function threadsRow(t: ThreadsFact | null, u: Unread | undefined): { stat
   if (t === null) {
     if (!u) return { status: "skip", detail: "no thread_relink — migration 120 (SMD-3306) is not applied, so no thread's edges stand yet." };
     // The census reads thought_facets and thoughts.
-    if (u.reason === "refused")
-      return { status: "warn", detail: `could not verify: ${u.message}`,
-               fix: "Grant the server's role SELECT on thought_facets and thoughts — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role)." };
-    if (u.reason === "invisible")
-      return { status: "warn", detail: `could not verify: ${u.message}`, fix: "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it." };
-    return { status: "warn", detail: `could not verify: ${u.message}`,
-             fix: u.reason === "timeout"
-               ? `A migration or a long transaction may hold thought_facets or thoughts: run preflight again once it has finished (--status would wait on it too). With nothing holding it, the census outran the statement cap: read it whole with ${THREADS_LINK} --status.`
-               : "The check reads thought_facets and thoughts; the message says why it failed." };
+    return unreadRow(u, {
+      refused: "Grant the server's role SELECT on thought_facets and thoughts — the capture group's rows: cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).",
+      timeout: `A migration or a long transaction may hold thought_facets or thoughts: run preflight again once it has finished (--status would wait on it too). With nothing holding it, the census outran the statement cap: read it whole with ${THREADS_LINK} --status.`,
+      reads: "thought_facets and thoughts",
+    });
   }
   const readEvery = `Read every key: ${THREADS_LINK} --status, which counts the keys whose edges differ and names the first ${THREAD_CENSUS_NAMED}; ${THREADS_LINK} links them.`;
   // Nothing read: the first key in key order alone passes the bound — not a pass (review pass 1).
@@ -2715,6 +2820,7 @@ export function brainInfoRows(info: BrainInfo): [label: string, value: string][]
   lines.push(row("Threads", threadsLine(db)));
   lines.push(row("Priority weights", priorityWeightsLine(db)));
   lines.push(row("Work-claim cap", workClaimCapLine(db)));
+  lines.push(row("Priority findings", priorityFindingsLine(db)));
   if (counts) lines.push(row("Findings", findingsLine(db)));
   lines.push(row("Workers", workersLine(db)));
   const calls = modelCallsLine(db);

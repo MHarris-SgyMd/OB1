@@ -6,7 +6,25 @@
 // structuredContent stopped at page one).
 
 import { PASS_KEY_CHARS } from "../pass-key.ts";
-import { RELATION_WORDS, UUID_RE, type ListSort, type RelationWord } from "../store.ts";
+import { RELATION_WORDS, UUID_RE, type FindingPosition, type ListSort, type RelationWord } from "../store.ts";
+import { isFindingKind, isFindingStatus, type FindingKind, type FindingStatus } from "../priority-kinds.ts";
+
+/**
+ * A cursor's text read back to its JSON array of `length` values, or null for anything that is not one: trimmed, at most
+ * `max` base64url characters (512 but for the claims cursor's), JSON, an array of that length. Each listing's parser
+ * below holds the values to its own shape (SMD-3671 PR 2: the preamble was written six times).
+ */
+function decodeCursor(raw: string, length: number, max = 512): unknown[] | null {
+  const text = raw.trim();
+  if (text.length > max || !/^[A-Za-z0-9_-]+$/.test(text)) return null;
+  let v: unknown;
+  try {
+    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  return Array.isArray(v) && v.length === length ? v : null;
+}
 
 /**
  * list_thoughts' cursor (SMD-2995): the sort it was made under and the place
@@ -28,16 +46,9 @@ export function listCursor(sort: ListSort, at: string | null, id: string): strin
  * store.ts, review pass 1): the bounds depend on the offset.
  */
 export function parseListCursor(raw: string): { sort: ListSort; at: string | null; id: string } | null {
-  const text = raw.trim();
-  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
-  let v: unknown;
-  try {
-    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(v) || v.length !== 3) return null;
-  const [sort, at, id] = v as unknown[];
+  const v = decodeCursor(raw, 3);
+  if (!v) return null;
+  const [sort, at, id] = v;
   if (sort !== "newest" && sort !== "oldest") return null;
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
   if (at === null) return { sort, at: null, id: id.toLowerCase() };
@@ -54,16 +65,9 @@ export function threadCursor(at: string | null, id: string): string {
 
 /** A thread cursor read back, or null for anything that is not one, held as parseListCursor holds its own. */
 export function parseThreadCursor(raw: string): { at: string | null; id: string } | null {
-  const text = raw.trim();
-  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
-  let v: unknown;
-  try {
-    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(v) || v.length !== 3 || v[0] !== "thread") return null;
-  const [, at, id] = v as unknown[];
+  const v = decodeCursor(raw, 3);
+  if (!v || v[0] !== "thread") return null;
+  const [, at, id] = v;
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
   if (at === null) return { at: null, id: id.toLowerCase() };
   return pgStamp(at) ? { at, id: id.toLowerCase() } : null;
@@ -85,16 +89,9 @@ export function relationsCursor(c: RelationsCursorAt): string {
 
 /** A relations cursor read back, or null for anything that is not one, held as parseListCursor holds its own. */
 export function parseRelationsCursor(raw: string): RelationsCursorAt | null {
-  const text = raw.trim();
-  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
-  let v: unknown;
-  try {
-    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(v) || v.length !== 6 || v[0] !== "relations") return null;
-  const [, thought, relation, rank, at, id] = v as unknown[];
+  const v = decodeCursor(raw, 6);
+  if (!v || v[0] !== "relations") return null;
+  const [, thought, relation, rank, at, id] = v;
   if (typeof thought !== "string" || !UUID_RE.test(thought) || typeof id !== "string" || !UUID_RE.test(id)) return null;
   if (relation !== null && !(RELATION_WORDS as readonly unknown[]).includes(relation)) return null;
   // numeric's text of a value rounded to six places: a sign, digits and a fraction, never an exponent; -1 the absent.
@@ -123,7 +120,7 @@ function pgStamp(at: unknown): at is string {
  * What a list_supersession_proposals page selected (SMD-3249): its status word (`all` for every state), its lineage
  * filter (null: every pair) and its judge key (null: every pass) — the tool's inputs and the CLI's --list/--key alike.
  */
-export type ProposalSelection = { status: (typeof PROPOSAL_STATUSES)[number]; lineage: boolean | null; judgeKey: string | null };
+export type ProposalSelection = { status: (typeof PROPOSAL_STATUSES)[number]; lineage: boolean | null; judgeKey: string | null; list?: undefined };
 
 const PROPOSAL_STATUSES = ["pending", "accepted", "rejected", "stale", "all"] as const;
 const isProposalStatus = (v: unknown): v is ProposalSelection["status"] => (PROPOSAL_STATUSES as readonly unknown[]).includes(v);
@@ -148,16 +145,9 @@ export function proposalCursor(sel: ProposalSelection, confidence: string, judge
 
 /** A list_supersession_proposals cursor read back, or null for anything that is not one. */
 export function parseProposalCursor(raw: string): { selection: ProposalSelection; confidence: string; judgedAt: string; id: string } | null {
-  const text = raw.trim();
-  if (!/^[A-Za-z0-9_-]{1,512}$/.test(text)) return null;
-  let v: unknown;
-  try {
-    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(v) || v.length !== 7) return null;
-  const [tag, status, lineage, judgeKey, confidence, judgedAt, id] = v as unknown[];
+  const v = decodeCursor(raw, 7);
+  if (!v) return null;
+  const [tag, status, lineage, judgeKey, confidence, judgedAt, id] = v;
   if (tag !== "proposals") return null;
   if (!isProposalStatus(status)) return null;
   if (lineage !== null && typeof lineage !== "boolean") return null;
@@ -194,17 +184,10 @@ export function claimCursor(sel: ClaimSelection, issue: string, pieceKey: string
 
 /** A list_work_claims cursor read back, or null for anything that is not one. */
 export function parseClaimCursor(raw: string): { selection: ClaimSelection; issue: string; pieceKey: string; claimedAt: string; id: string } | null {
-  const text = raw.trim();
   // 2048, not the other cursors' 512: this one carries ticket, holder, issue and piece_key (each up to 200), so a max-length cursor reaches ~1200 (SMD-3606 PR 2); the schema's `after` admits 2048 too.
-  if (!/^[A-Za-z0-9_-]{1,2048}$/.test(text)) return null;
-  let v: unknown;
-  try {
-    v = JSON.parse(Buffer.from(text, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(v) || v.length !== 8) return null;
-  const [tag, ticket, holder, includeEnded, issue, pieceKey, claimedAt, id] = v as unknown[];
+  const v = decodeCursor(raw, 8, 2048);
+  if (!v) return null;
+  const [tag, ticket, holder, includeEnded, issue, pieceKey, claimedAt, id] = v;
   if (tag !== "claims") return null;
   // The selection: the tool's inputs, each null or a bounded string, include_ended a boolean.
   if (ticket !== null && (typeof ticket !== "string" || ticket.length > 200)) return null;
@@ -212,7 +195,7 @@ export function parseClaimCursor(raw: string): { selection: ClaimSelection; issu
   if (typeof includeEnded !== "boolean") return null;
   // The position: issue the key 115 stores (non-empty, bounded), piece_key the piece folded ('' for a whole-ticket claim), id a uuid.
   if (typeof issue !== "string" || issue.length < 1 || issue.length > 200) return null;
-  // piece is at most 100 (115's CHECK), but piece_key is lower(piece), and lower() can lengthen a few code points, so 200 gives margin; the whole cursor is bounded to 512 above regardless.
+  // piece is at most 100 (115's CHECK), but piece_key is lower(piece), and lower() can lengthen a few code points, so 200 gives margin; the whole cursor is bounded to 2048 above regardless.
   if (typeof pieceKey !== "string" || pieceKey.length > 200) return null;
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
   const selection: ClaimSelection = { ticket, holder, includeEnded };
@@ -228,3 +211,38 @@ const leap = (y: number, bc: boolean) => {
   return n % 4 === 0 && (n % 100 !== 0 || n % 400 === 0);
 };
 
+
+/**
+ * What a list_priority_findings page selected (SMD-3671 PR 2): its status word (`all` for every state) and its kind
+ * (null: every kind), tagged `list: "findings"` so a refusal's `made` says which listing's it is (ProposalSelection, the
+ * older shape, carries no tag, and keeps none).
+ */
+export type FindingSelection = { list: "findings"; status: FindingStatus | "all"; kind: FindingKind | null };
+/** Whether two selections are the same listing — a cursor's and the call's it is passed with (sameSelection's rule, for findings). */
+export const sameFindingSelection = (a: FindingSelection, b: FindingSelection): boolean => a.status === b.status && a.kind === b.kind;
+
+/**
+ * list_priority_findings' cursor (SMD-3671 PR 2): the selection the page was listed under and the last listed row's
+ * place on the order (FindingPosition), as base64url of `["findings", status, kind, grp, sk, id]`. The place, not a
+ * count of rows: deciding a pending finding between pages takes it out of the pending listing, and an offset would then
+ * pass over one never shown. The selection, so a cursor passed with other filters is refused (the proposals' rule).
+ */
+export function findingsCursor(sel: FindingSelection, at: FindingPosition): string {
+  return Buffer.from(JSON.stringify(["findings", sel.status, sel.kind, at.grp, at.sk, at.id])).toString("base64url");
+}
+
+/** A list_priority_findings cursor read back, or null for anything that is not one: `sk` numeric's text, the id a uuid. */
+export function parseFindingsCursor(raw: string): { selection: FindingSelection; at: FindingPosition } | null {
+  const v = decodeCursor(raw, 6);
+  if (!v) return null;
+  const [tag, status, kind, grp, sk, id] = v;
+  if (tag !== "findings") return null;
+  if (status !== "all" && !isFindingStatus(status)) return null;
+  if (kind !== null && !isFindingKind(kind)) return null;
+  if (grp !== 0 && grp !== 1) return null;
+  // An epoch to the microsecond, negated for the decided: numeric's text, bounded so no cast can fail on it. An infinite
+  // found_at or decided_at reads as Infinity or -Infinity, which numeric takes from Postgres 14 (the stack's is 16).
+  if (typeof sk !== "string" || !/^(?:-?\d{1,15}(?:\.\d{1,6})?|-?Infinity)$/.test(sk)) return null;
+  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
+  return { selection: { list: "findings", status, kind }, at: { grp, sk, id: id.toLowerCase() } };
+}
