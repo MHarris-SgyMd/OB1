@@ -70,7 +70,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   brain's server resolves (`OB1_CHAT_BASE_URL` or `OB1_LLM_BASE_URL`,
   `OB1_METADATA_MODEL`; `--model` names another), each put to the egress gate on
   its own units: `OB1_WORKER_KEY`'s name as the actor, its source, type and
-  topics, the text sent as the marker. A refused thought is left out. Under the
+  topics, and what is sent of it (its text, type, topics and tags) and its
+  whole text as the marker: it goes only when both pass, so a marker anywhere
+  in a thought is the thought's. A refused thought is left out. Under the
   default deny, with no allow term and no endpoint declared local, the tier is
   skipped before any read, and the report says why. Release it with
   `OB1_EGRESS_ALLOW=actor:<the worker key>`, or with a source, type, topic or
@@ -106,11 +108,13 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   reached them, failed on them — `bun db/extract-entities.ts --retry-failed` —
   or is off); the entities with no edge (exact).
 - **Tier 3, a model's reading:** the newest dated thoughts of the last
-  `--days` (365) whose text, trimmed, is 20 characters or more, up to
-  `--sample-size` (100) once the hold-back and the gate have kept theirs back,
-  sent 20 a call, at most `--max-llm-calls` (5; 0 turns it off). Each goes as a
-  ref (`t1`…), its date, type, first 400 characters and five topics and tags,
-  with today's date. The model names contradictions, stale facts, superseded
+  `--days` (365) whose text, trimmed, is 20 characters or more, read newest
+  first until `--sample-size` (100) are left once the hold-back and the gate
+  have kept theirs back (at most 10,000 read), sent 20 a call, at most
+  `--max-llm-calls` (5; 0 turns it off). Each batch is read again just before
+  its call: a thought deleted or newly held back since is not sent. Each goes
+  as a ref (`t1`…), its date, type, first 400 characters and five topics and
+  tags (each cut to 100 characters), with today's date. The model names contradictions, stale facts, superseded
   decisions, orphans and missing links; each finding lists its thoughts' ids,
   and its words are made safe as a preview is and cut to 300 characters. Fewer
   than 10 thoughts left to send skips the tier. The sample is read in the

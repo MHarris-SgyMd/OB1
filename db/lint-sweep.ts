@@ -91,31 +91,45 @@
  * another), and only as the egress policy lets each one leave (decided
  * 2026-11-17, as consolidation's judge does): every thought is put to the gate
  * on its own units — OB1_WORKER_KEY's name as the actor, its source, type and
- * topics, the text sent as the marker — and a refused one is left out; the call
- * names every thought it carries, and providerCall gates each again. A policy
- * that would refuse every thought skips the tier before any read. Before that,
+ * topics, and as the marker what the prompt carries of it (its text, type,
+ * topics and tags) and, apart, its whole text: it goes only when both pass, so
+ * a writer's marker anywhere in the thought is the thought's — and a refused
+ * one is left out; the call names every thought it carries, and providerCall
+ * gates each again. A policy that would refuse every thought skips the tier
+ * before any read, and before the worker key is resolved, which happens only
+ * once the connection is known to have reached the URL's database. Before that,
  * the hold-back weekly-digest uses (db/sensitivity.ts, decided the same day):
  * a thought `restricted`, or `personal` unless --include-personal, by its key
  * or the enhanced-thoughts column, or so rated by the patterns over what the
  * prompt carries and its whole text, is never sent.
  *
  * The sample: the newest dated thoughts of the last --days (365) whose text,
- * trimmed, is 20 characters or more, read in the sweep's snapshot (twice
- * --sample-size, 100, so the hold-back leaves enough), then sent TIER3_BATCH
- * (20) a call, at most --max-llm-calls (5; 0 turns the tier off) — after the
- * transaction, so no lock or snapshot is held across a model's answer. Each
- * thought goes as a ref (t1…t20), its date, type, first 400 characters and five
- * topics and tags; today's date goes too, for what is stale. The model names
+ * trimmed, is 20 characters or more, read in the sweep's snapshot a page
+ * (twice --sample-size, at most 2,000) at a time, newest first, ties by id,
+ * each judged, until --sample-size (100) are to be sent, the window ends, or
+ * TIER3_READ_MAX (10,000) rows are read, so an allow term naming a few older
+ * thoughts finds them; the counts stop at the row that filled it. Then they go
+ * TIER3_BATCH (20) a call, at most --max-llm-calls (5; 0 turns the tier off),
+ * after the transaction, so no lock or snapshot is held across a model's
+ * answer; each batch is read again and judged again just before its call, so
+ * a thought deleted, forgotten, edited or newly held back since the snapshot
+ * (minutes, with the retries' pauses) is not sent as it was. Each thought goes
+ * as a ref (t1…t20), its date, type, first 400 characters and five topics and
+ * tags, each type, topic and tag cut to 100 characters; today's date goes too,
+ * for what is stale. A thought counts as sent once its call is dialled: a call
+ * that fails may have reached the provider. The model names
  * contradictions, stale facts, superseded decisions, orphans and missing links;
  * the recipe's sixth kind, low_signal, read `importance`, which the core
  * retired. Its `source_type`, selected but never sent, is not read. Each ref
  * is mapped back to its thought's id, and a finding naming none of its batch
  * is dropped and counted. An answer that is no JSON object loses its batch's
- * findings and is counted (the recipe stopped the run). A call that fails,
+ * findings and is counted (the recipe stopped the run), and so does an answer
+ * that is no text. A call that fails,
  * after the transient retries, stops the tier: the report is written with
  * tiers 1 and 2 and the findings before it, and the run exits 1. Fewer than
  * TIER3_MIN (10) thoughts left to send skips the tier, as the recipe did. The
- * model's words are made safe as a preview is, and cut to 300 characters.
+ * model's words are made safe as a preview is, and cut to 300 characters; so
+ * is a failure's reason (to 500), a provider's error body among them.
  *
  * `recipes/lint-sweep/views.sql` stays the recipe's: views over the columns
  * `schemas/enhanced-thoughts` adds, which this script does not read.
@@ -290,6 +304,10 @@ const TIER3_CONTENT = 400;
 const TIER3_MIN_CHARS = 20;
 /** Characters of the model's own words a finding keeps. */
 const FINDING_TEXT = 300;
+/** Characters of a type, topic or tag the prompt carries. */
+const TIER3_FIELD = 100;
+/** The most rows Tier 3 reads looking for its sample: past it, the window's older thoughts go unread. */
+export const TIER3_READ_MAX = 10_000;
 /** The kinds of finding, in the report's order. The recipe's sixth, low_signal, read importance, which the core retired. */
 export const CATEGORIES = ["contradictions", "stale_facts", "superseded", "orphans", "missing_links"] as const;
 export type Category = (typeof CATEGORIES)[number];
@@ -308,6 +326,12 @@ export interface Tier3Options {
   includePersonal: boolean;
   /** The worker key's name: the `actor` unit each thought's gate reads. */
   actor?: string;
+  /**
+   * The worker key, resolved by run() once the connection is known to have reached the URL's database and before any
+   * read, only when a thought could leave (the CLI's: workerIdentity, which registers the key in that brain). Not ok
+   * refuses the run, exit 2.
+   */
+  resolveActor?: () => Promise<{ ok: true; actor?: string } | { ok: false; message: string }>;
   /** The pauses before each retry of a transient failure (worker-bootstrap's by default). */
   pausesMs?: readonly number[];
 }
@@ -316,18 +340,23 @@ export interface Tier3Row { id: string; created: string; content: string; metada
 export interface Tier3Finding { category: Category; ids: string[]; issue: string; action: string }
 export interface Tier3 {
   status: "ran" | "skipped" | "failed";
-  /** Why it was skipped, or how it failed. */
+  /** Why it was skipped, or how it failed: made safe as a preview is (a provider's error body is no report line). */
   reason: string | null;
   model: string;
   days: number;
-  /** Dated thoughts of the window read, the newest first. */
+  /** Dated thoughts of the window read, the newest first, up to the one that filled the sample. */
   read: number;
+  /** Whether the read stopped at TIER3_READ_MAX rows with the sample not full. */
+  readCapped: boolean;
   /** Of those, held back by their tier (the key, or the column) or by the patterns. */
   heldSensitive: number;
   /** Of the rest, refused by the egress policy, each on its own units. */
   heldEgress: number;
-  /** Sent to the model. */
+  /** Sampled thoughts gone, or held back or refused, when their batch was read again just before its call. */
+  changed: number;
+  /** Sent to the model: every thought of every call dialled, a failed call's included. */
   sent: number;
+  /** Calls dialled. */
   calls: number;
   /** Answers that were not a JSON object: their batch's findings are lost. */
   unreadable: number;
@@ -338,15 +367,25 @@ export interface Tier3 {
 
 /** A metadata object, or null for anything else (an array, a string, NULL). */
 const objectOr = (m: unknown): Record<string, unknown> | null => (typeof m === "object" && m !== null && !Array.isArray(m) ? m as Record<string, unknown> : null);
-const firstFive = (m: Record<string, unknown> | null, k: string): unknown[] => (Array.isArray(m?.[k]) ? (m![k] as unknown[]).slice(0, 5) : []);
+/** A type, topic or tag as the prompt carries it: a string as it is, anything else as its JSON, cut to TIER3_FIELD characters. */
+function field(v: unknown): string | null {
+  if (v === null || v === undefined) return null;
+  const cps = [...(typeof v === "string" ? v : JSON.stringify(v) ?? "")];
+  return cps.length > TIER3_FIELD ? cps.slice(0, TIER3_FIELD).join("") : cps.join("");
+}
+const firstFive = (m: Record<string, unknown> | null, k: string): (string | null)[] => (Array.isArray(m?.[k]) ? (m![k] as unknown[]).slice(0, 5).map(field) : []);
+/** What the prompt carries of a thought besides its ref, its date and its text. */
+const promptFields = (r: Tier3Row) => ({ type: field(r.metadata?.type), topics: firstFive(r.metadata, "topics"), tags: firstFive(r.metadata, "tags") });
 
-/** What the prompt carries of a thought besides its ref and date, as the patterns read it: the text, the type, five topics, five tags. */
-const sentOf = (r: Tier3Row) =>
-  [r.content, JSON.stringify(r.metadata?.type ?? null), JSON.stringify(firstFive(r.metadata, "topics")), JSON.stringify(firstFive(r.metadata, "tags"))].join("\n");
+/** What the prompt carries of a thought besides its ref and date, as the patterns and the gate's marker read it: the text, the type, five topics, five tags. */
+const sentOf = (r: Tier3Row) => {
+  const f = promptFields(r);
+  return [r.content, JSON.stringify(f.type), JSON.stringify(f.topics), JSON.stringify(f.tags)].join("\n");
+};
 
-/** The gate's subject for one thought: the worker key, the row's own metadata, and the text the prompt carries. */
-export function lintSubject(r: Tier3Row, actor: string | undefined): EgressSubject {
-  return { kind: "lint", ...(actor ? { actor } : {}), ...(r.metadata ? { metadata: r.metadata } : {}), content: r.content };
+/** The gate's subject for one thought: the worker key, the row's own metadata, and `text` as the marker reads it (what the prompt carries, by default). */
+export function lintSubject(r: Tier3Row, actor: string | undefined, text = sentOf(r)): EgressSubject {
+  return { kind: "lint", ...(actor ? { actor } : {}), ...(r.metadata ? { metadata: r.metadata } : {}), content: text };
 }
 
 export const TIER3_SYSTEM =
@@ -370,25 +409,27 @@ export const TIER3_SYSTEM =
 
 /** The user turn for one batch: today's date (for what is stale), then each thought by its ref. */
 export function tier3Prompt(batch: readonly Tier3Row[], today: string): string {
-  const rows = batch.map((r, i) => ({
-    ref: `t${i + 1}`, date: r.created, type: r.metadata?.type ?? null, content: r.content,
-    topics: firstFive(r.metadata, "topics"), tags: firstFive(r.metadata, "tags"),
-  }));
+  const rows = batch.map((r, i) => ({ ref: `t${i + 1}`, date: r.created, ...promptFields(r), content: r.content }));
   return `Today: ${today}\nBatch size: ${batch.length}\n\nTHOUGHTS:\n${JSON.stringify(rows)}\n\nAudit the batch now. JSON output only.`;
 }
 
-/** The model's words for a report line: made safe as a preview is, and cut. */
-function clip(v: unknown): string {
+/** Text made safe as a preview is, and cut to `max` characters. */
+function clipTo(v: unknown, max: number): string {
   const t = [...sanitizePreview(typeof v === "string" ? v : "")];
-  return t.length > FINDING_TEXT ? `${t.slice(0, FINDING_TEXT).join("")}…` : t.join("");
+  return t.length > max ? `${t.slice(0, max).join("")}…` : t.join("");
 }
+/** The model's words for a report line. */
+const clip = (v: unknown) => clipTo(v, FINDING_TEXT);
+/** A reason for a report line or the terminal: a provider's error body among them, so made safe and cut. */
+const safeReason = (s: string) => clipTo(s, 500);
 
 /**
  * A batch's answer read: the JSON object in it (a fence or a sentence around it is passed over), each category's
  * findings, each ref (`t3`, or `3`) mapped to its thought's id. A ref naming no thought of the batch is dropped, and a
- * finding left with none is dropped and counted. Null when there is no JSON object to read.
+ * finding left with none is dropped and counted. Null when there is no JSON object to read, or the answer is no text.
  */
-export function readTier3Answer(raw: string, batch: readonly Tier3Row[]): { findings: Tier3Finding[]; dropped: number } | null {
+export function readTier3Answer(raw: unknown, batch: readonly Tier3Row[]): { findings: Tier3Finding[]; dropped: number } | null {
+  if (typeof raw !== "string") return null;
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
   if (start < 0 || end < start) return null;
@@ -424,31 +465,84 @@ export function readTier3Answer(raw: string, batch: readonly Tier3Row[]): { find
   return { findings, dropped };
 }
 
+/** Tier 3's rows as read: what the prompt carries of each, and whether its tier holds it back (`$1`, the held tiers). */
+const rowsSql = (hasColumn: boolean, rest: string) => `
+  SELECT id::text AS id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS created, left(content, ${TIER3_CONTENT}) AS content, metadata,
+         NOT (true${tierExcluded(hasColumn, "$1")}) AS tier_held
+    FROM thoughts ${rest}`;
+type ReadRow = Tier3Row & { tier_held: boolean };
+type Verdict = "send" | "sensitive" | "egress";
+
 /**
- * Tier 3's candidates, read in the sweep's snapshot: the newest dated thoughts of the window whose text, trimmed, is
- * 20 characters or more, twice the sample (so the hold-back leaves enough), then those the hold-back keeps: not of a
- * held tier, by the key or the column (a column the role may not read refuses the run), nor rated so by the patterns
- * over what the prompt carries and the whole text.
+ * Each row's verdict, in order: held back by its tier (the key, or the column), or by the patterns over what the prompt
+ * carries and its whole text (a row the second read does not return is held too); refused by the gate on what the
+ * prompt carries, or on its whole text (a writer's marker anywhere in the thought is the thought's: it goes only when
+ * both pass); else sent.
  */
-async function tier3Sample(tx: SQL, o: Tier3Options): Promise<{ rows: Tier3Row[]; read: number; heldSensitive: number }> {
+async function judge(sql: SQL, rows: readonly ReadRow[], o: Tier3Options): Promise<{ row: Tier3Row; verdict: Verdict }[]> {
+  const shaped = rows.map(({ tier_held, ...r }) => ({ row: { ...r, metadata: objectOr(r.metadata) } as Tier3Row, tierHeld: tier_held }));
+  const candidates = shaped.filter((s) => !s.tierHeld).map((s) => s.row);
+  const byId = new Map(candidates.map((r) => [r.id, r]));
+  const leaves = (r: Tier3Row, text?: string) => mayLeaveBox(lintSubject(r, o.actor, text), o.cfg.chat, o.cfg.egress).allowed;
+  const refusedWhole = new Set<string>();
+  const held = await heldByPatterns(sql, candidates.map((r) => ({ id: r.id, sent: sentOf(r) })), heldTiers(o.includePersonal), (id, text) => {
+    const r = byId.get(id);
+    if (r && !leaves(r, `${text}\n${sentOf(r)}`)) refusedWhole.add(id);
+  });
+  return shaped.map(({ row, tierHeld }) => ({
+    row,
+    verdict: tierHeld || held.has(row.id) ? "sensitive" : refusedWhole.has(row.id) || !leaves(row) ? "egress" : "send",
+  }));
+}
+
+interface Tier3Sample { rows: Tier3Row[]; read: number; readCapped: boolean; heldSensitive: number; heldEgress: number; hasColumn: boolean }
+
+/**
+ * Tier 3's sample, read in the sweep's snapshot: the newest dated thoughts of the window whose text, trimmed, is 20
+ * characters or more, a page (twice the sample, at most 2,000) at a time, newest first (ties by id), each judged, until
+ * --sample-size are to be sent, the window ends, or TIER3_READ_MAX rows are read: so an allow term that names a few
+ * older thoughts finds them. A sensitivity_tier column the role may not read refuses the run. The counts stop at the
+ * row that filled the sample.
+ */
+async function tier3Sample(tx: SQL, o: Tier3Options): Promise<Tier3Sample> {
   const hasColumn = await sensitivityColumn(tx, true,
     "public.thoughts has a sensitivity_tier column this role may not read: refusing rather than send the rows it marks to a model (grant SELECT on it)");
-  const read = (await tx.unsafe(`
-    SELECT id::text AS id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS created, left(content, ${TIER3_CONTENT}) AS content, metadata,
-           NOT (true${tierExcluded(hasColumn, "$2")}) AS tier_held
-      FROM thoughts
-     WHERE ${DATED} AND created_at >= now() - make_interval(days => $1::int) AND char_length(${TRIMMED}) >= ${TIER3_MIN_CHARS}
-     ORDER BY created_at DESC LIMIT ${o.sampleSize * 2}`,
-    [o.days, tx.array([...heldTiers(o.includePersonal)], "TEXT")])) as (Tier3Row & { tier_held: boolean })[];
-  const byTier = read.filter((r) => !r.tier_held).map(({ tier_held: _, ...r }) => ({ ...r, metadata: objectOr(r.metadata) }));
-  const held = await heldByPatterns(tx, byTier.map((r) => ({ id: r.id, sent: sentOf(r) })), heldTiers(o.includePersonal));
-  const rows = byTier.filter((r) => !held.has(r.id));
-  return { rows, read: read.length, heldSensitive: read.length - rows.length };
+  const page = Math.min(o.sampleSize * 2, 2000);
+  const out: Tier3Sample = { rows: [], read: 0, readCapped: false, heldSensitive: 0, heldEgress: 0, hasColumn };
+  for (let offset = 0; ; offset += page) {
+    const rows = (await tx.unsafe(rowsSql(hasColumn, `
+     WHERE ${DATED} AND created_at >= now() - make_interval(days => $2::int) AND char_length(${TRIMMED}) >= ${TIER3_MIN_CHARS}
+     ORDER BY created_at DESC, id DESC LIMIT ${page} OFFSET ${offset}`), [tx.array([...heldTiers(o.includePersonal)], "TEXT"), o.days])) as ReadRow[];
+    for (const { row, verdict } of await judge(tx, rows, o)) {
+      out.read++;
+      if (verdict === "sensitive") out.heldSensitive++;
+      else if (verdict === "egress") out.heldEgress++;
+      else out.rows.push(row);
+      if (out.rows.length === o.sampleSize) return out;
+    }
+    if (rows.length < page) return out;
+    if (out.read >= TIER3_READ_MAX) return { ...out, readCapped: true };
+  }
+}
+
+/**
+ * A batch read again just before its call, outside the snapshot: a thought deleted since, or one its tier, the patterns
+ * or the gate now hold back (a tier set, a `forget_thought`, an edit), is not sent; an edited one goes as it is now.
+ */
+async function recheck(sql: SQL, batch: readonly Tier3Row[], o: Tier3Options, hasColumn: boolean): Promise<Tier3Row[]> {
+  const fresh = (await sql.unsafe(rowsSql(hasColumn, "WHERE id = ANY($2::uuid[])"),
+    [sql.array([...heldTiers(o.includePersonal)], "TEXT"), sql.array(batch.map((r) => r.id), "TEXT")])) as ReadRow[];
+  const verdicts = new Map((await judge(sql, fresh, o)).map((v) => [v.row.id, v]));
+  return batch.flatMap((r) => {
+    const v = verdicts.get(r.id);
+    return v?.verdict === "send" ? [v.row] : [];
+  });
 }
 
 /** A Tier 3 that did not run, and why. */
 const skipped3 = (o: Tier3Options, reason: string, counts: Partial<Tier3> = {}): Tier3 => ({
-  status: "skipped", reason, model: o.model, days: o.days, read: 0, heldSensitive: 0, heldEgress: 0, sent: 0, calls: 0, unreadable: 0, dropped: 0, findings: [], ...counts,
+  status: "skipped", reason: safeReason(reason), model: o.model, days: o.days, read: 0, readCapped: false, heldSensitive: 0, heldEgress: 0, changed: 0,
+  sent: 0, calls: 0, unreadable: 0, dropped: 0, findings: [], ...counts,
 });
 
 /** Retry a call while its failure is transient (429, 5xx, a connection's), after each of `pauses`. */
@@ -458,7 +552,7 @@ async function withRetry<T>(pauses: readonly number[], w: Writer, fn: () => Prom
       return await fn();
     } catch (e) {
       if (classifyError(e) === "transient" && attempt < pauses.length) {
-        w.err(`[tier 3] a transient failure (${reasonOf(e)}); retrying in ${pauses[attempt] / 1000} s`);
+        w.err(`[tier 3] a transient failure (${safeReason(reasonOf(e))}); retrying in ${pauses[attempt] / 1000} s`);
         await Bun.sleep(pauses[attempt]);
         continue;
       }
@@ -468,24 +562,31 @@ async function withRetry<T>(pauses: readonly number[], w: Writer, fn: () => Prom
 }
 
 /**
- * Tier 3's calls, after the sweep's transaction (no lock or snapshot is held across a model's answer): each thought
- * put to the egress gate on its own units, a refused one left out; the sample cut to --sample-size and sent in batches
- * of TIER3_BATCH, at most --max-llm-calls of them, each call naming every thought it carries (providerCall gates each
- * again). An answer that is no JSON object loses its batch's findings and is counted; a call that fails (after the
- * transient retries) stops the tier, the findings so far kept.
+ * Tier 3's calls, after the sweep's transaction (no lock or snapshot is held across a model's answer): the sample in
+ * batches of TIER3_BATCH, at most --max-llm-calls of them, each read again just before its call (recheck), each call
+ * naming every thought it carries (providerCall gates each again). An answer that is no JSON object loses its batch's
+ * findings and is counted; a call that fails (after the transient retries), or a batch's second read that fails, stops
+ * the tier, the findings so far kept.
  */
-async function tier3Calls(sample: { rows: Tier3Row[]; read: number; heldSensitive: number }, o: Tier3Options, w: Writer): Promise<Tier3> {
-  const allowed = sample.rows.filter((r) => mayLeaveBox(lintSubject(r, o.actor), o.cfg.chat, o.cfg.egress).allowed);
-  const counts = { read: sample.read, heldSensitive: sample.heldSensitive, heldEgress: sample.rows.length - allowed.length };
-  const chosen = allowed.slice(0, o.sampleSize);
-  if (chosen.length < TIER3_MIN) {
-    return skipped3(o, `${chosen.length} thought(s) left to send of ${sample.read} read in the last ${o.days} days, fewer than ${TIER3_MIN}`, counts);
+async function tier3Calls(sql: SQL, sample: Tier3Sample, o: Tier3Options, w: Writer): Promise<Tier3> {
+  const counts = { read: sample.read, readCapped: sample.readCapped, heldSensitive: sample.heldSensitive, heldEgress: sample.heldEgress };
+  if (sample.rows.length < TIER3_MIN) {
+    return skipped3(o, `${sample.rows.length} thought(s) left to send of ${sample.read} read in the last ${o.days} days${sample.readCapped ? ` (the read stopped at ${TIER3_READ_MAX})` : ""}, fewer than ${TIER3_MIN}`, counts);
   }
   const batches: Tier3Row[][] = [];
-  for (let i = 0; i < chosen.length && batches.length < o.maxCalls; i += TIER3_BATCH) batches.push(chosen.slice(i, i + TIER3_BATCH));
-  const out: Tier3 = { status: "ran", reason: null, model: o.model, days: o.days, ...counts, sent: 0, calls: 0, unreadable: 0, dropped: 0, findings: [] };
+  for (let i = 0; i < sample.rows.length && batches.length < o.maxCalls; i += TIER3_BATCH) batches.push(sample.rows.slice(i, i + TIER3_BATCH));
+  const out: Tier3 = { status: "ran", reason: null, model: o.model, days: o.days, ...counts, changed: 0, sent: 0, calls: 0, unreadable: 0, dropped: 0, findings: [] };
+  const failed = (reason: string): Tier3 => ({ ...out, status: "failed", reason: safeReason(reason) });
   const today = new Date().toISOString().slice(0, 10);
-  for (const batch of batches) {
+  for (const [k, planned] of batches.entries()) {
+    let batch: Tier3Row[];
+    try {
+      batch = await recheck(sql, planned, o, sample.hasColumn);
+    } catch (e) {
+      return failed(`batch ${k + 1} of ${batches.length}, read again before its call: ${reasonOf(e)}`);
+    }
+    out.changed += planned.length - batch.length;
+    if (batch.length === 0) continue;
     const body = {
       model: o.model,
       max_tokens: 2048,
@@ -493,16 +594,17 @@ async function tier3Calls(sample: { rows: Tier3Row[]; read: number; heldSensitiv
       ...o.cfg.metadataReasoning,
       messages: [{ role: "system", content: TIER3_SYSTEM }, { role: "user", content: tier3Prompt(batch, today) }],
     };
-    let raw: string;
-    try {
-      const answer = await withRetry(o.pausesMs ?? TRANSIENT_PAUSES_MS, w, () =>
-        providerCall<{ choices?: { message?: { content?: string | null } }[] }>(o.cfg, "/chat/completions", body, batch.map((r) => lintSubject(r, o.actor))));
-      raw = answer.choices?.[0]?.message?.content ?? "";
-    } catch (e) {
-      return { ...out, status: "failed", reason: `call ${out.calls + 1} of ${batches.length}: ${reasonOf(e)}` };
-    }
+    // Counted as dialled: a call that fails may have reached the provider, its text with it.
     out.calls++;
     out.sent += batch.length;
+    let raw: unknown;
+    try {
+      const answer = await withRetry(o.pausesMs ?? TRANSIENT_PAUSES_MS, w, () =>
+        providerCall<{ choices?: { message?: { content?: unknown } }[] } | null>(o.cfg, "/chat/completions", body, batch.map((r) => lintSubject(r, o.actor))));
+      raw = answer?.choices?.[0]?.message?.content;
+    } catch (e) {
+      return failed(`call ${out.calls} of ${batches.length}: ${reasonOf(e)}`);
+    }
     const read = readTier3Answer(raw, batch);
     if (!read) {
       out.unreadable++;
@@ -554,10 +656,12 @@ export function renderReport(r: { tier: string; database: string; startedAt: str
   if (t3 && t3.status !== "skipped") {
     L.push("## Tier 3 — a model's reading of sampled thoughts", "");
     if (t3.status === "failed") L.push(`*Stopped: ${t3.reason}. The findings below are the calls' before it.*`, "");
-    L.push(`- Read (dated, the last ${t3.days} days, 20 characters or more, newest first): **${t3.read}**`);
+    L.push(`- Read (dated, the last ${t3.days} days, 20 characters or more, newest first, until the sample filled): **${t3.read}**`);
     L.push(`- Held back by their sensitivity tier or the sensitivity patterns: **${t3.heldSensitive}**`);
     L.push(`- Held back by the egress policy: **${t3.heldEgress}**`);
-    L.push(`- Sent to ${t3.model}: **${t3.sent}** in **${t3.calls}** call(s)${t3.unreadable ? `; **${t3.unreadable}** answer(s) not JSON, their findings lost` : ""}${t3.dropped ? `; **${t3.dropped}** finding(s) dropped, naming no thought of their batch` : ""}`, "");
+    L.push(`- Gone, or held back, when read again just before their call: **${t3.changed}**`);
+    if (t3.readCapped) L.push(`- The read stopped at ${TIER3_READ_MAX.toLocaleString("en-US")} thoughts with the sample not full: older thoughts of the window were not read.`);
+    L.push(`- Sent to ${t3.model}: **${t3.sent}** in **${t3.calls}** call(s), a failed one's included${t3.unreadable ? `; **${t3.unreadable}** answer(s) not JSON, their findings lost` : ""}${t3.dropped ? `; **${t3.dropped}** finding(s) dropped, naming no thought of their batch` : ""}`, "");
     for (const c of CATEGORIES) {
       const of = t3.findings.filter((f) => f.category === c);
       L.push(`### ${CATEGORY_TITLE[c]} (${of.length})`, "");
@@ -645,15 +749,10 @@ export async function run(opts: SweepOptions): Promise<number> {
   const startedAt = new Date().toISOString();
   let t1: Tier1 | null = null, t2: Tier2 | null = null, t3: Tier3 | null = null, database = "";
   const wants = (n: "1" | "2" | "3") => opts.tier === n || opts.tier === "all";
-  const o3 = wants("3") ? opts.tier3 : undefined;
+  let o3 = wants("3") ? opts.tier3 : undefined;
   if (wants("3") && !o3) throw new Error("lint-sweep: tier 3 needs its options (tier3)");
   // Set inside the transaction's callback, which control flow does not follow: declared so, not narrowed to null.
-  let sample = null as Awaited<ReturnType<typeof tier3Sample>> | null;
-  if (o3) {
-    // Before any read: a tier turned off, or a policy that refuses every thought whatever its units, sends nothing.
-    const blanket = o3.maxCalls === 0 ? "--max-llm-calls 0" : egressRefusal(o3.cfg.chat, o3.cfg.egress, o3.actor ? undefined : ROW_UNITS);
-    if (blanket) t3 = skipped3(o3, blanket);
-  }
+  let sample = null as Tier3Sample | null;
   try {
     // Best effort: a server whose platform cannot watch the socket refuses the setting.
     await opts.sql.unsafe(`SET client_connection_check_interval = '${CONNECTION_CHECK}'`).catch(() => {});
@@ -664,6 +763,25 @@ export async function run(opts: SweepOptions): Promise<number> {
       if (refusal !== null) {
         w.err(`lint-sweep refused — ${refusal}.`);
         return 2;
+      }
+    }
+    if (o3) {
+      // Before any read, once the database is the URL's: a tier turned off, or a policy that refuses every thought
+      // even with an actor, sends nothing and resolves no key; then the key (its registry write lands in this brain),
+      // and the policy again for an unkeyed run, whose thoughts carry no actor.
+      const keyed = o3.maxCalls === 0 ? "--max-llm-calls 0" : egressRefusal(o3.cfg.chat, o3.cfg.egress);
+      if (keyed) t3 = skipped3(o3, keyed);
+      else {
+        if (o3.resolveActor) {
+          const id = await o3.resolveActor();
+          if (!id.ok) {
+            w.err(id.message);
+            return 2;
+          }
+          o3 = { ...o3, ...(id.actor ? { actor: id.actor } : {}) };
+        }
+        const unkeyed = o3.actor ? null : egressRefusal(o3.cfg.chat, o3.cfg.egress, ROW_UNITS);
+        if (unkeyed) t3 = skipped3(o3, unkeyed);
       }
     }
     w.out(`[lint-sweep] database ${db}, tier ${opts.tier}, report ${opts.report}`);
@@ -706,13 +824,10 @@ export async function run(opts: SweepOptions): Promise<number> {
         }
       }
     });
-    if (o3 && sample) {
-      w.out(`[tier 3] ${sample.read} read, ${sample.heldSensitive} held back by sensitivity; asking ${o3.model}`);
-      t3 = await tier3Calls(sample, o3, w);
-    }
+    if (o3 && sample) t3 = await tier3Calls(opts.sql, sample, o3, w);
     if (t3) {
       w.out(t3.status === "skipped" ? `[tier 3] skipped: ${t3.reason}`
-        : `[tier 3] ${t3.read} read, ${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy; ${t3.sent} sent in ${t3.calls} call(s): ${t3.findings.length} finding(s)${t3.unreadable ? `, ${t3.unreadable} answer(s) not JSON` : ""}${t3.dropped ? `, ${t3.dropped} dropped` : ""}`);
+        : `[tier 3] ${t3.read} read, ${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy; ${t3.changed ? `${t3.changed} gone or held back before their call, ` : ""}${t3.sent} sent in ${t3.calls} call(s): ${t3.findings.length} finding(s)${t3.unreadable ? `, ${t3.unreadable} answer(s) not JSON` : ""}${t3.dropped ? `, ${t3.dropped} dropped` : ""}`);
     }
   } catch (e) {
     w.err(`lint-sweep FAILED — ${reasonOf(e)}. No report was written.`);
@@ -772,21 +887,17 @@ if (import.meta.main) {
     const cfg = resolveEmbedConfig(process.env as unknown as EmbedEnv);
     const model = (cli.value("model") ?? "").trim() || cfg.metadataModel;
     console.log(`[tier 3] model ${model}; egress: ${egressDescription(cfg.chat, cfg.egress, cfg.chat.declaredBy ?? "OB1_LLM_LOCAL")}`);
-    let actor: string | undefined;
-    // The key is resolved only when a thought could leave: run() skips the tier, before any read, when it is off or the
-    // policy refuses every call even with an actor.
-    if (maxCalls > 0 && egressRefusal(cfg.chat, cfg.egress) === null) {
-      const id = await workerIdentity(url, process.env, {
-        noKeyWarning: "  note: OB1_WORKER_KEY is not set — Tier 3 runs without an actor; release its thoughts by their source, type, topic or a marker, not actor:<key>.",
-      });
-      if (!id.ok) {
-        console.error(id.message);
-        process.exit(2);
-      }
-      actor = id.identity.keyName ?? undefined;
-      installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS });
-    }
-    tier3 = { cfg, model, sampleSize, maxCalls, days, includePersonal: cli.has("include-personal"), ...(actor ? { actor } : {}) };
+    tier3 = {
+      cfg, model, sampleSize, maxCalls, days, includePersonal: cli.has("include-personal"),
+      resolveActor: async () => {
+        const id = await workerIdentity(url, process.env, {
+          noKeyWarning: "  note: OB1_WORKER_KEY is not set — Tier 3 runs without an actor; release its thoughts by their source, type, topic or a marker, not actor:<key>.",
+        });
+        if (!id.ok) return { ok: false, message: id.message };
+        installBackgroundSlots({ url, raw: process.env.OB1_BACKGROUND_SLOTS, modelSlots: process.env.OB1_MODEL_SLOTS });
+        return { ok: true, ...(id.identity.keyName ? { actor: id.identity.keyName } : {}) };
+      },
+    };
   }
   const sql = openSql(url, { max: 1, session: { statement_timeout: `${timeout}s`, application_name: "lint-sweep" } });
   await closeThenExit(sql, async () => {

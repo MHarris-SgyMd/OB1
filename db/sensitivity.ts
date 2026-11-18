@@ -250,9 +250,10 @@ export function tierExcluded(hasColumn: boolean, param: string): string {
 /**
  * The ids the patterns hold back among `rows`: each row's `sent` (what its prompt would carry) and its whole text, read
  * again, PATTERN_BATCH at a time, so a secret past the part sent is seen. A row that second read does not return
- * (deleted, or out of sight) is held back too.
+ * (deleted, or out of sight) is held back too. `onText`, given, sees each row's whole text as it is read (lint-sweep's
+ * Tier 3 puts it to the egress gate's marker).
  */
-export async function heldByPatterns(sql: SQL, rows: readonly { id: string; sent: string }[], tiers: readonly string[]): Promise<Set<string>> {
+export async function heldByPatterns(sql: SQL, rows: readonly { id: string; sent: string }[], tiers: readonly string[], onText?: (id: string, text: string) => void): Promise<Set<string>> {
   const held = new Set<string>();
   const hold = new Set(tiers);
   for (let i = 0; i < rows.length; i += PATTERN_BATCH) {
@@ -261,6 +262,7 @@ export async function heldByPatterns(sql: SQL, rows: readonly { id: string; sent
     const whole = new Map(texts.map((t) => [t.id, t.content]));
     for (const r of batch) {
       const text = whole.get(r.id);
+      if (text !== undefined) onText?.(r.id, text);
       if (text === undefined || hold.has(sensitivityOf(`${r.sent}\n${text}`).tier)) held.add(r.id);
     }
   }

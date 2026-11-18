@@ -5888,9 +5888,12 @@ orphans and missing links, each naming its thoughts' ids (the model sees refs,
 calls go after the transaction, so no lock is held across a model's answer.
 The thoughts leave as the brain's passes' do: to the server's chat endpoint
 and model (`resolveEmbedConfig`), each put to the egress gate on its own units
-(`OB1_WORKER_KEY`'s name as the actor, its source, type and topics, the text
-sent as the marker; decided 2026-11-17), a refused one left out, and the call
-naming every thought it carries (`providerCall` gates each). Before that,
+(`OB1_WORKER_KEY`'s name as the actor, its source, type and topics, and as the
+marker what is sent of it and its whole text, both to pass; decided
+2026-11-17), a refused one left out, and the call naming every thought it
+carries (`providerCall` gates each). The sample is read until it fills (at
+most 10,000 rows), and each batch is read and judged again just before its
+call. Before that,
 weekly-digest's hold-back (`db/sensitivity.ts`): a `restricted` thought, or a
 `personal` one unless `--include-personal`, by its key, the enhanced-thoughts
 column, or the patterns over what is sent and the whole text, never leaves.
