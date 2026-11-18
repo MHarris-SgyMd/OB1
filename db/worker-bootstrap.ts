@@ -864,14 +864,14 @@ export class ProviderOutage {
   /**
    * Whether the outage in progress is a thought's doing, as far as the follower can tell (SMD-4254): begun or joined
    * over an error that made the thought in hand a suspect, a suspect's outage alone (`blame`), or the one a suspect
-   * blamed alone at its last leaves (`begin`'s `blamed`). Not backpressure alone — a 429, a 503, the model not served
-   * — which makes no suspect, nor an outage that met none of the last one's suspects still kept for isolation. An
-   * endpoint that is simply down, first met mid-pass with a 500, 502 or 504, a refused or reset connection or a
-   * timeout, makes the thought in hand a suspect too, and reads as one: the follower cannot tell the two apart.
-   * waitOutProvider says it with the wait (providerWait) and, under the sleep scheduler, probes it on a fixed interval
-   * (its fixedProbeMs): the scheduler leaves re-embed waiting out such an outage, within a bound a wait and a cap a
-   * period, so its suspects are retried one at a time once the provider answers; any other outage sets re-embed down
-   * for the period.
+   * blamed alone at its last leaves (`begin`'s `blamed`). Any error making the thought in hand a suspect sets it, while
+   * isolating too. Not an outage begun by backpressure — a 429, a 503, the model not served — which makes no suspect,
+   * while isolating too, though the kept suspects stay. An endpoint that is simply down, first met mid-pass with a 500,
+   * 502 or 504, a refused or reset connection or a timeout, makes the thought in hand a suspect too, and reads as one:
+   * the follower cannot tell the two apart. waitOutProvider says it with the wait (providerWait) and, under the sleep
+   * scheduler, probes it on a fixed interval (its fixedProbeMs): the scheduler leaves re-embed waiting out such an
+   * outage, within a bound a wait and a cap on the period's isolation, so its suspects are retried one at a time once
+   * the provider answers; any other outage sets re-embed down for the period.
    */
   get byThought(): boolean {
     return this.reason !== null && this.ofThought;

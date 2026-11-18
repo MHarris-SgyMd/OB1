@@ -33,7 +33,7 @@ import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -394,13 +394,14 @@ const providerRows = (passes: readonly string[]) =>
  * outage's names a thought that crashes the provider as a cause of one that
  * comes back every period, and how to find it (SMD-4254): the scheduler waits
  * out an outage that made a thought a suspect up to 2 min a wait and 4 min of
- * such waits a period (db/sleep.ts's REEMBED_THOUGHT_WAIT_MS and
- * REEMBED_THOUGHT_PERIOD_MS), and a crashing thought costs four waits, so one
- * that keeps the provider down past about 80 s a crash is set down at the
- * cap each period, retried at the next period's first claim.
+ * isolation a period, the retries between the waits counted (db/sleep.ts's
+ * REEMBED_THOUGHT_WAIT_MS and REEMBED_THOUGHT_PERIOD_MS), and a crashing
+ * thought costs four waits, so one that keeps the provider down about 80 s or
+ * more a crash is set down at the cap, retried at a later period, and the
+ * scheduler backs off between such tries (ThoughtWaitBackoff).
  */
 const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = false): string =>
-  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it) — or, if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages (2 min a wait, 4 min of them a period; a crashing thought takes four waits, so one whose crash lasts past about 80 s is never failed), which its log names at each period's start: the same thought id \"goes back to the pool unrecorded\""
+  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it) — or, if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages (2 min a wait, 4 min of isolation a period, the retries between the waits counted; a crashing thought takes four waits, so one whose crash lasts about 80 s or more is never failed, and the scheduler then sets re-embed down at once at such an outage for 1, 2, 4, … periods between tries), which its log names at each period's start: the same thought id \"goes back to the pool unrecorded\""
   // Under OB1_SLEEP_STATEMENT_TIMEOUT 0 the role's or the database's own timed it out, as the claim passes' held fix says (review pass 3 of SMD-3379 PR 1c-4b).
   : kind === "statement" ? `a statement passed ${ownTimeout ? "the role's or the database's own statement_timeout" : "its statement_timeout"}, which its log names: ${ownTimeout ? "set OB1_SLEEP_STATEMENT_TIMEOUT above theirs (a startup setting beats it), or raise theirs," : "raise OB1_SLEEP_STATEMENT_TIMEOUT"} in deploy/.env${stopped ? "" : `, then ${restartCommand("sleep", null)}`}`
   : kind === "failed" ? "it ended by itself, and its log gives the reason"
@@ -409,6 +410,18 @@ const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = fals
   : kind === "provider" || kind === "model" || kind === "egress"
     ? `${startRefusalRemedy(kind, "reembed")} — a setting changed in deploy/.env is read once, so recreate sleep after it (and api, for the embedding's)${stopped ? "" : `: ${restartCommand("sleep", null)}`}`
   : startRefusalRemedy(kind, "reembed");
+/**
+ * The sleep scheduler's back-off from waiting out outages that made a thought
+ * a suspect, in words (heartbeat:sleep's `reembedBackoff`, SMD-4254 review
+ * pass 2, db/sleep.ts's ThoughtWaitBackoff): a period set down at once at
+ * one, the periods left so, and what the next try ending at a limit costs.
+ */
+const reembedBackoffWords = (b: ReembedBackoff): string =>
+  b.skipping
+    ? `backing off: an earlier period's wait on an outage that made a thought a suspect ended at a limit, so this period sets re-embed down at once at such an outage${b.left ? `, as the next ${b.left} period(s) with re-embed will` : ""}; then one waits again, and if that ends at a limit too the next ${b.next} period(s) back off`
+    : b.left
+      ? `backing off: this period's wait on an outage that made a thought a suspect ended at a limit, so the next ${b.left} period(s) with re-embed set it down at once at such an outage; then one waits again, and if that ends at a limit too the next ${b.next} period(s) back off`
+      : `backing off since an earlier period's wait on an outage that made a thought a suspect ended at a limit: this period waits once more, and if it ends at a limit too the next ${b.next} period(s) with re-embed set it down at once at such an outage`;
 /**
  * What mends the cause that set the sleep scheduler's subject sweep down for a
  * period (heartbeat:sleep's `holds`, SMD-3306 PR 6b-2): its start refusal's
@@ -5534,7 +5547,8 @@ if (configFailed) {
                 : down ? (set.kind === "outage" ? null : `Its last period ${set.kind === "statement" ? "held re-embed" : "set re-embed down"} (${set.kind}) — ${reembedDownRemedy(set.kind, true, b?.statementTimeoutS === 0)}; mend that before it starts again, or its first period ${set.kind === "statement" ? "holds it again" : "sets re-embed down again"}.`)
                 : set.kind === "statement"
                   ? `Re-embed is held until a restart — ${reembedDownRemedy(set.kind, false, b?.statementTimeoutS === 0)}; the other passes run on meanwhile.${otherPass}`
-                  : `Re-embed was set down for ${h.running ? "this" : "its last"} period — ${reembedDownRemedy(set.kind)}; the other passes run on, and the next period with work tries it again.${set.kind === "outage" ? "" : otherPass}`;
+                  // Its back-off from waiting out an outage that made a thought a suspect, while it has one (SMD-4254 review pass 2).
+                  : `Re-embed was set down for ${h.running ? "this" : "its last"} period — ${reembedDownRemedy(set.kind)}; the other passes run on, and ${set.kind === "outage" && h.reembedBackoff ? `the next period with work runs it again — ${reembedBackoffWords(h.reembedBackoff)}` : "the next period with work tries it again"}.${set.kind === "outage" ? "" : otherPass}`;
             // Under a model name that forms no key its row carries, the
             // scheduler keeps re-embed out, as its start said, and the row
             // says so: a row with no key, or a stopped one, whose restart takes
@@ -5599,8 +5613,18 @@ if (configFailed) {
               // mid-pass on an outage that made a thought a suspect is left running, within a bound a wait and a cap a
               // period, which the row carries (`reembedWait`, SMD-4254).
               const left = h.reembedWait;
+              // In seconds and the time left, not ago()'s minutes, which read 210 s as "4 min" (review pass 2); the
+              // cap counts the period's isolation, the retries between the waits included, `earlierS` its part before
+              // this wait; and once the period has isolated before, the log line that names a crashing thought.
+              const leftWords = (w: NonNullable<typeof left>) => {
+                const waited = Math.max(0, Math.round(secondsSince(h, w.since)));
+                const remains = Math.max(0, Math.min(w.boundS - waited, w.periodS - w.earlierS - waited));
+                const backoff = h.reembedBackoff;
+                return `re-embed is left waiting: an outage made the thought in hand a suspect — a thought's embedding may have crashed the provider — so the scheduler waits it out and, once it answers, retries the suspects one at a time; it sets re-embed down for the period, extraction going on, in ${remains} s and a poll at most — ${w.boundS} s from this wait's start (${waited} s ago), or ${w.periodS} s of isolation this period, its waits and the retries between them (${w.earlierS} s before this wait) — and then backs off, the next ${backoff?.next ?? 1} period(s) with re-embed setting it down at once at such an outage${backoff ? ` (${reembedBackoffWords(backoff)})` : ""}`
+                  + (w.earlierS > 0 ? `; a thought that crashes the provider at each retry is named in the scheduler's log: the same thought id "goes back to the pool unrecorded" at each outage` : "");
+              };
               const reembedWords = (mid: boolean) => mid && left
-                ? `re-embed is left waiting: an outage made the thought in hand a suspect — a thought's embedding may have crashed the provider — so the scheduler waits it out and, once it answers, retries the suspects one at a time; it sets re-embed down for the period, extraction going on, once the provider has not answered for ${ago(left.boundS)} from the wait's start (this one began ${ago(Math.max(0, secondsSince(h, left.since)))} ago) or after ${ago(left.periodS)} of such waits this period (${ago(left.earlierS)} before this one), and the next period with work tries it again`
+                ? leftWords(left)
                 : "re-embed is set down for the period at the scheduler's next poll, extraction going on, and the next period with work tries it again";
               const waitTail = (passes: readonly string[], one: string, many: string, after: string, mid = false) => {
                 const others = passes.filter((p) => p !== "reembed").length;

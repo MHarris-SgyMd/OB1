@@ -10,13 +10,16 @@
  * refused while a local one proceeds. And the outage slice (SMD-2599): which
  * database errors a follower waits out, and the wait's schedule; a statement
  * run through it, and a worker key's lookup that meets the database down — a
- * closed loopback port, the one URL dialled, refused at once (SMD-2752).
+ * closed loopback port, the one URL dialled, refused at once (SMD-2752). And
+ * db/sleep.ts's re-embed numbers and back-off on an outage that made a thought
+ * a suspect (SMD-4254), pure: the module's import runs nothing.
  */
 
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { DecisionRefused } from "../server-portable/jev.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
+import { REEMBED_THOUGHT_PERIOD_MS, REEMBED_THOUGHT_PROBE_MS, REEMBED_THOUGHT_WAIT_MS, ThoughtWaitBackoff } from "./sleep.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeUntil, ProbeRefused, ProviderDown, ProviderOutage, EXTRACT_REQUEST_FIELDS, JUDGE_REQUEST_FIELDS, sameModel, regateMessage, requestShapeRefused, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
@@ -921,6 +924,25 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
       });
       ok(/calls e at b after 5 s and then twice as long each time, up to 5 min$/.test(busyLines[0]) && /calls e at b after 20 s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(busyLines[1]),
         `waitOutProvider: an outage that is no thought's doing keeps the doubling and carries it, a fixed interval passed or not (${busyLines.map((l) => l.slice(-140)).join(" | ")})`);
+      // Nothing carried into a fixed wait, nor out of one: a backpressure wait answered at its third probe, then a
+      // thought's fixed wait (no carried note), then backpressure again, all within the window, nothing settled
+      // between — the last begins at the schedule's first step, the fixed wait having ended at step 0.
+      const mix = new ProviderOutage(() => clock, SUSPECT_WINDOW_MS, true);
+      const mixLines = await onTheClock(async () => {
+        const got: string[] = [];
+        for (const [begin, fixed] of [[() => mix.begin("503 busy"), true], [() => mix.begin("500 crashed", "Q"), true], [() => mix.begin("503 busy"), true]] as const) {
+          begin();
+          downUntil = clock + 30_000;
+          lines.length = 0;
+          await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: mix, ...(fixed ? { fixedProbeMs: 5_000 } : {}),
+            probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "down" }), sleep: async (ms) => { clock += ms; } });
+          got.push(lines[0] ?? "");
+          clock += 500;
+        }
+        return got;
+      });
+      ok(/calls e at b every 5 s, an outage that made a thought a suspect$/.test(mixLines[1]) && /calls e at b after 5 s and then twice as long each time, up to 5 min$/.test(mixLines[2]),
+        `waitOutProvider: nothing carried into a thought's fixed wait, nor from it to the next (${mixLines.map((l) => l.slice(-140)).join(" | ")})`);
     }
     // The window's edges: a minute, the poll and — a follower that pauses before an outage — the pauses, read as it
     // runs; strictly within. Each on an outage of its own whose last answer was at step 1, nothing settled since.
@@ -963,6 +985,58 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     }
   }
   ok(overran.length === 0, `no follower's-waits cell probed past its script (review pass 5; ${overran.join(", ") || "none"})`);
+}
+
+// ---------------------------------------------------------------------------
+// The sleep scheduler's re-embed on an outage that made a thought a suspect (SMD-4254, review pass 2): the shipped
+// numbers, which test-live runs scaled, and the back-off across periods (the maintainer's decision of 2026-11-18).
+// ---------------------------------------------------------------------------
+{
+  ok(REEMBED_THOUGHT_WAIT_MS === 120_000 && REEMBED_THOUGHT_PERIOD_MS === 240_000 && REEMBED_THOUGHT_PROBE_MS === 5_000,
+    `the shipped numbers: 2 min a wait, 4 min of isolation a period, a probe every 5 s (${REEMBED_THOUGHT_WAIT_MS}, ${REEMBED_THOUGHT_PERIOD_MS}, ${REEMBED_THOUGHT_PROBE_MS})`);
+  // A crasher that never comes back within the limits: each try ends at a limit. Periods 1 (a try), 2 (backed off),
+  // 3 (a try), 4-5 (backed off), 6 (a try), 7-10 (backed off), 11 (a try).
+  const b = new ThoughtWaitBackoff();
+  const tries: number[] = [];
+  for (let period = 1; period <= 11; period++) {
+    b.period();
+    if (b.skipping) continue;
+    tries.push(period);
+    b.limited();
+  }
+  ok(tries.join() === "1,3,6,11" && b.left === 8 && b.next === 16,
+    `the back-off: a try ending at a limit skips 1 period, then 2, then 4, then 8 (tries at ${tries.join()}; left ${b.left}, next ${b.next})`);
+  ok(new ThoughtWaitBackoff().mark() === null, "no back-off, no mark");
+  const m = new ThoughtWaitBackoff();
+  m.period();
+  m.limited();
+  const afterLimit = JSON.stringify(m.mark());
+  m.period();
+  const skipped = JSON.stringify(m.mark());
+  m.limited();
+  const limitedWhileSkipping = JSON.stringify(m.mark());
+  m.period();
+  const tried = JSON.stringify(m.mark());
+  ok(afterLimit === JSON.stringify({ skipping: false, left: 1, next: 2 }) && skipped === JSON.stringify({ skipping: true, left: 0, next: 2 })
+      && limitedWhileSkipping === skipped && tried === JSON.stringify({ skipping: false, left: 0, next: 2 }),
+    `the mark through a limit, a period backed off (which sets down at no limit) and the try after it (${afterLimit} | ${skipped} | ${limitedWhileSkipping} | ${tried})`);
+  // Reset — re-embed drained, or an isolation's suspects settled (the crasher recorded failed alone): the next
+  // period waits, and a limit after it backs off 1 again.
+  for (const when of ["in a period backed off", "in the try after it"] as const) {
+    const r = new ThoughtWaitBackoff();
+    r.period();
+    r.limited();
+    r.period();
+    if (when === "in the try after it") r.period();
+    const before = r.skipping;
+    r.reset();
+    const reset = r.mark();
+    r.period();
+    const waits = !r.skipping;
+    r.limited();
+    ok(before === (when === "in a period backed off") && reset === null && waits && r.left === 1 && r.next === 2,
+      `reset ${when}: no mark, the next period waits, and its limit backs off 1 again (${JSON.stringify(r.mark())})`);
+  }
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);

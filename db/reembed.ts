@@ -2350,13 +2350,19 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 if (suspect) await backFirst(b.thought_id);
                 return "outage";
               };
-              /** A suspect's blame, recorded as its failure (SMD-2641 PR 2): answered, or at its third outage alone. */
-              const blamedFailure = (sent: "answered" | "alone"): Outcome => ({
-                outcome: "failed",
-                error: sent === "answered"
-                  ? `provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`
-                  : `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the probe after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`,
-              });
+              /**
+               * A suspect's blame, recorded as its failure (SMD-2641 PR 2): answered, or at its third outage alone. Said
+               * to a caller's stamper: the sleep scheduler's back-off ends on it (SMD-4254 review pass 2).
+               */
+              const blamedFailure = (sent: "answered" | "alone"): Outcome => {
+                stamper?.blamedAlone?.();
+                return {
+                  outcome: "failed",
+                  error: sent === "answered"
+                    ? `provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`
+                    : `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the probe after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`,
+                };
+              };
               /**
                * The request refused itself: every row would fail the same way. Stop every worker, mark nothing, and
                * say what to fix (extract-entities.ts's configError). A refusal the probe found says the probe's words
@@ -2576,6 +2582,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     if (ADMIT) gate = AbortSignal.any([onStop.signal, drainEnds.signal]);
     // The last outage's suspects, while any is left to retry (SMD-2641 PR 2): one worker, one thought a claim.
     isolated = !!FOLLOW && outage.isolating();
+    // Said to a caller's stamper: the sleep scheduler reads a drain not isolated as the isolation's end, which its
+    // cap counts and which resets its back-off (SMD-4254 review pass 2).
+    stamper?.isolating?.(isolated);
     if (isolated) err(`  retrying the last outage's ${outage.suspected} suspect thought(s) one at a time${WORKERS > 1 ? `, one worker, before the drain goes back to ${WORKERS}` : ""}; one that errs again alone is blamed only on a probe made at once`);
     const ends = await Promise.allSettled(Array.from({ length: isolated ? 1 : WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
