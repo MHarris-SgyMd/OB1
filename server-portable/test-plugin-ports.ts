@@ -3107,6 +3107,11 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   const th = await thoughtOf(w[0]?.thought_id ?? null);
   assert(th?.source === "agent-memory" && th.ws === "ws-am" && th.type === "decision" && th.runtime === "codex" && th.actor === "writer",
     `…its thought captured through the core: source agent-memory, the agent_memory_* keys, the caller's key on its audit row (${JSON.stringify(th)})`);
+  // With a local embedder, a write-back's thought carries the brain's model (SMD-3984's Verify), and no memory is in no_vector.
+  const firstModel = await one<{ model: string | null; brain: string | null }>(sql`
+    SELECT embedding_model AS model, (SELECT value FROM ob1_config WHERE key = 'embedding_model') AS brain FROM thoughts WHERE id = ${w[0]?.thought_id ?? null}::uuid`);
+  assert(firstModel?.model !== null && firstModel?.model === firstModel?.brain && first.body.no_vector === undefined,
+    `…embedded by the brain's own model with a local embedder, and no no_vector (${JSON.stringify(firstModel)} ${JSON.stringify(first.body.no_vector)})`);
   const refs = (await sql`SELECT source_kind, source_timestamp FROM plugin_agent_memory.source_refs WHERE memory_id = ${w[0]?.memory_id}::uuid ORDER BY source_kind`) as { source_kind: string; source_timestamp: Date | null }[];
   assert(refs.length === 2 && refs[0].source_kind === "chat" && refs[0].source_timestamp === null && refs[1].source_timestamp?.toISOString() === "2026-11-05T10:00:00.000Z",
     `…each source ref beside it, a time that is no time stored as none (${JSON.stringify(refs)})`);
@@ -3650,10 +3655,22 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     assert(kept.status === 200 && k?.review_status === "pending" && (await thoughtOf(k.thought_id))?.vector === false,
       `writeback while the provider does not answer: the memory kept, its thought without a vector for the mender (${kept.status} ${JSON.stringify(kept.body).slice(0, 160)})`);
     const nv = kept.body.no_vector as { memory_id: string; why: string; reason?: string }[] | undefined;
-    assert(nv?.length === 1 && nv[0].memory_id === k?.memory_id && nv[0].why === "provider_down" && typeof nv[0].reason === "string",
-      `…and the reply names it in no_vector, provider_down, with the provider's word (SMD-3984; ${JSON.stringify(nv)})`);
+    assert(nv?.length === 1 && nv[0].memory_id === k?.memory_id && nv[0].why === "provider_down" && !("reason" in nv[0]),
+      `…and the reply names it in no_vector, provider_down, its word alone (SMD-3984; ${JSON.stringify(nv)})`);
   } finally {
     embedDown = false;
+  }
+  // One memory of two meets the provider down: no_vector names that one alone, matched by its thought (review pass 1, mutant).
+  embedFailOn = (input) => input.includes("am_half_down");
+  try {
+    const half = await am("writeback", { ...base, task_id: "task-half", memory_payload: { lessons: ["am_ledger am_half_down: this one meets the provider down.", "am_ledger this one is embedded beside it."] } });
+    const hm = mems(half);
+    const hnv = half.body.no_vector as { memory_id: string; why: string }[] | undefined;
+    const downMem = hm.find((m) => m.content.includes("am_half_down"));
+    assert(half.status === 200 && hm.length === 2 && hnv?.length === 1 && hnv[0].memory_id === downMem?.memory_id && hnv[0].why === "provider_down",
+      `…one memory of two met the provider down: no_vector names it alone (${half.status} ${JSON.stringify(hnv)})`);
+  } finally {
+    embedFailOn = null;
   }
   // ── The egress policy keeping the text in (SMD-3984) ──
   // A provider that is not local, under deny with no term for this key: the core makes no embedding request for a recall
@@ -3678,12 +3695,12 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const nvCap = capOnly.body.no_vector as { memory_id: string; why: string; reason?: string }[] | undefined;
     assert(sent === 0, `under deny with a remote provider, a write-back and a recall make no embedding request (${sent} made)`);
     assert(keptIn.status === 200 && (await thoughtOf(kin?.thought_id))?.vector === false && nv?.length === 1 && nv[0].memory_id === kin?.memory_id
-      && nv[0].why === "refused" && /OB1_EGRESS_POLICY=deny/.test(String(nv[0].reason)),
-      `…the write-back keeps its memory without a vector and names the gate's refusal in no_vector, with the gate's words (${keptIn.status} ${JSON.stringify(nv)})`);
+      && nv[0].why === "refused" && !("reason" in nv[0]),
+      `…the write-back keeps its memory without a vector and names the gate's refusal in no_vector, its word alone: the gate's words name the provider's host (${keptIn.status} ${JSON.stringify(nv)})`);
     assert(deniedRecall.status === 422 && deniedRecall.body.code === "CORE_REFUSED" && deniedRecall.body.refused === "REFUSED_EGRESS" && deniedRecall.body.retryable === false,
       `…the recall is refused REFUSED_EGRESS, final, not the provider's 503 (${deniedRecall.status} ${JSON.stringify(deniedRecall.body).slice(0, 200)})`);
-    assert(capOnly.status === 200 && nvCap?.length === 1 && nvCap[0].why === "refused" && nvCap[0].reason === undefined,
-      `…a key that can only capture is told the gate refused, not the gate's words (${capOnly.status} ${JSON.stringify(nvCap)})`);
+    assert(capOnly.status === 200 && nvCap?.length === 1 && nvCap[0].why === "refused" && !("reason" in nvCap[0]),
+      `…and so is a key that can only capture (${capOnly.status} ${JSON.stringify(nvCap)})`);
     coreEnv.OB1_EGRESS_ALLOW = "actor:writer,actor:reader";
     const beforeAllowed = embedRequests;
     const let_ = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back under a term that lets the writer out."] } });
