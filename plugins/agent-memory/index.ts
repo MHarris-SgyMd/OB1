@@ -121,14 +121,15 @@ function asMemory(m: Row, artifacts: Map<string, z.output<typeof Artifact>[]>): 
 const Written = z.object({ memory_id: z.string(), thought_id: z.string().nullable() });
 /**
  * A memory whose capture in this request made no vector (SMD-3984): the egress policy kept its text in (`refused`, which
- * no retry changes) or the embedding provider did not answer (`provider_down`, which the vector mender mends), as the
- * core's capture tells the two apart (`embeddings.allowed`, `vectorFailed`) and core/deliverables.ts's noVector says them.
- * It says what this capture did, not what the thought holds: a text already a thought keeps any vector it had (as
- * rest/app.ts says of its own field). `why` alone, for every key, as core/deliverables.ts's noVector and render.ts's
- * structured safeCapture carry it: the gate's words name the provider's host. A refusal part way (CORE_REFUSED,
- * IDEMPOTENCY_KEY_REUSED) answers no no_vector for the memories kept before it, nor does their resend.
+ * no retry changes) or the embedding provider did not answer (`provider_down`, which the vector mender mends) — the core's
+ * capture tells them apart (`embeddings.allowed`, `vectorFailed`), and core/deliverables.ts's noVector and render.ts's
+ * structured safeCapture say them by this word alone, for every key, as the gate's words name the provider's host. It says
+ * what this capture did, not what the thought holds: a text already a thought keeps any vector it had (as rest/app.ts says
+ * of its own field). A refusal part way (CORE_REFUSED, IDEMPOTENCY_KEY_REUSED) answers no no_vector for the memories kept
+ * before it, nor does their resend.
  */
 const NoVector = z.object({ memory_id: z.string(), why: z.enum(["refused", "provider_down"]) });
+type NoVectorWhy = z.output<typeof NoVector>["why"];
 /** The thought a memory's write-back captured (kept in metadata.written; the README's copy block writes it for a migrated memory). */
 const writtenThought = (r: Row) => {
   const t = (r.metadata?.written as { thought_id?: unknown } | undefined)?.thought_id;
@@ -432,11 +433,10 @@ export default definePlugin({
         const createdBy = createdByOf(status);
         const staleAfter = req.retention.stale_after_days ? new Date(Date.now() + req.retention.stale_after_days * 86_400_000).toISOString() : null;
         const ids: string[] = [];
-        // The memories whose own capture in this request made no vector, by memory id — not by thought: two memories of
-        // one text share a thought, and one a write-back sent earlier answers from its idempotency key had no capture here
-        // (review pass 2). A concurrent write-back's race loser is answered the winner's memory and names it by its own
-        // capture: what this request's capture did (review pass 3).
-        const unembedded = new Map<string, "refused" | "provider_down">();
+        // The memories whose own capture in this request made no vector, by memory id, not by thought: two memories of one
+        // text share a thought, and one answered from its idempotency key had no capture here. A concurrent write-back's
+        // race loser is answered the winner's memory and names it by its own capture.
+        const unembedded = new Map<string, NoVectorWhy>();
         for (const [index, row] of rows.entries()) {
           const contentHash = await sha256Hex(`${row.memory_type}:${row.content}`);
           const base = req.idempotency_key || [req.workspace_id, req.runtime.name, req.task_id || "taskless", req.step_id || "step"].map(keyPart).concat(contentHash).join(":");
