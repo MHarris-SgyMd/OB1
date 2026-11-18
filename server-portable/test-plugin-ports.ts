@@ -91,12 +91,15 @@ let extraction: ((document: string) => Response) | null = null;
 let embedFailOn: ((input: string) => boolean) | null = null;
 /** Each extraction request the stub answered, as sent. */
 const extractionCalls: Body[] = [];
+/** How many embedding requests reached the stub, answered or not (agent-memory's egress section, SMD-3984). */
+let embedRequests = 0;
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
     const sent = typeof init?.body === "string" ? (JSON.parse(init.body) as Body) : {};
     if (url.endsWith("/embeddings")) {
+      embedRequests++;
       if (embedDown) return new Response("down", { status: 503 });
       if (embedStatus !== null) return new Response(`{"error":"stub answers ${embedStatus}"}`, { status: embedStatus, headers: { "Content-Type": "application/json" } });
       const onThis = embedStatusOn?.(String(sent.input ?? ""));
@@ -3646,8 +3649,57 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const k = mems(kept)[0];
     assert(kept.status === 200 && k?.review_status === "pending" && (await thoughtOf(k.thought_id))?.vector === false,
       `writeback while the provider does not answer: the memory kept, its thought without a vector for the mender (${kept.status} ${JSON.stringify(kept.body).slice(0, 160)})`);
+    const nv = kept.body.no_vector as { memory_id: string; why: string; reason?: string }[] | undefined;
+    assert(nv?.length === 1 && nv[0].memory_id === k?.memory_id && nv[0].why === "provider_down" && typeof nv[0].reason === "string",
+      `…and the reply names it in no_vector, provider_down, with the provider's word (SMD-3984; ${JSON.stringify(nv)})`);
   } finally {
     embedDown = false;
+  }
+  // ── The egress policy keeping the text in (SMD-3984) ──
+  // A provider that is not local, under deny with no term for this key: the core makes no embedding request for a recall
+  // or a write-back. The recall is refused REFUSED_EGRESS; the write-back keeps its memory, its thought without a vector,
+  // and says the gate refused, which no retry changes — never the provider's retryable 503. A term naming the writer's key
+  // lets both through, and the thought carries the brain's model.
+  // The servers froze their environment at their first request (root.ts initEnv) and resolve the provider's settings
+  // from that object at each call (core/context.ts embedConfig): this section sets the policy there, and puts it back.
+  const coreEnv = (await import("./root.ts")).env() as Record<string, string | undefined>;
+  const egressEnv = { local: coreEnv.OB1_LLM_LOCAL, policy: coreEnv.OB1_EGRESS_POLICY, allow: coreEnv.OB1_EGRESS_ALLOW };
+  delete coreEnv.OB1_LLM_LOCAL;
+  coreEnv.OB1_EGRESS_POLICY = "deny";
+  delete coreEnv.OB1_EGRESS_ALLOW;
+  try {
+    const before = embedRequests;
+    const keptIn = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back under a policy that keeps it in."] } });
+    const kin = mems(keptIn)[0];
+    const deniedRecall = await am("recall", rq({ query: "am_ledger under a policy that keeps it in" }), { as: KEYS.writer });
+    const capOnly = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back by a capture key under the policy."] } }, { as: KEYS.capture });
+    const sent = embedRequests - before;
+    const nv = keptIn.body.no_vector as { memory_id: string; why: string; reason?: string }[] | undefined;
+    const nvCap = capOnly.body.no_vector as { memory_id: string; why: string; reason?: string }[] | undefined;
+    assert(sent === 0, `under deny with a remote provider, a write-back and a recall make no embedding request (${sent} made)`);
+    assert(keptIn.status === 200 && (await thoughtOf(kin?.thought_id))?.vector === false && nv?.length === 1 && nv[0].memory_id === kin?.memory_id
+      && nv[0].why === "refused" && /OB1_EGRESS_POLICY=deny/.test(String(nv[0].reason)),
+      `…the write-back keeps its memory without a vector and names the gate's refusal in no_vector, with the gate's words (${keptIn.status} ${JSON.stringify(nv)})`);
+    assert(deniedRecall.status === 422 && deniedRecall.body.code === "CORE_REFUSED" && deniedRecall.body.refused === "REFUSED_EGRESS" && deniedRecall.body.retryable === false,
+      `…the recall is refused REFUSED_EGRESS, final, not the provider's 503 (${deniedRecall.status} ${JSON.stringify(deniedRecall.body).slice(0, 200)})`);
+    assert(capOnly.status === 200 && nvCap?.length === 1 && nvCap[0].why === "refused" && nvCap[0].reason === undefined,
+      `…a key that can only capture is told the gate refused, not the gate's words (${capOnly.status} ${JSON.stringify(nvCap)})`);
+    coreEnv.OB1_EGRESS_ALLOW = "actor:writer,actor:reader";
+    const beforeAllowed = embedRequests;
+    const let_ = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back under a term that lets the writer out."] } });
+    const lm = mems(let_)[0];
+    const allowedRecall = await am("recall", rq({ query: "am_ledger under a term that lets the writer out" }), { as: KEYS.reader });
+    const lt = await one<{ vector: boolean; model: string | null; brain: string | null }>(sql`
+      SELECT embedding IS NOT NULL AS vector, embedding_model AS model, (SELECT value FROM ob1_config WHERE key = 'embedding_model') AS brain
+      FROM thoughts WHERE id = ${lm?.thought_id ?? null}::uuid`);
+    assert(let_.status === 200 && let_.body.no_vector === undefined && lt?.vector === true && lt.model !== null && lt.model === lt.brain && allowedRecall.status === 200
+      && embedRequests - beforeAllowed >= 2,
+      `…OB1_EGRESS_ALLOW terms naming the keys let the write-back and the recall through, the thought carrying the brain's model (${let_.status} ${allowedRecall.status} ${JSON.stringify(lt)})`);
+  } finally {
+    for (const [k, v] of [["OB1_LLM_LOCAL", egressEnv.local], ["OB1_EGRESS_POLICY", egressEnv.policy], ["OB1_EGRESS_ALLOW", egressEnv.allow]] as const) {
+      if (v === undefined) delete coreEnv[k];
+      else coreEnv[k] = v;
+    }
   }
   // ── The embedding provider refusing the brain's key (SMD-2892, SMD-1992's other half) ──
   // The core refuses the search and the capture coded, final; the plugin answers each as its own coded JSON — 422, as a
