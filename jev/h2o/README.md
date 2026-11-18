@@ -258,7 +258,8 @@ per-row results on the Decision Index 0.3 public suite, the dataset
 probabilities answered, read two-way on vLLM at v1.4.1, whose weights v1.4.2
 keeps. `--two-way` draws choice questions from it by seed in four strata of
 prompt length, reads each two-way, and compares the probabilities at the
-shipped temperature. The start-up guard holds the read on three probes of
+shipped temperature. A stratum is counted in this tokenizer's tokens, on the
+whole prompt, and the last runs to the adapter's two-way limit. The start-up guard holds the read on three probes of
 about a hundred tokens; this holds it at the length of the pairs decide mode
 sends.
 
@@ -270,18 +271,22 @@ H2O_REVISION=v1.4.2 <venv>/bin/python -I jev/h2o/conformance.py \
 On 240 questions (2026-11-18, v1.4.2, float16 with decider's kernels), top
 answers agree on all 240:
 
-| Prompt tokens | Questions | Gap: median | 99th percentile | A read |
+| Prompt tokens | Questions | Gap: median | Largest | A read |
 |---|---|---|---|---|
-| under 500 | 60 | 0.0006 | 0.0155 | 0.21 s |
-| 500 to 2,000 | 60 | 0.0009 | 0.0085 | 0.74 s |
-| 2,000 to 4,300 | 60 | 0.0029 | 0.0130 | 1.69 s |
-| 4,300 to 8,000 | 60 | 0.0003 | 0.0506 | 4.87 s |
-| all | 240 | 0.0011 | 0.0146 | |
+| under 500 | 60 | 0.0006 | 0.0155 | 0.29 s |
+| 500 to 2,000 | 60 | 0.0008 | 0.0168 | 1.01 s |
+| 2,000 to 4,300 | 60 | 0.0029 | 0.0130 | 2.21 s |
+| 4,300 to 8,000 | 60 | 0.0003 | 0.0172 | 7.02 s |
+| all | 240 | 0.0010 | 0.0172 | |
 
 It passes at the same bar, over the whole sample and in each of the two long
-strata on its own. Yes/no questions are left out: that run applied the shim's
-yes/no floor (0.801), which this port never applies. A prompt over the
-two-way limit is counted and not read. The file is 115 MB of public benchmark
+strata on its own, and each of those must be full: a stratum of one question
+would pass on it. A read that is not a probability per option fails the arm
+outright. Left out, each counted in the run's first lines: yes/no questions
+(that run applied the shim's yes/no floor, 0.801, which this port never
+applies), a row read one-way, and a row answered from more than one read (the
+Decision Index profile blends two). A prompt over the two-way limit is counted
+and not read. The file is 115 MB of public benchmark
 rows under each benchmark's own licence (the dataset's `LICENSE.md`); fetch it
 into a directory of its own, and it is only read.
 

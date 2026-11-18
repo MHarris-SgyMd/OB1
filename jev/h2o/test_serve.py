@@ -28,7 +28,8 @@ jev/h2o/test_serve.py`); the real model's burst is the PR's own run against the 
   [17] under two-way, a record over the model's limit and a prompt over the setting's are each refused in their own
       words; a failure while a prompt is counted is a 500, not the pair's 422; a lone surrogate in a record, a question
       or an option is the pair's 422 in both modes
-  [18] conformance.py's two-way arm, without the model: which of H2O's result rows it compares, and its bar
+  [18] conformance.py's two-way arm, without the model: which of H2O's result rows it compares, how it fills its
+      strata, and its bar
 """
 import asyncio, gzip, importlib.util, json, math, os, sys, tempfile, threading, time
 from pathlib import Path
@@ -649,39 +650,93 @@ async def main():
     check(all(failures) and R.reads == 0 and gate.admitted == 0 and gate.bytes == 0,
           f"any failure while an encodable prompt is counted is the tier's 500, which a caller retries, never a 422 against the pair ({failures})")
 
-    print("\n[18] conformance.py's two-way arm: the rows it compares, and its bar")
+    print("\n[18] conformance.py's two-way arm: the rows it compares, its sample, and its bar")
     cspec = importlib.util.spec_from_file_location("h2o_conformance", Path(__file__).with_name("conformance.py"))
     conformance = importlib.util.module_from_spec(cspec)
     cspec.loader.exec_module(conformance)
-    def result_row(questions, answers, state="a record", status="ok", mode="bidirectional"):
-        return {"status": status, "payload": {"state": state, "questions": questions}, "response": {"attention_mode": mode, "answers": answers}}
-    choice = {"type": "choice", "instructions": "Which?", "criteria": {"a": "the first", "b": "the second"}}
+    once = {"tier": "fast", "passes_per_decision": 1}
+    def result_row(questions, answers, state="a record", status="ok", mode="bidirectional", effort=once):
+        return {"status": status, "payload": {"state": state, "questions": questions}, "response": {"attention_mode": mode, "answers": answers, "effort_used": effort}}
+    choice = {"type": "choice", "instructions": "Which?", "criteria": {"a": "the first", "b": None}}
     yes_no = {"type": "noul", "instructions": "Does it hold?", "criteria": {"true": "yes", "false": "no"}}
+    good = {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}
     rows = [
-        result_row({"q": choice}, {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}),                                    # 0: compared
-        result_row({"y": yes_no, "q": choice}, {"y": {"noul": True}, "q": {"probabilities": {"b": 0.3, "a": 0.7}}},
-                   state={"ticket": "t", "plan": "p"}),                                                               # 1: its choice question, after a yes/no
-        result_row({"y": yes_no}, {"y": {"noul": True, "probabilities": {"true": 0.801, "false": 0.199}}}),           # 2: a yes/no alone, floored: never compared, though it gives a probability per option
-        result_row({"q": choice}, {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}, mode="causal"),                     # 3: read one-way
-        result_row({"q": choice}, {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}, status="error"),                    # 4: not answered
-        result_row({"q": choice}, {"q": {"probabilities": {"a": 1.0}}}),                                              # 5: an answer short an option
-        result_row({"q": {**choice, "criteria": ["a", "b"]}}, {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}),        # 6: criteria not by name
-        {"status": "ok", "payload": {"state": "s", "questions": {"q": choice}}, "response": None},                    # 7: no response
+        result_row({"q": choice}, good),                                                                               # 0: compared
+        result_row({"y": yes_no, "q": {**choice, "instructions": {"ask": "which"}}}, {"y": {"noul": True}, "q": {"probabilities": {"b": 0.3, "a": 0.7}}},
+                   state={"ticket": "t", "plan": "p"}),                                                                # 1: its choice question, after a yes/no
+        result_row({"y": yes_no}, {"y": {"noul": True, "probabilities": {"true": 0.801, "false": 0.199}}}),            # 2: a yes/no alone, floored
+        result_row({"q": choice}, good, mode="causal"),                                                                # 3: read one-way
+        result_row({"q": choice}, good, status="error"),                                                               # 4: not answered
+        result_row({"q": choice}, {"q": {"probabilities": {"a": 1.0}}}),                                               # 5: an answer short an option
+        result_row({"q": {**choice, "criteria": ["a", "b"]}}, good),                                                   # 6: criteria not by name
+        {"status": "ok", "payload": {"state": "s", "questions": {"q": choice}}, "response": None},                     # 7: no response
+        result_row({"q": choice}, good, effort={"tier": "fast", "passes_per_decision": 2, "reread": True}),            # 8: a blend of two reads
+        result_row({"q": choice}, good, effort=None),                                                                  # 9: passes not said
+        result_row({"q": choice}, {"q": {"probabilities": {"a": float("nan"), "b": 0.1}}}),                            # 10: a NaN
+        result_row({"q": choice}, {"q": {"probabilities": {"a": None, "b": 1.0}}}),                                    # 11: a null
+        result_row({"q": choice}, {"q": {"probabilities": {"a": 1.2, "b": -0.2}}}),                                    # 12: outside [0, 1]
+        result_row({"q": choice}, {"q": "an answer that is no object"}),                                               # 13
+        result_row({"q": "a question that is no object"}, good),                                                       # 14
+        result_row({"q": {**choice, "instructions": None}}, good),                                                     # 15: compared, its instructions null
     ]
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "results.jsonl.gz")
         with gzip.open(path, "wt", encoding="utf-8") as f:
             for r in rows: f.write(json.dumps(r) + "\n")
-        cands, skipped = conformance.two_way_candidates(path)
-    check([c[0] for c in cands] == [0, 1] and [c[3] for c in cands] == ["q", "q"] and skipped == {"no choice question": 3, "not answered": 2, "one-way row": 1},
-          f"of eight rows, the two with a two-way choice answer per option are compared; the others are counted by why not ({[c[0] for c in cands]}, {skipped})")
-    check(cands[1][2] == '{"ticket":"t","plan":"p"}' and cands[1][1] == len(cands[1][2]) and cands[0][2] == "a record",
-          "a structured record is rendered as the shim renders it, compact, and a string as it is")
+        lines, skipped = conformance.two_way_index(path)
+        fetched = conformance.two_way_rows(path, {1, 15})
+    check(lines == [0, 1, 15] and skipped == {"no choice question": 8, "a one-way row": 1, "not answered": 2, "read more than once": 2},
+          f"of sixteen rows, the three with a two-way choice answer per option, read once, are compared; the others are counted by why not ({lines}, {skipped})")
+    check(fetched[1] == ('{"ticket":"t","plan":"p"}', "q", '{\n "ask": "which"\n}', ["a", "b"], ["the first", "b"], [0.7, 0.3]) and fetched[15][2] == "null" and set(fetched) == {1, 15},
+          f"a row is fetched as the shim would render it: the record compact, instructions that are no string as JSON (a null as null), an option with no description by its name, H2O's probabilities in the options' order ({fetched[1][2]!r}, {fetched[15][2]!r})")
     bar = [conformance.passes(100, 98, 0.01), conformance.passes(100, 97, 0.001), conformance.passes(100, 100, 0.0101), conformance.passes(0, 0, 0.0)]
     check(bar == [True, False, False, False], f"the bar: 98 of 100 at a median gap of 0.01 passes; 97, or a median over 0.01, or no question read, fails ({bar})")
-    check([n for n, _, _ in conformance.TWO_WAY_STRATA][-2:] == list(conformance.TWO_WAY_LONG) and conformance.TWO_WAY_STRATA[-1][2] == serve.DEFAULT_TWO_WAY_MAX_TOKENS
-          and all(a[2] == b[1] for a, b in zip(conformance.TWO_WAY_STRATA, conformance.TWO_WAY_STRATA[1:])) and conformance.TWO_WAY_STRATA[0][1] == 0,
+    S = conformance.TWO_WAY_STRATA
+    check([n for n, _, _ in S][-2:] == list(conformance.TWO_WAY_LONG) and S[-1][2] == serve.DEFAULT_TWO_WAY_MAX_TOKENS and all(x[2] == y[1] for x, y in zip(S, S[1:])) and S[0][1] == 0,
           "the strata run from 0 to the adapter's two-way limit with no hole, and the two that must pass alone are the last two")
+    where = [conformance.stratum_of(n, 8000) for n in (0, 499, 500, 4299, 4300, 7999, 8000, 8001)]
+    check(where == ["under 500", "under 500", "500 to 2,000", "2,000 to 4,300", "4,300 to 8,000", "4,300 to 8,000", "4,300 to 8,000", None]
+          and conformance.stratum_of(6000, 5000) is None and conformance.stratum_of(5000, 5000) == "4,300 to 8,000",
+          f"a prompt of exactly the limit is in the last stratum, since the adapter reads it; one token more is over the limit, whatever the limit ({where})")
+
+    # The sample: rows in the given order, a prompt tokenized unless its bytes cannot reach a stratum still short. A
+    # fake tokenizer here reads a token a byte for a record of digits and a token for four bytes otherwise.
+    strata = [("short", 0, 10), ("long", 10, 40)]
+    made = {0: "abcd" * 4, 1: "9" * 12, 2: "abcd" * 20, 3: "é" * 6, 4: "abcd" * 50, 5: "9" * 39, 6: "9" * 40, 7: "9" * 41, 8: "x", 9: "abcd" * 12, 10: "abcdefgh"}
+    tokenized = []
+    def fake_encode(text):
+        tokenized.append(text)
+        return list(range(len(text) if text.isdigit() else len(text.encode("utf-8")) // 4))
+    fetches = []
+    def fake_fetch(wanted):
+        fetches.append(sorted(wanted))
+        return {k: (made[k], f"q{k}", "", ["a", "b"], ["", ""], [0.5, 0.5]) for k in wanted}
+    take, over, counted = conformance.stratify(list(range(10)), fake_fetch, lambda state, *rest: state, fake_encode, 2, 40, chunk=4, strata=strata)
+    got = {k: [(row[0], len(row[3])) for row in v] for k, v in take.items()}
+    check(got == {"short": [(0, 4), (3, 3)], "long": [(1, 12), (2, 20)]} and over == 0 and counted == 4 and fetches == [[0, 1, 2, 3]],
+          f"each stratum takes the first rows of its length in order, a record of digits by its tokens, and the file is not fetched again once all are full ({got}, {fetches})")
+    tokenized.clear(); fetches.clear()
+    take, over, counted = conformance.stratify([8, 10, 4, 7, 6, 5, 9], fake_fetch, lambda state, *rest: state, fake_encode, 1, 40, chunk=3, strata=strata)
+    got = {k: [(row[0], len(row[3])) for row in v] for k, v in take.items()}
+    check(got == {"short": [(8, 0)], "long": [(6, 40)]} and over == 2 and counted == 4 and made[10] not in tokenized and made[4] in tokenized and made[7] in tokenized and fetches == [[4, 8, 10], [5, 6, 7]],
+          f"once short is full a prompt too few bytes for long is passed without a count; one over the limit is counted and not taken; one of exactly the limit is taken ({got}, over {over}, {counted} counted)")
+    take, _, counted = conformance.stratify([8, 1], fake_fetch, lambda state, *rest: state, fake_encode, 1, 40, chunk=10, strata=strata)
+    check([(r[0], len(r[3])) for r in take["long"]] == [(1, 12)] and counted == 2,
+          f"a record of twelve digits is twelve tokens: with short full it is still counted for long, where a guess of three characters a token would pass it by ({take['long'] and take['long'][0][0]}, {counted} counted)")
+    take, _, _ = conformance.stratify([8, 0, 3], fake_fetch, lambda state, *rest: state, fake_encode, 2, 40, chunk=10, strata=strata)
+    check(len(take["short"]) == 2 and take["long"] == [], "a file with no long prompt leaves the long stratum empty, which the verdict fails")
+
+    full = {"2,000 to 4,300": (60, 60, 0.003), "4,300 to 8,000": (60, 59, 0.0003), "under 500": (60, 60, 0.0006)}
+    v = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 0)
+    check(all(v.values()) and len(v) == 4, f"full long strata at the bar, the whole at the bar and every read a probability: every verdict passes ({v})")
+    thin = conformance.two_way_verdicts({**full, "4,300 to 8,000": (1, 1, 0.0003)}, (121, 121, 0.001), 60, 0)
+    gone = conformance.two_way_verdicts({k: full[k] for k in ("under 500", "2,000 to 4,300")}, (120, 120, 0.001), 60, 0)
+    check(not thin["4,300 to 8,000, 60 questions"] and thin["2,000 to 4,300, 60 questions"] and thin["all"] and not gone["4,300 to 8,000, 60 questions"],
+          f"a long stratum of one agreeing question, or none, fails though the whole sample passes ({thin})")
+    nan = conformance.two_way_verdicts(full, (180, 179, 0.001), 60, 1)
+    worse = conformance.two_way_verdicts({**full, "2,000 to 4,300": (60, 58, 0.003)}, (180, 177, 0.02), 60, 0)
+    check(not nan["every read a probability per option"] and nan["all"] and not worse["2,000 to 4,300, 60 questions"] and not worse["all"] and worse["4,300 to 8,000, 60 questions"],
+          f"one read that was no probability fails the arm though every count passes; 58 of 60 fails its stratum, and a whole-sample median of 0.02 the whole ({nan}, {worse})")
 
 asyncio.run(main())
 print(f"\n{passed + failed} assertions: {passed} passed, {failed} failed")
