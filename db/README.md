@@ -6045,11 +6045,11 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
 `--brains` is a JSON file naming each brain: `{"canary": {"connector":
 "open-brain-canary"}}` takes the url and key from that `~/.claude.json` entry, as
 `bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
-"keyFile": "…"}}` takes a url and a file holding the key alone. Only the brain a
-command names is read from it. No key is printed. A refusal names a flag or a
+"keyFile": "…"}}` takes a url and a file holding the key alone. An entry gives
+one or the other, not both. Only the brain a command names is read from it. No key is printed. A refusal names a flag or a
 brain and, for a file, the file system's code (`ENOENT`): never the path typed,
-a file's text or a parser's words, any of which could be a key put in the wrong
-place. Each subcommand refuses a flag it does not read.
+a file's text, a connector's name or a parser's words, any of which could be a
+key put in the wrong place. Each subcommand refuses a flag it does not read.
 
 - **load** captures the arm's notes, generated from the arm's name and the index,
   so every brain gets the same text and no arm's note is another's. Each starts
@@ -6061,13 +6061,18 @@ place. Each subcommand refuses a flag it does not read.
   off and may land yet. `load` exits 1 on any of those, or on a note saved
   without a vector or tags. It appends to `--ids` only where that file is new or
   holds thought ids alone, so a key file named there by mistake is not written.
+  A last line with no end is ended first, so the first id added does not run on
+  from it.
 - **sample** reads every brain's `brain_info` and `worker_status` each `--every`
   seconds (15), and, with `--ollama`, the model server's loaded models from
   Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
   if a brain never answered. A signal ends the wait; the round in hand is finished
   and written, and it then exits 128 plus the signal's number, whatever the
   brains answered. A second signal exits at once, the round in hand unwritten. It
-  appends to `--out` only where that file is new or holds samples alone.
+  appends to `--out` only where that file is new or holds samples alone, each a
+  JSON object with a time, an arm and a brain: not a brains file, nor
+  `bench-live.ts`'s samples, nor a file whose last sample was cut short. A
+  `--brains` file that names no brain is refused.
 - **clean** reads back each listed id, then searches for measure notes whose ids
   never came back and reads those back too. It deletes a thought only when its
   whole text is the generator's own for the arm and index its heading names: the
@@ -6084,8 +6089,9 @@ place. Each subcommand refuses a flag it does not read.
   A thought that starts with a note's heading and then differs, someone's own
   words after it, is never deleted, listed or found: clean says it and exits 1,
   on every run that meets it. A note written by another version of the generator
-  reads the same way. To clear one, delete that thought by its id, or name the
-  arm you mean with `--arm`: another arm's search never meets it.
+  reads the same way. To clear one, delete that thought by its id. Naming the arm
+  you mean with `--arm` also passes it by, since another arm's search never
+  meets it, but only where `--ids` does not list it: a listed id is always read.
   A last search finds any note still there. It exits 1 if one is left, or if a
   delete, a read or that search failed or stopped at 5,000 matches. Run it after `load` has ended: a capture
   still on its way lands afterwards, and a second run finds it. It deletes the

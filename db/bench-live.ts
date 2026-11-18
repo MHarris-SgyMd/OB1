@@ -39,7 +39,7 @@
  *   --key-from NAME (open-brain-canary: ~/.claude.json's mcpServers entry, its url and key)   --mcp URL (that entry's url; another needs --key-from)
  *   --key-file PATH (with --mcp, in place of --key-from: a file holding the key alone, a brain no connector names)
  *   --searches N (60)   --captures N (30)   --embeds N (40)   --metadata N (20)   --keep-probes
- *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard — no brain, no provider
+ *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard, a key file's reading, what a refusal says of a file — no brain, no provider
  *   bun db/bench-live.ts --help           # the flags (cli.ts reads every argument: an unknown one, a repeat or a blank value is refused, exit 2)
  *
  * The provider and models come from the variables the server reads
@@ -355,9 +355,11 @@ async function main(): Promise<void> {
     } catch (e) { console.error(`bench-live.ts: ${(e as Error).message}`); process.exit(2); }
   };
   const { mcp, key } = endpoint();
-  // Fail before the first call, not after a capture has landed, if either file cannot be written.
-  appendFileSync(out, "");
-  appendFileSync(ids, "");
+  // Fail before the first call, not after a capture has landed, if either file cannot be written: in a line naming the
+  // flag and the failure's code, as a key file's is (review pass 5: it was a stack trace quoting the path typed).
+  for (const [whose, path] of [["--out's", out], ["--ids'", ids]] as const) {
+    try { appendFileSync(path, ""); } catch (e) { console.error(`bench-live.ts: ${whose} file could not be written (${fileProblem(e)})`); process.exit(2); }
+  }
 
   const cfg = resolveEmbedConfig(process.env as EmbedEnv);
   const embedder = createEmbedder(() => cfg);
@@ -721,7 +723,7 @@ export function selfCheck(): number {
   const KEYISH = "abcdef0123456789abcdef0123456789";
   ok(said(() => jsonOf(`{"x-brain-key": ${KEYISH}}`, "~/.claude.json")) === "~/.claude.json is not JSON" && said(() => jsonOf(KEYISH, "f")) === "f is not JSON" && (jsonOf('{"a":1}', "f") as { a: number }).a === 1, "a file that is not JSON is named, and nothing of it is said");
   const enoent = Object.assign(new Error(`ENOENT: no such file or directory, open '${KEYISH}'`), { code: "ENOENT" });
-  ok(fileProblem(enoent) === "ENOENT" && fileProblem(new Error(KEYISH)) === "an error" && fileProblem({ code: `x ${KEYISH}` }) === "an error" && fileProblem(null) === "an error", "a file's failure is its code alone, and no code is no words of its own");
+  ok(fileProblem(enoent) === "ENOENT" && fileProblem(new Error(KEYISH)) === "an error" && fileProblem({ code: `x ${KEYISH}` }) === "an error" && fileProblem({ code: `ENOENT: ${KEYISH}` }) === "an error" && fileProblem({ code: `${KEYISH} ENOENT` }) === "an error" && fileProblem({ code: "ERR_INVALID_URL" }) === "ERR_INVALID_URL" && fileProblem(null) === "an error", "a file's failure is its code alone, and no code is no words of its own");
   ok(said(() => textOf(() => { throw enoent; }, "--key-file's file")) === "--key-file's file could not be read (ENOENT)" && textOf(() => "t", "f") === "t", "a file that cannot be read is named by its flag, never by the path typed");
   const noKey = (text: string) => { try { keyFromFile(text); return false; } catch { return true; } };
   ok(noKey("") && noKey("\n") && noKey("kéy\n") && !noKey("  abc123\n") && keyFromFile("  abc123\n") === "abc123", "an empty key file, or one whose line is not printable ASCII, is no key; spaces around the line are trimmed");
