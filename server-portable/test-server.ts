@@ -5336,6 +5336,28 @@ console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids
       && /Not forgotten — the same thought under that name, still holding its text here: .*REPLAYING.*\(FAILED 57P01\)/.test(partialReply.content[0].text)
       && JSON.stringify(scMissed) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "FAILED" }]),
     `a refusal or a fault after the first thought is named, not lost, the first staying forgotten (${JSON.stringify(partial.ok ? partial.value.notForgotten : partial)})`);
+  // The same call sent again: its first thought forgotten already, a later one still refused. The answer is the
+  // refusal that leaves the text, not FORGOTTEN's "nothing is left" (review pass 4), whichever order they come in.
+  const resend = async (answers: Record<string, string>) => {
+    const again = {
+      ...store,
+      thoughtsKeyed: async () => Object.keys(answers).filter((id) => id !== N),
+      forgetThought: async ({ id }: { id: string }) => ({ ok: false, error: answers[id] }),
+    };
+    const c = createCore({ env: () => ({}) as never, store: async () => again as never, door: "test" });
+    const r = await c.forgetThought({ name: "op", scope: "write", keyHash: "h" } as never, { id: N, confirm: N } as never);
+    return r.ok ? "ok" : `${r.refusal.code}:${(r.refusal as { id?: string }).id === N ? "N" : (r.refusal as { id?: string }).id === D2 ? "D2" : "?"}`;
+  };
+  const resent = [
+    await resend({ [N]: "FORGOTTEN", [D2]: "REPLAYING" }),
+    await resend({ [N]: "FORGOTTEN", [D2]: "CITED" }),
+    await resend({ [N]: "FORGOTTEN", [D2]: "NOT_FOUND" }),
+    await resend({ [N]: "NOT_FOUND", [D2]: "FORGOTTEN" }),
+  ];
+  const citedReply = renderForget({ ok: true, value: { ...(partial.ok ? partial.value : {}), notForgotten: [{ id: D2, code: "CITED" }] } } as never).content[0].text;
+  assert(resent.join() === "REPLAYING:D2,REFUSED_CITED:D2,FORGOTTEN:N,FORGOTTEN:D2"
+      && /again, with detach_citations for one another thought cites \(CITED\)/.test(citedReply) && !/detach_citations/.test(partialReply.content[0].text),
+    `a partial forget sent again answers what still holds the text, not "forgotten already"; a cited one left is told to detach (${resent.join()})`);
   const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
   const noWord = thrown({ ok: false });
   const noTime = thrown({ ok: true, id: T, removed: {} });

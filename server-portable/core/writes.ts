@@ -959,6 +959,9 @@ export async function deleteThought(ctx: Ctx, principal: Principal, { id: name, 
 export type Forgotten = ForgetEvidence & { byClientKey?: string; clientKey?: string; alsoForgotten?: string[]; notForgotten?: { id: string; code: string; errno?: string }[] };
 export type ForgetCode = "NOT_FOUND" | "REFUSED_CONFIRM" | "FORGOTTEN" | "REFUSED_CITED" | "REPLAYING" | "REFUSED";
 
+/** How much a forget's refusal before its first thought says: none there, forgotten already, or a text still held. */
+const refusalRank = (error: string) => (error === "NOT_FOUND" ? 0 : error === "FORGOTTEN" ? 1 : 2);
+
 export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, confirm, detach_citations }: Input<"forget_thought">): Promise<Outcome<Forgotten, ForgetCode>> {
   // The echo first, before anything is read (the ticket's Work 4): the name
   // exactly as sent, an id or a client_key, not as it resolves — a copy of
@@ -998,7 +1001,10 @@ export async function forgetThought(ctx: Ctx, principal: Principal, { id: name, 
       const key = canRead(principal) ? await store.clientKeyOf(id) : null;
       const r = await store.forgetThought({ id, actor, detach });
       if (r.ok) { first = { id, key, result: r }; continue; }
-      if (!refused || (refused.result.error === "NOT_FOUND" && r.error !== "NOT_FOUND")) refused = { id, result: r };
+      // A refusal that leaves a text here outranks FORGOTTEN, which outranks NOT_FOUND: a call sent again after a
+      // partial forget, its first thought forgotten already, answers what still holds the text, never "nothing is
+      // left" (review pass 4).
+      if (!refused || refusalRank(r.error) > refusalRank(refused.result.error)) refused = { id, result: r };
       if (r.error === "CITED") break;
       continue;
     }
