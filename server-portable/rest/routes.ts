@@ -91,6 +91,8 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   CLAIMS_UNREADABLE: 503,
   ORDER_UNAVAILABLE: 503,
   REFUSED_WEIGHTS: 400,
+  REFUSED_FINDING_INPUT: 400,
+  REFUSED_FINDING_DECISION: 409,
   REFUSED_EDITED_SINCE: 409,
   REFUSED_LINEAGE_PAIR: 409,
   REFUSED_WRITER: 409,
@@ -167,6 +169,9 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   set_work_claim_cap: { method: "POST", path: "/v1/work-claim-cap", ok: 200, call: CALLS.set_work_claim_cap },
   release_holder_claims: { method: "POST", path: "/v1/claims/release-holder", ok: 200, call: CALLS.release_holder_claims },
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
+  // The priority review's findings (SMD-3671 PR 2, migration 142): the list's filters in the query, a decision in the body.
+  list_priority_findings: { method: "GET", path: "/v1/priority-findings", ok: 200, call: CALLS.list_priority_findings },
+  review_priority_finding: { method: "POST", path: "/v1/priority-findings/{id}/review", ok: 200, call: CALLS.review_priority_finding },
   // Open items (SMD-3665 PR 2, migration 117): an item by its id in the path, a proposed close by its own.
   list_items: { method: "GET", path: "/v1/items", ok: 200, call: CALLS.list_items },
   // The agenda (SMD-3669, migration 123): the scope and flags in the query string.

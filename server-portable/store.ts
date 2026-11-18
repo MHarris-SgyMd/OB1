@@ -21,7 +21,8 @@ import type { JobSink } from "./jobs.ts";
 import { withSpan, withStoreSpan } from "./spans.ts";
 import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
-import { PRIORITY_KINDS, type PriorityKind } from "./priority-kinds.ts";
+import { isRecord } from "./is-record.ts";
+import { FINDING_INPUT_ERRORS, isFindingKind, isFindingStatus, PRIORITY_KINDS, type FindingInputError, type FindingKind, type FindingStatus, type PriorityKind } from "./priority-kinds.ts";
 import type { ItemAnswer, ItemListRow, ItemRecord, ItemStatus } from "./open-items.ts";
 import type { DeliverableAnswer, DeliverableRecord, VerifyStatus } from "./deliverables.ts";
 
@@ -1669,6 +1670,171 @@ export function normaliseReleaseHolder(r: unknown): ReleaseHolderResult {
 }
 
 /**
+ * Where a page of priority findings ended (SMD-3671 PR 2): the listing's order as three keys, all ascending — `grp` 0
+ * for a pending finding and 1 for the rest, `sk` its found_at's epoch (pending: oldest first) or the negated epoch of
+ * when it was decided or mooted (the rest: newest first), as numeric's exact text (an infinite time's `Infinity` or
+ * `-Infinity` included), and its id. The keys, not the row: the page after the cursor starts past these values, never
+ * past a count of rows, so a finding that stood in the listing when paging began, and still does, is never skipped. One
+ * that changes status, or one a scan adds (its found_at is its transaction's start), while paging can be missed, and
+ * under `all` a decided one can be listed twice.
+ */
+export type FindingPosition = { grp: 0 | 1; sk: string; id: string };
+/**
+ * A finding's item as 142 wrote it: one of PRIORITY_KINDS and its key, or (`itemUnread`) a kind this server does not
+ * read, kept as written. 142 holds item_kind to no list.
+ */
+export type FindingItem = { kind: PriorityKind | (string & {}); key: string };
+/**
+ * A statement a priority finding is about (migration 142, SMD-3671), from its evidence: a stale or settled finding's
+ * `statements`, or a disagreement's operator and source (`role`). An overdue finding's evidence names a due time, not
+ * statements, so it lists none. A field the evidence lacks is null.
+ */
+export type FindingStatement = { id: string; level: number | null; maker: string | null; assertedAt: string | null; role: "operator" | "source" | null };
+/**
+ * One priority finding as the list reads it (migration 142's priority_findings row): its kind, its item (keyed by its
+ * pool: a ticket and its own rows are one item), its status, the statements it is about, its evidence as the scan
+ * wrote it less those statements, its window, when it was found, last refreshed, mooted and decided, who decided it (a key's name), the
+ * operator's note, the writer's answer to an accept (`outcome`, read as review_priority_finding's answer is: one shape on
+ * the contract; null for a reject or a finding not decided, and null with `outcomeUnread` for one stored in a shape this
+ * server does not read), and until when the decision holds the same finding
+ * back.
+ */
+export type PriorityFinding = {
+  /** One of FINDING_KINDS, or a kind a brain migrated ahead of this server wrote (`kindUnread`), kept as written. */
+  id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: FindingItem; itemUnread?: true;
+  /** One of FINDING_STATUSES, or one this server does not know (`statusUnread`), kept as written. */
+  status: FindingStatus | (string & {}); statusUnread?: true; statements: FindingStatement[];
+  evidence: Record<string, unknown>; windowDays: number; foundAt: string; refreshedAt: string; mootAt: string | null;
+  decidedAt: string | null; decidedBy: string | null; note: string | null; outcome: PriorityAnswer | null; outcomeUnread?: true; suppressedUntil: string | null;
+};
+
+/**
+ * A decision's writer's answer, stored on a finding or answered by review_priority_finding, read by one rule: what a
+ * decision writes is asserted, unchanged or cleared, and anything else — a shape this server does not read, a code a
+ * later writer gives, another outcome — is `unread`, never a fault: the decision landed (SMD-3671 PR 2).
+ */
+export function readAnswerLeniently(raw: unknown, what: string): { answer: PriorityAnswer | null; unread: boolean } {
+  if (raw == null) return { answer: null, unread: false };
+  try {
+    const answer = normalisePriorityAnswer(raw, what);
+    return answer.outcome === "asserted" || answer.outcome === "unchanged" || answer.outcome === "cleared" ? { answer, unread: false } : { answer: null, unread: true };
+  } catch {
+    return { answer: null, unread: true };
+  }
+}
+
+/**
+ * A finding's statements from its evidence (see FindingStatement), and the evidence keys read into them: `statements`
+ * when every entry was read, `operator` and `source` each when it was. A key not read stays in the evidence, as written.
+ */
+function findingStatements(evidence: Record<string, unknown>): { statements: FindingStatement[]; read: string[] } {
+  const one = (s: unknown, role: FindingStatement["role"]): FindingStatement | null => {
+    if (!isRecord(s) || typeof s.id !== "string") return null;
+    const at = typeof s.asserted_at === "string" && !Number.isNaN(Date.parse(s.asserted_at)) ? new Date(s.asserted_at).toISOString() : null;
+    return { id: s.id, level: typeof s.level === "number" ? s.level : null, maker: typeof s.maker === "string" ? s.maker : null, assertedAt: at, role };
+  };
+  const isStatement = (s: FindingStatement | null): s is FindingStatement => s !== null;
+  if (Array.isArray(evidence.statements)) {
+    const listed = evidence.statements.map((s) => one(s, null));
+    const statements = listed.filter(isStatement);
+    return { statements, read: statements.length === listed.length ? ["statements"] : [] };
+  }
+  const op = one(evidence.operator, "operator"), src = one(evidence.source, "source");
+  return { statements: [op, src].filter(isStatement), read: [...(op ? ["operator"] : []), ...(src ? ["source"] : [])] };
+}
+
+/**
+ * A finding's item as 142 wrote it, the list's row's and the review's answer's alike: one of PRIORITY_KINDS and its key;
+ * else, with a key, its kind as written and `unread`; with no key, none and `unread`. Never one made up.
+ */
+function findingItemOf(kind: unknown, key: unknown): { item: FindingItem | null; unread: boolean } {
+  const known = priorityItemOf({ kind, key });
+  if (known) return { item: known, unread: false };
+  return { item: typeof key === "string" ? { kind: typeof kind === "string" ? kind : "?", key } : null, unread: true };
+}
+
+/** One priority_findings row as the list reads it: a kind, status, item kind or answer this server does not know marked unread; a row with no id or no item key a fault. */
+export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFinding {
+  // History outlives the server that reads it: a finding a brain migrated ahead of this server wrote — a fifth kind, a
+  // status, an item kind, a writer's answer in a later shape — is listed with that part marked unread, never the list's
+  // fault. Its id and its item's key are the row itself: one without them is a fault.
+  const { answer: outcome, unread: outcomeUnread } = readAnswerLeniently(r.outcome, "priority_findings' outcome");
+  if (typeof r.id !== "string" || typeof r.item_key !== "string" || typeof r.kind !== "string" || typeof r.status !== "string") {
+    throw new Error(`priority_findings answered a row this server cannot read: ${JSON.stringify({ kind: r.kind, status: r.status, item_kind: r.item_kind })}`);
+  }
+  const { item, unread: itemUnread } = findingItemOf(r.item_kind, r.item_key) as { item: FindingItem; unread: boolean };
+  const kindUnread = !isFindingKind(r.kind), statusUnread = !isFindingStatus(r.status);
+  const stored = isRecord(r.evidence) ? r.evidence : {};
+  // The statements are read out of the evidence once (`statements`), and the evidence sent keeps what they do not
+  // cover: a stale finding's last_activity and window_days, an overdue one's due_at, due_from and level, and any key the
+  // statements could not be read from, as written.
+  const { statements, read } = findingStatements(stored);
+  const evidence = Object.fromEntries(Object.entries(stored).filter(([k]) => !read.includes(k)));
+  return {
+    id: r.id, kind: r.kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(itemUnread ? { itemUnread: true as const } : {}),
+    status: r.status, ...(statusUnread ? { statusUnread: true as const } : {}),
+    statements, evidence,
+    windowDays: Number(r.window_days), foundAt: isoTimestamp(r.found_at), refreshedAt: isoTimestamp(r.refreshed_at), mootAt: isoTimestampOrNull(r.moot_at),
+    decidedAt: isoTimestampOrNull(r.decided_at), decidedBy: typeof r.decided_by === "string" ? r.decided_by : null,
+    note: typeof r.decision_note === "string" ? r.decision_note : null, outcome, ...(outcomeUnread ? { outcomeUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(r.suppressed_until),
+  };
+}
+
+/**
+ * review_priority_finding's answer (142, SMD-3671). Decided: the finding's id, kind (`kindUnread` for one this server does
+ * not know), item (as written, or null, with `itemUnread`, when this server does not read it) and status now, the writer's answer to an accept (assert_priority's or clear_priority's; null for a
+ * reject, or with `answerUnread` for one this server does not read), and until when the decision holds the
+ * same finding back. Refused, by 142's error: NOT_OPERATOR (`kind` the key's registry kind), NOT_PENDING (`status`
+ * the finding's, `statusUnread` for one this server does not know), NOTHING_TO_CLEAR and WRITER_REFUSED (`writerCode` the writer's own code, if it named one), and the
+ * rest in `message` alone.
+ */
+export type ReviewFindingResult =
+  | { ok: true; id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: FindingItem | null; itemUnread?: true; status: "accepted" | "rejected"; answer: PriorityAnswer | null; answerUnread?: true; suppressedUntil: string | null }
+  | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
+  | { ok: false; error: "NOT_PENDING"; status: FindingStatus | (string & {}); statusUnread?: true; message: string }
+  | { ok: false; error: "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; writerCode: string | null; message: string }
+  | { ok: false; error: "NOT_WRITE_SCOPE" | "NOT_FOUND" | FindingInputError; message: string };
+const FINDING_PLAIN_ERRORS = new Set<string>(["NOT_WRITE_SCOPE", "NOT_FOUND", ...FINDING_INPUT_ERRORS]);
+
+/**
+ * review_priority_finding's jsonb (142) as the store's union. A decision 142 made is never a fault: its kind, its item
+ * and its writer's answer are read leniently (marked unread), as a refused decision's status is. A refusal it does not name, or no envelope, throws: one this server cannot word is a fault.
+ */
+export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
+  const o = isRecord(r) ? r : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const what = "review_priority_finding";
+  if (o?.ok === true && typeof o.id === "string" && (o.status === "accepted" || o.status === "rejected")) {
+    // 142 committed the decision: nothing in its answer reports it failed — a retry would meet NOT_PENDING. The finding's
+    // kind and the writer's answer, which a brain migrated ahead of this server may give in a shape it does not know,
+    // are read as the list reads them (marked unread); the decision itself, its id and its status, strictly.
+    const { item, unread: itemUnread } = isRecord(o.item) ? findingItemOf(o.item.kind, o.item.key) : { item: null, unread: true };
+    // An accept wrote through a writer, so an accept with no answer is one this server did not read.
+    const answered = readAnswerLeniently(o.answer, what);
+    const answerUnread = answered.unread || (o.status === "accepted" && o.answer == null);
+    const kind = typeof o.kind === "string" ? o.kind : "?";
+    const kindUnread = !isFindingKind(kind);
+    return {
+      ok: true, id: o.id, kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(itemUnread ? { itemUnread: true as const } : {}), status: o.status,
+      answer: answered.answer, ...(answerUnread ? { answerUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null),
+    };
+  }
+  const message = word(o?.message) ?? "";
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message };
+  if (o?.ok === false && o.error === "NOT_PENDING" && typeof o.status === "string") {
+    // A status a brain migrated ahead of this server gives is kept as written, marked: the decision was still refused.
+    const statusUnread = !isFindingStatus(o.status);
+    return { ok: false, error: "NOT_PENDING", status: o.status, ...(statusUnread ? { statusUnread: true as const } : {}), message };
+  }
+  if (o?.ok === false && (o.error === "NOTHING_TO_CLEAR" || o.error === "WRITER_REFUSED")) {
+    const a = isRecord(o.answer) ? o.answer : {};
+    return { ok: false, error: o.error, writerCode: word(a.code) ?? word(a.error), message };
+  }
+  if (o?.ok === false && FINDING_PLAIN_ERRORS.has(o.error as string)) return { ok: false, error: o.error as "NOT_FOUND", message };
+  throw new Error(`${what} answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
+/**
  * An argument 116 refused by raising (SQLSTATE 22023), or a time Postgres could not
  * cast (`time`), told by which (`problem`), as ClaimRefused tells 115's. Its message
  * is the database's, which quotes the argument it could not read, cut. Any other
@@ -1912,6 +2078,14 @@ function keyedOf(v: unknown, what: string): AgendaResult["keyed"] {
   });
   return { others, waiting, missing: o.missing as string[] };
 }
+
+/**
+ * Every statement a writer's answer says it closed, newest first: 138's list, or from a brain before it the one it
+ * named — a clear's own statement, a statement's `replaced`. One rule for set_priority, clear_priority and a finding's
+ * accept (SMD-3671 PR 2: it was written three times).
+ */
+export const closedOf = (a: PriorityAnswer): PriorityAssertion[] =>
+  a.closed ?? (a.outcome === "cleared" || a.outcome === "nothing_to_clear" ? (a.assertion ? [a.assertion] : []) : a.replaced ? [a.replaced] : []);
 
 /** One of 116's writers' jsonb answers as the store's PriorityAnswer; an outcome or code 116 does not name throws. */
 export function normalisePriorityAnswer(r: unknown, what: string): PriorityAnswer {
@@ -2726,6 +2900,20 @@ export interface ThoughtStore {
    */
   releaseHolderClaims(opts: { holder: string; reason: string; actor?: Actor }): Promise<ReleaseHolderResult>;
   /**
+   * The priority review's findings (migration 142, SMD-3671): those of one status (null: every one) and kind (null:
+   * every kind), the pending oldest found first, then the rest most recently decided or mooted first, ties by id; `total`
+   * counts every one matching and `before` those ahead of the page, which is `limit` of them past `after` (FindingPosition),
+   * and `next` the last listed row's place while more follow. One statement. A database before 142 throws.
+   */
+  listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; after?: FindingPosition }): Promise<{ total: number; before: number; findings: PriorityFinding[]; next: FindingPosition | null }>;
+  /**
+   * An operator's decision on a pending finding (migration 142's review_priority_finding): accept with a level (and a
+   * due time) or clear, or reject. The function decides who may — a key the registry classifies operator, by its agent
+   * id, with write scope (the envelope states the key's) — and every rule of the decision. A due time Postgres cannot
+   * read, or a 22023 of the writer inside, throws PriorityRefused, as assert_priority's does. A database before 142 throws.
+   */
+  reviewPriorityFinding(opts: { id: string; decision: "accept" | "reject"; level?: number; dueAt?: string; clear?: boolean; note?: string; actor?: Actor; scope: "write" | "capture" | undefined }): Promise<ReviewFindingResult>;
+  /**
    * The agenda (migration 123, SMD-3669): open, startable, unclaimed tickets and open items in a scope, ranked by
    * 122's effective priority, with what was left out and why. `holder` is the calling key, for `mine`. One
    * statement. A database before 123 throws, and so does any raise of 123's: the schema checks every argument
@@ -3102,7 +3290,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, jobSink: false, close: false,
 };
 
