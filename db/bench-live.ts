@@ -37,7 +37,7 @@
  *
  *   bun db/bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids-baseline.txt
  *   --key-from NAME (open-brain-canary: ~/.claude.json's mcpServers entry, its url and key)   --mcp URL (that entry's url; another needs --key-from)
- *   --key-file PATH (with --mcp, in place of --key-from: a file holding the key alone, a brain no connector names)
+ *   --key-file PATH (with --mcp, in place of --key-from: a file holding the key alone, for a brain no connector names)
  *   --searches N (60)   --captures N (30)   --embeds N (40)   --metadata N (20)   --keep-probes
  *   bun db/bench-live.ts --self-check     # the pure parts — the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard, a key file's reading, what a refusal says of a file — no brain, no provider
  *   bun db/bench-live.ts --help           # the flags (cli.ts reads every argument: an unknown one, a repeat or a blank value is refused, exit 2)
@@ -714,6 +714,7 @@ export function selfCheck(): number {
   ok(same(conn({ url: "http://h:8011/mcp", headers: { "x-brain-key": "H" } }, "http://o:8000/mcp"), { mcp: "http://o:8000/mcp", key: "H" }), "--mcp names the endpoint, the entry the key");
   ok(conn({ url: "http://h:8011/mcp" }) === `~/.claude.json has no key for mcpServers["c"], in an x-brain-key header or on its url`, "no key anywhere is refused");
   ok(conn({ headers: { "x-brain-key": "H" } }) === `~/.claude.json has no url for mcpServers["c"]; give --mcp`, "no url and no --mcp is refused");
+  ok(typeof conn(undefined) === "string", "no such entry is refused");
   // A key from a file, for a brain no connector names (SMD-3379 PR 3b-3b).
   ok(keySourceProblem(undefined, undefined, undefined) === null && keySourceProblem("u", "c", undefined) === null && keySourceProblem("u", undefined, "f") === null, "the canary's connector, --mcp with --key-from, and --mcp with --key-file are each one key");
   ok(/give --key-from with the connector/.test(keySourceProblem("u", undefined, undefined) ?? "") && /give --mcp too/.test(keySourceProblem(undefined, undefined, "f") ?? "") && /not both/.test(keySourceProblem("u", "c", "f") ?? ""), "--mcp with no key, --key-file with no --mcp, and both key flags are refused");
@@ -727,7 +728,6 @@ export function selfCheck(): number {
   ok(said(() => textOf(() => { throw enoent; }, "--key-file's file")) === "--key-file's file could not be read (ENOENT)" && textOf(() => "t", "f") === "t", "a file that cannot be read is named by its flag, never by the path typed");
   const noKey = (text: string) => { try { keyFromFile(text); return false; } catch { return true; } };
   ok(noKey("") && noKey("\n") && noKey("kéy\n") && !noKey("  abc123\n") && keyFromFile("  abc123\n") === "abc123", "an empty key file, or one whose line is not printable ASCII, is no key; spaces around the line are trimmed");
-  ok(typeof conn(undefined) === "string", "no such entry is refused");
   ok(shownUrl("http://user:SECRET@host:8000/mcp") === "http://host:8000/mcp", "the banner never prints a URL's userinfo");
   ok(shownUrl("not a url") === "(an endpoint that does not parse)", "an endpoint that does not parse is not echoed");
   const refused = Object.assign(new TypeError("ECONNREFUSED: Unable to connect. Is the computer able to access the url?"), { code: "ECONNREFUSED", path: "http://127.0.0.1:9/mcp?key=SECRET", errno: 0 });

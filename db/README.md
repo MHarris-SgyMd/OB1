@@ -5928,7 +5928,7 @@ comes first, so no timed call loads a model; a warm-up that fails is said.
 OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_EMBEDDING_MODEL=qwen3-embedding:4b OB1_EMBEDDING_DIM=1024 \
 OB1_METADATA_MODEL=qwen2.5:7b OB1_LLM_LOCAL=1 \
   bun bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids-baseline.txt
-bun bench-live.ts --self-check   # the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard; what CI runs
+bun bench-live.ts --self-check   # the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard, a key file's reading, what a refusal says of a file; what CI runs
 ```
 
 The five variables are the canary's model settings. For another brain, they, and
@@ -6047,10 +6047,11 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
 `bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
 "keyFile": "…"}}` takes a url and a file holding the key alone. An entry gives
 a connector or a key file, not both; a connector's entry may add `mcp` to send
-that key to another url. Only the brain a command names is read from it. No key is printed. A refusal names a flag or a
-brain and, for a file, the file system's code (`ENOENT`): never the path typed,
-a file's text, a connector's name or a parser's words, any of which could be a
-key put in the wrong place. Each subcommand refuses a flag it does not read.
+that key to another url. `load` and `clean` read only the brain they name;
+`sample` reads every entry. No key is printed. A refusal names a flag or a brain
+and, for a file, the file system's code (`ENOENT`): never the path typed, a
+file's text, a connector's name or a parser's words, any of which could be a key
+put in the wrong place. Each subcommand refuses a flag it does not read.
 
 - **load** captures the arm's notes, generated from the arm's name and the index,
   so every brain gets the same text and no arm's note is another's. Each starts
@@ -6081,7 +6082,7 @@ key put in the wrong place. Each subcommand refuses a flag it does not read.
   arm's alone with `--arm`, else every measure note on the brain, of any arm or
   run. Like `load`, it runs only on a `canary` or `working` brain. A listed id is
   trusted no more than a search hit:
-  - one whose text is no measure note's is left, said, and exits 1;
+  - one whose text is no measure note's is left and said, and `clean` exits 1;
   - one that is another arm's note, under `--arm`, is left and counted;
   - one the brain does not hold, gone already or never an id of its own, is
     counted as not on the brain, not as deleted. So is a found note gone by the
@@ -6089,17 +6090,17 @@ key put in the wrong place. Each subcommand refuses a flag it does not read.
   - a line that is no thought id is counted and sent nowhere.
 
   A thought that starts with a note's heading and then differs, someone's own
-  words after it, is never deleted, listed or found: clean says it and exits 1,
+  words after it, is never deleted, listed or found: `clean` says it and exits 1,
   on every run that meets it. A note written by another version of the generator
   reads the same way. To clear one, delete that thought by its id. Naming the arm
   you mean with `--arm` also passes it by, since another arm's search never
   meets it, but only where `--ids` does not list it: a listed id is always read.
   A last search finds any note still there. It exits 1 if one is left, or if a
-  delete, a read or that search failed or stopped at 5,000 matches. Run it after `load` has ended: a capture
-  still on its way lands afterwards, and a second run finds it. It deletes the
-  notes alone. The entities extraction drew from them stay until an operator
-  prunes the orphans (`prune_orphan_entities()`), and the audit log keeps each
-  note's text.
+  delete, a read or that search failed or stopped at 5,000 matches. Run it after
+  `load` has ended: a capture still on its way lands afterwards, and a second
+  run finds it. It deletes the notes alone. The entities extraction drew from
+  them stay until an operator prunes the orphans (`prune_orphan_entities()`),
+  and the audit log keeps each note's text.
 - **summary** prints, for each arm and brain, its sleep's background calls in two
   windows: before `--split` minutes, with no live load from the harness, and after
   it, with `bench-live.ts` running. For each window it gives:
@@ -6135,17 +6136,18 @@ these limits:
 
 **The windows.** A heartbeat's tallies count since the sleep's process began. It
 stamps them at least once a minute, more often while it works, by the database's
-clock, and a call counts when it ends. So a window's figures are the sum of the increases from stamp to stamp,
-over the time between its first and last stamps. That is up to a stamp short of
-its minutes at each end, and the pair of stamps across the split is in neither
-window. A pair of stamps in which any pass's tally falls, or a pass drops out,
-marks the process begun again: every pass's value then is the increase since, and
-the summary counts the restarts. The calls the old process made after its last
-stamp are lost. A restart whose first stamp already passes the old one's on every
-tally is not seen. Each sample keeps the coordinator's children and the time of
-its stamp, whose `for_s` says when one began. A sleep that has made no model call
-stamps no tallies, nor does a build before SMD-3379 PR 2b-2a: for those, the
-summary gives the share of samples in which the sleep was working.
+clock, and a call counts when it ends. So a window's figures are the sum of the
+increases from stamp to stamp, over the time between its first and last stamps.
+That is up to a stamp short of its minutes at each end, and the pair of stamps
+across the split is in neither window. A pair of stamps in which any pass's
+tally falls, or a pass drops out, marks the process begun again: every pass's
+value then is the increase since, and the summary counts the restarts. The calls
+the old process made after its last stamp are lost. A restart whose first stamp
+already passes the old one's on every tally is not seen. Each sample keeps the
+coordinator's children and the time of its stamp, whose `for_s` says when one
+began. A sleep that has made no model call stamps no tallies, nor does a build
+before SMD-3379 PR 2b-2a: for those, the summary gives the share of samples in
+which the sleep was working.
 
 **The extraction rows** are `worker_status`'s pending and claimed rows under
 every `extract:` key. They are thoughts, so `bench-live.ts`'s probes and any

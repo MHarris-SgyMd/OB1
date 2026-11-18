@@ -52,12 +52,12 @@
  *         counted and sent nowhere. A text that starts with a note's heading
  *         and then differs is never deleted, and said on every run that meets
  *         it (delete it by its id; another arm passes it by unless it is
- *         listed). Only a canary or
- *         working brain, as load. A last search finds what is left, and it
- *         exits 1 if anything is, or a delete, a read or that search failed. Run it once load has ended: a capture
- *         still on its way lands after, for another run to find. The notes
- *         alone go: the entities extraction drew from them stay until an
- *         operator prunes the orphans, and the audit log keeps each text.
+ *         listed). Only a canary or working brain, as load. A last search finds
+ *         what is left, and it exits 1 if anything is, or a delete, a read or
+ *         that search failed. Run it once load has ended: a capture still on
+ *         its way lands after, for another run to find. The notes alone go: the
+ *         entities extraction drew from them stay until an operator prunes the
+ *         orphans, and the audit log keeps each text.
  * summary prints, for each arm and brain, what its sleep's heartbeat says the
  *         sleep's background calls held over the arm's two windows — before
  *         --split minutes (no live load from the harness) and after (bench-live
@@ -68,28 +68,28 @@
  *         models, and each --live file's latencies (bench-live.ts's samples).
  *
  * What the numbers are. A heartbeat's model tallies are the sleep process's
- * since it began (db/pass-stamp.ts `models`), stamped at least once a minute by the
- * database's clock, and a call is counted when it ends: a window's figures are
- * the sum of the increases from stamp to stamp, over the time between its first
- * and last stamps, and a call running across a stamp counts in the stamp after.
- * So a window is shorter than its minutes by up to a stamp at each end, and the
- * pair of stamps across the split is in neither. A call's time runs from its
- * slot to its answer, failed or not: its wait inside the model server (a model
- * loading, a call ahead of it) is in it, its wait for a slot is not; a call that
- * ran without a slot (a type no share holds, the gate failing open) counts too. A tally is
- * a pass's, over every model and server it calls, so a brain's figure can pass
- * any one server's room; and it is the sleep's alone — board-sync's calls, the
- * api's vector mender's and a detached job's hold slots too and are not in it.
- * A pass's tally that falls, or a pass that drops out, is the process begun
- * again, and every pass's value is then the increase since (windowOf): the calls
- * the old process made after its last stamp are lost, and a restart whose first
- * stamp already passes the old one's on every tally is not seen. A sample keeps
- * the coordinator's children and its stamp's time, whose for_s says when. A
- * sleep that has made no model call stamps no tallies, nor does stable's build
- * before SMD-3379 PR 2b-2a: its sleep's state is shown. The extraction rows are
- * worker_status's pending and claimed under every extract: key — thoughts, the
- * probes' and any older backlog's among them, not failed rows, and none before
- * a brain's first extraction pass has pooled them.
+ * since it began (db/pass-stamp.ts `models`), stamped at least once a minute by
+ * the database's clock, and a call is counted when it ends: a window's figures
+ * are the sum of the increases from stamp to stamp, over the time between its
+ * first and last stamps, and a call running across a stamp counts in the stamp
+ * after. So a window is shorter than its minutes by up to a stamp at each end,
+ * and the pair of stamps across the split is in neither. A call's time runs
+ * from its slot to its answer, failed or not: its wait inside the model server
+ * (a model loading, a call ahead of it) is in it, its wait for a slot is not; a
+ * call that ran without a slot (a type no share holds, the gate failing open)
+ * counts too. A tally is a pass's, over every model and server it calls, so a
+ * brain's figure can pass any one server's room; and it is the sleep's alone —
+ * board-sync's calls, the api's vector mender's and a detached job's hold slots
+ * too and are not in it. A pass's tally that falls, or a pass that drops out,
+ * is the process begun again, and every pass's value is then the increase since
+ * (windowOf): the calls the old process made after its last stamp are lost, and
+ * a restart whose first stamp already passes the old one's on every tally is
+ * not seen. A sample keeps the coordinator's children and its stamp's time,
+ * whose for_s says when. A sleep that has made no model call stamps no tallies,
+ * nor does a build before SMD-3379 PR 2b-2a: its sleep's state is shown. The
+ * extraction rows are worker_status's pending and claimed under every extract:
+ * key — thoughts, the probes' and any older backlog's among them, not failed
+ * rows, and none before a brain's first extraction pass has pooled them.
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
@@ -151,14 +151,17 @@ export function brainsOf(text: string): Record<string, unknown> {
   return raw as Record<string, unknown>;
 }
 
+/** --brains' entries, read and parsed, none resolved. */
+const entriesFrom = (path: string) => brainsOf(textOf(() => readFileSync(path, "utf8"), BRAINS));
+
 /** Every brain --brains names. */
 function brainsFrom(path: string): Brain[] {
-  return Object.entries(brainsOf(textOf(() => readFileSync(path, "utf8"), BRAINS))).map(([name, entry]) => brainOf(name, entry, claudeJson, readKeyFile));
+  return Object.entries(entriesFrom(path)).map(([name, entry]) => brainOf(name, entry, claudeJson, readKeyFile));
 }
 
 /** The one brain named, its entry alone resolved (another's broken entry does not block it); null when none is. */
 function brainFrom(path: string, name: string): Brain | null {
-  const raw = brainsOf(textOf(() => readFileSync(path, "utf8"), BRAINS));
+  const raw = entriesFrom(path);
   return Object.hasOwn(raw, name) ? brainOf(name, raw[name], claudeJson, readKeyFile) : null;
 }
 
@@ -302,7 +305,8 @@ function rpcFor(b: Brain): (method: string, params: Record<string, unknown>, ms?
   };
 }
 
-/** A tool's structured answer, or a thrown error naming the brain, the tool and why (never the url's query). */
+/** A tool's structured answer, or a thrown error naming the brain, the tool and why (never the url's query). A capture the
+ *  brain answered as failed is returned, not thrown: load counts it. */
 async function tool(b: Brain, rpc: ReturnType<typeof rpcFor>, name: string, args: Record<string, unknown>, ms = QUICK_MS): Promise<Record<string, any>> {
   let a: Answer;
   try { a = await rpc("tools/call", { name, arguments: args }, ms); } catch (e) { throw new Error(`${b.name}: ${name} got no answer from ${shownUrl(b.mcp)} (${errorKind(e)})`); }
@@ -311,8 +315,8 @@ async function tool(b: Brain, rpc: ReturnType<typeof rpcFor>, name: string, args
   return { ...(a.msg?.result?.structuredContent ?? {}), _ok: o.ok, _error: o.error, _id: o.id };
 }
 
-/** The latency harness's tier rule, in this one's words: its own speak of probe captures. */
-const tierWords = (name: string) => `${name}: this brain's tier is not canary or working: load and clean write to a brain, so they run on no other`;
+/** A tool call as the tier guard and clean read it: its structured answer, or why not. Never throws. */
+export type Call = (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; sc: Record<string, any> }>;
 
 /** A brain's tools as load's guard and clean read them: a structured answer, or why not. Never throws, never a url's query. */
 function callOf(b: Brain, rpc: ReturnType<typeof rpcFor>): Call {
@@ -323,6 +327,9 @@ function callOf(b: Brain, rpc: ReturnType<typeof rpcFor>): Call {
     return { ok: o.ok, error: o.error, sc: a.msg?.result?.structuredContent ?? {} };
   };
 }
+
+/** The latency harness's tier rule, in this one's words: its own speak of probe captures. */
+const tierWords = (name: string) => `${name}: this brain's tier is not canary or working: load and clean write to a brain, so they run on no other`;
 
 /** load's and clean's guard, through `call`: only a brain that says its tier is canary or working is written to — not one
  *  that says another, says none, or cannot be asked. */
@@ -358,10 +365,8 @@ async function load(b: Brain, arm: string, n: number, parallel: number, ids: str
   return degraded + unsaved ? 1 : 0;
 }
 
-/** A tool call as clean reads it: its structured answer, or why not. Never throws. */
-export type Call = (name: string, args: Record<string, unknown>) => Promise<{ ok: boolean; error?: string; sc: Record<string, any> }>;
-
-/** What clean did: notes deleted, how many of those a search by content found, ids the brain does not hold (gone already, or never an id of its), listed notes of another arm left alone, and what is left, with why. */
+/** What clean did: notes deleted, how many of those a search by content found, ids the brain does not hold (gone already,
+ *  or never an id of its), listed notes of another arm left alone, and what is left, with why. */
 export type Cleaned = { deleted: number; absent: number; found: number; otherArm: number; left: Map<string, string> };
 
 /**
@@ -458,7 +463,8 @@ async function clean(b: Brain, ids: string, arm: string | undefined): Promise<nu
   return code;
 }
 
-/** What a sample keeps of brain_info: each heartbeat's state and model tallies, the coordinator's relay mark. */
+/** What a sample keeps of brain_info: the tier, the commit, the provider's state, each heartbeat's state and model tallies,
+ *  and the coordinator's relay mark, children and stamp time. */
 export function keptOf(info: Record<string, any>): Record<string, unknown> {
   const w = info?.database?.workers ?? {};
   return {
@@ -530,12 +536,14 @@ async function sample(brains: Brain[], arm: string, minutes: number, everyS: num
   return sampleExit(stop, silent.length);
 }
 
-/** Whether a sample has nothing to read: no brain and no model server. A model server alone is a sample, which summary reads (review pass 6: pass 5 refused it). */
+/** Whether a sample has nothing to read: no brain and no model server. A model server alone is a sample, which summary
+ *  reads (review pass 6: pass 5 refused it). */
 export function nothingToSample(brains: number, ollama: string | undefined): boolean {
   return brains === 0 && !ollama;
 }
 
-/** sample's exit code: 128 + the first signal's number when one cut it short, whatever the brains answered (so `sample && summary` stops there), else 1 when a brain never answered. */
+/** sample's exit code: 128 + the first signal's number when one cut it short, whatever the brains answered
+ *  (so `sample && summary` stops there), else 1 when a brain never answered. */
 export function sampleExit(signal: "SIGINT" | "SIGTERM" | null, silent: number): number {
   return signal === "SIGINT" ? 130 : signal === "SIGTERM" ? 143 : silent ? 1 : 0;
 }
@@ -578,7 +586,8 @@ export function windowOf(stamps: Stamp[]): { s: number; total: Tally; byPass: Re
   return { s: (stamps[stamps.length - 1].at - stamps[0].at) / 1000, total, byPass, restarts };
 }
 
-/** An arm's extraction backlog in sample order: first, last and most, and when it ran dry — the first empty sample after the last that was not, when the last is empty. */
+/** An arm's extraction backlog in sample order: first, last and most, and when it ran dry — the first empty sample after
+ *  the last that was not, when the last is empty. */
 export function backlogLine(sizes: readonly { t: string; n: number }[]): string {
   if (!sizes.length) return "-";
   const lastBusy = sizes.map((x) => x.n > 0).lastIndexOf(true);
@@ -701,10 +710,13 @@ function summary(out: string, splitMin: number, live: readonly string[]): number
   return lines.length ? 0 : 1;
 }
 
-/** The pure parts, and clean against a brain in memory, checked without a brain or a provider: what CI runs (--self-check). */
 /** A floor under the self-check's rows, raised as it grows: fewer means some of it did not run. */
 const ROWS_AT_LEAST = 120;
 
+/** A string shaped like a key, for the rows that put one where a path, a file's text or an id belongs. */
+const KEYISH = "abcdef0123456789abcdef0123456789";
+
+/** The pure parts, and clean against a brain in memory, checked without a brain or a provider: what CI runs (--self-check). */
 export async function selfCheck(): Promise<number> {
   const rows: [string, boolean][] = [];
   const ok = (pass: boolean, what: string) => { rows.push([what, pass]); };
@@ -785,8 +797,9 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
   ok(JSON.stringify(strayFlags("summary", ["out", "arm"])) === '["arm"]' && strayFlags("clean", ["brains", "brain", "ids", "arm"]).length === 0 && JSON.stringify(strayFlags("load", ["brains", "out", "split"])) === '["out","split"]' && !throws(() => strayFlags("constructor", ["out"]), /./) && strayFlags("constructor", ["out"]).length === 0 && strayFlags(undefined, ["out"]).length === 0,
     "a subcommand's stray flags are those it does not read: summary's --arm, none of clean's own, and none for a name that is no subcommand");
 
-  // summary's table (no row reached it), from fourteen rounds of samples built here, two a stamp: a canary whose sleep
-  // works, a brain with one stamp and a failed sample, a brain that never answers, the model server's loaded models.
+  // summary's table (review pass 2: no row reached it), from fourteen rounds of samples built here, two a stamp: a canary
+  // whose sleep works, a brain with one stamp and a failed sample, a brain whose sleep stamps no tallies, a brain that never
+  // answers, the model server's loaded models.
   const T0 = Date.parse("2026-11-16T12:00:00Z");
   const iso = (s: number) => new Date(T0 + s * 1000).toISOString();
   const grown = { calls: [10, 13, 19, 30, 34, 41, 50], s: [10, 60, 200, 420, 500, 640, 800], rows: [0, 150, 150, 90, 40, 0, 0] };
@@ -829,7 +842,6 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
   const wl = waits.find((l) => l.trim().startsWith("canary") && l.includes(" before ")) ?? "";
   ok(cells(wl).slice(0, 8).join(" ") === "canary before 60 0 0 0.00 40 173.0" && wl.endsWith("   consolidate 0/0s (40 waited 173s)") && !wl.includes("extract"), "a pass whose asks waited while none of its calls ended is listed by its waits; a pass with no increase is not");
   ok(summaryLines([{ t: iso(0), arm: "O", brain: "(ollama)", error: "x" }], 1, []).includes("  ollama: never answered in the arm: 1 of 1 samples failed"), "a model server that never answered its loaded models is said");
-  const KEYISH = "abcdef0123456789abcdef0123456789";
   ok(throws(() => brainsOf(`${KEYISH}\n`), /^--brains' file is not JSON$/) && throws(() => brainsOf("[]"), /^--brains' file holds no JSON object of brains$/) && throws(() => brainsOf('"k"'), /holds no JSON object/) && throws(() => brainsOf("null"), /holds no JSON object/) && throws(() => brainsOf("7"), /holds no JSON object/) && Object.keys(brainsOf('{"a":{}}')).join() === "a",
     "a brains file that is not JSON is named by its flag and nothing of it printed (a key file given as --brains); it is a JSON object, no array, string, number or null");
 
@@ -846,10 +858,9 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
     && noSample('{"w": {"mcp": "http://127.0.0.1:1/mcp", "keyFile": "/k"}}\n') && noSample('{"label":"l","kind":"search","ms":5,"ok":true}\n') && noSample("{this is not json\n") && noSample(`${smp}\n${smp.slice(0, 20)}`),
     "sample appends to an empty file or one of samples alone: not to a key file, a brains file on one line, the latency harness's samples, a line that only begins as JSON, or a file whose last sample was cut");
   ok(lineEnd("") === "" && lineEnd(`${smp}\n`) === "" && lineEnd(smp) === "\n", "a file whose last line has no end gets one before the first line appended; an empty file and a whole one get none");
-  const sample1 = `{"t":"${iso(0)}","arm":"X","brain":"b"}`;
-  ok(!throws(() => samplesOf(`${sample1}\n\n${sample1}\n`, "f"), /./) && samplesOf(`${sample1}\n\n${sample1}\n`, "--out's file").length === 2 && throws(() => samplesOf(`{"t":"${iso(0)}","arm":"X"}\n`, "f"), /^f line 1 is no sample$/) && throws(() => samplesOf(`${sample1}\n\n${KEYISH}\n`, "--out's file"), /^--out's file line 3 is not JSON$/) && throws(() => samplesOf(`${sample1}\n12345\n`, "f"), /^f line 2 is no sample$/) && throws(() => samplesOf('"k"\n', "f"), /^f line 1 is no sample$/) && throws(() => samplesOf('{"t":"never","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/) && samplesOf("", "f").length === 0,
+  ok(!throws(() => samplesOf(`${smp}\n\n${smp}\n`, "f"), /./) && samplesOf(`${smp}\n\n${smp}\n`, "--out's file").length === 2 && throws(() => samplesOf(`{"t":"${iso(0)}","arm":"X"}\n`, "f"), /^f line 1 is no sample$/) && throws(() => samplesOf(`${smp}\n\n${KEYISH}\n`, "--out's file"), /^--out's file line 3 is not JSON$/) && throws(() => samplesOf(`${smp}\n12345\n`, "f"), /^f line 2 is no sample$/) && throws(() => samplesOf('"k"\n', "f"), /^f line 1 is no sample$/) && throws(() => samplesOf('{"t":"never","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/) && samplesOf("", "f").length === 0,
     "a samples file's line that is not JSON, or no sample (a time, an arm, a brain), is named by flag and by the file's own line number, its text unsaid");
-  ok(!throws(() => liveOf('{"label":"l","kind":"search","ms":5,"ok":true}\n', "f"), /./) && liveOf('{"label":"l","kind":"search","ms":5,"ok":true}\n', "f").length === 1 &&throws(() => liveOf("12345\n", "--live's file 1"), /^--live's file 1 line 1 is no bench-live\.ts sample$/) && throws(() => liveOf(`${KEYISH}\n`, "f"), /^f line 1 is not JSON$/), "a --live file's lines likewise");
+  ok(!throws(() => liveOf('{"label":"l","kind":"search","ms":5,"ok":true}\n', "f"), /./) && liveOf('{"label":"l","kind":"search","ms":5,"ok":true}\n', "f").length === 1 && throws(() => liveOf("12345\n", "--live's file 1"), /^--live's file 1 line 1 is no bench-live\.ts sample$/) && throws(() => liveOf(`${KEYISH}\n`, "f"), /^f line 1 is not JSON$/), "a --live file's lines likewise");
   ok(cleanLines("x", 2, { deleted: 2, absent: 0, found: 0, otherArm: 0, left: new Map() }, undefined, 3).lines[0] === "x: 2 measure notes deleted, 0 of them found by content; 2 ids listed and 3 lines that are no id, not sent, 0 not on the brain", "clean's line counts the listed lines that were no id, sent nowhere");
   const armA = Array.from({ length: 150 }, (_, i) => notesFor("A", i)).join("\n");
   ok(new Bun.CryptoHasher("sha256").update([armA, notesFor("fixed-2", 4999), notesFor("C3", 199)].join("\n")).digest("hex").slice(0, 16) === "6fc050428bf9eaff" && [...PEOPLE, ...PROJECTS, ...TOOLS, ...ISSUES, ...DECISIONS, ...FOLLOWUPS].every((w) => armA.includes(w)),
@@ -899,11 +910,10 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
   ok(JSON.stringify(keptOf({})) === '{"tier":null,"commit":null,"provider":null,"heartbeats":[],"relay":null,"children":null,"childrenAt":null}', "a brain_info with nothing in it is kept as nothing, not a throw");
   ok(noteKind("smd-3379 measure note (arm A #1). x") === "none" && noteKind("SMD-3379 Measure Note (arm A #1). x") === "none", "a heading in another case is none, not a lookalike to say on every run");
   ok(JSON.stringify(TAKES) === '{"load":["brains","brain","arm","ids","notes","parallel"],"sample":["brains","arm","minutes","every","out","ollama"],"clean":["brains","brain","ids","arm"],"summary":["out","split","live"]}', "each subcommand's flags, whole");
-  const noLine = (f: () => unknown, re: RegExp) => throws(f, re);
-  ok(noLine(() => liveOf('{"label":"l","kind":"search","ok":true}\n', "f"), /^f line 1 is no bench-live\.ts sample$/) && noLine(() => liveOf('{"label":"l","kind":"search","ms":5}\n', "f"), /^f line 1 is no bench-live\.ts sample$/)
-    && noLine(() => samplesOf(`{"t":"${iso(0)}","brain":"b"}\n`, "f"), /^f line 1 is no sample$/) && noLine(() => samplesOf("null\n", "f"), /^f line 1 is no sample$/)
-    && noLine(() => samplesOf('{"t":"5","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/) && noLine(() => samplesOf('{"t":"May 1","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/)
-    && noLine(() => samplesOf(`{"t":"${iso(0)}","arm":"X","brain":"b","heartbeats":"x"}\n`, "f"), /^f line 1 is no sample$/) && noLine(() => samplesOf('{"t":"2026-13-45T99:99","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/),
+  ok(throws(() => liveOf('{"label":"l","kind":"search","ok":true}\n', "f"), /^f line 1 is no bench-live\.ts sample$/) && throws(() => liveOf('{"label":"l","kind":"search","ms":5}\n', "f"), /^f line 1 is no bench-live\.ts sample$/)
+    && throws(() => samplesOf(`{"t":"${iso(0)}","brain":"b"}\n`, "f"), /^f line 1 is no sample$/) && throws(() => samplesOf("null\n", "f"), /^f line 1 is no sample$/)
+    && throws(() => samplesOf('{"t":"5","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/) && throws(() => samplesOf('{"t":"May 1","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/)
+    && throws(() => samplesOf(`{"t":"${iso(0)}","arm":"X","brain":"b","heartbeats":"x"}\n`, "f"), /^f line 1 is no sample$/) && throws(() => samplesOf('{"t":"2026-13-45T99:99","arm":"X","brain":"b"}\n', "f"), /^f line 1 is no sample$/),
     "a live sample wants its milliseconds and its ok; a sample its arm, an ISO time, and heartbeats that are a list");
 
   // Review pass 6's rows.
@@ -937,9 +947,10 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
 const NO_SCOPE = '{"code":-32602,"message":"Tool delete_thought not found"}';
 
 /**
- * A brain of thoughts in memory, answering clean's three tools as the server does (render.ts's NOT_FOUND texts, a keyword
- * search blind to case); `scope` false answers as a key without write scope. `deleteGone` is a thought another caller
- * deletes between its read and its delete; `searchFails` says which search calls fail, by their count from 1.
+ * A brain of thoughts in memory, answering the guard's brain_info and clean's three tools as the server does (render.ts's
+ * NOT_FOUND texts, a keyword search blind to case); `scope` false answers as a key without write scope. `deleteGone` is a
+ * thought another caller deletes between its read and its delete; `searchFails` says which search calls fail, by their
+ * count from 1.
  */
 function fakeBrain(texts: Record<string, string>, scope = true, opts: { deleteLies?: string; deleteGone?: string; deleteGoneAll?: boolean; fetchFails?: string; fetchNoText?: string; searchFails?: (nth: number) => boolean; noTotal?: boolean; tier?: string; noTier?: boolean; infoFails?: boolean } = {}): { call: Call; held: Map<string, string>; deletes: string[]; searched: () => number } {
   const held = new Map(Object.entries(texts));
@@ -974,11 +985,10 @@ function fakeBrain(texts: Record<string, string>, scope = true, opts: { deleteLi
 }
 
 /** clean's rows, against fakeBrain: async, so run after the pure rows. */
-export async function cleanChecks(ok: (pass: boolean, what: string) => void): Promise<void> {
+async function cleanChecks(ok: (pass: boolean, what: string) => void): Promise<void> {
   const notes = (arm: string, n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`${arm}-${i}`, notesFor(arm, i)]));
   const base = { ...notes("A", 3), ...notes("B", 2), q: `A record quoting one: ${notesFor("A", 0)}`, other: "an ordinary thought" };
   const keys = (b: { held: Map<string, string> }) => [...b.held.keys()].sort().join(",");
-  const KEYISH = "abcdef0123456789abcdef0123456789";
   let b = fakeBrain(base);
   let r = await cleanWith(b.call, ["A-0", "A-0", "gone-already"]);
   ok(r.left.size === 0 && keys(b) === "other,q" && r.deleted === 5 && r.found === 4 && r.absent === 1 && b.deletes.length === 5,
@@ -1057,6 +1067,18 @@ export async function cleanChecks(ok: (pass: boolean, what: string) => void): Pr
   b = fakeBrain(notes("D", 5100));
   r = await cleanWith(b.call, []);
   ok(r.left.size === 0 && b.held.size === 0 && r.found === 5100 && r.deleted === 5100, "more than 5,000 notes go in rounds, and the brain clean at the last search is exit 0");
+  let asks = 0;
+  const many: Call = async (name) => name === "search_thoughts_keyword"
+    ? (asks++, { ok: true, sc: { hits: Array.from({ length: 100 }, (_, i) => ({ id: `quote-${i}` })), total: 1_000_000 } })
+    : name === "fetch" ? { ok: true, sc: { text: "a thought quoting a note" } } : { ok: false, error: "unknown tool", sc: {} };
+  r = await cleanWith(many, []);
+  ok(r.left.get("(search)") === "the last search read 5,000 matches and stopped" && r.deleted === 0 && asks === 100, "a last search that stops at 5,000 matches is said: what lies past them was not read, fifty pages a search and no more");
+  const said = (c: Cleaned, n: number, arm?: string) => cleanLines("canary", n, c, arm).lines;
+  ok(said({ deleted: 5, absent: 1, found: 4, otherArm: 2, left: new Map() }, 3, "A").join("|") === "canary: 5 measure notes deleted (arm A), 4 of them found by content; 3 ids listed, 1 not on the brain, 2 another arm's notes and left"
+    && said({ deleted: 2, absent: 0, found: 0, otherArm: 0, left: new Map() }, 2).join("|") === "canary: 2 measure notes deleted, 0 of them found by content; 2 ids listed, 0 not on the brain",
+    "clean's line says what was deleted, how much of it a search found, what the brain did not hold and what was left to another arm, each apart; no arm and no other arm's are not said");
+  ok(said({ deleted: 0, absent: 0, found: 0, otherArm: 0, left: new Map([["id-1", "its delete failed: X"], ["id-2", "its read failed: Y"]]) }, 2)[1] === "  NOT deleted, or not known to be: id-1 (its delete failed: X), id-2 (its read failed: Y)",
+    "and each id left, with why, on a line of its own");
   // Review pass 5's rows.
   b = fakeBrain({ n0: notesFor("A", 0) }, true, { searchFails: (nth) => nth === 1, fetchFails: "n0" });
   r = await cleanWith(b.call, []);
@@ -1089,18 +1111,6 @@ export async function cleanChecks(ok: (pass: boolean, what: string) => void): Pr
   ok(listedOn !== null && listedOn.code === 1 && listedOn.lines[0] === "x: 1 measure notes deleted (arm A), 1 of them found by content; 2 ids listed, 0 not on the brain, 1 another arm's notes and left"
     && listedOn.lines[1] === `  NOT deleted, or not known to be: ${U(1)} (listed, but its text is no measure note's: not deleted)` && keys(b) === `${U(1)},${U(2)}`,
     "clean passes the listed ids on, and counts them: an ordinary thought listed is read back and said, another arm's note left and counted, the arm's own found and deleted");
-  let asks = 0;
-  const many: Call = async (name) => name === "search_thoughts_keyword"
-    ? (asks++, { ok: true, sc: { hits: Array.from({ length: 100 }, (_, i) => ({ id: `quote-${i}` })), total: 1_000_000 } })
-    : name === "fetch" ? { ok: true, sc: { text: "a thought quoting a note" } } : { ok: false, error: "unknown tool", sc: {} };
-  r = await cleanWith(many, []);
-  ok(r.left.get("(search)") === "the last search read 5,000 matches and stopped" && r.deleted === 0 && asks === 100, "a last search that stops at 5,000 matches is said: what lies past them was not read, fifty pages a search and no more");
-  const said = (c: Cleaned, n: number, arm?: string) => cleanLines("canary", n, c, arm).lines;
-  ok(said({ deleted: 5, absent: 1, found: 4, otherArm: 2, left: new Map() }, 3, "A").join("|") === "canary: 5 measure notes deleted (arm A), 4 of them found by content; 3 ids listed, 1 not on the brain, 2 another arm's notes and left"
-    && said({ deleted: 2, absent: 0, found: 0, otherArm: 0, left: new Map() }, 2).join("|") === "canary: 2 measure notes deleted, 0 of them found by content; 2 ids listed, 0 not on the brain",
-    "clean's line says what was deleted, how much of it a search found, what the brain did not hold and what was left to another arm, each apart; no arm and no other arm's are not said");
-  ok(said({ deleted: 0, absent: 0, found: 0, otherArm: 0, left: new Map([["id-1", "its delete failed: X"], ["id-2", "its read failed: Y"]]) }, 2)[1] === "  NOT deleted, or not known to be: id-1 (its delete failed: X), id-2 (its read failed: Y)",
-    "and each id left, with why, on a line of its own");
 }
 
 /** Each subcommand's flags; any other given is refused, not ignored (review pass 1: summary --arm looked like a filter). */
@@ -1111,7 +1121,8 @@ export const TAKES: Record<string, readonly string[]> = {
   summary: ["out", "split", "live"],
 };
 
-/** The flags given that the subcommand does not read. None for a name that is no subcommand, which main refuses: its own names alone, so `constructor` is none (Object.prototype's is a function, not a list). */
+/** The flags given that the subcommand does not read. None for a name that is no subcommand, which main refuses: its own
+ *  names alone, so `constructor` is none (Object.prototype's is a function, not a list). */
 export function strayFlags(cmd: string | undefined, given: readonly string[]): string[] {
   return cmd !== undefined && Object.hasOwn(TAKES, cmd) ? given.filter((f) => !TAKES[cmd].includes(f)) : [];
 }
@@ -1150,7 +1161,7 @@ async function main(): Promise<number> {
       return load(one(cli.value("brain")!), arm!, cli.int("notes", { absent: 150, min: 1, max: 5000 }), cli.int("parallel", { absent: 2, min: 1, max: 8 }), cli.value("ids")!);
     case "sample":
       need("brains", "arm", "out");
-      if (nothingToSample(Object.keys(brainsOf(textOf(() => readFileSync(cli.value("brains")!, "utf8"), BRAINS))).length, cli.value("ollama"))) { console.error("bench-brains.ts sample: --brains' file names no brain, and no --ollama names a model server: nothing to sample"); return 2; }
+      if (nothingToSample(Object.keys(entriesFrom(cli.value("brains")!)).length, cli.value("ollama"))) { console.error("bench-brains.ts sample: --brains' file names no brain, and no --ollama names a model server: nothing to sample"); return 2; }
       return sample(brainsFrom(cli.value("brains")!), arm!, cli.int("minutes", { absent: 20, min: 1, max: 600 }), cli.int("every", { absent: 15, min: 5, max: 600 }), cli.value("out")!, cli.value("ollama"));
     case "clean":
       need("brains", "brain", "ids");

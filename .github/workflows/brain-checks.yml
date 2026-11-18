@@ -926,12 +926,13 @@ jobs:
       # the server's own capture replies built by renderCapture (saved without
       # a vector, tagging that failed or was refused, a re-capture), the probe
       # match its cleanup deletes by (never a thought that quotes a probe), the
-      # call schedule, the tier guard and a key file's reading. The two-brain
-      # harness's beside it (SMD-3379 PR 3b-3b): its notes, its brains file,
-      # what a sample keeps, the windows' arithmetic, the summary's table, each
-      # subcommand's flags and clean against a brain in memory. Their flags are
-      # cli.ts's, held by the flag scanner's suite. No network, no database, no
-      # provider: main's cleanup, deadlines and signals are not run here.
+      # call schedule, the tier guard, a key file's reading and what a refusal
+      # says of a file. The two-brain harness's beside it (SMD-3379 PR 3b-3b):
+      # its notes, its brains file, what a sample keeps, the windows'
+      # arithmetic, the summary's table, each subcommand's flags and clean
+      # against a brain in memory. Their flags are cli.ts's, held by the flag
+      # scanner's suite. No network, no database, no provider: main's cleanup,
+      # deadlines and signals are not run here.
       - name: Latency harness rules
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
