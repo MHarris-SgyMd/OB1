@@ -1,16 +1,18 @@
 #!/bin/bash
 # One headless Claude Code session against a running probe, then the probe's log of it:
 #
-#   ./run-claude-code.sh <mcp|legacy|session> <toggle|toggle-quiet|expire|drop> [seconds to wait, default 8]
+#   ./run-claude-code.sh <mcp|legacy|session> <toggle|toggle-quiet|expire|drop|down/N|refuse/N|busy/N|fault/N|cut/N> [seconds to wait, default 8]
 #
 # The session calls a tool, calls the control step itself, waits, says whether probe_extra is available and calls it.
 # It is connected throughout, so the log shows what the step made the client do. Read the result from the log, not
-# from the model's report. The session runs from this directory with project settings only, so no user hook or
+# from the model's report. A headless session refuses a long sleep in the foreground (110 s was not run; 50 s the model ran in the
+# background, and waited): for a longer
+# wait use run-claude-code-turns.sh, which waits outside the session. The session runs from this directory with project settings only, so no user hook or
 # user MCP server joins it; it spends tokens on the account `claude` is signed in to.
 set -u
 cd "$(dirname "$0")" || exit 1
 path=${1:?path: mcp, legacy or session}
-step=${2:?step: toggle, toggle-quiet, expire or drop}
+step=${2:?step: toggle, toggle-quiet, expire, drop, or down/N, refuse/N, busy/N, fault/N, cut/N for N seconds}
 wait=${3:-8}
 base=${BASE:-http://127.0.0.1:8765}
 log=${LOG:-probe.jsonl}
