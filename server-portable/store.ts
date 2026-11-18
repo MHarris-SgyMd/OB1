@@ -1678,6 +1678,11 @@ export function normaliseReleaseHolder(r: unknown): ReleaseHolderResult {
  */
 export type FindingPosition = { grp: 0 | 1; sk: string; id: string };
 /**
+ * A finding's item as 142 wrote it: one of PRIORITY_KINDS and its key, or (`itemUnread`) a kind this server does not
+ * read, kept as written. 142 holds item_kind to no list.
+ */
+export type FindingItem = { kind: PriorityKind | (string & {}); key: string };
+/**
  * A statement a priority finding is about (migration 142, SMD-3671), from its evidence: a stale or settled finding's
  * `statements`, or a disagreement's operator and source (`role`). An overdue finding's evidence names a due time, not
  * statements, so it lists none. A field the evidence lacks is null.
@@ -1692,11 +1697,6 @@ export type FindingStatement = { id: string; level: number | null; maker: string
  * server does not read), and until when the decision holds the same finding
  * back.
  */
-/**
- * A finding's item as 142 wrote it: one of PRIORITY_KINDS and its key, or (`itemUnread`) a kind this server does not
- * read, kept as written. 142 holds item_kind to no list.
- */
-export type FindingItem = { kind: PriorityKind | (string & {}); key: string };
 export type PriorityFinding = {
   /** One of FINDING_KINDS, or a kind a brain migrated ahead of this server wrote (`kindUnread`), kept as written. */
   id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: FindingItem; itemUnread?: true;

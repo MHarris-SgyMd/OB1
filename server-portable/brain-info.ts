@@ -1331,13 +1331,13 @@ export function proposalsValue(row: { pending?: unknown; stale?: unknown; oldest
   return { pending, stale: countOf("proposals", row.stale), oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)), boardPairs: null };
 }
 
+/** `byKind.other`: pending findings of kinds this server does not know (a brain migrated ahead), so the counts sum to `pending`. */
+export type PriorityFindingsFact = { pending: number; oldestPendingS: number | null; byKind: Record<FindingKind, number> & { other: number }; decided30d: number };
 /**
  * The priority review's findings as the record carries them (SMD-3671 PR 2): counts, the pending by kind, and a whole
  * number of seconds for the oldest pending one (found_at defaults to the scan's now, which a clock moved back can leave
  * ahead of the read's: held at 0).
  */
-/** `byKind.other`: pending findings of kinds this server does not know (a brain migrated ahead), so the counts sum to `pending`. */
-export type PriorityFindingsFact = { pending: number; oldestPendingS: number | null; byKind: Record<FindingKind, number> & { other: number }; decided30d: number };
 export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unknown; by_kind?: unknown; decided_30d?: unknown } | undefined): PriorityFindingsFact {
   if (!row) throw new Error("the priority findings read answered no row");
   const pending = countOf("priority findings", row.pending);
@@ -1358,7 +1358,7 @@ export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unkno
 /**
  * A preflight row for a fact its read did not get (`unread`): a warning with the remedy for its reason — the grant the
  * read needs when refused, the search path when its table is out of the role's sight, a wait when a lock or the cap
- * stopped it, else the tables it reads. One shape for the rows read off these facts (threadsRow, priorityFindingsRow).
+ * stopped it or the whole read's deadline came first, else the tables it reads. One shape for the rows read off these facts (threadsRow, priorityFindingsRow).
  */
 export function unreadRow(u: Unread, fixes: { refused: string; timeout: string; reads: string }): { status: "warn"; detail: string; fix: string } {
   return {
@@ -1366,6 +1366,7 @@ export function unreadRow(u: Unread, fixes: { refused: string; timeout: string; 
     fix: u.reason === "refused" ? fixes.refused
       : u.reason === "invisible" ? "Put that schema on the server role's search_path (ALTER ROLE … SET search_path), or GRANT USAGE on it."
       : u.reason === "timeout" ? fixes.timeout
+      : u.reason === "deadline" ? "The whole read's time ran out before this read was reached: run again once the slower reads before it have finished."
       : `The check reads ${fixes.reads}; the message says why it failed.`,
   };
 }

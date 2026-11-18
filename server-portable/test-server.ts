@@ -8340,7 +8340,8 @@ console.log("\n[36g] The priority review's findings in the core and the words (S
   // The fault: a brain before 142, or a role without the grant, named.
   assert(/migration 142 \(db\/migrations\/142_priority_findings\.sql\) is not applied$/.test(say.findingsHint('relation "priority_findings" does not exist'))
       && /migration 142/.test(say.findingsHint("function review_priority_finding(uuid, text, integer, timestamp with time zone, boolean, text, jsonb) does not exist"))
-      && /the priority group's grants on priority_findings/.test(say.findingsHint("permission denied for table priority_findings")) && say.findingsHint("connection refused") === "",
+      && /the priority group's grants on priority_findings/.test(say.findingsHint("permission denied for table priority_findings")) && say.findingsHint("connection refused") === ""
+      && say.findingsHint('column f.outcome does not exist') === "" && say.findingsHint('column "evidence" of relation "priority_findings" does not exist') === "",
     `the findings' hint names a brain before 142 and a role without the grant (${say.findingsHint('relation "priority_findings" does not exist')})`);
 
   // brain_info: the row for each state, and the read's value.
@@ -8367,6 +8368,12 @@ console.log("\n[36g] The priority review's findings in the core and the words (S
   assert(ahead !== null && JSON.stringify(ahead.byKind) === JSON.stringify({ stale: 1, overdue: 0, disagree: 0, settled: 0, other: 2 })
       && aheadLine.startsWith("3 pending (1 stale, 2 of kinds this server does not know), the oldest found"),
     `a pending kind this server does not know: counted as other, the kinds summing to the pending, and said (${JSON.stringify(ahead?.byKind)} | ${aheadLine.slice(0, 90)})`);
+  // A read the whole read's deadline came before is told to run again, on both rows unreadRow serves.
+  const { threadsRow } = await import("./brain-info.ts");
+  const late = { reason: "deadline", message: "not read before the deadline" } as never;
+  const lateRows = [priorityFindingsRow(null, late), threadsRow(null, late)];
+  assert(lateRows.every((r) => r.status === "warn" && r.fix === "The whole read's time ran out before this read was reached: run again once the slower reads before it have finished."),
+    `a read the deadline came before: warned with its own remedy, on the findings row and the threads row (${lateRows.map((r) => r.fix).join(" | ")})`);
   // Preflight's row and brain_info's are one wording (priorityFindingsRow): each state, and an age not known.
   const rows = [
     priorityFindingsRow(null, undefined),

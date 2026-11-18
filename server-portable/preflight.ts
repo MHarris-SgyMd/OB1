@@ -239,9 +239,9 @@ const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
  * said in a clause of its own, so a qualifier of the others (on an open item) is never read as its (SMD-4193 PR 2
  * review pass 2). 133's thought_sources is read by every priority call on a thought or a ticket, which asks which
  * ticket's row a thought is (a ticket and its own rows are one item, SMD-4127), and by the agenda since 122: a clause of
- * its own too. 142's priority_findings is written by the priority review's scan and by an operator's decision on a
- * finding (SMD-3671), and read by list_priority_findings, brain_info and preflight's own priority findings row (PR 2): a
- * clause of its own, no board lost for it.
+ * its own too. 142's priority_findings is written by the priority review's scan (INSERT, UPDATE, DELETE) and by an
+ * operator's decision on a finding (UPDATE) (SMD-3671), and read by list_priority_findings, brain_info and preflight's
+ * own priority findings row (PR 2): a clause of its own naming what the missing privilege fails, no board lost for it.
  */
 function priorityUngrantedWords(ungranted: readonly string[]): string {
   const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
@@ -267,9 +267,13 @@ function priorityUngrantedWords(ungranted: readonly string[]): string {
       : "set_priority_weights fails naming priority_weight_settings (migration 132)");
   }
   if (findings.length) {
+    // By the privilege missing: SELECT every reader's and the writers'; UPDATE the scan's and the decision's (which
+    // selects FOR UPDATE and updates); INSERT and DELETE the scan's alone (new findings, moot ones pruned).
     clauses.push(findings.includes("priority_findings SELECT")
       ? "the priority review's scan (ob1_priority_review), list_priority_findings and review_priority_finding fail naming priority_findings (migration 142), and brain_info and the priority findings row say it was not read"
-      : "the priority review's scan (ob1_priority_review) and review_priority_finding fail naming priority_findings (migration 142)");
+      : findings.includes("priority_findings UPDATE")
+      ? "the priority review's scan (ob1_priority_review) and review_priority_finding fail naming priority_findings (migration 142)"
+      : "the priority review's scan (ob1_priority_review) fails naming priority_findings (migration 142)");
   }
   const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT") || sources.length > 0;
   return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;

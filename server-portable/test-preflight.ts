@@ -3434,6 +3434,15 @@ else {
       const priorityRowNoFindings = noFindings.out.split("\n").find((l) => /!  priority\s/.test(l)) ?? "";
       assert(/priority_findings SELECT[^:]*: .*the priority review's scan \(ob1_priority_review\), list_priority_findings and review_priority_finding fail naming priority_findings \(migration 142\), and brain_info and the priority findings row say it was not read/.test(priorityRowNoFindings),
         `…and the priority row says without SELECT on priority_findings the list fails too, and brain_info and the findings row say it was not read (${priorityRowNoFindings.trim().slice(-260)})`);
+      // With SELECT and UPDATE held, INSERT and DELETE are the scan's alone (new findings, moot ones pruned): the decision,
+      // which selects FOR UPDATE and updates, is not named.
+      await claims.unsafe("GRANT UPDATE ON priority_findings TO ob1_pf_capture");
+      const scanOnly = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("REVOKE UPDATE ON priority_findings FROM ob1_pf_capture");
+      const priorityRowScanOnly = scanOnly.out.split("\n").find((l) => /!  priority\s/.test(l)) ?? "";
+      assert(/priority_findings INSERT, priority_findings DELETE: .*the priority review's scan \(ob1_priority_review\) fails naming priority_findings \(migration 142\)/.test(priorityRowScanOnly)
+             && !/review_priority_finding/.test(priorityRowScanOnly),
+        `…and without INSERT and DELETE alone the priority row names the scan, not the decision (${priorityRowScanOnly.trim().slice(-200)})`);
       const threadsRowOut = row(noFacets.out, "threads");
       assert(/^\s*!\s+threads\s+could not verify: permission denied for table thought_facets/.test(threadsRowOut) && /--grant <role> --groups capture,server/.test(noFacets.out),
         `…and without SELECT on thought_facets the threads row warns with the grant, not a skip (${threadsRowOut.trim().slice(0, 160)})`);

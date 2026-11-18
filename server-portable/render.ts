@@ -2673,7 +2673,8 @@ export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingR
 
 /** The findings' fault: a database before 142 holds neither the table nor the function, or the server's role lacks the grant. */
 export const findingsHint = (msg: string): string =>
-  /priority_findings|review_priority_finding/.test(msg) && /does not exist|could not find/i.test(msg)
+  // The table or the decision's function missing is a brain before 142; a missing column is a drifted brain, not that.
+  /(?<!of )relation "(?:public\.)?priority_findings" does not exist|function (?:public\.)?review_priority_finding\([^)]*\) does not exist/i.test(msg)
     ? " — migration 142 (db/migrations/142_priority_findings.sql) is not applied"
     : /permission denied for (?:table priority_findings|function review_priority_finding)/i.test(msg)
     ? " — the server's role needs the priority group's grants on priority_findings (migration 142; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"

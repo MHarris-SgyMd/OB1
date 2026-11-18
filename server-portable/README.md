@@ -1416,8 +1416,10 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   more follow (null at the end), is the last listed row's place, made under the status
   and kind asked: one passed with others is refused `REFUSED_CURSOR` (400), `made`
   naming the status and kind it was made under. A place, not
-  an offset, so a finding decided between pages, which leaves the pending listing,
-  skips none not yet shown. The pending come oldest found first; the rest most
+  an offset, so none is skipped: a finding decided between pages leaves the pending
+  listing without moving the next page's start. Under `all`, or a status a decision
+  moves findings into, one decided or mooted between pages can come back on a later
+  page with its new status. The pending come oldest found first; the rest most
   recently decided or mooted first, ties by id. Each finding is `{id, kind, item: {kind, key}, status, statements,
   evidence, windowDays, foundAt, refreshedAt, mootAt, decidedAt, decidedBy, note,
   outcome, suppressedUntil}`: `statements` are read out of the evidence (a stale or
