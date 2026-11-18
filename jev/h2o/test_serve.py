@@ -28,8 +28,9 @@ jev/h2o/test_serve.py`); the real model's burst is the PR's own run against the 
   [17] under two-way, a record over the model's limit and a prompt over the setting's are each refused in their own
       words; a failure while a prompt is counted is a 500, not the pair's 422; a lone surrogate in a record, a question
       or an option is the pair's 422 in both modes
+  [18] conformance.py's two-way arm, without the model: which of H2O's result rows it compares, and its bar
 """
-import asyncio, importlib.util, json, math, os, sys, threading, time
+import asyncio, gzip, importlib.util, json, math, os, sys, tempfile, threading, time
 from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("h2o_serve", Path(__file__).with_name("serve.py"))
@@ -647,6 +648,40 @@ async def main():
         failures.append(s == 500 and "the model failed" in b["error"] and type(error).__name__ in b["error"])
     check(all(failures) and R.reads == 0 and gate.admitted == 0 and gate.bytes == 0,
           f"any failure while an encodable prompt is counted is the tier's 500, which a caller retries, never a 422 against the pair ({failures})")
+
+    print("\n[18] conformance.py's two-way arm: the rows it compares, and its bar")
+    cspec = importlib.util.spec_from_file_location("h2o_conformance", Path(__file__).with_name("conformance.py"))
+    conformance = importlib.util.module_from_spec(cspec)
+    cspec.loader.exec_module(conformance)
+    def result_row(questions, answers, state="a record", status="ok", mode="bidirectional"):
+        return {"status": status, "payload": {"state": state, "questions": questions}, "response": {"attention_mode": mode, "answers": answers}}
+    choice = {"type": "choice", "instructions": "Which?", "criteria": {"a": "the first", "b": "the second"}}
+    yes_no = {"type": "noul", "instructions": "Does it hold?", "criteria": {"true": "yes", "false": "no"}}
+    rows = [
+        result_row({"q": choice}, {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}),                                    # 0: compared
+        result_row({"y": yes_no, "q": choice}, {"y": {"noul": True}, "q": {"probabilities": {"b": 0.3, "a": 0.7}}},
+                   state={"ticket": "t", "plan": "p"}),                                                               # 1: its choice question, after a yes/no
+        result_row({"y": yes_no}, {"y": {"noul": True, "probabilities": {"true": 0.801, "false": 0.199}}}),           # 2: a yes/no alone, floored: never compared, though it gives a probability per option
+        result_row({"q": choice}, {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}, mode="causal"),                     # 3: read one-way
+        result_row({"q": choice}, {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}, status="error"),                    # 4: not answered
+        result_row({"q": choice}, {"q": {"probabilities": {"a": 1.0}}}),                                              # 5: an answer short an option
+        result_row({"q": {**choice, "criteria": ["a", "b"]}}, {"q": {"probabilities": {"a": 0.9, "b": 0.1}}}),        # 6: criteria not by name
+        {"status": "ok", "payload": {"state": "s", "questions": {"q": choice}}, "response": None},                    # 7: no response
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "results.jsonl.gz")
+        with gzip.open(path, "wt", encoding="utf-8") as f:
+            for r in rows: f.write(json.dumps(r) + "\n")
+        cands, skipped = conformance.two_way_candidates(path)
+    check([c[0] for c in cands] == [0, 1] and [c[3] for c in cands] == ["q", "q"] and skipped == {"no choice question": 3, "not answered": 2, "one-way row": 1},
+          f"of eight rows, the two with a two-way choice answer per option are compared; the others are counted by why not ({[c[0] for c in cands]}, {skipped})")
+    check(cands[1][2] == '{"ticket":"t","plan":"p"}' and cands[1][1] == len(cands[1][2]) and cands[0][2] == "a record",
+          "a structured record is rendered as the shim renders it, compact, and a string as it is")
+    bar = [conformance.passes(100, 98, 0.01), conformance.passes(100, 97, 0.001), conformance.passes(100, 100, 0.0101), conformance.passes(0, 0, 0.0)]
+    check(bar == [True, False, False, False], f"the bar: 98 of 100 at a median gap of 0.01 passes; 97, or a median over 0.01, or no question read, fails ({bar})")
+    check([n for n, _, _ in conformance.TWO_WAY_STRATA][-2:] == list(conformance.TWO_WAY_LONG) and conformance.TWO_WAY_STRATA[-1][2] == serve.DEFAULT_TWO_WAY_MAX_TOKENS
+          and all(a[2] == b[1] for a, b in zip(conformance.TWO_WAY_STRATA, conformance.TWO_WAY_STRATA[1:])) and conformance.TWO_WAY_STRATA[0][1] == 0,
+          "the strata run from 0 to the adapter's two-way limit with no hole, and the two that must pass alone are the last two")
 
 asyncio.run(main())
 print(f"\n{passed + failed} assertions: {passed} passed, {failed} failed")

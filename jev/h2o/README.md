@@ -197,8 +197,10 @@ H2O_REVISION=v1.4.2 H2O_ATTENTION=two-way JEV_PORT=8023 \
   always was, and `72fa9c992f907dc0` two-way, so a judgement's lineage says how
   it was read.
 
-Whether two-way judges this brain's pairs better than `v1.2.3` read one-way is
-not measured yet, so the pin and decide mode's settings stay as they are.
+That this read is H2O's two-way read at the length of our pairs is held by
+`conformance.py --two-way` (under "Conformance"). Whether two-way judges this
+brain's pairs better than `v1.2.3` read one-way is not measured yet, so the pin
+and decide mode's settings stay as they are.
 
 ## How the contract maps onto H2O's questions
 
@@ -249,6 +251,39 @@ at 98% of top answers agreeing and a median gap of at most 0.01. The routing set
 is on the model's repository: Plumb (Apache-2.0) and Eikos (CC-BY-4.0)
 questions, with sources in its `ATTRIBUTION.md`. Fetch it into a directory of its
 own; it is only read.
+
+**The two-way read has a reference of its own** (SMD-4369). H2O publishes its
+per-row results on the Decision Index 0.3 public suite, the dataset
+`h2oai/h2o-lightning-4b-decision-index`: each request as sent and the
+probabilities answered, read two-way on vLLM at v1.4.1, whose weights v1.4.2
+keeps. `--two-way` draws choice questions from it by seed in four strata of
+prompt length, reads each two-way, and compares the probabilities at the
+shipped temperature. The start-up guard holds the read on three probes of
+about a hundred tokens; this holds it at the length of the pairs decide mode
+sends.
+
+```bash
+H2O_REVISION=v1.4.2 <venv>/bin/python -I jev/h2o/conformance.py \
+  --two-way runs/h2o-lightning-4b/results.jsonl.gz
+```
+
+On 240 questions (2026-11-18, v1.4.2, float16 with decider's kernels), top
+answers agree on all 240:
+
+| Prompt tokens | Questions | Gap: median | 99th percentile | A read |
+|---|---|---|---|---|
+| under 500 | 60 | 0.0006 | 0.0155 | 0.21 s |
+| 500 to 2,000 | 60 | 0.0009 | 0.0085 | 0.74 s |
+| 2,000 to 4,300 | 60 | 0.0029 | 0.0130 | 1.69 s |
+| 4,300 to 8,000 | 60 | 0.0003 | 0.0506 | 4.87 s |
+| all | 240 | 0.0011 | 0.0146 | |
+
+It passes at the same bar, over the whole sample and in each of the two long
+strata on its own. Yes/no questions are left out: that run applied the shim's
+yes/no floor (0.801), which this port never applies. A prompt over the
+two-way limit is counted and not read. The file is 115 MB of public benchmark
+rows under each benchmark's own licence (the dataset's `LICENSE.md`); fetch it
+into a directory of its own, and it is only read.
 
 ## SMD-3058: in front of the consolidation judge
 
