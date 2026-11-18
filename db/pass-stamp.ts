@@ -173,8 +173,13 @@ export interface PassStamper {
    * work while the judge waits, SMD-3008) and stamps it on the sleep's row,
    * or a follower's own, which writes `waitingMidPass` with its own name on
    * its row — so preflight says the provider, not "running a pass" (SMD-2905).
+   * With the word that it waits, `byThought`: whether the outage is a
+   * thought's doing (worker-bootstrap.ts's ProviderOutage), which the
+   * scheduler's per-pass stamper reads for re-embed — such a wait is left
+   * running, up to a bound, rather than set down (SMD-4254). A follower's own
+   * stamper, and the subject sweep's word, leave it out.
    */
-  providerWait?(on: boolean): Promise<void>;
+  providerWait?(on: boolean, byThought?: boolean): Promise<void>;
   /**
    * The thoughts extraction holds back across the scheduler's wakes (`held`
    * in the value, left out while none is), carried by the row's next write —

@@ -2326,7 +2326,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   blamed = outage.blame(b.thought_id, why, p?.state === "up");
                   if (blamed === "answered") return "answered";
                   if (blamed === "alone") {
-                    outage.begin(why);
+                    // No suspect made, but the thought's doing: the sleep scheduler waits it out as one (SMD-4254).
+                    outage.begin(why, undefined, true);
                     drainEnds.abort();
                     outageSubject ??= rowSubject;
                     return "alone";

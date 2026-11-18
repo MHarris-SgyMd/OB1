@@ -371,8 +371,8 @@ export async function thoughtFault(o: FaultHost, t: FaultThought, e: unknown): P
       return { then: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`, stopAfter: false };
     }
     // Its own, and the provider not answering all the same: the outage begins, no suspect made, and
-    // this worker stops after recording it.
-    outage.begin(msg);
+    // this worker stops after recording it. A thought's doing all the same (ProviderOutage's byThought, SMD-4254).
+    outage.begin(msg, undefined, true);
     o.count.providerStop();
     o.halt().abort();
     return { then: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`, stopAfter: true };

@@ -818,6 +818,8 @@ export class ProviderOutage {
    * clears them, so an earlier one's are no longer "right after" — but not one that begins while isolating.
    */
   private suspects = new Map<string, number>();
+  /** Whether the outage in progress is a thought's doing, as far as the follower can tell (`byThought`, SMD-4254). */
+  private ofThought = false;
 
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */
   constructor(
@@ -838,9 +840,11 @@ export class ProviderOutage {
 
   /**
    * Begin, or join, an outage over `thoughtId`'s error — "outage" — or say it is the thought's: "thought". Isolated,
-   * never "thought": a suspect alone is blamed through `blames` and `blame`, before any begin.
+   * never "thought": a suspect alone is blamed through `blames` and `blame`, before any begin. `blamed`: the outage
+   * that a suspect blamed alone at its ALONE_OUTAGES-th outage leaves — no suspect made, the thought recorded its own,
+   * a thought's doing all the same (`byThought`, SMD-4254).
    */
-  begin(reason: string, thoughtId?: string): "outage" | "thought" {
+  begin(reason: string, thoughtId?: string, blamed = false): "outage" | "thought" {
     if (!this.isolate && thoughtId !== undefined && this.reason === null && this.suspects.has(thoughtId) && this.now() - this.endedAt <= this.window()) {
       this.suspects.delete(thoughtId);
       return "thought";
@@ -849,9 +853,24 @@ export class ProviderOutage {
       // A pass isolating the last outage's suspects keeps those not yet retried (SMD-2641).
       if (!this.isolating()) this.suspects.clear();
       this.reason = reason;
+      this.ofThought = false;
     }
     if (thoughtId !== undefined && !this.suspects.has(thoughtId)) this.suspects.set(thoughtId, 0);
+    if (thoughtId !== undefined || blamed) this.ofThought = true;
     return "outage";
+  }
+
+  /**
+   * Whether the outage in progress is a thought's doing, as far as the follower can tell (SMD-4254): begun or joined
+   * over an error that made the thought in hand a suspect, a suspect's outage alone (`blame`), or the one a suspect
+   * blamed alone at its last leaves (`begin`'s `blamed`). Not backpressure alone — a 429, a 503, the model not served
+   * — which makes no suspect, nor an outage that met none of the last one's suspects still kept for isolation.
+   * waitOutProvider says it with the wait (providerWait): the sleep scheduler leaves re-embed waiting out such an
+   * outage, up to a bound, so its suspects are retried one at a time once the provider answers; any other outage sets
+   * re-embed down for the period.
+   */
+  get byThought(): boolean {
+    return this.reason !== null && this.ofThought;
   }
 
   /**
@@ -890,6 +909,7 @@ export class ProviderOutage {
     this.suspects.set(thoughtId, alone);
     if (alone >= ALONE_OUTAGES) return "alone";
     this.reason = reason;
+    this.ofThought = true;
     return "outage";
   }
 
@@ -1139,7 +1159,8 @@ const CARRIED_NOTE_PAUSED = " (back within a minute and a poll of its last answe
 /**
  * A follower's wait for its provider after a pass a worker halted on the provider's outage (SMD-2599; one copy for
  * extract, consolidate and re-embed, SMD-2636 PR 2, on re-embed's rules, SMD-2679 PR 4a-2b): said, and stamped on the
- * caller's row through `stamper.providerWait` while it lasts (SMD-2905), and probed on outageWait's schedule until a
+ * caller's row through `stamper.providerWait` while it lasts (SMD-2905) — with whether the outage is a thought's doing
+ * (`byThought`), which the sleep scheduler reads for re-embed (SMD-4254) — and probed on outageWait's schedule until a
  * probe settles — anything but out or missing.
  * - **The schedule carries** (ProviderOutage.resumeFrom): a wait beginning within a minute and a poll of the last
  *   one's answer — and the pauses, for a follower that spends them before an outage begins (`pausesBefore`: extract's,
@@ -1173,7 +1194,8 @@ export async function waitOutProvider(o: {
   pausesBefore?: boolean;
   wake: AbortSignal;
   writer: FollowerWriter;
-  stamper?: { providerWait?: (on: boolean) => Promise<void> | void } | null;
+  /** Its providerWait hears, as the wait begins, whether the outage is a thought's doing (ProviderOutage's byThought, SMD-4254): the sleep scheduler's per-pass stamper reads it. */
+  stamper?: { providerWait?: (on: boolean, byThought?: boolean) => Promise<void> | void } | null;
   /** db/lease.ts's sleepUnless; the suite's own, to run the schedule without the wall clock. */
   sleep?: (ms: number, wake: AbortSignal) => Promise<void>;
 }): Promise<"answered" | { refused: string; tier?: true } | null> {
@@ -1184,7 +1206,7 @@ export async function waitOutProvider(o: {
     ? `every ${OUTAGE_MS.max / 60_000} min`
     : `after ${outageWait(from) / 1000} s and then twice as long each time, up to ${OUTAGE_MS.max / 60_000} min`;
   o.writer.err(`  ${o.who} is not answering (${(o.outage.reason ?? "").slice(0, 200)}) — unfinished thoughts are back in the pool, recorded nothing; the follower calls ${o.calls} ${schedule}${from > 0 ? (o.pausesBefore ? CARRIED_NOTE_PAUSED : CARRIED_NOTE) : ""}`);
-  await o.stamper?.providerWait?.(true);
+  await o.stamper?.providerWait?.(true, o.outage.byThought);
   try {
     let step = from;
     const answered = await probeUntil(() => { step++; return o.probe(o.wake); }, o.wake, (p) => !isOut(p), o.sleep, from);

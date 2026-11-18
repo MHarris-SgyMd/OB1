@@ -390,10 +390,14 @@ const providerRows = (passes: readonly string[]) =>
 /**
  * What mends the cause that set the sleep scheduler's re-embed down for a
  * period (heartbeat:sleep's `aside`, SMD-2679 PR 4b): a refusal's remedy as a
- * re-embed follower's, and the scheduler's own words for the rest.
+ * re-embed follower's, and the scheduler's own words for the rest. An
+ * outage's names a thought that crashes the provider as a cause of one that
+ * comes back every period, and how to find it (SMD-4254): the scheduler waits
+ * out such a thought's outage up to two minutes, so one that keeps the
+ * provider down longer still sets re-embed down at each period's first claim.
  */
 const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = false): string =>
-  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it)"
+  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it) — or, if it comes back every period, a thought whose embedding crashes the provider and keeps it down past the two minutes the scheduler waits on such an outage, which its log names at each period's start: the same thought id \"goes back to the pool unrecorded\""
   // Under OB1_SLEEP_STATEMENT_TIMEOUT 0 the role's or the database's own timed it out, as the claim passes' held fix says (review pass 3 of SMD-3379 PR 1c-4b).
   : kind === "statement" ? `a statement passed ${ownTimeout ? "the role's or the database's own statement_timeout" : "its statement_timeout"}, which its log names: ${ownTimeout ? "set OB1_SLEEP_STATEMENT_TIMEOUT above theirs (a startup setting beats it), or raise theirs," : "raise OB1_SLEEP_STATEMENT_TIMEOUT"} in deploy/.env${stopped ? "" : `, then ${restartCommand("sleep", null)}`}`
   : kind === "failed" ? "it ended by itself, and its log gives the reason"

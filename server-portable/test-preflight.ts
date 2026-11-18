@@ -5061,8 +5061,10 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "ok", aside: { reembed: { kind: "outage" } }, slept: { from: await at(300), to: await at(130) } }), 10);
       const lastDown = await run(LOG_ON);
       assert(/; re-embed set down for its last period \(outage\)$/.test(row(lastDown.out, "sleep"))
-          && /Re-embed was set down for its last period — its provider did not answer: check it, and the embedding provider row here \(--deep calls it\)/.test(fix(lastDown.out, "sleep")),
-        `idle, a set-down speaks of the last period, an outage naming the embedding provider (${row(lastDown.out, "sleep")} | ${fix(lastDown.out, "sleep")})`);
+          && /Re-embed was set down for its last period — its provider did not answer: check it, and the embedding provider row here \(--deep calls it\)/.test(fix(lastDown.out, "sleep"))
+          // …and, coming back every period, a thought that crashes the provider, as its log names it (SMD-4254).
+          && /if it comes back every period, a thought whose embedding crashes the provider and keeps it down past the two minutes the scheduler waits on such an outage, which its log names at each period's start: the same thought id "goes back to the pool unrecorded"; the other passes run on/.test(fix(lastDown.out, "sleep")),
+        `idle, a set-down speaks of the last period, an outage naming the embedding provider, and a thought crashing it as the cause of one that comes back every period (${row(lastDown.out, "sleep")} | ${fix(lastDown.out, "sleep")})`);
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, aside: { reembed: { kind: "provider" } }, slept: { from: await at(900), to: await at(700) } }), 30);
       const endedDown = await run(LOG_ON);
       assert(/at its last word, re-embed set down for its last period \(provider\)$/.test(row(endedDown.out, "sleep")) && !/Re-embed was set down/.test(fix(endedDown.out, "sleep"))

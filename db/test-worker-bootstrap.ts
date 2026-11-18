@@ -417,6 +417,31 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   iso.begin("500", "F");
   ok(iso.suspected === 2, "an outage begun while isolating keeps the last one's suspect beside its own");
   iso.end();
+  // Whether the outage is a thought's doing (SMD-4254): the sleep scheduler leaves re-embed waiting out such a one, up
+  // to a bound, and sets it down at any other.
+  const by = new ProviderOutage(() => 0, SUSPECT_WINDOW_MS, true);
+  by.begin("503");
+  ok(!by.byThought, "a thought's doing (SMD-4254): not an outage begun by backpressure, no suspect made");
+  by.begin("500", "A");
+  ok(by.byThought, "…but once an error joins it that makes the thought in hand a suspect");
+  by.end();
+  ok(!by.byThought, "…and no outage is anyone's doing");
+  by.begin("429");
+  ok(!by.byThought && by.suspected === 1, "an outage begun while isolating that meets no suspect is not, though it keeps the last one's");
+  by.end();
+  ok(by.blame("A", "500 alone", false) === "outage" && by.byThought, "a suspect's outage alone is");
+  by.end();
+  by.blame("A", "500 alone", false);
+  by.end();
+  ok(by.blame("A", "500 alone", false) === "alone" && !by.byThought, "the third alone begins none by the blame");
+  by.begin("500 alone", undefined, true);
+  by.begin("503");
+  ok(by.byThought && by.suspected === 1, "the outage the caller begins after it, its suspect blamed, is a thought's doing, joined by backpressure or not");
+  by.settled("A");
+  by.end();
+  by.begin("503");
+  ok(!by.byThought, "the next outage begins as no one's doing again");
+  by.end();
   // A blame whose probe ends past the window is an outage as any thought's, its count begun again (review pass 1).
   ok(iso.blame("E", "500", false) === "outage" && iso.aloneAt("E") === 1, "E's first outage alone");
   iso.end();

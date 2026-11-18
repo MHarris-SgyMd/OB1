@@ -45,7 +45,7 @@ import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH, setFront } from "./lease.ts";
-import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
+import { ALONE_OUTAGES, OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
 import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, readHeartbeats, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
@@ -149,13 +149,16 @@ if (!URL_) {
  * extract's floor. SMD-3318's [50], the backup's ~13-25 s with its lock and
  * signal waits, went to sweep (~141 s of live step on main's runs to
  * 27ea5b19) rather than the rest, by then the run's longest cell (~562 s).
+ * SMD-4254's [38p], a thought crashing re-embed's provider under the
+ * scheduler, went to long beside [38r], whose scaffold it shares, rather than
+ * the rest, still the longest.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["5d", "10g", "37b", "38"],
-  long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
+  long: ["9", "9f", "10e", "17", "38r", "38p", "38b", "39"],
   extract: ["10f", "10h"],
   sweep: ["38s", "50", "51"],
 };
@@ -25371,6 +25374,16 @@ async function sleepScaffold(sql: SQL) {
     /** Every embedding, probes too: the embedding provider down (503), or refusing the key (401). */
     embedDown: false,
     embedKeyRefused: false,
+    /**
+     * An embedding whose input holds this text crashes the embedding provider ([38p], SMD-4254): it and every embedding
+     * after, probes too, answer 500 — a code no rule names, so the thought in hand is a suspect — until
+     * `embedCrashProbes` probes have found it down (Infinity: it never comes back); the next probe answers, and the
+     * provider is back. `embedCrashes` counts the crashes.
+     */
+    embedCrashOn: null as string | null,
+    embedCrashProbes: 2,
+    embedCrashLeft: null as number | null,
+    embedCrashes: 0,
     /** Embeddings but the probe's: each held this long, its hold ending with its client's abort. */
     embedSlowMs: 0,
     /** The subject sweep's questions ([38s], SMD-3306 PR 6b-2): each held this long, its hold ending with its client's abort, as slowJudge's. */
@@ -25404,6 +25417,20 @@ async function sleepScaffold(sql: SQL) {
       if (typeof body.input === "string") {
         if (body.input !== "reembed.ts provider probe") embedCalls.push({ input: body.input, at: Date.now() });
         else sw.embedProbes++;
+        // The provider a thought crashed ([38p], SMD-4254): down until its probes have found it so embedCrashProbes times.
+        const isProbe = body.input === "reembed.ts provider probe";
+        if (sw.embedCrashLeft !== null) {
+          if (isProbe && sw.embedCrashLeft <= 0) sw.embedCrashLeft = null;
+          else {
+            if (isProbe) sw.embedCrashLeft--;
+            return Response.json({ error: { message: "stub: the embedding runner crashed" } }, { status: 500 });
+          }
+        }
+        if (!isProbe && sw.embedCrashOn !== null && body.input.includes(sw.embedCrashOn)) {
+          sw.embedCrashes++;
+          sw.embedCrashLeft = sw.embedCrashProbes;
+          return Response.json({ error: { message: "stub: the embedding runner crashed" } }, { status: 500 });
+        }
         if (sw.embedDown) return Response.json({ error: { message: "stub: embeddings overloaded" } }, { status: 503 });
         if (sw.embedKeyRefused) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
         if (sw.embedSlowMs && body.input !== "reembed.ts provider probe") await Promise.race([Bun.sleep(sw.embedSlowMs), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
@@ -27650,8 +27677,10 @@ if (want("38r")) {
       waitingCode = await waiting.stop();
       await sql.unsafe(`DROP TRIGGER IF EXISTS zz_sleep_beats ON ob1_config; DROP FUNCTION IF EXISTS zz_sleep_beats(); DROP TABLE IF EXISTS zz_sleep_beats`);
     }
-    assert(sawWait && waitFailed === 0 && wentOn && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && outageOutcome !== "failed" && heldPending && waitingCode === 0,
-      `the embedding provider gone mid-pass: the row reads re-embed waiting mid-pass, never failed, then set down for the period, extraction going on meanwhile, nothing recorded failed (waited ${sawWait}; ${waitFailed} wait write(s) read failed; went on ${wentOn}; row ${JSON.stringify(downWord)}, outcome ${outageOutcome} — an outage is the provider's state, not failed; none failed ${heldPending}; exit ${waitingCode})`);
+    // A 503 makes no suspect: no thought's doing, so set down at the poll that sees the wait, never left waiting (SMD-4254).
+    const leftWaiting = lines.some((l) => /re-embed waits for its provider, which a thought's call brought down/.test(l));
+    assert(sawWait && waitFailed === 0 && wentOn && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && outageOutcome !== "failed" && heldPending && waitingCode === 0 && !leftWaiting,
+      `the embedding provider gone mid-pass: the row reads re-embed waiting mid-pass, never failed, then set down for the period — a 503, no thought's doing, so not left waiting — extraction going on meanwhile, nothing recorded failed (waited ${sawWait}; ${waitFailed} wait write(s) read failed; went on ${wentOn}; row ${JSON.stringify(downWord)}, outcome ${outageOutcome} — an outage is the provider's state, not failed; none failed ${heldPending}; left waiting ${leftWaiting}; exit ${waitingCode})`);
     await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(waitOld, "TEXT")}::uuid[])`;
 
     // A model switch at the check: re-embed set aside, said by the dry run, the log and the row; extraction runs on.
@@ -28302,6 +28331,104 @@ if (want("38r")) {
   }
 }
 
+// A thought whose embedding crashes the provider, under the scheduler (SMD-4254): re-embed waits out an outage a
+// thought's call brought down and isolates its suspects, where it was set down for the period at the first poll that
+// saw the wait, the suspects forgotten — the thought, handed back at the pool's front, crashed the provider at every
+// period's first claim, and nothing behind it was re-embedded. The wait has a bound, past which it is set down still.
+if (want("38p")) {
+  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage a thought's call brought down and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; one that keeps the provider down sets re-embed down once the wait passes its bound, extraction running on");
+  const sql = new SQL({ url: URL_, max: 4 });
+  const { EX, EMBED_JOB, sw, capture, beat, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
+  // Every wait probes once a second: with embedCrashProbes 2 the provider is back at a wait's second or third probe,
+  // 2-3 s on, which the scheduler's 250 ms poll sees many times over — a set-down at the first sight would leave the
+  // thought pending and the backlog behind it.
+  const restoreOutage = shortenOutage(1000, 1000);
+  try {
+    /** A thought with no vector, written by the sync key, which pauses nothing: re-embed's backlog. */
+    const vectorless = async (content: string) =>
+      ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+    const atEmbed = async (id: string) => (await sql`SELECT embedding_model FROM thoughts WHERE id = ${id}::uuid AND embedding IS NOT NULL`)[0]?.embedding_model === "stub-embed";
+    const allAtEmbed = async (ids: string[]) => (await Promise.all(ids.map(atEmbed))).filter(Boolean).length;
+    const reClaim = async (id: string) =>
+      (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EMBED_JOB}`)[0] as { status: string; last_error: string | null } | undefined;
+    /** Pooled, the crashing thought first: re-embed's first claim crashes the provider, the backlog behind it. */
+    const poolFirst = async (first: string, rest: string[]) => {
+      await sql`SELECT enqueue_thoughts(${EMBED_JOB}, ${sql.array([first, ...rest], "TEXT")}::uuid[])`;
+      await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 hour' WHERE thought_id = ${first}::uuid AND work_type = ${EMBED_JOB}`;
+    };
+    const follow = (o: Partial<Parameters<typeof runSleep>[0]> = {}) => {
+      lines.length = 0;
+      const ac = new AbortController();
+      const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, ...o, signal: ac.signal });
+      return () => { ac.abort(); return bounded(run, ac); };
+    };
+    const LEFT = /re-embed waits for its provider, which a thought's call brought down — left running up to (\d+) s from the wait's start/;
+    const DOWN = /re-embed set down for this period — its provider is not answering/;
+
+    // The provider back in seconds: the thought failed at its third outage alone, its fourth crash, the backlog behind
+    // it re-embedded, all in the one period — re-embed drained, never set down.
+    sw.embedCrashOn = "hemlock";
+    sw.embedCrashProbes = 2;
+    sw.embedCrashes = 0;
+    const poison = await vectorless("A hemlock note whose embedding crashes the provider.");
+    const behind: string[] = [];
+    for (let i = 1; i <= 5; i++) behind.push(await vectorless(`A note pooled behind the crashing one, number ${i}.`));
+    await poolFirst(poison, behind);
+    let isolated = false, poisonClaim: Awaited<ReturnType<typeof reClaim>>, reembedded = 0, poisonCode = -9;
+    const poisonStop = follow();
+    try {
+      isolated = await pollUntil(async () => (await reClaim(poison))?.status === "failed" && (await allAtEmbed(behind)) === behind.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 60_000);
+      poisonClaim = await reClaim(poison);
+      reembedded = await allAtEmbed(behind);
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedCrashLeft = null;
+      poisonCode = await poisonStop();
+    }
+    const leftSaid = lines.filter((l) => LEFT.test(l)).length;
+    const downSaid = lines.some((l) => DOWN.test(l));
+    assert(isolated && poisonClaim?.status === "failed" && new RegExp(`alone in flight at ${ALONE_OUTAGES} outages`).test(poisonClaim.last_error ?? "") && reembedded === behind.length
+        && sw.embedCrashes === ALONE_OUTAGES + 1 && leftSaid >= 1 && lines.some((l) => LEFT.exec(l)?.[1] === "120") && !downSaid && poisonCode === 0,
+      `a thought whose embedding crashes the provider, back in seconds: re-embed waits each outage out under the scheduler, left running (said ${leftSaid} time(s), the shipped 120 s bound), the thought recorded failed at its third outage alone and the backlog behind it re-embedded in the same period, never set down (isolated ${isolated}; ${JSON.stringify(poisonClaim)}; ${reembedded} of ${behind.length} re-embedded; ${sw.embedCrashes} crash(es); set down ${downSaid}; exit ${poisonCode}${isolated ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
+
+    // A thought that brings the provider down for good: left waiting to the bound (3 s here), then set down as at any
+    // outage, said; extraction runs on, and the thought stays pending, not failed — the provider's state.
+    sw.embedCrashOn = "nightshade";
+    sw.embedCrashProbes = Infinity;
+    sw.embedCrashes = 0;
+    const stuck = await vectorless("A nightshade note whose embedding brings the provider down for good.");
+    const stuckBehind = await vectorless("A note pooled behind the one that brings the provider down.");
+    await poolFirst(stuck, [stuckBehind]);
+    const meanwhile = await capture("A note extraction takes once re-embed is set down.", "sync-sleep", 0, 31);
+    const BOUND_MS = 3000;
+    let leftAt = 0, downAt = 0, extracted = false, stuckClaim: Awaited<ReturnType<typeof reClaim>>, downWord: unknown, boundCode = -9;
+    const boundStop = follow({ reembedThoughtWaitMs: BOUND_MS });
+    try {
+      for (const until = Date.now() + 30_000; Date.now() < until && downAt === 0;) {
+        if (leftAt === 0 && lines.some((l) => LEFT.test(l))) leftAt = Date.now();
+        if (lines.some((l) => DOWN.test(l))) downAt = Date.now();
+        await Bun.sleep(25);
+      }
+      extracted = await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${meanwhile}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status === "succeeded", 20_000);
+      stuckClaim = await reClaim(stuck);
+      downWord = ((await beat()) as { aside?: unknown } | null)?.aside;
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedCrashLeft = null;
+      boundCode = await boundStop();
+    }
+    const heldMs = leftAt > 0 && downAt > 0 ? downAt - leftAt : -1;
+    assert(leftAt > 0 && heldMs >= BOUND_MS - 500 && heldMs < BOUND_MS + 5000 && lines.some((l) => /re-embed's provider, which a thought's call brought down, has not answered in 3 s — set down as at any outage/.test(l))
+        && extracted && stuckClaim?.status === "pending" && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && sw.embedCrashes === 1 && boundCode === 0,
+      `a thought that brings the provider down for good: re-embed left waiting to the bound, then set down for the period as at any outage, said, extraction running on, the thought pending, not failed (left waiting ${heldMs} ms against a ${BOUND_MS} ms bound; extracted ${extracted}; ${JSON.stringify(stuckClaim)}; row ${JSON.stringify(downWord)}; ${sw.embedCrashes} crash(es); exit ${boundCode}${downAt > 0 ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
+  } finally {
+    sw.embedCrashOn = null;
+    sw.embedCrashLeft = null;
+    restoreOutage();
+    await done();
+  }
+}
+
 if (want("38b")) {
   console.log("\n[38b] db/sleep.ts: a thought longer than every run between pauses, the brain live 2.45 s into each working period, pausing it (SMD-3379 PR 1c-3b) — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every run between pauses is joined past after three stalled stops and named on the row (SMD-2694); a capture made during a period goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same period; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the pauses' aborts and order the held word (SMD-3060)");
   const sql = new SQL({ url: URL_, max: 4 });
@@ -28322,8 +28449,8 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] leaves recorded, in a full run and the long
-  // cell alike, is another model's, which every pass's start would refuse:
+  // The extraction key [38r] and [38p] leave recorded, in a full run and the
+  // long cell alike, is another model's, which every pass's start would refuse:
   // set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
