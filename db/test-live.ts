@@ -18303,8 +18303,10 @@ if (want("16")) {
       // `failed` ends its own session (a trigger of this row's, once: a sequence counts across the rolled-back
       // write). Nothing is recorded, the thought returns to the pool, and the pass does not count it judged: the
       // claim judges it again, and that pass counts it once. The count shows in the closing "per thought judged"
-      // ratio alone, so an innocent pair is judged beside it: one pair over four thoughts — the two older seeds,
-      // which have no older side, the innocent, and the poison once — not five.
+      // ratio alone, so an innocent pair is judged beside it: one pair over the thoughts the summary says finished,
+      // judged or failed, the poison among them once, not twice. How many finish is the pool's order: the four are
+      // pooled in one statement, their dates tie, and the run is stopped once the two newer are done, with the two
+      // older seeds, which have no older side, claimed before them or not at all.
       judgeCallScript.length = 0;
       judgeProbeScript.length = 0;
       judgeCrashMarker = "crash-cut";
@@ -18317,10 +18319,12 @@ if (want("16")) {
         const cut = await followOver([["The spare table names the weekly lead.", "The spare table names the daily lead now."], ["The cut table names the crash-free lead.", "The cut table names the crash-cut lead now."]], 120_000, { workers: 1 });
         const cutSaid = cut.lines.some((l) => new RegExp(`the database is not answering \\(.*\\) — recording nothing for ${cut.ids[1]}; it returns to the pool when the database answers$`).test(l));
         const ratio = cut.lines.map((l) => /(\d+) pair\(s\) judged — ([\d.]+) per thought judged, (\d+) calls per thousand thoughts/.exec(l)).find((m) => m !== null) ?? null;
-        const judgedSaid = cut.lines.map((l) => /(\d+) thought\(s\) judged/.exec(l)?.[1]).filter((n): n is string => n !== undefined);
+        const finished = cut.lines.map((l) => /(\d+) thought\(s\) judged, (\d+) failed/.exec(l)).find((m) => m !== null) ?? null;
+        const finishedN = finished ? Number(finished[1]) + Number(finished[2]) : -1;
         const [{ fired }] = (await sql`SELECT last_value::int AS fired FROM smd4352_cut`) as { fired: number }[];
-        assert(cutSaid && fired === 2 && cut.claims[0]?.status === "succeeded" && cut.claims[1]?.status === "failed" && ratio !== null && ratio[1] === "1" && ratio[2] === "0.25" && ratio[3] === "250",
-          `a consolidate follower whose record of a failure meets a database cut records nothing, and does not count the thought judged: it is judged again, failed, and counted once — one pair over four thoughts judged (SMD-4352; ${cut.claims.map((c) => c?.status).join(", ")}; the cut said ${cutSaid}; the claim's write to failed tried ${fired} time(s); ${ratio ? ratio[0] : "no ratio said"}; thoughts judged said ${judgedSaid.join(",")}; exit ${cut.code}; ${cut.lines.filter((l) => /pair\(s\) judged|recording nothing|still failing/.test(l)).map((l) => l.trim().slice(0, 170)).join(" | ").slice(0, 700)})`);
+        assert(cutSaid && fired === 2 && cut.claims[0]?.status === "succeeded" && cut.claims[1]?.status === "failed" && finished !== null && finished[2] === "1" && ratio !== null && ratio[1] === "1"
+            && ratio[2] === (1 / finishedN).toFixed(2) && ratio[3] === String(Math.round(1000 / finishedN)),
+          `a consolidate follower whose record of a failure meets a database cut records nothing, and does not count the thought judged: it is judged again, failed, and counted once — one pair over the thoughts finished, not one more (SMD-4352; ${cut.claims.map((c) => c?.status).join(", ")}; the cut said ${cutSaid}; the claim's write to failed tried ${fired} time(s); ${finished ? finished[0] : "no summary said"}, so over ${finishedN}; ${ratio ? ratio[0] : "no ratio said"}; exit ${cut.code}; ${cut.lines.filter((l) => /recording nothing|still failing/.test(l)).map((l) => l.trim().slice(0, 170)).join(" | ").slice(0, 500)})`);
       } finally {
         await sql.unsafe(`DROP TRIGGER IF EXISTS smd4352_cut_once ON thought_work_claims`);
         await sql.unsafe(`DROP FUNCTION IF EXISTS smd4352_cut_once()`);
