@@ -2791,7 +2791,7 @@ export async function postWrite(cfg, op) {
     // A forget that left some of the thought there (a replay, a fault, on a copy after the first): kept, to be sent
     // again, so its text does not stay there for a copy logged done (SMD-1723 PR 3, review pass 2).
     const missedThere = op.tool === "forget_thought" && !result.isError && Array.isArray(result.structuredContent?.notForgotten) && result.structuredContent.notForgotten.length;
-    if (missedThere) return { keep: true, line: `kept: ${opLabel(op)} — forgotten in part there, ${missedThere} cop${missedThere === 1 ? "y" : "ies"} of it not yet: sent again` };
+    if (missedThere) return { keep: true, line: `kept: ${opLabel(op)} — forgotten in part there, ${missedThere} cop${missedThere === 1 ? "y" : "ies"} of it not yet (${[...new Set(result.structuredContent.notForgotten.map((m) => String(m?.code ?? "?")))].join(", ")}): sent again` };
     if (!result.isError) {
       const id = new RegExp(`\\b(${UUID})\\b`, "i").exec(text.split("\n")[0])?.[1];
       const keyed = typeof result.structuredContent?.keyed === "string" ? `, ${result.structuredContent.keyed}` : "";
@@ -2806,7 +2806,7 @@ export async function postWrite(cfg, op) {
     // A server from before forget_thought (migration 144): the copy waits for it, in order, as a brain away does —
     // given up only after the week — so the forget is not lost (SMD-1723 PR 3).
     if (FANOUT_LATER.has(op.tool) && SDK_ERROR_RE.test(text) && /\bTool \S+ (?:not found|disabled)\b/.test(text))
-      return { keep: true, line: `kept: ${opLabel(op)} — this brain's server has no ${op.tool} (from before SMD-1723 PR 2, migration 144), or the write key is no write key: upgrade it, and the copy lands in order` };
+      return { keep: true, line: `kept: ${opLabel(op)} — this brain's server has no ${op.tool} (one before v2.1.0), or the write key is no write key: upgrade the server past v2.1.0, or mint a write key, and the copy lands in order` };
     // A key that cannot call the tool (a capture key in write_key): the
     // operator's to fix, and every later copy would meet it — kept, in order.
     // Only "Tool … not found" (or disabled): the SDK answers an input it
@@ -2820,7 +2820,7 @@ export async function postWrite(cfg, op) {
       dropped.push(`its id, sent again by its client_key ${op.alt}`);
       continue;
     }
-    if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${op.tool === "forget_thought" ? ", or forgotten there already" : ""}${note}` };
+    if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${op.tool === "forget_thought" ? ", or forgotten there already (on a v2.1.0 server, also a copy deleted there before by its key, its text kept: upgrade it and forget it there)" : ""}${note}` };
     // A fault (FAILED: the REST core away behind the MCP server, the store
     // restarting, a busy registry) carries no `retryable`, which verdictOf reads
     // as final: kept, so a brain mid-restart does not lose its edits (review pass 2).
@@ -2850,7 +2850,7 @@ export async function postWrite(cfg, op) {
     // The receiving brain's embedding provider refusing it (a key or a model its operator mends, SMD-2892): held as a
     // fault is, not given up — its edits and delete would otherwise meet NOT_FOUND there (review pass 1).
     if (v.retryable || providerMends(result)) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
-    return { dead: true, line: `not copied (given up): ${opLabel(op)} — ${oneLine(text).slice(0, 200)}${note}` };
+    return { dead: true, line: `not copied (given up): ${opLabel(op)} — ${oneLine(text).slice(0, 200)}${note}${op.tool === "forget_thought" ? " — its text stays on this brain until forgotten there by hand" : ""}` };
   }
   return { dead: true, line: `not copied (given up): ${opLabel(op)} — still refused after dropping ${dropped.join(", ")}` };
 }

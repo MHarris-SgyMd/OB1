@@ -642,8 +642,20 @@ console.log("\n[12] forget_thought: refused without the id echoed and while cite
   const KC = "44444444-4444-4444-8444-444444444444";
   const c1 = idOf(await writer.call("capture_thought", { content: "[12] a keyed thought forgotten by its id", client_key: KC }));
   const byId = await full("forget_thought", { id: c1, confirm: c1 });
-  const left = [a1, a2, b1, b2, s1, t1, c1].map(count);
+  // A keyed thought deleted first, then forgotten by its id: the reply still names its key, read from the tombstone, so
+  // a copy of the forget reaches the brain it began on (pass 6's whole-diff mutant).
+  const KE = "66666666-6666-4666-8666-666666666666";
+  const e1 = idOf(await writer.call("capture_thought", { content: "[12] a keyed thought deleted, then forgotten by its id", client_key: KE }));
+  await writer.call("delete_thought", { id: e1 });
+  const byIdGone = await full("forget_thought", { id: e1, confirm: e1 });
+  assert(!byIdGone.isError && byIdGone.sc.clientKey === KE && new RegExp(`^Forgot ${e1}, its client_key ${KE} at `).test(byIdGone.text),
+    `a keyed thought deleted, then forgotten by its id, names its key from the tombstone (${byIdGone.text.split("\n")[0].slice(0, 120)})`);
+  const left = [a1, a2, b1, b2, s1, t1, c1, e1].map(count);
   const opens = await Promise.all(left);
+  // A name tried again as an id (NOT_FOUND), or a copy forgotten already, is nothing left: never listed as not
+  // forgotten, or every copied forget would be kept and sent again (pass 6's whole-diff mutant).
+  const noneLeft = [byA, byB, byS, byId, byIdGone].every((r) => r.sc.notForgotten === undefined && !/Not forgotten/.test(r.text));
+  assert(noneLeft, `a forget with nothing left names nothing not forgotten (${[byA, byB, byS, byId, byIdGone].map((r) => JSON.stringify(r.sc.notForgotten ?? null)).join(" ")})`);
   assert(!byA.isError && byA.sc.id === a2 && JSON.stringify(byA.sc.alsoForgottenIds) === JSON.stringify([a1])
       && !byB.isError && byB.sc.id === b2 && JSON.stringify(byB.sc.alsoForgottenIds) === JSON.stringify([b1])
       && !byS.isError && byS.sc.id === t1 && JSON.stringify(byS.sc.alsoForgottenIds) === JSON.stringify([s1]) && /Also forgotten here, the same thought under that name/.test(byS.text)

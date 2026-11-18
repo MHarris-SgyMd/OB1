@@ -148,7 +148,7 @@ Write `key_file` as a full path (`~` is not expanded), each file mode 600.
 - **The model summary**, if on, is shared and asked once per brain.
 - **The environment wins.** `OB1_BRAIN_URL` in the environment is one brain, over the list.
 
-**Copying your writes to another brain** (SMD-3314): the same hook, on Claude Code's `PostToolUse`, repeats each capture, edit and delete you or an agent make through one connector on every other brain that has a write key. Give the brain the connector writes to its `connector` (the MCP server's name as Claude Code spells it in `mcp__<server>__<tool>`), and each brain that should receive copies a `write_key` or `write_key_file` — a write-scoped key minted on that brain (`bun server-portable/keygen.ts --name claude-code --scope write`; the same name as the connector's key keeps the copies attributed to the same agent):
+**Copying your writes to another brain** (SMD-3314): the same hook, on Claude Code's `PostToolUse`, repeats each capture, edit, delete and forget (1.9.0) you or an agent make through one connector on every other brain that has a write key. Give the brain the connector writes to its `connector` (the MCP server's name as Claude Code spells it in `mcp__<server>__<tool>`), and each brain that should receive copies a `write_key` or `write_key_file` — a write-scoped key minted on that brain (`bun server-portable/keygen.ts --name claude-code --scope write`; the same name as the connector's key keeps the copies attributed to the same agent):
 
 ```json
 {

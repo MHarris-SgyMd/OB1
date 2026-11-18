@@ -3140,7 +3140,16 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   assert(f1.code === 0 && fCall?.args.id === S(30) && fCall.args.confirm === S(30) && fCall.args.detach_citations === true && copy30 && !byName(S(30)) && forgottenIds.has(copy30)
       && new RegExp(`copied forget_thought of ${S(30)} → ${copy30}`).test(logOf(CANARY_ROOT)),
     `a forget is copied by stable's id, its confirm that id, detach_citations kept, and forgets the canary's copy (${JSON.stringify(fCall?.args)})`);
-  await post("delete_thought", { id: S(31) }, [{ type: "text", text: `Deleted ${S(31)}. Its previous content is preserved in the audit trail.` }]);
+  // The caller named the thought on stable by a client_key, not the id stable answered: the copy's confirm is the
+  // answered id, not the caller's echo, which the canary would refuse REFUSED_CONFIRM (pass 6's whole-diff mutant).
+  await post("capture_thought", { content: "a secret named by its key on stable" }, captured(S(45)));
+  const STABLE_KEY = "abcdef01-0000-4000-8000-000000000045";
+  const f1b = await post("forget_thought", { id: STABLE_KEY, confirm: STABLE_KEY },
+    [{ type: "text", text: `Forgot ${S(45)}, named by its client_key ${STABLE_KEY} at 2026-11-16T00:00:00.000Z. Its audit events keep who acted and when, without its text.` }]);
+  const f1bCall = calls.find((c) => c.name === "forget_thought" && c.args.id === S(45));
+  assert(f1b.code === 0 && f1bCall?.args.id === S(45) && f1bCall.args.confirm === S(45),
+    `a forget named otherwise on stable is copied with its confirm the id stable answered, not the caller's echo (${JSON.stringify(f1bCall?.args)})`);
+  await post("delete_thought", { id: S(31) },[{ type: "text", text: `Deleted ${S(31)}. Its previous content is preserved in the audit trail.` }]);
   const f2 = await post("forget_thought", { id: S(31), confirm: S(31) }, forgot(S(31)));
   const f2Call = calls.filter((c) => c.name === "forget_thought").at(-1);
   assert(f2.code === 0 && copy31 && forgottenIds.has(copy31) && !gone.has(copy31) && f2Call?.args.detach_citations === true,
@@ -3191,7 +3200,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const heldPartial = queueIn().length;
   canaryPartial = false;
   const drained42 = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
-  assert(f8.code === 1 && heldPartial === 1 && /kept: forget_thought of [^ ]+ — forgotten in part there, 1 copy of it not yet: sent again/.test(f8.err) && drained42.code === 0 && !queueIn().length,
+  assert(f8.code === 1 && heldPartial === 1 && /kept: forget_thought of [^ ]+ — forgotten in part there, 1 copy of it not yet \(REPLAYING\): sent again/.test(f8.err) && drained42.code === 0 && !queueIn().length,
     `a forget answered in part is kept and sent again (${f8.err.trim().slice(0, 120)})`);
 
   // A thought that began on the canary, copied to stable under the canary's id as its key: stable's reply names that key,
@@ -3212,7 +3221,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const heldOld = queueIn().length;
   canaryNoForget = false;
   const drained = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
-  assert(f4.code === 1 && heldOld === 1 && /kept: forget_thought of [^ ]+ — this brain's server has no forget_thought \(from before SMD-1723 PR 2, migration 144\)/.test(f4.err)
+  assert(f4.code === 1 && heldOld === 1 && /kept: forget_thought of [^ ]+ — this brain's server has no forget_thought \(one before v2\.1\.0\)/.test(f4.err)
       && drained.code === 0 && !queueIn().length && copy32 && forgottenIds.has(copy32),
     `a canary with no forget_thought holds the copy and names the upgrade; upgraded, the copy lands (${f4.err.trim().slice(0, 150)})`);
 

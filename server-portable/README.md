@@ -1093,8 +1093,10 @@ can't be removed mechanically), the twins that keep the same text, the hashed
 record it was ingested as, and the copies outside the brain. A name takes every
 thought here it is — the thought with that id, standing or deleted, the one keeping it as
 its `client_key`, and each deleted one whose tombstone kept that key — the others listed as
-`alsoForgotten` (MCP's values: `alsoForgottenIds`), and any not forgotten after the first
-(a replay, a fault) as `notForgotten`, which the same call sweeps when sent again; the reply names the thought's
+`alsoForgotten` (MCP's values: `alsoForgottenIds`), and any it could not forget beside one it
+did (refused, or a fault) as `notForgotten` (MCP's values give each id and code; REST and the
+text a fault's SQLSTATE too), which the same call sweeps when sent again, with
+`detach_citations` for one left `CITED`; the reply names the thought's
 own `client_key` too, so a copy of the call can reach it on a brain that knows it by that
 key alone. Forgotten already,
 it is `FORGOTTEN`; an id the log never held, `NOT_FOUND`. It writes no action-log
@@ -1221,7 +1223,8 @@ first written. The copy keeps it as `metadata.client_key`, one thought per key
 with that id, else the one keeping it as its key**: `update_thought`'s,
 `delete_thought`'s and `forget_thought`'s `id` (and the REST paths
 `PATCH`/`DELETE /v1/thoughts/{id}` and `POST /v1/thoughts/{id}/forget`), and
-the `supersedes` and `derived_from` of a capture or an edit. So the client sends the
+the `supersedes` and `derived_from` of a capture or an edit; a forget takes every thought
+its name is, not one (SMD-1723 PR 3). So the client sends the
 second brain the same ids it sent the first. A thought a refresh copied has the same id
 on both brains, and a key equal to it names that thought.
 

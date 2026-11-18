@@ -5366,8 +5366,13 @@ console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids
   const citedStops = await resend({ [N]: "CITED", [D2]: "ok" });
   assert(heldFirst === "ok:D2[N REPLAYING]" && citedStops === "REFUSED_CITED:N" && resendTried.join() === "N,D2,N",
     `a refusal before the first thought forgotten is named, not dropped; a CITED stops the rest, the later thought not tried (${heldFirst} | ${citedStops} | ${resendTried.join()})`);
+  // One forgotten already, before or after the first forgotten now, holds no text: never named not forgotten (pass 6).
+  const forgottenBefore = await resend({ [N]: "FORGOTTEN", [D2]: "ok" });
+  const forgottenAfter = await resend({ [N]: "ok", [D2]: "FORGOTTEN" });
+  assert(forgottenBefore === "ok:D2[]" && forgottenAfter === "ok:N[]",
+    `a thought forgotten already, before or after the first forgotten now, is not named not forgotten (${forgottenBefore} | ${forgottenAfter})`);
   assert(resent.join() === "REPLAYING:D2,REFUSED_CITED:D2,FORGOTTEN:N,FORGOTTEN:D2"
-      && /again, with detach_citations for one another thought cites \(CITED\)/.test(citedReply) && !/detach_citations/.test(partialReply.content[0].text),
+      && /again, with detach_citations true for one CITED \(another thought cites it\)/.test(citedReply) && /again once the replay is done:/.test(partialReply.content[0].text) && !/detach_citations/.test(partialReply.content[0].text),
     `a partial forget sent again answers what still holds the text, not "forgotten already"; a cited one left is told to detach (${resent.join()})`);
   const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
   const noWord = thrown({ ok: false });

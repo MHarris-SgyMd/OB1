@@ -498,7 +498,7 @@ export const SPECS = {
       // brain the write was first made on, kept as metadata.client_key so
       // every brain names the thought by that one id (migration 112).
       client_key: z.string().optional()
-        .describe("An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's, delete_thought's and forget_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it."),
+        .describe("An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's, delete_thought's and forget_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key; a forget takes every thought the name is (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it."),
     },
   },
   update_thought: {
@@ -563,7 +563,7 @@ export const SPECS = {
       idempotentHint: true,
     },
     inputSchema: {
-      id: z.string().describe("UUID of the thought to forget — the id on an `ID:` line of a search or list result, or the one capture_thought reported; or the `client_key` it was captured with, when no thought has that id — a thought deleted earlier too, by the key its delete kept"),
+      id: z.string().describe("UUID of the thought to forget — the id on an `ID:` line of a search or list result, or the one capture_thought reported; or the `client_key` it was captured with. Every thought here the name is goes: the thought with that id, standing or deleted, the one keeping it as its key, and each deleted one that kept it"),
       confirm: z.string().describe("The `id` again, exactly as you passed it: forgetting cannot be undone, so the call is refused unless the two match"),
       detach_citations: z.boolean().optional().describe(
         "When statements in other thoughts cite this one as their source, the forget is refused and the reply names them. Pass true to forget anyway: the citations are deleted with it, since each one may restate its text; the thoughts that made them stay. Default false.",
