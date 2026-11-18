@@ -157,7 +157,9 @@ H2O_REVISION=v1.4.2 H2O_ATTENTION=two-way JEV_PORT=8023 \
   `H2O_ATTENTION=two-way` is set (`one-way`, or H2O's `causal` and
   `bidirectional`, are read too; another word stops the start).
 - **It needs weights trained for it.** A revision whose `serve_config.json`
-  has no `two_way.probe_reference` (any before v1.3) is refused at start.
+  has no `two_way.probe_reference` (any before v1.3) is refused at start, and
+  so is a `two_way` block without temperatures of its own: the two-way `rules`
+  value says a judgement was read at that block's.
 - **It checks itself at start, with H2O's own check.** `serve_config.json`
   records the release weights' two-way answers to three fixed probes at
   temperature 1. The adapter reads the same probes both ways and serves only

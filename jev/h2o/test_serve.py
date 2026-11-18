@@ -424,8 +424,15 @@ async def main():
             "two_way": {"probe_reference": reference, "probe_tolerance": 0.05, "temperature": {"choice": 0.5, "noul": 0.6, "score": 0.7}}}
     ref, tol, temps = serve.two_way_config(good, "v9")
     check(ref is reference and tol == 0.05 and temps == {"choice": 0.5, "noul": 0.6, "score": 0.7}, f"the block's reference, tolerance and own temperatures are read ({tol}, {temps})")
-    no_temps = {"temperature": good["temperature"], "two_way": {"probe_reference": reference}}
-    check(serve.two_way_config(no_temps, "v9")[1:] == (0.05, good["temperature"]), "without its own, the tolerance is 0.05 and the temperatures the one-way ones")
+    no_tol = {"temperature": good["temperature"], "two_way": {"probe_reference": reference, "temperature": 0.7}}
+    check(serve.two_way_config(no_tol, "v9")[1:] == (0.05, {"choice": 0.7, "noul": 0.7, "score": 0.7}), "without a tolerance of its own it is 0.05, and one temperature serves the three types")
+    try:
+        serve.two_way_config({"temperature": good["temperature"], "two_way": {"probe_reference": reference}}, "v9")
+        no_temps = None
+    except SystemExit as e:
+        no_temps = str(e)
+    check(no_temps is not None and "two_way.temperature" in no_temps,
+          f"a two_way block with no temperatures of its own is refused by the field's name, not read at the top block's: the rules say whose they are ({no_temps})")
 
     def config_refused(cfg):
         try:
@@ -592,18 +599,38 @@ async def main():
     R.prompt_limit = None
     s, _, _ = await post(R, gate, json.dumps(wide).encode())
     check(s == 200, f"one-way, whose cost does not square, still reads the wide question ({s})")
+    check(serve.encodable("plain, é, 漢, \U0001f600 and a NUL \x00") and not serve.encodable("a\ud800b") and not serve.encodable("\udfff"),
+          "a text with a lone surrogate is not encodable; accents, CJK, an astral character and a NUL are")
+    # A lone surrogate in the question or an option is read off the text, whatever a tokenizer raises for one: the real
+    # one raises TypeError (review pass 3), so the fake here raises that for a surrogate, as the real one does.
+    class RealisticSurrogates(FakeReader):
+        def encode(self, text):
+            if not serve.encodable(text):
+                raise TypeError("TextEncodeInput must be Union[TextInputSequence, Tuple[InputSequence, InputSequence]]")
+            return super().encode(text)
+    R = RealisticSurrogates()
+    R.prompt_limit = 8000
+    surrogates = (one("short record", proposition="it \ud800 holds"),
+                  json.dumps({"decisions": [{"kind": "choice", "context": "short record", "question": "Which?",
+                                             "options": [{"id": "a", "description": "fine"}, {"id": "b", "description": "bro\udfffken"}]}]}).encode(),
+                  json.dumps({"decisions": [{"kind": "choice", "context": "short record", "question": "Wh\ud800ich?",
+                                             "options": [{"id": "a", "description": "fine"}, {"id": "b", "description": "also fine"}]}]}).encode())
+    outs = [await post(R, gate, raw) for raw in surrogates]
+    check(all(s == 422 and "decision 0: its question or options cannot be encoded" in b["error"] for s, b, _ in outs) and R.reads == 0 and gate.admitted == 0,
+          f"a lone surrogate in a proposition, an option or a question is that decision's 422 under two-way, though the tokenizer raises TypeError for one ({[(s, b.get('error', '')[:40]) for s, b, _ in outs]})")
     class Unpromptable(FakeReader):
         error = None
         def prompt(self, *a):
             raise self.error
     R = Unpromptable()
-    R.prompt_limit, R.error = 8000, UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
-    s, b, _ = await post(R, gate, body())
-    check(s == 422 and "question or options cannot be encoded" in b["error"] and R.reads == 0 and gate.admitted == 0, f"a question the tokenizer cannot encode is that decision's 422 under two-way ({s}, {b.get('error')})")
-    R.error = RuntimeError("Already borrowed")
-    s, b, _ = await post(R, gate, body())
-    check(s == 500 and "the model failed" in b["error"] and "Already borrowed" in b["error"] and R.reads == 0 and gate.admitted == 0 and gate.bytes == 0,
-          f"any other failure while a prompt is counted is the tier's 500, which a caller retries, never a 422 against the pair ({s}, {b.get('error')})")
+    R.prompt_limit = 8000
+    failures = []
+    for error in (RuntimeError("Already borrowed"), TypeError("an argument of the wrong type"), UnicodeEncodeError("utf-8", "x", 0, 1, "raised by the tier, not by the text")):
+        R.error = error
+        s, b, _ = await post(R, gate, body())
+        failures.append(s == 500 and "the model failed" in b["error"] and type(error).__name__ in b["error"])
+    check(all(failures) and R.reads == 0 and gate.admitted == 0 and gate.bytes == 0,
+          f"any failure while an encodable prompt is counted is the tier's 500, which a caller retries, never a 422 against the pair ({failures})")
 
 asyncio.run(main())
 print(f"\n{passed + failed} assertions: {passed} passed, {failed} failed")

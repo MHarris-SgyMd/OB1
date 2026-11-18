@@ -47,14 +47,16 @@ Two-way reading (SMD-4369). From v1.3 H2O's weights answer under two attention p
 above, and two-way, where the model's full-attention layers (8 of its 32) read the prompt in both directions and its
 Gated DeltaNet layers stay causal, so the answer slot sees the record, the question and the options whole. H2O serves
 two-way through its own vLLM build; here it is one forward pass whose `attention_mask` names an all-attend mask for the
-full-attention layers, which transformers' Qwen3.5 text model takes by layer type and uses as given. H2O_ATTENTION=two-way
-asks for it, on a revision whose serve_config.json carries a `two_way` block (none before v1.3: refused at start).
+full-attention layers, which transformers' Qwen3.5 text model takes by layer type and uses as given.
+H2O_ATTENTION=two-way asks for it, on a revision whose serve_config.json carries a `two_way` block with temperatures
+of its own (none before v1.3: refused at start).
 H2O ships the check, and this port applies it at start as the shim does: the release weights' two-way answers to three
 fixed probes at temperature 1 (`two_way.probe_reference`) must be matched within `two_way.probe_tolerance` (0.05), and
 must differ from the one-way answers by at least 0.05 on some question, or the tier does not serve. A two-way read
 shares no prefix (a two-way prefix is not reusable), so every question of a request reads its record again, and its
 memory grows with the square of its length: a prompt (the record, the question and its options) over
-H2O_TWO_WAY_MAX_TOKENS (8,000, the longest measured here) gets the 422 above, and /info's max_tokens says that limit. /info's `rules` differs by mode, so a judgement's lineage
+H2O_TWO_WAY_MAX_TOKENS (8,000, the longest measured here) gets a 422 naming it, beside the model's own limit on the
+record, and /info's max_tokens is the smaller of the two. /info's `rules` differs by mode, so a judgement's lineage
 says how it was read; the one-way value is what it was before this mode existed.
 
 Endpoints (ob1-jev/1): GET /health, GET /info, POST /decide.
@@ -192,9 +194,9 @@ def two_way_config(cfg, revision):
     tol = tw.get("probe_tolerance", 0.05)
     if isinstance(tol, bool) or not isinstance(tol, (int, float)) or not 0 < tol < 0.5:
         raise SystemExit(f"two_way.probe_tolerance is a number in (0, 0.5), not {tol!r}")
-    if "temperature" in tw:
-        return ref, float(tol), temperatures_of(tw["temperature"], "two_way.temperature")
-    return ref, float(tol), temperatures_of(cfg.get("temperature"), "temperature")
+    # The block's own, and no fall back to the top block's: /info's two-way `rules` says whose temperatures a
+    # judgement was read at, and one string cannot say two things (review pass 3). H2O's releases give them.
+    return ref, float(tol), temperatures_of(tw.get("temperature"), "two_way.temperature")
 
 
 def two_way_verdict(reference, tolerance, one_way, two_way, min_separation=TWO_WAY_MIN_SEPARATION):
@@ -230,6 +232,16 @@ def revision_label(path):
     """The revision as its operator named it, with the commit it resolved to: a snapshot's directory is the commit's
     sha alone, which names no setting (review pass 1)."""
     return f"{REVISION} ({Path(path).name[:8]})"
+
+
+def encodable(text):
+    """Whether a text is one a tokenizer can be handed: it has no lone surrogate, which JSON lets through and UTF-8
+    does not."""
+    try:
+        text.encode("utf-8")
+        return True
+    except UnicodeError:
+        return False
 
 
 def read_limit(max_state_tokens, attention, two_way_max):
@@ -351,13 +363,15 @@ class Reader:
 
     def _run_two_way(self, ids):
         """The final hidden state at the last position of a two-way read: one pass, every position of the full-attention
-        layers attending to every position (an additive mask of zeros, given by layer type, which the text model uses
+        layers attending to every position (an additive mask of zero, given by layer type, which the text model uses
         as it is given), the Gated DeltaNet layers causal as they always are, and no cache: a two-way prefix is not
-        reusable."""
+        reusable. The start-up guard is what holds that this is H2O's two-way read."""
         x = self.torch.tensor([ids], dtype=self.torch.long, device=self.dev)
-        emb = self.lm.get_input_embeddings()(x)
-        full = self.torch.zeros((1, 1, len(ids), len(ids)), dtype=emb.dtype, device=self.dev)
-        out = self.lm(inputs_embeds=emb, attention_mask={"full_attention": full, "linear_attention": None}, use_cache=False)
+        # One zero, which the attention adds to every weight: a mask of the prompt's own square was 128 MB a read at
+        # 8,000 tokens for the same answer (review pass 3). It must be a mask and not None, which a layer may read as
+        # "the causal default".
+        full = self.torch.zeros((1, 1, 1, 1), dtype=self.lm.dtype, device=self.dev)
+        out = self.lm(input_ids=x, attention_mask={"full_attention": full, "linear_attention": None}, use_cache=False)
         return out.last_hidden_state[0, -1].float()
 
     def read(self, prompts, share=None, two_way=None):
@@ -682,11 +696,13 @@ async def handle(R, gate, model_info, headers, chunks, gone=None):
                     # 100,000 tokens that a count of the record let through (review pass 1). The record's own limit
                     # above stays the model's; this one is the setting's, and each refusal names its own (pass 2).
                     instr, names, descs = question_of(dd)[:3]
+                    # A lone surrogate in the question or an option, as in a context, is a fact about the text: the
+                    # pair's 422. It is read off the text itself, since what a tokenizer raises for one is its own
+                    # affair (review pass 3: this one raises TypeError, so a branch on UnicodeError never ran).
+                    if not all(encodable(t) for t in (instr, *names, *descs)):
+                        return 422, {"error": f"decision {i}: its question or options cannot be encoded (a lone surrogate), so this model cannot read it"}, {}
                     try:
                         n = len(R.encode(R.prompt(ctx, instr, names, descs)))
-                    except UnicodeError as e:
-                        # a lone surrogate in the question or an option, as in a context: a fact about the text
-                        return 422, {"error": f"decision {i}: its question or options cannot be encoded ({type(e).__name__}), so this model cannot read it"}, {}
                     except Exception as e:
                         # anything else is this tier's failure, not the pair's: the contract's 500, which a caller
                         # retries, never a 422 it would record against the pair for good (review pass 2)
