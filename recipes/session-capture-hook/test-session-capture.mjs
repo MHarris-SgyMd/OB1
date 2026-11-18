@@ -3235,16 +3235,34 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   writeFileSync(join(CANARY_ROOT, "writes", "pending", OLD_FORGET), JSON.stringify({ from: "stable", at: new Date(Date.now() - 8 * 24 * 3600_000).toISOString(), tool: "forget_thought", args: { id: S(43), confirm: S(43), detach_citations: true } }));
   const drainedOld = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
   away = false;
-  const reach = [refusedOne, answeredOne, faultOne, lostOne].map((o) => `${o.keep === true}/${o.unknown === true}`);
+  away = false; busy = true;
+  const storeOne = await postOne(canaryWrite, { tool: "capture_thought", args: { content: "[[busy]] x", client_key: S(43) } });
+  busy = false;
+  const reach = [refusedOne, answeredOne, faultOne, lostOne, storeOne].map((o) => `${o.keep === true}/${o.unknown === true}`);
   const LEFT = "000000000000007-000000000000007-1.json";
   writeFileSync(join(CANARY_ROOT, "writes", "pending", LEFT), JSON.stringify({ from: "stable", at: new Date().toISOString(), tool: "capture_thought", args: { content: "[[embed-down]] a copy a killed drain left, then refused", client_key: S(43) }, sending: true }));
   await spawnScript(["--drain-writes", "--brain", "canary"], { env });
   const leftAfter = JSON.parse(readFileSync(join(CANARY_ROOT, "writes", "pending", LEFT), "utf8"));
   rmSync(join(CANARY_ROOT, "writes", "pending", LEFT), { force: true });
-  assert(JSON.stringify(reach) === JSON.stringify(["true/false", "true/false", "true/true", "true/true"]) && leftAfter.sent === true && leftAfter.sending === undefined
+  assert(JSON.stringify(reach) === JSON.stringify(["true/false", "true/false", "true/true", "true/true", "true/true"]) && leftAfter.sent === true && leftAfter.sending === undefined
       && /not copied \(given up after a week\): forget_thought of [^ ]+ — .* — its text stays on this brain until forgotten there by hand/.test(logOf(CANARY_ROOT)) && drainedOld.code === 1 && !queueIn().length,
     `a refused connection and an answered refusal are not sent, a fault and a lost answer may be; a copy a killed drain left stays sent though refused after; a forget given up after a week says its text stays (${JSON.stringify({ reach, left: { sent: leftAfter.sent, sending: leftAfter.sending }, drained: drainedOld.code, queue: queueIn() })})`);
   rmSync(join(CANARY_ROOT, "writes", "dead", OLD_FORGET), { force: true });
+
+  // A forget's drop that read a copy before the drain marked it removes it during the send: the drain, its answer a
+  // fault, writes the copy back `sent`, so the forget behind it reaches whatever it committed (review pass 9).
+  const RACED = "000000000000008-000000000000008-1.json";
+  writeFileSync(join(CANARY_ROOT, "writes", "pending", RACED), JSON.stringify({ from: "stable", at: new Date().toISOString(), tool: "capture_thought", args: { content: "[[fault]] a copy dropped while in flight", client_key: S(39) } }));
+  slowMs = 600;
+  const racedDrain = spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  for (let i = 0; i < 100 && !calls.some((c) => c.args?.client_key === S(39)); i++) await sleep(20);
+  rmSync(join(CANARY_ROOT, "writes", "pending", RACED), { force: true });
+  await racedDrain;
+  slowMs = 0;
+  const racedBack = existsSync(join(CANARY_ROOT, "writes", "pending", RACED)) ? JSON.parse(readFileSync(join(CANARY_ROOT, "writes", "pending", RACED), "utf8")) : null;
+  rmSync(join(CANARY_ROOT, "writes", "pending", RACED), { force: true });
+  assert(racedBack?.sent === true && racedBack?.sending === undefined,
+    `a copy a drop removed during its send, its answer a fault, is written back sent (${JSON.stringify(racedBack)})`);
 
   // The receiving brain's own forget leaves things for a person to review there: the log names them (review pass 7).
   canaryReview = true;

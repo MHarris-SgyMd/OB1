@@ -2860,7 +2860,9 @@ export async function postWrite(cfg, op) {
     }
     // The receiving brain's embedding provider refusing it (a key or a model its operator mends, SMD-2892): held as a
     // fault is, not given up — its edits and delete would otherwise meet NOT_FOUND there (review pass 1).
-    if (v.retryable || providerMends(result)) return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
+    // STORE_UNAVAILABLE is how a capture says the fault FAILED says for an edit: the REST core behind the MCP server
+    // away or slow — which may have committed it all the same (review pass 9).
+    if (v.retryable || providerMends(result)) return { keep: true, ...(v.code === "STORE_UNAVAILABLE" ? { unknown: true } : {}), line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
     return { dead: true, line: `not copied (given up): ${opLabel(op)} — ${oneLine(text).slice(0, 200)}${note}${op.tool === "forget_thought" ? " — its text stays on this brain until forgotten there by hand" : ""}` };
   }
   return { dead: true, line: `not copied (given up): ${opLabel(op)} — still refused after dropping ${dropped.join(", ")}` };
@@ -2904,6 +2906,10 @@ export async function drainWrites(cfg) {
         // good (review pass 7). One a drain killed mid-send left `sending` is read as having been sent (review pass 8).
         const reachedBefore = op.sent === true || op.sending === true;
         if (!reachedBefore && !rewriteWrite(name, { ...op, sending: true })) continue; // gone: a drop took it first
+        // Still this drain's, just before the send: a holder whose lock was taken back while it was suspended does not
+        // send a copy its successor may have sent, and a forget after (review pass 9). Narrowed, not closed: the gap is
+        // the microseconds to the request.
+        if (!holdDrainLock()) { stopped = true; break; }
         let o = await postWrite(cfg, op);
         // A lock taken back while this copy was in flight: the queue is its new holder's, and this drain touches no
         // file of it — not this copy's, which the holder may be sending again (review pass 8: a stale holder's
@@ -2917,8 +2923,12 @@ export async function drainWrites(cfg) {
         if (o.keep) {
           // `sent` once a send may have reached the brain — a transport failure past the connection, or a fault — and
           // never cleared; an answer the brain gave (a refusal, a code to retry) wrote nothing.
+          // Written back even if a forget's drop removed it during the send — the drop read it before it was marked
+          // (review pass 9): its name keeps it ahead of that forget, which then reaches it. Only this drain, holding the
+          // lock, and a drop remove a queued copy.
           const { sending: _s, sent: _t, ...rest } = op;
-          rewriteWrite(name, { ...rest, ...(reachedBefore || o.unknown ? { sent: true } : {}) });
+          const sent = reachedBefore || o.unknown === true;
+          rewriteWrite(name, { ...rest, ...(sent ? { sent: true } : {}) }, { force: sent });
           stopped = true; markHeld(name); break;
         }
         if (o.dead) moveWrite(path, WRITES_DEAD(), name); else removeWrite(path); // already gone: the holder before finished it too
@@ -2944,11 +2954,11 @@ function forgetReview(sc) {
 const NOT_REACHED = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
 /**
  * A queued copy's file rewritten whole — a temporary file renamed over it, so a kill or a full disk never leaves half a
- * copy (review pass 8) — or false when it is gone (a forget's drop took it).
+ * copy (review pass 8) — or false when it is gone (a forget's drop took it), unless `force` puts it back.
  */
-function rewriteWrite(name, op) {
+function rewriteWrite(name, op, { force = false } = {}) {
   const path = join(WRITES_PENDING(), name);
-  if (!existsSync(path)) return false;
+  if (!force && !existsSync(path)) return false;
   const tmp = join(WRITES_PENDING(), `.${name}.${process.pid}.tmp`);
   writeFileSync(tmp, JSON.stringify(op), { mode: 0o600 });
   renameSync(tmp, path);
