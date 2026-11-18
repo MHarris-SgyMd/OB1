@@ -6,6 +6,11 @@
 //   bun selfcheck.ts                   prove it with the SDK's own client
 //   ./run-claude-code.sh mcp toggle    one headless Claude Code session against it, the change made inside one turn
 //   ./run-claude-code-turns.sh mcp toggle-quiet   the same over two turns, the change made between them
+//   ./run-claude-code.sh mcp down/20 45           a restart 20 s long, the session waiting 45 s
+//   An interactive session is run by hand: `claude --strict-mcp-config --setting-sources project --mcp-config
+//   {"mcpServers":{"probe":{"type":"http","url":"http://127.0.0.1:8765/mcp"}}}`, a prompt that calls probe_time, the
+//   control step from another terminal, /mcp, and a second prompt. A script that types into a real session is not
+//   kept here: it cannot be made to read every dialog before it presses Enter.
 //
 //   /mcp        both eras: 2026-07-28 through createMcpHandler, 2025-era stateless
 //   /legacy     2025-era only, stateless, POST only: the brain's wiring today
@@ -13,7 +18,19 @@
 //
 //   /control/toggle        add or remove the tool `probe_extra`, and notify: listen streams and open sessions
 //   /control/toggle-quiet  change the tool set and tell nobody
-//   /control/drop          cut every open listen stream and change the tool set, as a restart would
+//   /control/drop          end every open listen stream, with its closing frame, and change the tool set, the server staying up
+//   /control/down/N        a restart behind a proxy (SMD-4347): the streams ended, the sessions forgotten and the tool set
+//                          changed, then every MCP request answered 502 for N seconds, as the stack's proxy answers
+//                          while the server behind it is away
+//   /control/refuse/N      a restart of the whole stack: the same, with the port closed for N seconds
+//   /control/busy/N        the server back before the REST core behind it: the same, each MCP request answered as the
+//                          brain's edge answers a busy registry (HTTP 200, JSON-RPC -32003, Retry-After 2)
+//   /control/fault/N       the same, each answered 500, as the brain's route answers when its key check throws
+//   /control/cut/N         a server that dies: every connection dropped where it stands, a listen stream with no closing
+//                          frame, then 502 for N seconds. The other controls end each stream as the SDK's close() does
+//
+//   LISTEN=off bun probe.ts   declare tools.listChanged false, as the brain's server does today: a client told so
+//                             is offered no stream
 //   /control/expire        forget every 2025-era session, so its next request is answered 404
 //   /control/ttl?ms=N      the ttlMs answered on tools/list (2026-07-28 only)
 //   /control/state         what the probe holds
@@ -30,6 +47,16 @@ let ttlMs = Number(process.env.TTL_MS ?? 0);
 /** MCP requests received, so a check can tell a list answered from a client's cache from one that was sent. */
 let requests = 0;
 const sessions = new Map<string, { server: McpServer; transport: WebStandardStreamableHTTPServerTransport }>();
+/** Until when the MCP paths answer as something that is not serving, and how; 0 while serving. */
+let downUntil = 0;
+let downAs: "down" | "busy" | "fault" = "down";
+/** Whether the 2026-07-28 server says it sends list-changed notifications; `LISTEN=off` says it does not, as the brain's does today. */
+const LISTEN = process.env.LISTEN !== "off";
+/** What a client is answered while the probe is away, by the control that sent it away. */
+const away = (id: unknown): Response =>
+  downAs === "busy" ? Response.json({ jsonrpc: "2.0", error: { code: -32003, message: "Busy: the key could not be checked just now. Retry shortly." }, id: id ?? null }, { status: 200, headers: { "retry-after": "2" } })
+    : downAs === "fault" ? new Response("Internal Server Error", { status: 500, headers: { "content-type": "text/plain; charset=UTF-8" } })
+    : new Response("Bad Gateway", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
 
 const log = (line: Record<string, unknown>): void => {
   const full = { at: new Date().toISOString(), ...line };
@@ -50,7 +77,7 @@ const dropExtra = (server: McpServer): void => {
 
 /** A server for one request or one session, holding the tool set as it stands now. */
 function build(): McpServer {
-  const server = new McpServer({ name: "client-probe", version: "0.0.1" }, { cacheHints: { "tools/list": { ttlMs, cacheScope: "private" } } });
+  const server = new McpServer({ name: "client-probe", version: "0.0.1" }, { cacheHints: { "tools/list": { ttlMs, cacheScope: "private" } }, ...(LISTEN ? {} : { capabilities: { tools: { listChanged: false } } }) });
   server.registerTool("probe_time", { description: "Says the probe's time and which tool set it serves.", inputSchema: {} }, async () => ({
     content: [{ type: "text" as const, text: `time ${new Date().toISOString()} · tool set ${extra ? "B (probe_time, probe_extra)" : "A (probe_time)"}` }],
   }));
@@ -173,16 +200,53 @@ async function control(url: URL): Promise<Response> {
     for (const { transport } of sessions.values()) await transport.close().catch(() => undefined);
     sessions.clear();
     log({ event: "expire", sessions: n });
+  } else if (/^(down|refuse|busy|fault|cut)\/\d+$/.test(what)) {
+    // A restart as a client meets it. What a restart loses is lost at once: the listen streams and the sessions. The
+    // tool set changes, unannounced, as a release's does. Then nothing serves for the seconds named.
+    const [how, n] = what.split("/");
+    const seconds = Number(n);
+    if (seconds < 1 || seconds > 600) return new Response("1 to 600 seconds", { status: 400 });
+    extra = !extra;
+    const old = modern;
+    modern = handler();
+    // A server that dies sends no closing frame: its streams end when their connections are dropped, below.
+    if (how !== "cut") await old.close();
+    for (const { transport } of sessions.values()) await transport.close().catch(() => undefined);
+    sessions.clear();
+    log({ event: how, seconds, toolSet: extra ? "B" : "A" });
+    if (how === "cut") {
+      downAs = "down";
+      downUntil = Date.now() + seconds * 1000;
+      setTimeout(() => log({ event: "serving-again" }), seconds * 1000);
+      // After this answer has left: every connection dropped, and the port open again at once to answer 502.
+      setTimeout(() => {
+        void listener.stop(true).then(() => old.close()).catch(() => undefined);
+        listener = listen();
+      }, 100);
+    } else if (how !== "refuse") {
+      downAs = how as typeof downAs;
+      downUntil = Date.now() + seconds * 1000;
+      setTimeout(() => log({ event: "serving-again" }), seconds * 1000);
+    } else {
+      // After this answer has left: the port closed, its connections with it, and opened again.
+      setTimeout(() => {
+        void listener.stop(true);
+        setTimeout(() => {
+          listener = listen();
+          log({ event: "serving-again" });
+        }, seconds * 1000);
+      }, 100);
+    }
   } else if (what === "ttl") {
     ttlMs = Number(url.searchParams.get("ms") ?? 0);
     log({ event: "ttl", ttlMs });
   } else if (what !== "state") {
     return new Response("unknown control", { status: 404 });
   }
-  return Response.json({ toolSet: extra ? "B" : "A", ttlMs, sessions: sessions.size, requests });
+  return Response.json({ toolSet: extra ? "B" : "A", ttlMs, sessions: sessions.size, requests, down: Date.now() < downUntil, listen: LISTEN });
 }
 
-Bun.serve({
+const listen = () => Bun.serve({
   port: PORT,
   hostname: HOST,
   idleTimeout: 255,
@@ -195,9 +259,16 @@ Bun.serve({
     }
     requests++;
     await record(req, url.pathname);
+    if (Date.now() < downUntil) {
+      const id = req.method === "POST" ? await req.clone().json().then((m: { id?: unknown }) => m?.id, () => undefined) : undefined;
+      const res = away(id);
+      log({ event: "response", path: url.pathname, http: req.method, status: res.status, type: res.headers.get("content-type"), sid: null, away: downAs });
+      return res;
+    }
     const res = url.pathname === "/mcp" ? await modern.fetch(req) : url.pathname === "/legacy" ? await stateless(req) : await sessionful(req);
     log({ event: "response", path: url.pathname, http: req.method, status: res.status, type: res.headers.get("content-type"), sid: res.headers.get("mcp-session-id") });
     return res;
   },
 });
+let listener = listen();
 log({ event: "listening", host: HOST, port: PORT, ttlMs });
