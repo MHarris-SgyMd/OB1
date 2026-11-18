@@ -6046,7 +6046,8 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
 "open-brain-canary"}}` takes the url and key from that `~/.claude.json` entry, as
 `bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
 "keyFile": "…"}}` takes a url and a file holding the key alone. Only the brain a
-command names is read from it. No key is printed. Each subcommand refuses a flag
+command names is read from it. No key is printed, and a file that is not JSON is
+named without quoting it. Each subcommand refuses a flag
 it does not read.
 
 - **load** captures the arm's notes, generated from the arm's name and the index,
@@ -6061,16 +6062,22 @@ it does not read.
 - **sample** reads every brain's `brain_info` and `worker_status` each `--every`
   seconds (15), and, with `--ollama`, the model server's loaded models from
   Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
-  if a brain never answered, and 128 plus the signal's number if a signal cut it
-  short, as `bench-live.ts` does.
+  if a brain never answered. A signal ends the wait and the round in hand, and it
+  then exits 128 plus the signal's number, whatever the brains answered; a second
+  signal exits at once, the round in hand unwritten.
 - **clean** reads back each listed id, then searches for measure notes whose ids
-  never came back and reads those back too. It deletes the ones whose text starts
-  as a measure note does: the arm's alone with `--arm`, else every measure note on
-  the brain, of any arm or run. A listed id is trusted no more than a search hit:
+  never came back and reads those back too. It deletes a thought only when its
+  whole text is the generator's own for the arm and index its heading names: the
+  arm's alone with `--arm`, else every measure note on the brain, of any arm or
+  run. Like `load`, it runs only on a `canary` or `working` brain. A listed id is
+  trusted no more than a search hit:
   - one whose text is no measure note's is left, said, and exits 1;
   - one that is another arm's note, under `--arm`, is left and counted;
-  - one the brain no longer holds is counted as already gone, not as deleted.
+  - one the brain does not hold, gone already or never an id of its own, is
+    counted as not on the brain, not as deleted.
 
+  A thought that starts with a note's heading and then differs, someone's own
+  words after it, is never deleted, listed or found: clean says it and exits 1.
   A last search finds any note still there. It exits 1 if one is left, or if a
   delete, a read or that search failed. Run it after `load` has ended: a capture
   still on its way lands afterwards, and a second run finds it. It deletes the
@@ -6080,10 +6087,12 @@ it does not read.
 - **summary** prints, for each arm and brain, its sleep's background calls in two
   windows: before `--split` minutes, with no live load from the harness, and after
   it, with `bench-live.ts` running. For each window it gives:
+  - `s`, the seconds from the window's first sleep stamp to its last;
   - the calls, and their time;
-  - the mean number in flight: their time over the window's;
+  - the mean number in flight: their time over `s`;
   - the slot waits, of every model server the sleep asks, its decide tier's
-    included, in all and by pass.
+    included, in all and by pass. A pass reads `extract 51/1322s (51 waited
+    658s)`: its calls, their seconds, and its asks that waited with their seconds.
 
   It also gives the brain's extraction rows pending or claimed (first, last, most,
   and when they ran dry), how many of its samples failed, how often the model
@@ -6099,15 +6108,17 @@ these limits:
 - A call's time runs from its slot to its answer, failed or not. Its wait inside
   the model server (a model loading, a call ahead of it) is in that time; its
   wait for a slot is not. A model server that stalls a call makes it read as held.
+- A call that ran without a slot is counted too: one of a type no share holds,
+  or one let through when the gate could not be asked.
 - A tally is a pass's, over every model and server the pass calls. A brain's
   figure adds its passes, so it can pass any one server's room.
-- A call counts whole in the window it ends in. A window gains the earlier part
+- A call counts whole at the stamp after it ends. A window gains the earlier part
   of the calls ending in it and loses the calls still running at its end, so a
   long call (a 27B model's, minutes) can put the figure above the workers.
 
 **The windows.** A heartbeat's tallies count since the sleep's process began. It
-stamps them about once a minute, by the database's clock, and a call counts when
-it ends. So a window's figures are the sum of the increases from stamp to stamp,
+stamps them at least once a minute, more often while it works, by the database's
+clock, and a call counts when it ends. So a window's figures are the sum of the increases from stamp to stamp,
 over the time between its first and last stamps. That is up to a stamp short of
 its minutes at each end, and the pair of stamps across the split is in neither
 window. A pair of stamps in which any pass's tally falls, or a pass drops out,
