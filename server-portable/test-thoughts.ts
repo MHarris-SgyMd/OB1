@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
-import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
+import { canonicalType, displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, providerFault, ProviderError, refuseRedirect, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture, updateThought } from "./core/writes.ts";
@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
+import { askOwnSubject, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -66,6 +66,15 @@ console.log("\n[3] Unknown and malformed values degrade to observation");
     assert(out.type === "observation", `${JSON.stringify(bad)} → observation`);
   }
   assert(normaliseType("wingding").raw === "wingding", "an invented type is preserved in type_raw");
+  // An object's inherited keys are no alias: TYPE_ALIASES["constructor"] was Object's function (SMD-3318).
+  for (const inherited of ["constructor", "Constructor", "__proto__"]) {
+    const out = normaliseType(inherited);
+    assert(out.type === "observation" && out.raw === inherited && canonicalType(inherited) === null, `${inherited} → observation, its words in type_raw; canonicalType names none`);
+  }
+  assert(JSON.stringify(canonicalType(" To-Do ")) === "null" && JSON.stringify(canonicalType("To Do")) === "null"
+         && JSON.stringify(canonicalType("Action Item")) === JSON.stringify({ type: "task", aliased: true })
+         && JSON.stringify(canonicalType(" Person-Note ")) === JSON.stringify({ type: "person_note", aliased: false }),
+    "canonicalType: an alias after folding (action item → task), a type after folding (Person-Note → person_note), none for to_do");
 }
 
 console.log("\n[4] Case and spacing are normalised, not rejected");
@@ -2920,7 +2929,9 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     "…none for a note that is no session summary, a header naming no ticket (the hook's older layout, its branch's id lower case) or a denied prefix");
   // The hook's own renderSummary (review passes 1 and 3), its session as the segmenter fills one: a header it writes for
   // prompts naming their ticket is keyed; one carrying the branch's ticket, the harness's title naming it, is not.
-  const { renderSummary, headerTickets } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string; headerTickets: (s: Record<string, unknown>) => { tickets: string[]; from: string | null } };
+  const { renderSummary, headerTickets, NOT_TICKETS: hookNotTickets } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string; headerTickets: (s: Record<string, unknown>) => { tickets: string[]; from: string | null }; NOT_TICKETS: Set<string> };
+  assert(hookNotTickets.size === HOOK_NOT_TICKETS.size && [...hookNotTickets].every((p) => HOOK_NOT_TICKETS.has(p)),
+    "the brain's mirror of the hook's denied prefixes (HOOK_NOT_TICKETS) is the hook's NOT_TICKETS exactly (SMD-4291's review pass 3, cold read)");
   const hookSession = (branch: string, prompts: string[], named: string[], title = "") => ({
     harness: "claude-code", sessionId: "s-1", title, cwd: "/work/ob1", branch, roots: new Set(), prompts, outcome: "Done.", assistant: [], files: new Set(), commits: 0, prs: [],
     retrieved: new Set(), captured: new Set(), first: "2026-10-01T10:00:00Z", last: "2026-10-01T11:00:00Z", pushed: false, checkpoint: undefined, n: 0, named: new Set(named),
@@ -2973,7 +2984,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     "…the team the header's own parts name read as the hook reads a ticket, two to five letters and two to six digits: `hotfix-2026`, `release-2` or `ob1-2` no team (review pass 5, run-it); `node-22` beside `smd-610` still another team's");
   assert(H(onPlace("SMD-55", "fix smd-55", "site-2025 (smd-55-fix)"), "asks") === "SMD-55" && H(onPlace("SMD-55", "fix smd-55", "aoc-2024 (feature/smd-55-day1)"), "asks") === "SMD-55"
       && H(onPlace("SMD-34", "fix smd-34", "eng-12-foo (smd-34-bar)"), "asks") === "SMD-34" && H(onPlace("SMD-34", "fix smd-34", "eng-12-foo (smd-34-bar)")) === "SMD-34"
-      && ["ed-25519-keys", "md-12-render", "html-2026"].every((b) => H(onPlace("SMD-55", "Work on SMD-55 please", `ob1 (${b})`), "asks") === "SMD-55")
+      && ["ed-25519-keys", "md-12-render", "html-2026", "ipv-46-dual"].every((b) => H(onPlace("SMD-55", "Work on SMD-55 please", `ob1 (${b})`), "asks") === "SMD-55")
       && H(onPlace("NODE-3", "x", "smd-12-wt (main)"), "asks") === "" && H(onPlace("SMD-12", "start smd-12", "smd-12-wt (main)"), "asks") === "SMD-12"
       && H(onPlace("NODE-22, NODE-24", "bump node-22 to node-24", "ob1 (smd-610-bump-node-22)"), "asks") === "",
     "…the branch's team first, then the project's, as the hook reads a place, no prefix either list denies: a project `site-2025` or a worktree of another team's ticket beside a ticket branch, and `ed-25519-keys`, keep the session (review pass 6, cold read)");

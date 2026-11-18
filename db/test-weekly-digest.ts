@@ -12,8 +12,8 @@
  * (type:digest, source:weekly-digest) and the worker key is the actor. Under the
  * default deny the send is refused; a matching OB1_EGRESS_ALLOW term lets it
  * through; a local endpoint (the drop-the-gate mutant) always would. The
- * DB-backed behavior (the fail-closed read, the stub that records zero requests)
- * lives in test-live.ts [20b].
+ * DB-backed behavior (the sensitivity filter, the stub that records zero requests)
+ * lives in test-live.ts [36] and [51].
  */
 
 import { resolveEgressPolicy, mayLeaveBox, type EgressSubject } from "../server-portable/egress.ts";
@@ -288,10 +288,12 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   const window = (n: number) => {
     const asked: string[] = [];
     const fn = Object.assign(
-      (strings: TemplateStringsArray) => (/information_schema/.test(strings.join("$")) ? Promise.resolve([{ has_sensitivity: true }]) : Promise.reject(new Error("unexpected"))),
+      (strings: TemplateStringsArray) => (/pg_attribute|has_column_privilege/.test(strings.join("$")) ? Promise.resolve([{ has_sensitivity: true, readable: true }]) : Promise.reject(new Error("unexpected"))),
       {
-        unsafe: (q: string) => {
+        unsafe: (q: string, params?: unknown[]) => {
           asked.push(q);
+          // The pattern check's second read: each id asked for, its text clean.
+          if (/id = ANY/.test(q)) return Promise.resolve((params?.[0] as string[]).map((id) => ({ id, content: "x" })));
           const limit = Number(/LIMIT (\d+)/.exec(q)?.[1]);
           return Promise.resolve(Array.from({ length: Math.min(n, limit) }, (_, i) => ({ id: `t${i}`, content: "x", created_at: "2026-11-01T00:00:00Z", metadata: null, turn: 1, group: "g" })));
         },
@@ -302,10 +304,13 @@ const thought = (o: Partial<DigestThought>): DigestThought => ({
   const opts = { windowDays: 7, includePersonal: false, noSensitivityFilter: false };
   const full = window(5001);
   const over = await readThoughts(full.sql, opts);
-  ok(!over.failClosed && over.rows.length === 5000 && over.more === true, `a window past 5,000 is read to 5,000 and said to hold more (${over.failClosed ? "" : `${over.rows.length}, ${over.more}`})`);
+  ok(over.rows.length === 5000 && over.more === true, `a window past 5,000 is read to 5,000 and said to hold more (${over.rows.length}, ${over.more})`);
   ok(/left\(content, 280\) AS content/.test(full.asked[0] ?? "") && /LIMIT 5001\b/.test(full.asked[0] ?? ""), "the text is read only as far as the prompt reads it");
-  const under = await readThoughts(window(5000).sql, opts);
-  ok(!under.failClosed && under.rows.length === 5000 && under.more === false, "a window of exactly 5,000 is all read, with nothing more said");
+  const exact = window(5000);
+  const under = await readThoughts(exact.sql, opts);
+  ok(under.rows.length === 5000 && under.more === false, "a window of exactly 5,000 is all read, with nothing more said");
+  // The patterns' second read takes the window 100 ids a statement, so a window of long documents is never held whole.
+  ok(exact.asked.filter((q) => /id = ANY/.test(q)).length === 50, `the second read in batches of 100: 50 statements for 5,000 rows (${exact.asked.filter((q) => /id = ANY/.test(q)).length})`);
 }
 
 // ---------------------------------------------------------------------------

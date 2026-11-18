@@ -1,6 +1,6 @@
 {
   "name": "Thought Enrichment Pipeline",
-  "description": "Retroactively classifies existing thoughts with type, importance, sensitivity, topics, tags, and more using LLM-based enrichment and regex-based sensitivity detection.",
+  "description": "Retroactively classifies existing thoughts with type, importance, topics, tags, and more using LLM-based enrichment; its type and sensitivity backfills are db/backfill-metadata.ts now.",
   "category": "recipes",
   "author": {
     "name": "Alan Shurafa",

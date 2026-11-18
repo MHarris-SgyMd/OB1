@@ -791,12 +791,13 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // PUBLIC's, and adds ob1_text_forgotten_at and ob1_forget_leftovers,
   // refusing by name without 139 or 142 ([20ci]); 145 adds release_holder_claims,
   // an operator's one-call release of every live claim a holder holds, refusing
-  // by name without 046 or 115 ([20cj]) — all recorded by the
+  // by name without 046 or 115 ([20cj]); 146 upserts ob1_config.schema_version
+  // for the 2.1.0 cut, needing only 006's table — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 116, `030 is among the last one hundred and sixteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 117, `030 is among the last one hundred and seventeen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
