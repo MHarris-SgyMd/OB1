@@ -16,7 +16,7 @@
 import { createHash } from "node:crypto";
 import { createAssert } from "../db/test-support.ts";
 import { applyChunkContextPrompt, applyEmbeddingPrompt, CHUNK_CONTEXT_PROMPTS, DEFAULT_LLM_BASE_URL, DEFAULT_METADATA_MODEL, EXTRACT_MARKER_TOKENS, EXTRACT_OUTPUT_FLOOR, EXTRACT_OUTPUT_RATIO, EXTRACT_PROMPT_TOKENS, extractContextNeeded, extractOutputBudget, extractWindowThatFits, KNOWN_CHAT_MODEL_WINDOW, MAX_WHOLE_TOKENS, resolveExtractWindow } from "../db/config.mjs";
-import { displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
+import { canonicalType, displayDate, normaliseType, thoughtTitle, thoughtUrl, THOUGHT_TYPES, TYPE_ALIASES } from "./thoughts.ts";
 import { createEmbedder, DEFAULT_LLM_TIMEOUT_S, providerCall, providerDown, providerFault, ProviderError, refuseRedirect, resolveEmbedConfig } from "./embed.ts";
 import { createContext } from "./core/context.ts";
 import { capture, updateThought } from "./core/writes.ts";
@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
+import { askOwnSubject, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -66,6 +66,15 @@ console.log("\n[3] Unknown and malformed values degrade to observation");
     assert(out.type === "observation", `${JSON.stringify(bad)} → observation`);
   }
   assert(normaliseType("wingding").raw === "wingding", "an invented type is preserved in type_raw");
+  // An object's inherited keys are no alias: TYPE_ALIASES["constructor"] was Object's function (SMD-3318).
+  for (const inherited of ["constructor", "Constructor", "__proto__"]) {
+    const out = normaliseType(inherited);
+    assert(out.type === "observation" && out.raw === inherited && canonicalType(inherited) === null, `${inherited} → observation, its words in type_raw; canonicalType names none`);
+  }
+  assert(JSON.stringify(canonicalType(" To-Do ")) === "null" && JSON.stringify(canonicalType("To Do")) === "null"
+         && JSON.stringify(canonicalType("Action Item")) === JSON.stringify({ type: "task", aliased: true })
+         && JSON.stringify(canonicalType(" Person-Note ")) === JSON.stringify({ type: "person_note", aliased: false }),
+    "canonicalType: an alias after folding (action item → task), a type after folding (Person-Note → person_note), none for to_do");
 }
 
 console.log("\n[4] Case and spacing are normalised, not rejected");
@@ -1148,7 +1157,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
   const embedPort = closedNow();
   const chatPort = closedNow();
   const written: Record<string, any>[] = [];
-  const store = { captureThought: async (args: Record<string, unknown>) => { written.push(args); return { id: "00000000-0000-4000-8000-0000000000b1", existed: false }; } };
+  const store = { textForgottenAt: async () => null, captureThought: async (args: Record<string, unknown>) => { written.push(args); return { id: "00000000-0000-4000-8000-0000000000b1", existed: false }; } };
   const ctx = createContext({
     env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${embedPort}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `http://127.0.0.1:${chatPort}/v1`, OB1_CHAT_LOCAL: "1" }),
     store: async () => store as never,
@@ -1172,7 +1181,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
     const written2: unknown[] = [];
     const ctx2 = createContext({
       env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${embedPort}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
-      store: async () => ({ captureThought: async (args: unknown) => { written2.push(args); return { id: "00000000-0000-4000-8000-0000000000b2", existed: false }; } }) as never,
+      store: async () => ({ textForgottenAt: async () => null, captureThought: async (args: unknown) => { written2.push(args); return { id: "00000000-0000-4000-8000-0000000000b2", existed: false }; } }) as never,
       door: "test",
     });
     let eTls: unknown;
@@ -1188,7 +1197,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
       for (const [what, port] of [["an echoing endpoint", echo.port], ["a deep nest", deep.port]] as const) {
         const ctx4 = createContext({
           env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_LLM_API_KEY: "secret-key-0123456789", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
-          store: async () => ({ captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000b4", existed: false }) }) as never,
+          store: async () => ({ textForgottenAt: async () => null, captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000b4", existed: false }) }) as never,
           door: "test",
         });
         const out = await capture(ctx4, { name: "writer", scope: "write", keyHash: "h" } as never, { content: `a thought sent to ${what}` } as never).then((o) => o, (e) => e);
@@ -1208,7 +1217,7 @@ console.log("\n[13] A provider that does not answer (SMD-2888): providerDown nam
       const written3: unknown[] = [];
       const ctx3 = createContext({
         env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${keyless.port}/v1`, OB1_LLM_LOCAL: "1", OB1_CHAT_BASE_URL: `https://127.0.0.1:${plain.port}/v1`, OB1_CHAT_LOCAL: "1" }),
-        store: async () => ({ captureThought: async (args: unknown) => { written3.push(args); return { id: "00000000-0000-4000-8000-0000000000b3", existed: false }; } }) as never,
+        store: async () => ({ textForgottenAt: async () => null, captureThought: async (args: unknown) => { written3.push(args); return { id: "00000000-0000-4000-8000-0000000000b3", existed: false }; } }) as never,
         door: "test",
       });
       const both = await capture(ctx3, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought both endpoints fail" } as never).then((o) => o, (e) => e);
@@ -2726,7 +2735,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   // coded since SMD-2892 (EMBEDDING_PROVIDER_ERROR, retryable), not thrown.
   {
     const uid = "00000000-0000-4000-8000-0000000000d1";
-    const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), thoughtsNamed: async () => new Map(), updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
+    const editStore = { getThought: async () => ({ id: uid, content: "old", metadata: {} }), thoughtsNamed: async () => new Map(), textForgottenAt: async () => null, updateThought: async () => ({ ok: true, id: uid, updatedAt: "2026-10-22T00:00:00.000Z" }) };
     const embedsOk = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => Response.json({ data: [{ embedding: [0.1, 0.2, 0.3, 0.4] }] }) });
     let port = closedNow();
     const ectx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => editStore as never, door: "test" });
@@ -2746,7 +2755,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
   {
     const refuses = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(JSON.stringify({ error: "input refused" }), { status: 400 }) });
     try {
-      const fctx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${refuses.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => ({ captureThought: async () => ({ id: "x", existed: false }), hybridThoughts: async () => [] }) as never, door: "test" });
+      const fctx = createContext({ env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${refuses.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }), store: async () => ({ textForgottenAt: async () => null, captureThought: async () => ({ id: "x", existed: false }), hybridThoughts: async () => [] }) as never, door: "test" });
       fctx.providerHealth.noteDown({ reason: "provider_unreachable", detail: "the connection was refused" });
       const cap = await capture(fctx, { name: "writer", scope: "write", keyHash: "h" } as never, { content: "a thought the provider refuses" } as never);
       assert(!cap.ok && cap.refusal.code === "EMBEDDING_PROVIDER_ERROR" && cap.refusal.retryable === false && cap.refusal.status === 400 && fctx.providerHealth.state().status === "answering",
@@ -2776,7 +2785,7 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
     try {
       const gctx = createContext({
         env: () => ({ OB1_LLM_BASE_URL: `http://127.0.0.1:${mode === "down" ? port : stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_DIM: "4" }),
-        store: async () => ({ captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000e1", existed: false }), hybridThoughts: async () => [], literalFacts: async () => ({ literals: [], textable: false }) }) as never,
+        store: async () => ({ textForgottenAt: async () => null, captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000e1", existed: false }), hybridThoughts: async () => [], literalFacts: async () => ({ literals: [], textable: false }) }) as never,
         door: "test",
       });
       const writer = { name: "writer", scope: "write", keyHash: "h" } as never;
@@ -2920,7 +2929,9 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     "…none for a note that is no session summary, a header naming no ticket (the hook's older layout, its branch's id lower case) or a denied prefix");
   // The hook's own renderSummary (review passes 1 and 3), its session as the segmenter fills one: a header it writes for
   // prompts naming their ticket is keyed; one carrying the branch's ticket, the harness's title naming it, is not.
-  const { renderSummary, headerTickets } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string; headerTickets: (s: Record<string, unknown>) => { tickets: string[]; from: string | null } };
+  const { renderSummary, headerTickets, NOT_TICKETS: hookNotTickets } = (await import(new URL("../recipes/session-capture-hook/session-capture.mjs", import.meta.url).href)) as { renderSummary: (s: Record<string, unknown>) => string; headerTickets: (s: Record<string, unknown>) => { tickets: string[]; from: string | null }; NOT_TICKETS: Set<string> };
+  assert(hookNotTickets.size === HOOK_NOT_TICKETS.size && [...hookNotTickets].every((p) => HOOK_NOT_TICKETS.has(p)),
+    "the brain's mirror of the hook's denied prefixes (HOOK_NOT_TICKETS) is the hook's NOT_TICKETS exactly (SMD-4291's review pass 3, cold read)");
   const hookSession = (branch: string, prompts: string[], named: string[], title = "") => ({
     harness: "claude-code", sessionId: "s-1", title, cwd: "/work/ob1", branch, roots: new Set(), prompts, outcome: "Done.", assistant: [], files: new Set(), commits: 0, prs: [],
     retrieved: new Set(), captured: new Set(), first: "2026-10-01T10:00:00Z", last: "2026-10-01T11:00:00Z", pushed: false, checkpoint: undefined, n: 0, named: new Set(named),
@@ -2973,7 +2984,7 @@ console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the
     "…the team the header's own parts name read as the hook reads a ticket, two to five letters and two to six digits: `hotfix-2026`, `release-2` or `ob1-2` no team (review pass 5, run-it); `node-22` beside `smd-610` still another team's");
   assert(H(onPlace("SMD-55", "fix smd-55", "site-2025 (smd-55-fix)"), "asks") === "SMD-55" && H(onPlace("SMD-55", "fix smd-55", "aoc-2024 (feature/smd-55-day1)"), "asks") === "SMD-55"
       && H(onPlace("SMD-34", "fix smd-34", "eng-12-foo (smd-34-bar)"), "asks") === "SMD-34" && H(onPlace("SMD-34", "fix smd-34", "eng-12-foo (smd-34-bar)")) === "SMD-34"
-      && ["ed-25519-keys", "md-12-render", "html-2026"].every((b) => H(onPlace("SMD-55", "Work on SMD-55 please", `ob1 (${b})`), "asks") === "SMD-55")
+      && ["ed-25519-keys", "md-12-render", "html-2026", "ipv-46-dual"].every((b) => H(onPlace("SMD-55", "Work on SMD-55 please", `ob1 (${b})`), "asks") === "SMD-55")
       && H(onPlace("NODE-3", "x", "smd-12-wt (main)"), "asks") === "" && H(onPlace("SMD-12", "start smd-12", "smd-12-wt (main)"), "asks") === "SMD-12"
       && H(onPlace("NODE-22, NODE-24", "bump node-22 to node-24", "ob1 (smd-610-bump-node-22)"), "asks") === "",
     "…the branch's team first, then the project's, as the hook reads a place, no prefix either list denies: a project `site-2025` or a worktree of another team's ticket beside a ticket branch, and `ed-25519-keys`, keep the session (review pass 6, cold read)");
@@ -3557,7 +3568,7 @@ console.log("\n[18] The priority a text states (SMD-3670): a due phrase resolved
     let stamp: "throws" | string | null = null, stampReads = 0;
     const stubStore = {
       getThought: async () => { stampReads++; if (stamp === "throws") throw new Error("the row is away"); return { id: "00000000-0000-4000-8000-0000000000c1", content: "", metadata: stamp === null ? {} : { actor_kind: stamp }, created_at: null }; },
-      captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000c1", existed }),
+      textForgottenAt: async () => null, captureThought: async () => ({ id: "00000000-0000-4000-8000-0000000000c1", existed }),
       keyAtText: async () => (existed ? { id: "00000000-0000-4000-8000-0000000000c1", clientKey: null } : null),
       assertPriority: async (o: Record<string, unknown>) => { if (assertFails) throw new Error("the store is away"); stated.push(o); return { outcome: "asserted" }; },
     };

@@ -2981,6 +2981,7 @@ console.log("\n[13] A redirect is never followed: each call that sends brain tex
     ["db/sync-linear.ts", { aliases: 4 }], // a local array named fetch (the identifiers to fetch), not the global
     ["server-portable/api.ts", { calls: 1 }], // app.fetch: the REST core's own Hono app, in process
     ["mcp-server/index.ts", { calls: 1 }], // app.fetch: the MCP server's own app, in process
+    ["mcp-server/app.ts", { calls: 1 }], // modern.fetch: the SDK's handler for the 2026-07-28 revision, in process (SMD-4345)
     ["mcp-server/stack.ts", { calls: 2 }], // restCore.fetch and app.fetch: the stack's servers, in process
     ["server-portable/core/calls.ts", { calls: 1 }], // c.fetch: the core's fetch-a-thought operation, no HTTP
   ]);

@@ -331,7 +331,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and forty-three (143) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and forty-six (146) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -372,7 +372,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -389,7 +389,8 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.7.0+upstream.9543c29`, the eighth (`082..083`), and 089 writes
 `1.8.0+upstream.9543c29`, the ninth (`084..089`), and 103 writes
 `1.9.0+upstream.9543c29`, the tenth (`090..103`), and 121 writes
-`2.0.0`, the eleventh (`104..121`), the first plain version (SMD-3317). `preflight` prints the
+`2.0.0`, the eleventh (`104..121`), the first plain version (SMD-3317), and 146 writes
+`2.1.0`, the twelfth (`122..146`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -2508,6 +2509,33 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 144 makes `forget_thought` run as its owner (SMD-1723 PR 2). Under 139 a
+role calling it needed every store's privilege: `UPDATE` on `thought_audit`, the
+deletes on the append-only tables, the query log's writes and `INSERT` on the
+ledger, more than a full `--grant` issues, and a role holding them all could forget
+by hand. 139's function is renamed `ob1_forget_thought_body`, and
+`forget_thought` is now a SECURITY DEFINER wrapper over it (the maintainer's
+choice, 2026-11-15): its `search_path` pinned to the schemas the migration ran
+under with `pg_temp` last, and every `ob1.*` setting but `ob1.actor` emptied for
+the call and given back after, so a caller can't carry a replay's or an
+amendment's exemption in as the owner; a forget called inside a replay runs as a
+live write. The settings are emptied by `set_config`, not pinned on the function:
+PostgreSQL refuses a custom setting there to an owner that is not a superuser.
+`ob1_forgetting()` now reads its setting through a cast that cannot raise: 139's
+raised `22P02` in every guard once a forget had left the setting empty in a
+session. `EXECUTE` is revoked
+from PUBLIC and is the **server** grant group's: a grant 139's function held is
+carried to the wrapper, and a role granted before 144 needs `--grant` again (not every
+role that may delete a thought: a delete can be undone from the log, a forget
+cannot). `ob1_text_forgotten_at(text)` answers when a text was
+forgotten, by 139's refusal rule, so the server refuses a forgotten text before it
+pays for an embedding; `ob1_forget_leftovers()` lists every forgotten thought a
+store still holds the id or text of, a write that raced the forget, which
+preflight's `forgotten` row names; it reads each store once, as its owner. A re-applied 139 puts its body back under
+`forget_thought`, running as its caller, until 144 is re-applied: preflight's
+`forget definer` row says so. Needs 139 and 142; a re-apply is a no-op. test-schema [131], test-upgrade
+[20ci].
+
 Migration 142 proposes a review of stale, overdue, disagreeing and settled priority
 statements (SMD-3671 PR 1). A priority stated once stood for ever; docs/priority.md
 decision 6 has the brain propose findings and an operator decide them.
@@ -2597,8 +2625,8 @@ section once built on it whose revision keeps the earlier body), are listed for
 a person to review: prose that absorbed the text can't be removed mechanically.
 Copies outside the brain (sleep dumps, posted Linear comments, digest files,
 extraction dumps, earlier backups) are named, not reached. Each role that writes
-thoughts is granted SELECT on the ledger. The operation over REST and MCP is PR
-2; the other brains, PR 3. Needs 016, 034, 053, 055, 060, 064, 067, 116, 117,
+thoughts is granted SELECT on the ledger. The operation over REST and MCP came
+with 144; the other brains are PR 3. Needs 016, 034, 053, 055, 060, 064, 067, 116, 117,
 123 and 134; a re-apply keeps the ledger. test-schema [129], test-upgrade
 [20cg].
 
@@ -3114,6 +3142,8 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
+| | `forget_thought(uuid, jsonb, boolean)` (144) | `EXECUTE` — `forget_thought`, which runs as its owner since 144 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 144 carries a grant 139's function held to the wrapper; a role granted before 144 needs `--grant` again |
+| | `ob1_forget_leftovers()` (144) | `EXECUTE` — preflight's `forgotten` row, which reads every store `forget_thought` reaches as the function's owner; without it the row says it could not verify |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
@@ -3134,7 +3164,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **pages** — the page store (064, SMD-1812): a role that writes pages through `upsert_page`, `write_page_section`, `accept_page_section`, `reject_page_section`, `release_page_section`, `lock_page_section` and `delete_page_section` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function) — beside `capture`, since a page is a thought and the store writes it through `upsert_thought` / `update_thought` and records lineage in `derivations`. A page's rows go with its thought's delete, whose cascade runs as the owner | `pages` (064) | `SELECT, INSERT, UPDATE` |
 | | `page_sections` (064) | `SELECT, INSERT, UPDATE, DELETE` — `delete_page_section` deletes the row as the caller |
 | | `page_section_revisions` (064; append-only — UPDATE, a DELETE while the section stands, and TRUNCATE refused by trigger for the owner too, so only a section's cascade removes its rows; the identity `seq` needs no sequence grant, test-schema [59]) | `SELECT, INSERT` |
-| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. The per-holder cap (140, SMD-3606): `claim_work` reads `work_claim_cap_settings` on every new claim, and `set_work_claim_cap` writes it, a trigger holding the write to an operator key by its agent id. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
+| **claims** — work claims (115, SMD-3597): a role whose clients claim work through `claim_work`, `renew_work_claim` and `release_work_claim`, or read it through `list_work_claims` (SECURITY INVOKER; PUBLIC's EXECUTE, as every core function but 118's release and 144's forget_thought and ob1_forget_leftovers). The holder's kind is read from `ob1_agents`, the **capture** group's `SELECT`. The per-holder cap (140, SMD-3606): `claim_work` reads `work_claim_cap_settings` on every new claim, and `set_work_claim_cap` writes it, a trigger holding the write to an operator key by its agent id. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `work_claims` (115; no `DELETE` — an ended claim stays as history) | `SELECT, INSERT, UPDATE` |
 | | `work_claim_cap_settings` (140; the operator's cap, one standing row, history after — a DELETE and TRUNCATE refused by trigger, for the owner too) | `SELECT, INSERT, UPDATE` |
 | **closedclaims** — board-sync's role (SMD-3600): `sync-linear.ts` ends every unreleased claim on a ticket the brain records as settled through `release_closed_ticket_claims` (118), the one core function whose EXECUTE is not PUBLIC's. It reads `ob1_ticket_head`, `thoughts` and `ob1_agents`, the **capture** group's `SELECT`s. Soft: without it board-sync says so once per run, and the claims stay until their holders release them | `release_closed_ticket_claims(text, boolean, jsonb)` (118) | `EXECUTE` |
 | | `work_claims` (115) | `SELECT, UPDATE` |
@@ -3976,12 +4006,17 @@ none: a session on a branch may have done other work. A header listing several
 is left to the model, which names each whose work the session did. A header
 listing a ticket of another team than the session's, its branch's first ticket,
 else its project's, read as the hook reads a place (`hotfix-2026` names none),
-is left to the model too: the hook learns a team from each ticket-shaped word of
-a branch, so on `smd-610-bump-node-22` a prompt's `node-22` is a ticket to it.
-The hook also learns teams from the session's other places and a directory's
-whole path, which the header does not show; that is SMD-4291's to fix in the
-hook. A summary the hook's model wrote (`metadata.summary_model`) keys no
-header: its prose is never the hook's layout. The header rule's version 3
+is left to the model too: the hook before 1.8.1 learned a team from each
+ticket-shaped word of a branch, so on `smd-610-bump-node-22` a prompt's
+`node-22` was a ticket to it, and from the session's other places and a
+directory's whole path, which the header does not show. From 1.8.1 a place
+teaches its own ticket's team alone (SMD-4291), but the guard stays for it too:
+a place with no ticket teaches its first ticket-shaped word's team
+(`node-22-pin`), and the session's teams are every place it has been but a
+folder entered from within its checkout, so an ask can still name another
+team's key the branch on the header does not show. A summary the hook's model
+wrote (`metadata.summary_model`) keys no header: its prose is never the hook's
+layout. The header rule's version 3
 (SMD-3306 PR 7a-3b-2) keyed a header listing several as a set; its Verify on the
 canary failed on such sessions, whose raters mostly named one subject, often the
 review or triage the session did (Linear cd0dfb52), and version 4 (PR 7a-3b-3)
@@ -5856,6 +5891,56 @@ the bound on a lock wait (a held table, and a held REINDEX under an unbounded
 count), a role that may not read a table, a report that cannot be written, and
 the refusals.
 
+## Backfilling a thought's type and sensitivity tier (SMD-3318)
+
+### `backfill-metadata.ts`
+
+```bash
+bun backfill-metadata.ts                    # both passes, a dry run: what would be written (DATABASE_URL from the env or ./.env)
+bun backfill-metadata.ts --apply            # write
+bun backfill-metadata.ts --pass type --apply  # one pass
+#   --pass type|sensitivity (both)   --apply (none: a dry run)   --limit N (rows written; 0: none)   --batch N (rows a page reads; 500)   --statement-timeout SECONDS (60; 0: none)   --url (shows the password to ps; prefer DATABASE_URL)
+#   exits 0 the run ended · 1 a read or a write failed (rows already written stay) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
+```
+
+`recipes/thought-enrichment`'s `backfill-type.mjs` and
+`backfill-sensitivity.mjs` (SMD-2139), one script (SMD-3318). Both passes write
+the metadata key through `update_thought`, and `schemas/enhanced-thoughts`'
+column too where a brain has it, for that schema's readers (its search and
+stats functions, the bio worker, ops views). A row's writes are one
+transaction: its keys in one `update_thought` call (one audit event,
+`actor_name` `backfill-metadata`; the row's own actor stamp kept), then its
+columns (a column's write alone records no audit event, as the old scripts' did
+not); a row written since its page was read is left for the next run
+(`if_unchanged_since` on `COALESCE(updated_at, created_at)`, as the function
+compares it), and metadata that is not a JSON object has its keys counted, not
+written. The **type** pass writes a `metadata.type` the capture would have
+written otherwise (another case or spacing, or an alias such as `todo` or
+`fact`) as the capture's type, by its own rule (`server-portable/thoughts.ts`'s
+`canonicalType`), an alias's words in `type_raw`; a type naming none of the
+capture's is left, and so is a row an importer owns (trust `ingested`), whose
+next sync would write its own value back. The `type` column takes the old rule
+on the type as the capture names it: `reference` becomes it when it is one of
+the old eight (so `Task` and `todo` now set it, an importer's row's included).
+The **sensitivity** pass reads a thought's text against the sensitivity
+patterns (`db/sensitivity.ts`, which `db/weekly-digest.ts` reads too: the
+recipe's, reworked, and the session-capture hook's secret table), and each place
+takes the highest of their tier and the other place's when that is higher than
+what it says (absent, empty and `standard`, in any case, lowest), so the key
+and the column agree; a tier is never lowered, an unknown one left, and no text
+is printed. Pages are read by the primary key, one statement each, so a run
+holds no snapshot or lock for its length; a page holds its rows' whole text, so
+a brain of long documents takes a smaller `--batch`. A role needs what `bun
+db/migrate.ts --grant <role>` gives (`update_thought` reads `ob1_agents` and
+`ob1_config`). test-live [51] holds the patterns label by label (the copied
+secret table against the hook's own, rule for rule), a dry
+run writing nothing (and the same over pages of two), each pass's writes and
+audit events, the cases left, the digest's read with and without the column
+(its patterns before any backfill included), a row edited or deleted mid-run, a
+failure, a second run writing nothing, `--pass`, `--limit`, the statement bound
+and the refusals. The recipe's `enrich-thoughts.mjs` becomes SMD-2298's re-tag
+worker (SMD-3318 PR 3b).
+
 ## Extensions
 
 The core schema needs **`vector`** and, since migration 011, **`pg_trgm`**.
@@ -7482,7 +7567,7 @@ OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outsi
 bun test-cli.ts                             # every script's flags through cli.ts — no database
 bun test-connect.ts                         # every script's connection through connect.ts — no database
 bun test-coordinator.ts                     # the coordinator's passes, each one's settings and command line — no database; as root, its planted /proc check
-bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts, sleep.ts, rebuild.ts) import with no side effect, refuse through run(), and the claim workers' loop (claim-loop.ts's claimWorker, SMD-4308) over a stand-in for the database — no database
+bun test-engines.ts                         # the engines (migrate.ts, extract-entities.ts, consolidate.ts, reembed.ts, sleep.ts, rebuild.ts) import with no side effect, refuse through run(), and the claim workers' loop and its reading of a failed call (claim-loop.ts's claimWorker and thoughtFault, SMD-4308) over stand-ins for the database and the engine — no database
 bun test-worker-bootstrap.ts                # every claim worker's egress and identity bootstrap, and the outage rules and probe, through worker-bootstrap.ts — no database
 bun test-weekly-digest.ts                   # the digest's ranking, chunking and its egress subject/gate — no database
 bun test-board-findings.ts                  # the findings poster's grouping, comment, marker, cap and egress subject, and what became of a finding posted (SMD-2682) — no database
@@ -7758,12 +7843,19 @@ as the actor — and one term opts the sink in: `OB1_EGRESS_ALLOW=type:digest` (
 `source:weekly-digest`, or `actor:<key>`). Under the default deny with no such
 term the send is refused, the refusal names the rule, and the digest is printed
 to stdout instead — nothing reaches Telegram; `--output stdout|file` never leaves
-the box (the synthesis still does). The sensitivity boundary is fail-closed: with
-no `sensitivity_tier` column the run refuses rather than page every row, unless
-`--no-sensitivity-filter` says so. A row is left out by the column or by its
-`metadata.sensitivity_tier`, whichever says `restricted` (or `personal` without
-`--include-personal`): the import recipes set the facet and leave the column
-at its default (SMD-2493). The prompt takes a share of each day and writer
+the box (the synthesis still does). A row is left out by its
+`metadata.sensitivity_tier`, by `schemas/enhanced-thoughts`' column where a
+brain has it (each in any case and white space; a column the role may not read
+refuses the run), or by the sensitivity patterns (`db/sensitivity.ts`: the
+recipe's, widened, and the session-capture hook's secret table) over its whole
+text and the type, topics and tags the prompt sends, whichever says
+`restricted` (or `personal` without `--include-personal`): the import recipes
+set the key and leave the column at its default (SMD-2493),
+`db/backfill-metadata.ts` sets both, and the patterns hold back what neither
+tags yet, a capture since the backfill's last run included, the run saying
+how many. The patterns are a denylist: they narrow what leaves, they do not
+prove nothing does. A brain without the column refused to run until SMD-3318;
+`--no-sensitivity-filter` sends every row. The prompt takes a share of each day and writer
 (`metadata.actor_name`), a turn at a time, so neither a busy day nor one key's
 burst fills it, and each share what matters most first: open work before
 closed (a settled ticket or item keeps its level in the read; the maintainer,

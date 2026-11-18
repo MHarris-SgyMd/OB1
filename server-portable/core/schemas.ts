@@ -498,7 +498,7 @@ export const SPECS = {
       // brain the write was first made on, kept as metadata.client_key so
       // every brain names the thought by that one id (migration 112).
       client_key: z.string().optional()
-        .describe("An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's and delete_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it."),
+        .describe("An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's, delete_thought's and forget_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it."),
     },
   },
   update_thought: {
@@ -534,7 +534,7 @@ export const SPECS = {
   delete_thought: {
     title: "Delete Thought",
     description:
-      "Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. Refused while statements in other thoughts cite this one as their source — the reply names them — unless `detach_citations` is true.",
+      "Permanently remove a thought by id, along with its search chunks. `search_thoughts`, `search_thoughts_keyword`, and `list_thoughts` print the id on an `ID:` line under each hit, and `capture_thought` reports it when it saves; read the thought back first to confirm it is the one to remove. The deletion is recorded in the audit trail with the thought's previous content, so it can be reconstructed if removed in error. To remove its text for good — a secret, a password, personal data the user wants gone — use forget_thought instead. Refused while statements in other thoughts cite this one as their source — the reply names them — unless `detach_citations` is true.",
     annotations: {
       readOnlyHint: false,
       openWorldHint: false,
@@ -545,6 +545,28 @@ export const SPECS = {
       id: z.string().describe("UUID of the thought to delete — the id on an `ID:` line of a search_thoughts, search_thoughts_keyword, or list_thoughts result, or the one capture_thought reported when it saved; or the `client_key` a thought was captured with, when no thought has it as its id"),
       detach_citations: z.boolean().optional().describe(
         "When statements in other thoughts cite this one as their source, the delete is refused and the reply names them. Pass true to delete anyway: each citation keeps its text and stance, loses its source, and records this id and the time as the deleted source. Default false.",
+      ),
+    },
+  },
+  // Migrations 139 and 144 (SMD-1723 PR 2): the one write the audit trail
+  // cannot undo, so the id is echoed back in `confirm`, as the CLI's --retire
+  // asks. The guard is the core's (SMD-2282): every client meets it.
+  forget_thought: {
+    title: "Forget Thought",
+    description:
+      "Forget a thought for good: remove it and every copy of its text or id the brain holds, and say what was removed. Use it only when the user asks for the text to be gone for good (a secret, a password, personal data); to tidy or correct, use delete_thought or update_thought. Read the thought back first (fetch takes the id) to be sure it is the one. Unlike delete_thought, which keeps the removed text in the audit trail so a deletion can be reconstructed, this redacts the thought's audit events (who acted and when stay; the text does not), deletes its entities, search windows and vectors, strips its id from other thoughts' derived_from, deletes the relations and expired or detached citations naming it, the page sections built on it, its priority statements, open items, close proposals and deliverable events, and clears it from the logged searches. It records the forgetting in a ledger, so a later capture or edit of the same text is refused FORGOTTEN, and the record it was ingested as (a Linear ticket, a note) is left out of every sync. Cannot be undone. Pass the same id again as `confirm`. The reply lists what could not be removed mechanically: thoughts derived from it, whose prose may have absorbed its text (`irreproducible`), pages to review, and copies outside the brain. Refused while statements in other thoughts cite it, unless `detach_citations` is true. A thought deleted earlier can still be forgotten: what it left behind is removed.",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      destructiveHint: true,
+      // A second call on a forgotten thought takes nothing new (FORGOTTEN), or sweeps what a write racing the first left.
+      idempotentHint: true,
+    },
+    inputSchema: {
+      id: z.string().describe("UUID of the thought to forget — the id on an `ID:` line of a search or list result, or the one capture_thought reported; or the `client_key` it was captured with, when no thought has that id"),
+      confirm: z.string().describe("The `id` again, exactly as you passed it: forgetting cannot be undone, so the call is refused unless the two match"),
+      detach_citations: z.boolean().optional().describe(
+        "When statements in other thoughts cite this one as their source, the forget is refused and the reply names them. Pass true to forget anyway: the citations are deleted with it, since each one may restate its text; the thoughts that made them stay. Default false.",
       ),
     },
   },
@@ -804,6 +826,25 @@ export const SPECS = {
       // and the match setWorkClaimCap relies on to keep BAD_CAP unreachable (core/claims.ts). A migration that changes the
       // DB range must change this literal too, or a cap this admits but 140 rejects throws there as a divergence fault.
       cap: z.number().int().min(1).max(100000).nullable().describe("The per-holder cap on live work claims (1 to 100000); null clears the setting so the built-in 50 stands"),
+    },
+  },
+  // SMD-3606 PR 3 (migration 145): the operator's one-call undo of a claim hog. The gate past the scope is the
+  // database's: the key's registry kind by its agent id, which the server does not hold. The blank-check refines keep
+  // NO_HOLDER and NO_REASON (144's backstop) unreachable from here, as the cap's range keeps BAD_CAP unreachable.
+  release_holder_claims: {
+    title: "Release Holder Claims",
+    description:
+      "Operator only: a key the operator classified `operator` (set_agent_kind). End every live work claim one holder holds, in one call — the undo of a claim hog, where release_claim ends one claim at a time (SMD-3606). `holder` is the key's name as list_claims shows it (its `holder`); `reason` says why and is kept on each released claim as history. Only the holder's live claims (unreleased and unexpired) end; its lapsed and released claims, and every other holder's, stand. The reply gives how many ended and which (id, ticket, piece). A holder with no live claims ends none (`released` 0). Any key not classified operator, or reaching the brain with no agent id, is refused.",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      // A released claim stays as a history row, as release_claim's does.
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: {
+      holder: z.string().min(1).max(200).refine((v) => v.trim() !== "", "may not be blank").describe("The holder whose live claims to release: a key's name, as list_claims shows it (its `holder`). Surrounding white space is ignored"),
+      reason: z.string().min(1).max(500).refine((v) => v.trim() !== "", "may not be blank").describe("Why the claims are released; kept on each released claim as history"),
     },
   },
   // Open items (SMD-3665 PR 2, migration 117): a to-do, a commitment or a plugin's task — its id, status and history.

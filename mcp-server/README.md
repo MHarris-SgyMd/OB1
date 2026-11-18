@@ -42,6 +42,27 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   A refused notification gets a bare 202, or 503 when busy, as server-portable answers
   (SMD-2106). If the REST core refuses this server's own forwarder key, the server is
   misconfigured: the request is a 500, never the caller's refusal.
+- **The revision** (SMD-4345). Once the caller is known, the request is told apart by
+  the SDK's own rule (`isLegacyRequest`). One carrying the 2026-07-28 envelope in
+  `params._meta` is answered by the SDK's `createMcpHandler`: `server/discover`,
+  `tools/list` and `tools/call` with no `initialize` before them. A well-formed
+  2025-era request is answered by the 2025-era transport, as every request was. A
+  request the rule cannot place (one that mixes the two revisions' header and body, or
+  a JSON body that is no JSON-RPC message) goes to the handler too, which refuses it in
+  its own words. Both get the caller's own server,
+  the same tools and replies, an event stream with this server's keepalive, and one
+  line. What differs for a 2026-07-28 client:
+  - its server declares `tools.listChanged: false`, since this server holds no
+    connection open to send a notification on; a `subscriptions/listen` is acknowledged
+    with nothing honoured and ended at once (SMD-4347 decides whether one is ever served);
+  - list results carry the revision's cache fields, `ttlMs: 0` and
+    `cacheScope: "private"` (SMD-4346 chooses a real `ttlMs`);
+  - the SDK's handler refuses in its own words a request whose `Mcp-Method` header
+    disagrees with its body (400, `-32020`), a revision it does not serve (400,
+    `-32022`) and a body not sent as JSON (415).
+
+  A body past the SDK's 4 MiB bound is refused 413 whichever revision it speaks. The
+  key's refusals come before any of this, so they are the same for both.
 - **An OAuth client** (SMD-2286): a bearer of a JWT's shape is never sent to the REST
   core as a key, a key form beside it or not (a dotted value in a key form stays a
   key, since a raw `MCP_ACCESS_KEY` may have dots; on a stack with no public origin
@@ -182,8 +203,11 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   budget as `index.ts`'s was: point a monitor at `/health`.
 
 **Every request's line** is this server's own, `door: "mcp"`, as `index.ts` wrote it
-(SMD-1849): the route as a template, the JSON-RPC method and tool, the key's name once
-known, how it ended — a batch its worst call, a call that never ran `unrun`, a client
+(SMD-1849): the route as a template, the JSON-RPC method and tool, the MCP revision
+the request named (`rev`, SMD-4363: `2026-07-28`, a 2025-era revision, `unnamed` for
+a request that named none, `other` for any other string; `deploy/README.md`'s table
+says where it is read and what a count of it means), the key's
+name once known, how it ended — a batch its worst call, a call that never ran `unrun`, a client
 gone `abandoned`, a stall `stalled` — and the bytes a stream wrote. The REST core's
 lines are its own process's.
 
@@ -248,7 +272,7 @@ assertion total, as main's last run counted it, is on the wiki's
 [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts) page (SMD-3614).
 
 ```bash
-bun test-mcp.ts                                                  # the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the entry's stop, a tool call waited on and cut; a fault's line `error` FAILED, the keyed HEADs at once, `/health`'s record beside the key's check, a key turned mid-call; the entry's spans sent at its stop as open-brain-mcp, the REST core's span the child of its tool call's across two processes, a plugin tool named on its line; the method guard; the token exchange: a token traded once and cached by its digest, the REST core sent the exchanged token alone, a read and a write connector of one subject each their own scope, one trade at a time, the cache's margin and bound, refusals on the claims, the authorization server's answers (invalid_grant, invalid_scope, away, busy, 429, a cut-short 200, its client refused) and the REST core's (403, keyless), a revoked subject, job links and mirrors by token, refused ones answered (503 with the authorization server away), /health not, a token beside a key form never sent as one, a dotted raw key in each form and as a bearer with no OAuth, a REST core that checks no token or another origin's, a trade past a job link's deadline, unavailable trades said in the log, a stalled refusal, echoing error codes (a bare 64-hex value too) and a hex key as a bearer, another Host and no secret, a key client with the authorization server away, a token too brief to keep
+bun test-mcp.ts                                                  # [9b]: the 2026-07-28 revision beside the 2025-era ones, each answer held to the other's; the tool list from whoami; each reply what render.ts makes of the core's outcome (a success, a refusal carried whole, a fault, capture's STORE_UNAVAILABLE, the REST core away); a scan's links under the endpoint; the key refusals' envelopes and a notification's bare answer; /health; the mirrors and the job routes; a capture key's capture, a reply that cannot be said, the tools' order, /health's first key, the mirrors' deadline, a job poll's fault; /health's one deadline, a job stream's answers, a misconfigured forwarder said once; the forwarder's busy key, the registry busy mid-call, one line for a route's throw, the entry's idle timeout and its refusal of a base; a route's throw named with the REST core's address, a client gone unsaid, a base's credentials unprinted, the entry imported throwing; a plugin's operation a tool where whoami names it, its value, refusal and fault as renderPlugin says them, the entry's OB1_PLUGINS, an input's steps run once, a call with no arguments, a batch's shared id refused, a body behind byte-order marks; the entry's stop, a tool call waited on and cut; a fault's line `error` FAILED, the keyed HEADs at once, `/health`'s record beside the key's check, a key turned mid-call; the entry's spans sent at its stop as open-brain-mcp, the REST core's span the child of its tool call's across two processes, a plugin tool named on its line; the method guard; the token exchange: a token traded once and cached by its digest, the REST core sent the exchanged token alone, a read and a write connector of one subject each their own scope, one trade at a time, the cache's margin and bound, refusals on the claims, the authorization server's answers (invalid_grant, invalid_scope, away, busy, 429, a cut-short 200, its client refused) and the REST core's (403, keyless), a revoked subject, job links and mirrors by token, refused ones answered (503 with the authorization server away), /health not, a token beside a key form never sent as one, a dotted raw key in each form and as a bearer with no OAuth, a REST core that checks no token or another origin's, a trade past a job link's deadline, unavailable trades said in the log, a stalled refusal, echoing error codes (a bare 64-hex value too) and a hex key as a bearer, another Host and no secret, a key client with the authorization server away, a token too brief to keep
 cd ../server-portable && bun test-auth.ts   # test-auth's assertions, held to this server with the REST core behind it
 cd ../server-portable && ../db/with-postgres.sh bun test-e2e-sql.ts   # the whole server over MCP on real Postgres, held to this server the same way
 cd ../server-portable && bun test-server.ts   # the real server's suite whole: its request lines, its spans, one trace per tool call, the entry's telemetry, a keyed HEAD outside the budget, and its stop, a tool call past its client waited on

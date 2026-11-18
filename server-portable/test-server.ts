@@ -3963,17 +3963,22 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   const wrong = cells.filter(([s, c, want]) => outcomeOf(s, c) !== want);
   assert(wrong.length === 0, `an answer's outcome: a fault's 5xx (or a codeless one) \`error\`, any other 4xx or 5xx \`refused\`, else \`ok\` (wrong: ${JSON.stringify(wrong)})`);
   const at = new Date("2026-10-08T00:00:00.000Z");
-  const ORDER = ["ts", "door", "method", "route", "rpc", "tool", "agent", "status", "outcome", "code", "ms", "bytes"];
-  const full = JSON.parse(requestLine({ door: "mcp", method: "POST", route: "/v1/thoughts/:id", rpc: "tools/call", tool: "capture_thought", agent: "laptop", status: 200, outcome: "refused", code: "NOT_FOUND", ms: 12.4, bytes: 30 }, at)) as Record<string, unknown>;
-  assert(JSON.stringify(Object.keys(full)) === JSON.stringify(ORDER) && full.ts === at.toISOString() && full.ms === 12 && full.tool === "capture_thought" && full.code === "NOT_FOUND",
+  const ORDER = ["ts", "door", "method", "route", "rpc", "rev", "tool", "agent", "status", "outcome", "code", "ms", "bytes"];
+  const full = JSON.parse(requestLine({ door: "mcp", method: "POST", route: "/v1/thoughts/:id", rpc: "tools/call", rev: "2026-07-28", tool: "capture_thought", agent: "laptop", status: 200, outcome: "refused", code: "NOT_FOUND", ms: 12.4, bytes: 30 }, at)) as Record<string, unknown>;
+  assert(JSON.stringify(Object.keys(full)) === JSON.stringify(ORDER) && full.ts === at.toISOString() && full.ms === 12 && full.tool === "capture_thought" && full.code === "NOT_FOUND" && full.rev === "2026-07-28",
     `every field in its place, ts first, numbers whole (${JSON.stringify(full)})`);
   const odd = JSON.parse(requestLine({
-    door: "the private door" as never, method: "BREW", route: "/v1/thoughts?key=the-key", rpc: "x/the private thought", tool: "the private thought", agent: "laptop\n{\"forged\":1}",
+    door: "the private door" as never, method: "BREW", route: "/v1/thoughts?key=the-key", rpc: "x/the private thought", rev: "the private thought", tool: "the private thought", agent: "laptop\n{\"forged\":1}",
     status: -200, outcome: "maybe" as never, code: "the private code", ms: -3, bytes: Number.POSITIVE_INFINITY,
     ...({ url: "http://brain/mcp?key=the-key", query: "the private thought" } as object),
   } as never, at)) as Record<string, unknown>;
-  assert(odd.door === "mcp" && odd.status === 0 && odd.method === "?" && odd.route === "?" && odd.rpc === "other" && odd.tool === "?" && odd.outcome === "?" && odd.code === "?" && odd.ms === 0 && !("bytes" in odd),
-    `each value held to its rule: an unknown method, route, tool, outcome and code are \`?\`, an unknown RPC method \`other\`, a bad number 0 or absent (${JSON.stringify(odd)})`);
+  assert(odd.door === "mcp" && odd.status === 0 && odd.method === "?" && odd.route === "?" && odd.rpc === "other" && odd.rev === "other" && odd.tool === "?" && odd.outcome === "?" && odd.code === "?" && odd.ms === 0 && !("bytes" in odd),
+    `each value held to its rule: an unknown method, route, tool, outcome and code are \`?\`, an unknown RPC method and an unknown MCP revision \`other\`, a bad number 0 or absent (${JSON.stringify(odd)})`);
+  const revs = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07", "unnamed", "2027-01-01", "2026-07-28\n", ""].map((rev) => (JSON.parse(requestLine({ door: "mcp", method: "POST", rev, status: 200, ms: 1 }, at)) as { rev?: unknown }).rev);
+  assert(JSON.stringify(revs) === '["2026-07-28","2025-11-25","2025-06-18","2025-03-26","2024-11-05","2024-10-07","unnamed","other","other","other"]' && !("rev" in JSON.parse(requestLine({ door: "api", method: "GET", status: 200, ms: 1 }, at))),
+    `the MCP revision a request named (SMD-4363): each revision served and \`unnamed\` as itself, any other string \`other\`, and no field where none was read (${JSON.stringify(revs)})`);
+  const modernRpc = ["server/discover", "subscriptions/listen"].map((rpc) => (JSON.parse(requestLine({ door: "mcp", method: "POST", rpc, status: 200, outcome: "ok", ms: 1 }, at)) as { rpc?: unknown }).rpc);
+  assert(JSON.stringify(modernRpc) === '["server/discover","subscriptions/listen"]', `the two methods the 2026-07-28 revision adds are named, not \`other\` (SMD-4345: ${JSON.stringify(modernRpc)})`);
   assert(odd.agent === "laptop?{\"forged\":1}" && !JSON.stringify(odd).includes("the-key") && !JSON.stringify(odd).includes("private") && !("url" in odd) && !("query" in odd),
     "…the agent's name held to printable ASCII (a line break is `?`); a field the record does not declare is not written");
 
@@ -4811,7 +4816,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   };
   try {
     // A failed search, its key in ?key= and its text planted, under a client's traceparent.
-    const searched = await linesOf(() => post(callOf("search_thoughts", { query: PLANTED }), { traceparent, tracestate: `vendor=${PLANTED}` }));
+    const searched = await linesOf(() => post(callOf("search_thoughts", { query: PLANTED }), { traceparent, tracestate: `vendor=${PLANTED}`, "mcp-protocol-version": "2025-06-18" }));
     const spans = exporter.getFinishedSpans();
     const server = requestSpan(spans);
     const restSide = new Set(spans.filter((s) => attrs(s)["ob1.door"] === "api").map((s) => s.spanContext().spanId));
@@ -4820,6 +4825,8 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     assert(server?.name === "tools/call search_thoughts" && server.spanContext().traceId !== TID && parentOf(server) === undefined && server.links.length === 1 && link?.traceId === TID && link.spanId === PARENT,
       `the request's span is named for its call and starts its own trace, the caller's linked, not continued (${server?.name} ${server?.spanContext().traceId} ${parentOf(server)} ${JSON.stringify(link)})`);
     const sa = attrs(server);
+    assert(sa["mcp.protocol.version"] === "2025-06-18" && !("ob1.rev" in sa),
+      `the request's span says the revision it named, under the MCP conventions' name, and no ob1.rev beside it (SMD-4363: ${sa["mcp.protocol.version"]} / ${sa["ob1.rev"]})`);
     assert(sa["http.request.method"] === "POST" && sa["mcp.method.name"] === "tools/call" && sa["ob1.tool"] === "search_thoughts" && sa["ob1.agent"] === "MCP_ACCESS_KEY"
       && sa["http.response.status_code"] === 200 && sa["ob1.outcome"] === "error" && sa["ob1.code"] === "FAILED" && sa["error.type"] === "FAILED" && server?.status.code === SpanStatusCode.ERROR && !("http.route" in sa),
       `its attributes are the line's: method, MCP method, tool, the key's name, the 200, \`error\` FAILED, an ERROR status, and no route at the MCP endpoint (${JSON.stringify(sa)})`);
@@ -4900,10 +4907,24 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       `a worker mirror's and a worker action's store fault: an exception event on the request's span (${JSON.stringify(mirrorFaults)})`);
     // A tools/call refused at its key ran nothing: no gen_ai names on its span (review pass 6).
     exporter.reset();
-    await post(callOf("brain_info", {}), {}, "/mcp");
+    const keylessLines = await linesOf(() => post(callOf("brain_info", {}), { "mcp-protocol-version": "2025-06-18" }, "/mcp"));
     const refusedAtKey = requestSpan();
     assert(attrs(refusedAtKey)["ob1.code"] === "UNAUTHORIZED" && !("gen_ai.operation.name" in attrs(refusedAtKey)) && !("gen_ai.tool.name" in attrs(refusedAtKey)) && refusedAtKey?.name === "tools/call brain_info",
       `a tools/call refused at its key: no gen_ai names, so no execution is counted (${JSON.stringify(attrs(refusedAtKey))})`);
+    // Nor the revision it named, under either name (SMD-4363): the conventions' attribute is the version used, it used
+    // none, and a caller with no key would count under whichever it named. Its line keeps the word, beside its `refused`.
+    assert(!("mcp.protocol.version" in attrs(refusedAtKey)) && !("ob1.rev" in attrs(refusedAtKey)) && keylessLines.some((l) => l.rev === "2025-06-18" && l.outcome === "refused"),
+      `…nor a revision on its span, though its line says the one it named (${JSON.stringify(attrs(refusedAtKey))}; ${JSON.stringify(keylessLines)})`);
+    const revAt = (rev: string, atKey: boolean) => {
+      exporter.reset();
+      const t = beginRequest("mcp", new Request("http://mcp/x"), () => {});
+      Object.assign(t, { rpc: "tools/call", rev, outcome: "refused", code: "UNAUTHORIZED", refusedAtKey: atKey });
+      t.end();
+      return [attrs(requestSpan())["mcp.protocol.version"] ?? null, attrs(requestSpan())["ob1.rev"] ?? null];
+    };
+    const revsAt = JSON.stringify([revAt("2025-06-18", true), revAt("unnamed", true), revAt("other", true), revAt("2025-06-18", false), revAt("unnamed", false), revAt("other", false)]);
+    assert(revsAt === '[[null,null],[null,null],[null,null],["2025-06-18",null],[null,"unnamed"],[null,"other"]]',
+      `a revision, \`unnamed\` and \`other\` marked at the key: neither attribute; a tool's own refusal by the same code keeps each (${revsAt})`);
     // A tool's own refusal by the same codes ran, and is counted; an unrun call is not (review pass 7).
     const byTool = (code: string, atKey: boolean, outcome: "refused" | "unrun") => {
       exporter.reset();
@@ -4942,6 +4963,14 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const batch = requestSpan(batchSpans);
     // Its calls' spans; through the MCP server, the REST core's whoami for the request is its child too, a request of its own.
     const children = batchSpans.filter((s) => parentOf(s) === batch?.spanContext().spanId && s.kind !== SpanKind.SERVER);
+    assert(attrs(batch)["ob1.rev"] === "unnamed" && !("mcp.protocol.version" in attrs(batch)), `a request that names no revision: ob1.rev's word, and no mcp.protocol.version (SMD-4363: ${attrs(batch)["ob1.rev"]} / ${attrs(batch)["mcp.protocol.version"]})`);
+    // A header that is no revision: `other` is ob1.rev's word too, never the convention's attribute.
+    exporter.reset();
+    await post(callOf("brain_info", {}, 123), { "mcp-protocol-version": "no revision at all" });
+    await Bun.sleep(50);
+    const strange = attrs(requestSpan(exporter.getFinishedSpans()));
+    assert(strange["ob1.rev"] === "other" && !("mcp.protocol.version" in strange) && !JSON.stringify(strange).includes("no revision at all"),
+      `a request naming a string that is no revision: ob1.rev \`other\`, no mcp.protocol.version, and none of its text (SMD-4363: ${strange["ob1.rev"]} / ${strange["mcp.protocol.version"]})`);
     assert(batch?.name === "POST" && attrs(batch)["ob1.rpc"] === "batch" && !("mcp.method.name" in attrs(batch)) && children.length === 2,
       `a batch's span names no MCP method and has a child per call (${batch?.name} ${children.map((c) => c.name).join(", ")})`);
     exporter.reset();
@@ -5029,8 +5058,8 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const measured = (received["/v1/metrics"] ?? []).join("\n");
   const everything = JSON.stringify(received);
   assert(records.length === 1 && records[0].eventName === "ob1.request" && records[0].severityText === "WARN" && spanTrace !== undefined && records[0].traceId === spanTrace
-    && record.rpc === "tools/list" && record.outcome === "refused" && record.code === "UNAUTHORIZED" && String(record.status) === "200" && record.door === "mcp",
-    `the request's log record: ob1.request, WARN for a refusal, the span's trace, the line's fields (${JSON.stringify(records)})`);
+    && record.rpc === "tools/list" && record.rev === "unnamed" && record.outcome === "refused" && record.code === "UNAUTHORIZED" && String(record.status) === "200" && record.door === "mcp",
+    `the request's log record: ob1.request, WARN for a refusal, the span's trace, the line's fields, its \`rev\` among them (${JSON.stringify(records)})`);
   assert(measured.includes('"http.server.request.duration"') && measured.includes('"tools/list"') && measured.includes('"refused"') && !measured.includes('"MCP_ACCESS_KEY"'),
     `the request-duration histogram, labelled with the request's MCP method and outcome, never the key's name (${measured.slice(0, 200)})`);
   assert(!everything.includes(PLANTED) && !everything.includes(KEY) && !everything.includes("note="), `no signal holds the key, the query string or the planted text (${everything.length} chars)`);
@@ -5266,6 +5295,30 @@ console.log("\n[23b] append_thought_evidence's reply: the entry added or found, 
     `a retried hundredth entry found, not full; a null entry passed over; each answer's stamp; deleted under the read NOT_FOUND; a longer list at its count; busy 503 and the list's refusals 409 over REST (${JSON.stringify([retried, pastNull.ok, appendedStamp, goneUnder.ok ? "ok" : goneUnder.refusal.code])})`);
 }
 
+console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids among the values, the twins' wording, the hint for a brain without 144, and a malformed answer a fault (SMD-1723 PR 2)");
+{
+  const { renderForget, forgetHint } = await import("./render.ts");
+  const { normaliseForget } = await import("./store.ts");
+  const T = "00000000-0000-4000-8000-000000001723", I = "00000000-0000-4000-8000-0000000017a1", P = "00000000-0000-4000-8000-0000000017b1", TW = "00000000-0000-4000-8000-0000000017c1";
+  const evidence = { id: T, forgottenAt: "2026-11-16T00:00:00.000Z", gone: false, orphanEntities: 0, removed: { audit_events: 2 }, irreproducible: [], pages: [], twins: [] as string[], source: null, itemIds: [I], proposalIds: [P], outside: [] };
+  const plain = renderForget({ ok: true, value: evidence } as never);
+  const twinned = renderForget({ ok: true, value: { ...evidence, twins: [TW] } } as never);
+  const sc = plain.structuredContent as Record<string, unknown>;
+  assert(JSON.stringify(sc.itemIds) === JSON.stringify([I]) && JSON.stringify(sc.proposalIds) === JSON.stringify([P])
+      && /the same text is refused if captured again/.test(plain.content[0].text) && !/refused if captured again/.test(twinned.content[0].text)
+      && new RegExp(`lands on them rather than being refused: ${TW}`).test(twinned.content[0].text),
+    `the values carry the item and proposal ids; the text promises a refusal only when no twin keeps the text (${JSON.stringify({ itemIds: sc.itemIds, proposalIds: sc.proposalIds })})`);
+  const tableHint = forgetHint("permission denied for table thought_audit");
+  const fnHint = forgetHint("permission denied for function forget_thought");
+  assert(/apply migration 144/.test(tableHint) && /--url <the owner's connection string> --grant <role> --groups server/.test(fnHint) && forgetHint("connection refused") === "",
+    `a forget refused a store's privilege names 144; one refused the function names the owner's grant; another fault no hint (${tableHint.slice(0, 60)} | ${fnHint.slice(0, 60)})`);
+  const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
+  const noWord = thrown({ ok: false });
+  const noTime = thrown({ ok: true, id: T, removed: {} });
+  assert(noWord !== "answered" && noTime !== "answered" && thrown({ ok: false, error: "NOT_FOUND", id: T }) === "answered",
+    `a refusal with no error word and an answer with no forgotten_at are faults, not NOT_FOUND or "at ." (${noWord} | ${noTime})`);
+}
+
 console.log("\n[24] update_thought's kept stamp keys: the patch against the stamp the write answered (088), nothing claimed when it answered none, and the reply's hint by what the caller sent (SMD-2744)");
 {
   const { keptStampKeys } = await import("./core/writes.ts");
@@ -5282,7 +5335,7 @@ console.log("\n[24] update_thought's kept stamp keys: the patch against the stam
       && JSON.stringify(planted) === '[{"key":"actor_name","value":null,"present":true},{"key":"trust","value":null,"present":false}]',
     `the patch against the write's stamp: nothing for a patch naming no stamp key or a database that answered no stamp; the kept keys, an echo not among them; a non-string present, a null absent (${JSON.stringify({ none, kept, pre088, planted })})`);
   // Through the operation, on a store answering as 088 does — and as a database before it does.
-  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
+  const op = (answer: Record<string, unknown>) => createCore({ env: () => ({}), store: () => Promise.resolve({ textForgottenAt: async () => null, updateThought: async () => ({ ok: true, id: ID, updatedAt: AT, ...answer }), getThought: async () => ({ id: ID, content: "x", metadata: { ...stamp }, created_at: AT, updated_at: AT }), thoughtsNamed: async () => new Map(), logActions: async () => {} } as never), door: "test" });
   const principal = { name: "laptop", scope: "write", keyHash: "x" } as never;
   const lowered = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, metadata_patch: { trust: "ingested" } } as never);
   const echoed = await op({ stamp, sameText: true, metadataMerged: false }).updateThought(principal, { id: ID, content: "x", metadata_patch: { trust: "agent" } } as never);
@@ -6956,6 +7009,27 @@ console.log("\n[33] Work claims in the tools' words (SMD-3598): claim_work's tok
       && curShape.isError === true && /not a list_claims cursor/.test(text(curShape)) && curFilters.isError === true && /made with other filters/.test(text(curFilters)),
     `release_claim's two answers in words, and list_claims' JSON with 143's cursor and no token field, its REFUSED_CURSOR messages (${text(listed)} | ${text(curShape)})`);
 
+  // release_holder_claims' render (SMD-3606 PR 3, migration 145): the count and holder in words, the claims in the value; the refusals name the key's kind or the registry away; the fault names a brain before 145.
+  const relMany = say.renderReleaseHolderClaims({ ok: true, value: { holder: "codex", released: 3, claims: [{ id: "a", issue: "SMD-1", piece: null }, { id: "b", issue: "SMD-2", piece: "PR 1" }, { id: "c", issue: "SMD-2", piece: "PR 2" }] } } as never);
+  const relOne = say.renderReleaseHolderClaims({ ok: true, value: { holder: "codex", released: 1, claims: [{ id: "a", issue: "SMD-1", piece: null }] } } as never);
+  const relZero = say.renderReleaseHolderClaims({ ok: true, value: { holder: "ghost", released: 0, claims: [] } } as never);
+  const relAgent = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "REFUSED_NOT_OPERATOR", retryable: false, key: "bob", kind: "agent" } } as never);
+  const relUnid = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "REFUSED_NOT_OPERATOR", retryable: false, key: "bob", kind: null, unidentified: true } } as never);
+  const relAway = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "RELEASE_HOLDER_UNATTRIBUTED", retryable: true, cause: "registry_away" } } as never);
+  const relStuck = say.renderReleaseHolderClaims({ ok: false, refusal: { code: "RELEASE_HOLDER_UNATTRIBUTED", retryable: false, cause: "registry_refused" } } as never);
+  const relSv = relMany.structuredContent;
+  assert(text(relMany) === "Released 3 live claims held by codex across 2 tickets, each with the reason. The rows stay as history; list_claims and the per-holder cap no longer count them."
+      && text(relOne) === "Released 1 live claim held by codex, with the reason. The rows stay as history; list_claims and the per-holder cap no longer count them."
+      && text(relZero) === "No live claims held by ghost; nothing was released."
+      && relAgent.isError === true && text(relAgent).includes("This key, bob, is classified agent") && !text(relAgent).includes("\n")
+      && relUnid.isError === true && /reached the brain with none; call with the operator's own key\.$/.test(text(relUnid))
+      && relAway.isError === true && text(relAway) === "Refused: the operator's key is known by its agent id, which the agent registry did not give just now; retry shortly."
+      && relStuck.isError === true && /the agent registry cannot give this server until an operator acts/.test(text(relStuck))
+      && relSv.holder === "codex" && relSv.released === 3 && (relSv.claims as unknown[]).length === 3 && !/wc_/i.test(JSON.stringify(relSv)),
+    `release_holder_claims' render: the count and holder, the claims in the value, the refusals and the registry away (${text(relMany)} | ${text(relAgent).slice(0, 60)})`);
+  assert(/migration 145/.test(say.releaseHolderHint("function release_holder_claims(text, text, jsonb) does not exist")) && say.releaseHolderHint("connection refused") === "",
+    `release_holder_claims' hint names a brain before 145 (${say.releaseHolderHint("function release_holder_claims does not exist").slice(0, 60)})`);
+
   // The list_work_claims cursor codec (SMD-3606 PR 2): this listing's own round-trips with its selection; another tag, a
   // wrong length, a non-boolean include_ended, an over-long or non-string ticket/holder, an empty issue, an over-long
   // piece_key, a non-uuid id, a day that does not exist, a clock past 23:59 and a null time are none of its cursors;
@@ -7980,6 +8054,46 @@ console.log("\n[36e] The operator's work-claim cap in the core and the words (SM
       && lines[4] === "the operator's, REFUSED, so every new claim fails: 200000 (set 2026-11-14T03:30:44.937Z by op-key): a cap above 100000 (200000). An operator key sets it again, or clears it, through set_work_claim_cap"
       && badRead.every((r) => r === "threw"),
     `brain_info's Work-claim cap row: before 140, unread, built in, the operator's, the operator's refused; a read answering no cap throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+}
+
+console.log("\n[36f] The operator's holder-release in the core and the words (SMD-3606 PR 3, migration 145): releaseHolderClaims passing the holder, reason and the caller's key to the store; its answer and its NOT_OPERATOR refusal said; the no-agent-id paths (the registry away RELEASE_HOLDER_UNATTRIBUTED, a principal with none REFUSED_NOT_OPERATOR, neither reaching the store); an envelope the store cannot read a fault");
+{
+  const { releaseHolderClaims } = await import("./core/claims.ts");
+  const { normaliseReleaseHolder } = await import("./store.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const asked: Record<string, unknown>[] = [];
+  const core = (answer: unknown) => ({ door: "test", store: async () => ({ releaseHolderClaims: async (o: Record<string, unknown>) => { asked.push(o); return normaliseReleaseHolder(answer); } }) });
+  const P = { name: "op-key", scope: "write", agentId: "a1" } as never;
+  // 144's envelopes, as the scratch brain answers them.
+  const okA = { ok: true, holder: "codex", released: 2, claims: [{ id: "a", issue: "SMD-1", piece: null }, { id: "b", issue: "SMD-2", piece: "PR 1" }] };
+  const agentA = { ok: false, error: "NOT_OPERATOR", key: "op-key", kind: "agent", message: "only an operator key, named by its agent id, may release a holder's claims; op-key is agent" };
+  const holderA = { ok: false, error: "NO_HOLDER", message: "name the holder whose live claims to release: a key's name, as list_work_claims shows it" };
+  const released = await releaseHolderClaims(core(okA) as never, P, { holder: "codex", reason: "cleanup" } as never);
+  const agent = await releaseHolderClaims(core(agentA) as never, P, { holder: "codex", reason: "cleanup" } as never);
+  const sent = asked[0] as Record<string, unknown> | undefined;
+  const actor = sent?.actor as Record<string, unknown> | undefined;
+  assert(sent?.holder === "codex" && sent?.reason === "cleanup" && actor?.name === "op-key" && actor?.agentId === "a1" && actor?.via === "test"
+      && released.ok && released.value.holder === "codex" && released.value.released === 2 && released.value.claims.length === 2
+      && !agent.ok && agent.refusal.code === "REFUSED_NOT_OPERATOR" && agent.refusal.kind === "agent",
+    `the holder and reason reach the store with the caller's key, its agent id and the door; the answer and the NOT_OPERATOR refusal said (${JSON.stringify(sent)} | ${released.ok} | ${!agent.ok ? agent.refusal.code : "?"})`);
+
+  // The no-agent-id paths: the registry away is RELEASE_HOLDER_UNATTRIBUTED (retryable, or not when an operator must act); a principal with none by design is REFUSED_NOT_OPERATOR, named so; neither reaches the store.
+  const before = asked.length;
+  const away = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write", agentUnresolved: "unreachable" } as never, { holder: "codex", reason: "x" } as never);
+  const stuck = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write", agentUnresolved: "misconfigured" } as never, { holder: "codex", reason: "x" } as never);
+  const none = await releaseHolderClaims(core(okA) as never, { name: "op-key", scope: "write" } as never, { holder: "codex", reason: "x" } as never);
+  assert(asked.length === before && !away.ok && away.refusal.code === "RELEASE_HOLDER_UNATTRIBUTED" && away.refusal.retryable === true
+      && !stuck.ok && stuck.refusal.code === "RELEASE_HOLDER_UNATTRIBUTED" && stuck.refusal.retryable === false
+      && !none.ok && none.refusal.code === "REFUSED_NOT_OPERATOR" && none.refusal.unidentified === true
+      && /reached the brain with none; call with the operator's own key\.$/.test(text(say.renderReleaseHolderClaims(none))),
+    `with no agent id nothing reaches the store: the registry away RELEASE_HOLDER_UNATTRIBUTED (retryable or not), a principal with none REFUSED_NOT_OPERATOR unidentified (${!away.ok ? away.refusal.code : "?"}/${!stuck.ok ? String(stuck.refusal.retryable) : "?"}/${!none.ok ? none.refusal.code : "?"})`);
+
+  // NO_HOLDER/NO_REASON are unreachable from the schema (holder and reason are required, non-blank): a database that answers one is a divergence fault, a throw, not the caller's refusal.
+  let threw = "";
+  try { await releaseHolderClaims(core(holderA) as never, P, { holder: "codex", reason: "cleanup" } as never); } catch (e) { threw = (e as Error).message; }
+  assert(/release_holder_claims: the database refused an argument the schema requires/.test(threw),
+    `a NO_HOLDER the schema should have caught throws as a divergence fault (${threw.slice(0, 70)})`);
 }
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");

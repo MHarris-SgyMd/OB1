@@ -103,6 +103,8 @@ export interface RequestRecord {
   route?: string;
   /** The MCP server's JSON-RPC method (`tools/call`), or `batch` for a body of several messages. */
   rpc?: string;
+  /** The MCP revision the request named (`2026-07-28`), or `unnamed` for one that named none, as mcp-edge.ts's revisionOf reads it (SMD-4363). The MCP endpoint's alone. */
+  rev?: string;
   /** The tool: an MCP tool call's, the operation a REST route runs, or the tool a mirror mirrors. */
   tool?: string;
   /** The configured name of the key that authenticated — never the key. */
@@ -122,14 +124,26 @@ export interface RequestRecord {
 const METHODS = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "TRACE", "CONNECT"]);
 /**
  * The JSON-RPC methods an MCP client sends this server (the 2025-06-18
- * schema's, client to server), and `batch`, which the MCP server writes for a
- * body of several messages; any other is `other`.
+ * schema's, client to server, and the two the 2026-07-28 revision adds,
+ * `server/discover` and `subscriptions/listen`: a client that offers that
+ * revision probes with the first before it initializes, SMD-4345), and
+ * `batch`, which the MCP server writes for a body of several messages; any
+ * other is `other`.
  */
 const RPC_METHODS = new Set([
   "batch", "initialize", "ping", "tools/list", "tools/call", "resources/list", "resources/templates/list", "resources/read",
   "resources/subscribe", "resources/unsubscribe", "prompts/list", "prompts/get", "completion/complete", "logging/setLevel",
   "notifications/initialized", "notifications/cancelled", "notifications/progress", "notifications/roots/list_changed",
+  "server/discover", "subscriptions/listen",
 ]);
+/**
+ * What a line may say of the MCP revision a request named (SMD-4363): the
+ * revisions the SDK's two paths serve (2026-07-28, and the 2025-era ones its
+ * transport negotiates; test-mcp.ts holds this list to the installed SDK's),
+ * and `unnamed`, the route's word for a request that named none. Any other
+ * string is `other`: a revision not served, or no revision at all.
+ */
+export const MCP_REVISIONS: ReadonlySet<string> = new Set(["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07", "unnamed"]);
 const TOOL_NAMES: ReadonlySet<string> = new Set(TOOLS.map((t) => t.name));
 /** The enabled plugins' tool names (SMD-2310), known beside the core's once a server loads them (knowTools). */
 const PLUGIN_TOOLS = new Set<string>();
@@ -158,7 +172,7 @@ type CheckedRecord = ReturnType<typeof checked>;
 
 /**
  * A record's fields in RequestRecord's order, each held to its rule — a
- * method, an RPC method, a tool and an outcome to their known sets, a route,
+ * method, an RPC method, an MCP revision, a tool and an outcome to their known sets, a route,
  * a code and a trace id to their spellings, the agent's name to printable
  * ASCII of at most 64 characters, numbers to non-negative integers; what
  * fails its rule is `?` (a trace id that fails is left out), and an absent
@@ -172,6 +186,7 @@ function checked(r: RequestRecord) {
     method: known(r.method, METHODS),
     route: spelled(r.route, ROUTE),
     rpc: known(r.rpc, RPC_METHODS, "other"),
+    rev: known(r.rev, MCP_REVISIONS, "other"),
     tool: toolName(r.tool),
     agent: r.agent === undefined ? undefined : labelPart(r.agent),
     status: count(r.status) ?? 0,
@@ -303,6 +318,9 @@ function spanOf(c: CheckedRecord, refusedAtKey: boolean): { name: string; error:
   // not a code: a plugin may refuse with UNAUTHORIZED or BUSY of its own, and its call ran (review pass 7).
   const named = mcpMethod === "tools/call" && tool !== undefined;
   const toolCall = named && c.outcome !== "unrun" && !refusedAtKey;
+  // Nor does a request refused at its key say a revision here (SMD-4363): the conventions' attribute is the version
+  // used, it used none, and a caller with no key would count under whichever it named. Its line keeps the word, beside its `refused`.
+  const rev = refusedAtKey ? undefined : c.rev;
   const name = mcpMethod !== undefined ? (named ? `${mcpMethod} ${tool}` : mcpMethod)
     : `${method === "_OTHER" ? "HTTP" : method}${route !== undefined ? ` ${route}` : ""}`;
   return {
@@ -314,6 +332,11 @@ function spanOf(c: CheckedRecord, refusedAtKey: boolean): { name: string; error:
       "http.response.status_code": answered ? c.status : undefined,
       "http.response.body.size": c.bytes,
       "mcp.method.name": mcpMethod,
+      // The revision under the MCP conventions' name where it is one; the line's other two words under ob1.rev, as
+      // ob1.rpc holds what mcp.method.name cannot say. Not a label of the duration histogram: the line counts
+      // requests by revision, and a label would multiply every series by the revisions served.
+      "mcp.protocol.version": rev === "unnamed" || rev === "other" ? undefined : rev,
+      "ob1.rev": rev === "unnamed" || rev === "other" ? rev : undefined,
       // A tool call's, under the MCP conventions' names too: the operation's
       // name here alone, not on the call's own span, so a backend counting
       // tool executions counts a single MCP call once (review pass 2); a REST
@@ -321,7 +344,7 @@ function spanOf(c: CheckedRecord, refusedAtKey: boolean): { name: string; error:
       "gen_ai.operation.name": toolCall ? "execute_tool" : undefined,
       "gen_ai.tool.name": toolCall ? tool : undefined,
       "ob1.door": c.door,
-      // Only what mcp.method.name cannot say: a batch, or a method outside the schema's.
+      // Only what mcp.method.name cannot say: a batch, or a method the line's rpc writes `other`.
       "ob1.rpc": mcpMethod === undefined ? c.rpc : undefined,
       "ob1.tool": tool,
       "ob1.agent": c.agent,
@@ -391,6 +414,7 @@ export class RequestTrace {
   readonly started = performance.now();
   route?: string;
   rpc?: string;
+  rev?: string;
   tool?: string;
   agent?: string;
   /** The answer's status, once there is one (0 before). */
@@ -499,8 +523,8 @@ export class RequestTrace {
     if (this.done) return;
     this.done = true;
     OPEN.delete(this);
-    const { route, rpc, tool, agent, status, outcome, code } = this;
-    const record: RequestRecord = { door: this.door, method: this.method, route, rpc, tool, agent, status, outcome, code, ...fields, ms: at - this.started, trace: this.traceId };
+    const { route, rpc, rev, tool, agent, status, outcome, code } = this;
+    const record: RequestRecord = { door: this.door, method: this.method, route, rpc, rev, tool, agent, status, outcome, code, ...fields, ms: at - this.started, trace: this.traceId };
     try {
       this.write(record);
     } finally {
