@@ -535,7 +535,7 @@ async function tier3Sample(tx: SQL, o: Tier3Options): Promise<Tier3Sample> {
     "public.thoughts has a sensitivity_tier column this role may not read: refusing rather than send the rows it marks to a model (grant SELECT on it)");
   const target = tier3Target(o);
   const readMax = o.readMax ?? TIER3_READ_MAX;
-  const fetch = Math.min(target * 2, TIER3_FETCH);
+  const perFetch = Math.min(target * 2, TIER3_FETCH);
   const out: Tier3Sample = { rows: [], read: 0, readCapped: false, heldSensitive: 0, heldEgress: 0, hasColumn };
   // Nothing to send, nothing to read: run() skips --max-llm-calls 0 before this, and `FETCH 0` would return the
   // cursor's current row again for ever (a mutant that dropped that skip hung a run for hours, review pass 2).
@@ -543,7 +543,7 @@ async function tier3Sample(tx: SQL, o: Tier3Options): Promise<Tier3Sample> {
   await tx.unsafe(`DECLARE tier3_sample NO SCROLL CURSOR FOR ${rowsSql(hasColumn, o, `WHERE ${inWindow(o.days)} ORDER BY created_at DESC`)}`);
   try {
     for (;;) {
-      const rows = (await tx.unsafe(`FETCH ${fetch} FROM tier3_sample`)) as ReadRow[];
+      const rows = (await tx.unsafe(`FETCH ${perFetch} FROM tier3_sample`)) as ReadRow[];
       for (const { row, verdict } of await judge(tx, rows, o)) {
         out.read++;
         if (verdict === "sensitive") out.heldSensitive++;
@@ -552,7 +552,7 @@ async function tier3Sample(tx: SQL, o: Tier3Options): Promise<Tier3Sample> {
         if (out.rows.length === target) return out;
         if (out.read === readMax) return { ...out, readCapped: true };
       }
-      if (rows.length < fetch) return out;
+      if (rows.length < perFetch) return out;
     }
   } finally {
     await tx.unsafe("CLOSE tier3_sample").catch(() => {});
