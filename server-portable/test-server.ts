@@ -3963,17 +3963,20 @@ console.log("\n[21] One JSON line per request, from an allow-list: the method, t
   const wrong = cells.filter(([s, c, want]) => outcomeOf(s, c) !== want);
   assert(wrong.length === 0, `an answer's outcome: a fault's 5xx (or a codeless one) \`error\`, any other 4xx or 5xx \`refused\`, else \`ok\` (wrong: ${JSON.stringify(wrong)})`);
   const at = new Date("2026-10-08T00:00:00.000Z");
-  const ORDER = ["ts", "door", "method", "route", "rpc", "tool", "agent", "status", "outcome", "code", "ms", "bytes"];
-  const full = JSON.parse(requestLine({ door: "mcp", method: "POST", route: "/v1/thoughts/:id", rpc: "tools/call", tool: "capture_thought", agent: "laptop", status: 200, outcome: "refused", code: "NOT_FOUND", ms: 12.4, bytes: 30 }, at)) as Record<string, unknown>;
-  assert(JSON.stringify(Object.keys(full)) === JSON.stringify(ORDER) && full.ts === at.toISOString() && full.ms === 12 && full.tool === "capture_thought" && full.code === "NOT_FOUND",
+  const ORDER = ["ts", "door", "method", "route", "rpc", "rev", "tool", "agent", "status", "outcome", "code", "ms", "bytes"];
+  const full = JSON.parse(requestLine({ door: "mcp", method: "POST", route: "/v1/thoughts/:id", rpc: "tools/call", rev: "2026-07-28", tool: "capture_thought", agent: "laptop", status: 200, outcome: "refused", code: "NOT_FOUND", ms: 12.4, bytes: 30 }, at)) as Record<string, unknown>;
+  assert(JSON.stringify(Object.keys(full)) === JSON.stringify(ORDER) && full.ts === at.toISOString() && full.ms === 12 && full.tool === "capture_thought" && full.code === "NOT_FOUND" && full.rev === "2026-07-28",
     `every field in its place, ts first, numbers whole (${JSON.stringify(full)})`);
   const odd = JSON.parse(requestLine({
-    door: "the private door" as never, method: "BREW", route: "/v1/thoughts?key=the-key", rpc: "x/the private thought", tool: "the private thought", agent: "laptop\n{\"forged\":1}",
+    door: "the private door" as never, method: "BREW", route: "/v1/thoughts?key=the-key", rpc: "x/the private thought", rev: "the private thought", tool: "the private thought", agent: "laptop\n{\"forged\":1}",
     status: -200, outcome: "maybe" as never, code: "the private code", ms: -3, bytes: Number.POSITIVE_INFINITY,
     ...({ url: "http://brain/mcp?key=the-key", query: "the private thought" } as object),
   } as never, at)) as Record<string, unknown>;
-  assert(odd.door === "mcp" && odd.status === 0 && odd.method === "?" && odd.route === "?" && odd.rpc === "other" && odd.tool === "?" && odd.outcome === "?" && odd.code === "?" && odd.ms === 0 && !("bytes" in odd),
-    `each value held to its rule: an unknown method, route, tool, outcome and code are \`?\`, an unknown RPC method \`other\`, a bad number 0 or absent (${JSON.stringify(odd)})`);
+  assert(odd.door === "mcp" && odd.status === 0 && odd.method === "?" && odd.route === "?" && odd.rpc === "other" && odd.rev === "other" && odd.tool === "?" && odd.outcome === "?" && odd.code === "?" && odd.ms === 0 && !("bytes" in odd),
+    `each value held to its rule: an unknown method, route, tool, outcome and code are \`?\`, an unknown RPC method and an unknown MCP revision \`other\`, a bad number 0 or absent (${JSON.stringify(odd)})`);
+  const revs = ["2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07", "unnamed", "2027-01-01", "2026-07-28\n", ""].map((rev) => (JSON.parse(requestLine({ door: "mcp", method: "POST", rev, status: 200, ms: 1 }, at)) as { rev?: unknown }).rev);
+  assert(JSON.stringify(revs) === '["2026-07-28","2025-11-25","2025-06-18","2025-03-26","2024-11-05","2024-10-07","unnamed","other","other","other"]' && !("rev" in JSON.parse(requestLine({ door: "api", method: "GET", status: 200, ms: 1 }, at))),
+    `the MCP revision a request named (SMD-4363): each revision served and \`unnamed\` as itself, any other string \`other\`, and no field where none was read (${JSON.stringify(revs)})`);
   const modernRpc = ["server/discover", "subscriptions/listen"].map((rpc) => (JSON.parse(requestLine({ door: "mcp", method: "POST", rpc, status: 200, outcome: "ok", ms: 1 }, at)) as { rpc?: unknown }).rpc);
   assert(JSON.stringify(modernRpc) === '["server/discover","subscriptions/listen"]', `the two methods the 2026-07-28 revision adds are named, not \`other\` (SMD-4345: ${JSON.stringify(modernRpc)})`);
   assert(odd.agent === "laptop?{\"forged\":1}" && !JSON.stringify(odd).includes("the-key") && !JSON.stringify(odd).includes("private") && !("url" in odd) && !("query" in odd),
@@ -4813,7 +4816,7 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   };
   try {
     // A failed search, its key in ?key= and its text planted, under a client's traceparent.
-    const searched = await linesOf(() => post(callOf("search_thoughts", { query: PLANTED }), { traceparent, tracestate: `vendor=${PLANTED}` }));
+    const searched = await linesOf(() => post(callOf("search_thoughts", { query: PLANTED }), { traceparent, tracestate: `vendor=${PLANTED}`, "mcp-protocol-version": "2025-06-18" }));
     const spans = exporter.getFinishedSpans();
     const server = requestSpan(spans);
     const restSide = new Set(spans.filter((s) => attrs(s)["ob1.door"] === "api").map((s) => s.spanContext().spanId));
@@ -4822,6 +4825,8 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     assert(server?.name === "tools/call search_thoughts" && server.spanContext().traceId !== TID && parentOf(server) === undefined && server.links.length === 1 && link?.traceId === TID && link.spanId === PARENT,
       `the request's span is named for its call and starts its own trace, the caller's linked, not continued (${server?.name} ${server?.spanContext().traceId} ${parentOf(server)} ${JSON.stringify(link)})`);
     const sa = attrs(server);
+    assert(sa["mcp.protocol.version"] === "2025-06-18" && !("ob1.rev" in sa),
+      `the request's span says the revision it named, under the MCP conventions' name, and no ob1.rev beside it (SMD-4363: ${sa["mcp.protocol.version"]} / ${sa["ob1.rev"]})`);
     assert(sa["http.request.method"] === "POST" && sa["mcp.method.name"] === "tools/call" && sa["ob1.tool"] === "search_thoughts" && sa["ob1.agent"] === "MCP_ACCESS_KEY"
       && sa["http.response.status_code"] === 200 && sa["ob1.outcome"] === "error" && sa["ob1.code"] === "FAILED" && sa["error.type"] === "FAILED" && server?.status.code === SpanStatusCode.ERROR && !("http.route" in sa),
       `its attributes are the line's: method, MCP method, tool, the key's name, the 200, \`error\` FAILED, an ERROR status, and no route at the MCP endpoint (${JSON.stringify(sa)})`);
@@ -4902,10 +4907,24 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       `a worker mirror's and a worker action's store fault: an exception event on the request's span (${JSON.stringify(mirrorFaults)})`);
     // A tools/call refused at its key ran nothing: no gen_ai names on its span (review pass 6).
     exporter.reset();
-    await post(callOf("brain_info", {}), {}, "/mcp");
+    const keylessLines = await linesOf(() => post(callOf("brain_info", {}), { "mcp-protocol-version": "2025-06-18" }, "/mcp"));
     const refusedAtKey = requestSpan();
     assert(attrs(refusedAtKey)["ob1.code"] === "UNAUTHORIZED" && !("gen_ai.operation.name" in attrs(refusedAtKey)) && !("gen_ai.tool.name" in attrs(refusedAtKey)) && refusedAtKey?.name === "tools/call brain_info",
       `a tools/call refused at its key: no gen_ai names, so no execution is counted (${JSON.stringify(attrs(refusedAtKey))})`);
+    // Nor the revision it named, under either name (SMD-4363): the conventions' attribute is the version used, it used
+    // none, and a caller with no key would count under whichever it named. Its line keeps the word, beside its `refused`.
+    assert(!("mcp.protocol.version" in attrs(refusedAtKey)) && !("ob1.rev" in attrs(refusedAtKey)) && keylessLines.some((l) => l.rev === "2025-06-18" && l.outcome === "refused"),
+      `…nor a revision on its span, though its line says the one it named (${JSON.stringify(attrs(refusedAtKey))}; ${JSON.stringify(keylessLines)})`);
+    const revAt = (rev: string, atKey: boolean) => {
+      exporter.reset();
+      const t = beginRequest("mcp", new Request("http://mcp/x"), () => {});
+      Object.assign(t, { rpc: "tools/call", rev, outcome: "refused", code: "UNAUTHORIZED", refusedAtKey: atKey });
+      t.end();
+      return [attrs(requestSpan())["mcp.protocol.version"] ?? null, attrs(requestSpan())["ob1.rev"] ?? null];
+    };
+    const revsAt = JSON.stringify([revAt("2025-06-18", true), revAt("unnamed", true), revAt("other", true), revAt("2025-06-18", false), revAt("unnamed", false), revAt("other", false)]);
+    assert(revsAt === '[[null,null],[null,null],[null,null],["2025-06-18",null],[null,"unnamed"],[null,"other"]]',
+      `a revision, \`unnamed\` and \`other\` marked at the key: neither attribute; a tool's own refusal by the same code keeps each (${revsAt})`);
     // A tool's own refusal by the same codes ran, and is counted; an unrun call is not (review pass 7).
     const byTool = (code: string, atKey: boolean, outcome: "refused" | "unrun") => {
       exporter.reset();
@@ -4944,6 +4963,14 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const batch = requestSpan(batchSpans);
     // Its calls' spans; through the MCP server, the REST core's whoami for the request is its child too, a request of its own.
     const children = batchSpans.filter((s) => parentOf(s) === batch?.spanContext().spanId && s.kind !== SpanKind.SERVER);
+    assert(attrs(batch)["ob1.rev"] === "unnamed" && !("mcp.protocol.version" in attrs(batch)), `a request that names no revision: ob1.rev's word, and no mcp.protocol.version (SMD-4363: ${attrs(batch)["ob1.rev"]} / ${attrs(batch)["mcp.protocol.version"]})`);
+    // A header that is no revision: `other` is ob1.rev's word too, never the convention's attribute.
+    exporter.reset();
+    await post(callOf("brain_info", {}, 123), { "mcp-protocol-version": "no revision at all" });
+    await Bun.sleep(50);
+    const strange = attrs(requestSpan(exporter.getFinishedSpans()));
+    assert(strange["ob1.rev"] === "other" && !("mcp.protocol.version" in strange) && !JSON.stringify(strange).includes("no revision at all"),
+      `a request naming a string that is no revision: ob1.rev \`other\`, no mcp.protocol.version, and none of its text (SMD-4363: ${strange["ob1.rev"]} / ${strange["mcp.protocol.version"]})`);
     assert(batch?.name === "POST" && attrs(batch)["ob1.rpc"] === "batch" && !("mcp.method.name" in attrs(batch)) && children.length === 2,
       `a batch's span names no MCP method and has a child per call (${batch?.name} ${children.map((c) => c.name).join(", ")})`);
     exporter.reset();
@@ -5031,8 +5058,8 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
   const measured = (received["/v1/metrics"] ?? []).join("\n");
   const everything = JSON.stringify(received);
   assert(records.length === 1 && records[0].eventName === "ob1.request" && records[0].severityText === "WARN" && spanTrace !== undefined && records[0].traceId === spanTrace
-    && record.rpc === "tools/list" && record.outcome === "refused" && record.code === "UNAUTHORIZED" && String(record.status) === "200" && record.door === "mcp",
-    `the request's log record: ob1.request, WARN for a refusal, the span's trace, the line's fields (${JSON.stringify(records)})`);
+    && record.rpc === "tools/list" && record.rev === "unnamed" && record.outcome === "refused" && record.code === "UNAUTHORIZED" && String(record.status) === "200" && record.door === "mcp",
+    `the request's log record: ob1.request, WARN for a refusal, the span's trace, the line's fields, its \`rev\` among them (${JSON.stringify(records)})`);
   assert(measured.includes('"http.server.request.duration"') && measured.includes('"tools/list"') && measured.includes('"refused"') && !measured.includes('"MCP_ACCESS_KEY"'),
     `the request-duration histogram, labelled with the request's MCP method and outcome, never the key's name (${measured.slice(0, 200)})`);
   assert(!everything.includes(PLANTED) && !everything.includes(KEY) && !everything.includes("note="), `no signal holds the key, the query string or the planted text (${everything.length} chars)`);
