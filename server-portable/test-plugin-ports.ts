@@ -3660,7 +3660,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   } finally {
     embedDown = false;
   }
-  // One memory of two meets the provider down: no_vector names that one alone, matched by its thought (review pass 1, mutant).
+  // One memory of two meets the provider down: no_vector names that one alone, by its own capture (review pass 1, mutant).
   embedFailOn = (input) => input.includes("am_half_down");
   try {
     const half = await am("writeback", { ...base, task_id: "task-half", memory_payload: { lessons: ["am_ledger am_half_down: this one meets the provider down.", "am_ledger this one is embedded beside it."] } });
@@ -3705,7 +3705,7 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   // The servers froze their environment at their first request (root.ts initEnv) and resolve the provider's settings
   // from that object at each call (core/context.ts embedConfig): this section sets the policy there, and puts it back.
   const coreEnv = (await import("./root.ts")).env() as Record<string, string | undefined>;
-  const egressEnv = { local: coreEnv.OB1_LLM_LOCAL, policy: coreEnv.OB1_EGRESS_POLICY, allow: coreEnv.OB1_EGRESS_ALLOW };
+  const egressEnv = { local: coreEnv.OB1_LLM_LOCAL, policy: coreEnv.OB1_EGRESS_POLICY, allow: coreEnv.OB1_EGRESS_ALLOW, deny: coreEnv.OB1_EGRESS_DENY };
   delete coreEnv.OB1_LLM_LOCAL;
   coreEnv.OB1_EGRESS_POLICY = "deny";
   delete coreEnv.OB1_EGRESS_ALLOW;
@@ -3737,8 +3737,21 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     assert(let_.status === 200 && let_.body.no_vector === undefined && lt?.vector === true && lt.model !== null && lt.model === lt.brain && allowedRecall.status === 200
       && embedRequests - beforeAllowed >= 2,
       `…OB1_EGRESS_ALLOW terms naming the keys let the write-back and the recall through, the thought carrying the brain's model (${let_.status} ${allowedRecall.status} ${JSON.stringify(lt)})`);
+    // One write-back, two causes: each memory named, each with its own why (review pass 3, mutant).
+    coreEnv.OB1_EGRESS_POLICY = "allow";
+    coreEnv.OB1_EGRESS_DENY = "marker:am_keep_in";
+    embedFailOn = (input) => input.includes("am_mixed_down");
+    try {
+      const mixed = await am("writeback", { ...base, task_id: "task-mixed", memory_payload: { lessons: ["am_ledger am_mixed_down meets the provider down."], constraints: ["am_ledger am_keep_in stays home."] } });
+      const xnv = (mixed.body.no_vector ?? []) as { memory_id: string; why: string }[];
+      const whyOf = (t: string) => xnv.find((x) => x.memory_id === mems(mixed).find((m) => m.memory_type === t)?.memory_id)?.why;
+      assert(mixed.status === 200 && xnv.length === 2 && whyOf("lesson") === "provider_down" && whyOf("constraint") === "refused",
+        `…of a write-back's two memories, one meeting the provider down and one a deny term, each is named with its own why (${mixed.status} ${JSON.stringify(xnv)})`);
+    } finally {
+      embedFailOn = null;
+    }
   } finally {
-    for (const [k, v] of [["OB1_LLM_LOCAL", egressEnv.local], ["OB1_EGRESS_POLICY", egressEnv.policy], ["OB1_EGRESS_ALLOW", egressEnv.allow]] as const) {
+    for (const [k, v] of [["OB1_LLM_LOCAL", egressEnv.local], ["OB1_EGRESS_POLICY", egressEnv.policy], ["OB1_EGRESS_ALLOW", egressEnv.allow], ["OB1_EGRESS_DENY", egressEnv.deny]] as const) {
       if (v === undefined) delete coreEnv[k];
       else coreEnv[k] = v;
     }
