@@ -27,7 +27,7 @@ import { ok, refuse, type Refusal } from "../server-portable/core/refusal.ts";
 import { createRestApp } from "../server-portable/rest/app.ts";
 import * as say from "../server-portable/render.ts";
 import { visibleToolNames } from "../server-portable/tools.ts";
-import { REVOKED_MESSAGE, BUSY_MESSAGE, MIRROR_WORDS } from "../server-portable/mcp-edge.ts";
+import { REVOKED_MESSAGE, BUSY_MESSAGE, MIRROR_WORDS, revisionOf, parsedBody } from "../server-portable/mcp-edge.ts";
 import type { AgentOutcome } from "../server-portable/agents.ts";
 import { createRestClient } from "../rest-client/index.ts";
 import { argumentsById, createMcpApp } from "./app.ts";
@@ -990,7 +990,7 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   assert(found.headers.get("access-control-allow-origin") === "*" && !found.headers.has("mcp-session-id") && /^text\/event-stream/.test(found.headers.get("content-type") ?? ""), "…answered as an event stream with the CORS headers, as a 2025-era request is, and no session id");
   const keyless = await rpc("server/discover", {}, undefined, { modern: true });
   assert(keyless.status === 200 && errorOf(keyless).code === -32001 && last().rpc === "server/discover" && last().outcome === "refused" && last().code === "UNAUTHORIZED",
-    `…and with no key it is refused at the key as a 2025-era request is, the -32001 envelope, before its revision is read (${keyless.status} ${JSON.stringify(keyless.body)}; ${JSON.stringify(last())})`);
+    `…and with no key it is refused at the key as a 2025-era request is, the -32001 envelope, before the SDK is asked which revision it is (${keyless.status} ${JSON.stringify(keyless.body)}; ${JSON.stringify(last())})`);
 
   // tools/list: the caller's tools, each definition as a 2025-era client reads it, with the revision's cache fields.
   for (const key of ["write-raw", "read-raw", "cap-raw"]) {
@@ -1016,14 +1016,16 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
     `a refusal: the 2025-era reply, and its line \`refused\` NOT_FOUND as that one's is (${JSON.stringify(refusedLine)})`);
   answer = () => ok({});
 
-  // The key's refusals: the edge's, before the revision is read, so one answer for both.
+  // The key's refusals: the edge's, before the SDK is asked which revision a request is, so one answer for both.
   const refusals: [string, AgentOutcome | null, string][] = [["a wrong key", null, "wrong"], ["a revoked key", { status: "revoked", agentId: "agent-1", revokedAt: "2026-10-05T00:00:00Z", reason: null }, "write-raw"], ["a busy registry", { status: "busy" } as AgentOutcome, "write-raw"]];
   for (const [what, as, key] of refusals) {
     if (as) identity = as;
     const legacy = await rpc("tools/list", {}, key);
+    const legacyRev = last().rev;
     const modern = await rpc("tools/list", {}, key, { modern: true });
     assert(modern.status === legacy.status && same(errorOf(modern), errorOf(legacy)) && errorOf(modern).code !== undefined && modern.headers.get("retry-after") === legacy.headers.get("retry-after"),
       `${what}: the 2025-era refusal, status, code, words and Retry-After (${modern.status} ${errorOf(modern).code})`);
+    assert(legacyRev === "unnamed" && last().rev === MODERN && last().outcome === "refused", `${what}: each refusal's line says the revision its request named (SMD-4363: ${legacyRev}, ${last().rev})`);
     identity = { status: "ok", agentId: "agent-1" };
   }
   const note = await rpc("notifications/cancelled", { requestId: 1 }, "write-raw", { modern: true, notification: true });
@@ -1058,6 +1060,88 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   const nearLegacy = await rpc("tools/call", calling(3 * 1024 * 1024), "write-raw");
   const nearModern = await rpc("tools/call", calling(3 * 1024 * 1024), "write-raw", { modern: true });
   assert(nearLegacy.status === 200 && nearLegacy.body?.result !== undefined && same(replyOf(nearModern), replyOf(nearLegacy)) && nearModern.status === 200, `a 3 MiB call, either revision: answered by its tool (${nearLegacy.status}, ${nearModern.status})`);
+
+  // The line says which revision each request named (SMD-4363), read in revisionOf's order: a 2026-07-28 request's
+  // envelope; what an initialize offers; a 2025-era request's header once it has one; `unnamed` with none; `other` for
+  // a string that is no revision this server serves. Read for a request refused at the key too. Never the caller's own text.
+  {
+    const revOf = async (method: string, params: unknown, key: string | undefined, opts: RpcOpts = {}) => { await rpc(method, params, key, opts); return last().rev; };
+    const offered = { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "c", version: "1" } };
+    const got = {
+      modern: await revOf("tools/list", {}, "read-raw", { modern: true }),
+      modernKeyless: await revOf("server/discover", {}, undefined, { modern: true }),
+      legacyBare: await revOf("tools/list", {}, "read-raw"),
+      legacyHeader: await revOf("tools/list", {}, "read-raw", { headers: { "mcp-protocol-version": "2025-06-18" } }),
+      initialize: await revOf("initialize", offered, "read-raw"),
+      notServed: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2027-01-01" }, envelope: { "io.modelcontextprotocol/protocolVersion": "2027-01-01" } }),
+      madeUp: await revOf("tools/list", {}, "read-raw", { headers: { "mcp-protocol-version": "the private thought" } }),
+      // The envelope against a header that disagrees (the handler refuses the request): the body is the request's word on itself.
+      crossed: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2025-06-18" } }),
+      // An initialize under a header: the offer, which is what the transport acts on.
+      initializeUnderHeader: await revOf("initialize", { ...offered, protocolVersion: "2025-11-25" }, "read-raw", { headers: { "mcp-protocol-version": "2025-03-26" } }),
+      // An initialize that carries the envelope is a 2026-07-28 request to the SDK, whatever it offers: the envelope's.
+      initializeEnveloped: await revOf("initialize", { ...offered }, "read-raw", { modern: true }),
+      // A caller's own `unnamed` is not the route's word.
+      saysUnnamed: await revOf("tools/list", {}, "read-raw", { headers: { "mcp-protocol-version": "unnamed" } }),
+      // An envelope whose revision is no string is no envelope: the header's stands.
+      oddEnvelope: await revOf("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-protocol-version": "2026-07-28" }, envelope: { "io.modelcontextprotocol/protocolVersion": 7 } }),
+    };
+    // A batch, which only 2025-03-26 has and which carries no header: none named.
+    await (await app.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw" }, body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "tools/list" }, { jsonrpc: "2.0", id: 2, method: "tools/list" }]) }))).text();
+    const batchLine = last();
+    assert(batchLine.rpc === "batch" && batchLine.rev === "unnamed", `a batch with no header: \`unnamed\` (${JSON.stringify(batchLine)})`);
+    // Under a header a batch is the header's: an array is read by its header alone.
+    await (await app.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw", "mcp-protocol-version": "2025-03-26" }, body: JSON.stringify([{ jsonrpc: "2.0", id: 1, method: "tools/list" }, { jsonrpc: "2.0", id: 2, method: "tools/list" }]) }))).text();
+    assert(last().rpc === "batch" && last().rev === "2025-03-26", `a batch under a header: the header's (${JSON.stringify(last())})`);
+    // An initialize whose envelope is not whole is a 2025-era handshake to the SDK, and answered as one; its line says what the envelope claimed.
+    const half = await rpc("initialize", { ...offered, protocolVersion: "2025-11-25", _meta: { "io.modelcontextprotocol/protocolVersion": MODERN } }, "read-raw");
+    assert(half.status === 200 && resultOf(half).protocolVersion === "2025-11-25" && last().rev === MODERN,
+      `an initialize claiming 2026-07-28 in an envelope that is not whole: answered as a 2025-era handshake, and the line says the claim (${half.status} ${JSON.stringify(half.body)}; ${last().rev})`);
+    const { initializeUnderHeader, initializeEnveloped, saysUnnamed, oddEnvelope, ...plain } = got;
+    assert(initializeUnderHeader === "2025-11-25" && initializeEnveloped === MODERN && saysUnnamed === "other" && oddEnvelope === MODERN,
+      `an initialize under a 2025-era header is its offer, and one carrying the envelope is the envelope's; a header that says \`unnamed\` is \`other\`; an envelope whose revision is no string leaves the header's (${initializeUnderHeader}, ${initializeEnveloped}, ${saysUnnamed}, ${oddEnvelope})`);
+    assert(same(plain, { modern: MODERN, modernKeyless: MODERN, legacyBare: "unnamed", legacyHeader: "2025-06-18", initialize: "2025-06-18", notServed: "other", madeUp: "other", crossed: MODERN }),
+      `each line's \`rev\`: the envelope's, a keyless request's too, and over a header that disagrees; a 2025-era header's, an initialize's offer, \`unnamed\` with none, \`other\` for a revision not served and for a made-up string (${JSON.stringify(got)})`);
+    // Every field but the clock's: `ts` holds the year, and this row must not start failing on a date.
+    const said = lines.map(({ ts: _ts, ...rest }) => JSON.stringify(rest));
+    assert(!said.some((l) => l.includes("private") || l.includes("2027-01-01")), "…and nothing of a caller's own text on any line");
+    // The list telemetry.ts holds is what this server serves, read from the installed SDK both ways: its 2025-era
+    // list by its export, and its 2026-07-28 family by what server/discover answers here (the SDK keeps that list
+    // apart and exports none of it). A bump that serves another revision of either family fails this row.
+    const { MCP_REVISIONS } = await import("../server-portable/telemetry.ts");
+    const { SUPPORTED_PROTOCOL_VERSIONS } = await import("@modelcontextprotocol/server");
+    const discovered = (resultOf(await rpc("server/discover", {}, "read-raw", { modern: true })).supportedVersions ?? []) as string[];
+    const served = [...discovered, ...SUPPORTED_PROTOCOL_VERSIONS, "unnamed"].sort();
+    assert(discovered.length > 0 && same([...MCP_REVISIONS].sort(), served), `the revisions a line may name are what server/discover answers, the SDK's 2025-era list and \`unnamed\` (${[...MCP_REVISIONS].sort().join(", ")} against ${served.join(", ")})`);
+    // A body that is no JSON, and one that is no request, still have a line: the header's word, or `unnamed`.
+    const raw = async (body: string, headers: Record<string, string> = {}) => {
+      await (await app.fetch(new Request("http://mcp/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "read-raw", ...headers }, body }))).text();
+      return last();
+    };
+    const notJson = await raw("{not json", { "mcp-protocol-version": "2025-06-18" });
+    const noRequest = await raw("{}");
+    assert(notJson.rev === "2025-06-18" && notJson.rpc === undefined && noRequest.rev === "unnamed" && noRequest.rpc === undefined,
+      `a body that is no JSON under a header: the header's; a body that is no request: \`unnamed\`; neither a method (${JSON.stringify(notJson)}; ${JSON.stringify(noRequest)})`);
+    // revisionOf by itself, one guard at a time, on what no request above sends. What it returns, before the line holds it:
+    // the empty string is its word for "named, and no revision", which the line writes `other`.
+    const V = "io.modelcontextprotocol/protocolVersion";
+    const names = (headers: Record<string, string>, body: unknown): string => {
+      try { return revisionOf(new Headers(headers), body === undefined ? null : parsedBody(JSON.stringify(body))); } catch (err) { return `threw: ${err}`; }
+    };
+    const alone = {
+      offerElsewhere: names({}, { method: "tools/list", params: { protocolVersion: "2025-06-18" } }),
+      offerNoString: names({}, { method: "initialize", params: { protocolVersion: 20250618 } }),
+      emptyEnvelope: names({ "mcp-protocol-version": "2025-06-18" }, { method: "tools/list", params: { _meta: { [V]: "" } } }),
+      oddEnvelopeOffer: names({}, { method: "initialize", params: { protocolVersion: "2025-06-18", _meta: { [V]: 7 } } }),
+      arrayOfOne: names({}, [{ method: "initialize", params: { protocolVersion: "2025-03-26" } }]),
+      emptyHeader: names({ "mcp-protocol-version": "" }, { method: "tools/list" }),
+      saysUnnamed: names({ "mcp-protocol-version": "unnamed" }, { method: "tools/list" }),
+      unread: names({ "mcp-protocol-version": "2025-06-18" }, undefined),
+      unreadBare: names({}, undefined),
+    };
+    assert(same(alone, { offerElsewhere: "unnamed", offerNoString: "unnamed", emptyEnvelope: "", oddEnvelopeOffer: "2025-06-18", arrayOfOne: "unnamed", emptyHeader: "", saysUnnamed: "", unread: "2025-06-18", unreadBare: "unnamed" }),
+      `revisionOf alone: an offer is an initialize's and a string; an empty envelope or header named something, no revision; an envelope that is no string leaves the offer; an array of one is read by its header; a caller's \`unnamed\` is not its word; a body unread leaves the header's (${JSON.stringify(alone)})`);
+  }
 
   // A request the SDK's rule cannot place goes to the handler, which refuses it in its own words: a 2025-era
   // `initialize` under a 2026-07-28 header was served before this, and is a 400 now.
