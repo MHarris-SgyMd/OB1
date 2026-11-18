@@ -8166,12 +8166,12 @@ console.log("\n[36g] The priority review's findings in the core and the words (S
       && JSON.stringify(refusalValue((foreign[1] as unknown as { refusal: never }).refusal)) === JSON.stringify({ code: "REFUSED_CURSOR", retryable: false, reason: "filters", made: { list: "findings", status: "all", kind: "stale" } }),
     `the cursor carries the selection and the last row's place; one made under another status or kind refused (filters), none of this tool's or an sk no numeric refused (shape), neither reaching the store (${foreignWords.join(",")})`);
   const [s0, d0, o0] = listed.ok ? listed.value.findings : [];
-  const badRows = [{ ...staleRow, kind: "late" }, { ...staleRow, status: "open" }, { ...staleRow, item_kind: "board" }].map((r) => { try { normalisePriorityFinding(r); return "read"; } catch { return "threw"; } });
+  const badRows = [{ ...staleRow, kind: "late" }, { ...staleRow, status: "open" }, { ...staleRow, item_kind: "board" }, { ...staleRow, item_key: null }, { ...staleRow, id: null }].map((r) => { try { normalisePriorityFinding(r); return "read"; } catch { return "threw"; } });
   assert(JSON.stringify(listAsked) === JSON.stringify([{ status: null, kind: "stale", limit: 3 }, { status: "pending", kind: null, limit: 20, after: { grp: 0, sk: "1762732800.5", id: T } }])
       && listed.ok && listed.value.status === "all" && listed.value.kind === "stale" && listed.value.total === 7 && pendingOnly.ok && pendingOnly.value.kind === null
       && s0.foundAt === "2026-11-10T00:00:00.000Z" && s0.statements.length === 1 && s0.statements[0].level === 4 && s0.statements[0].maker === "rival" && s0.statements[0].assertedAt === "2026-09-01T00:00:00.000Z" && s0.statements[0].role === null
       && d0.statements.map((s) => `${s.role}:${s.level}:${s.maker}`).join() === "operator:4:op-key,source:1:linear" && d0.decidedBy === "op-key" && d0.note === "Linear is right" && d0.suppressedUntil === "2027-01-12T00:00:00.000Z"
-      && o0.statements.length === 0 && o0.mootAt === "2026-11-14T00:00:00.000Z" && badRows.join() === "read,read,threw"
+      && o0.statements.length === 0 && o0.mootAt === "2026-11-14T00:00:00.000Z" && badRows.join() === "read,read,read,threw,threw"
       && JSON.stringify(s0.evidence) === JSON.stringify({ last_activity: "2026-09-01T00:00:00+00:00", window_days: 60 }) && JSON.stringify(d0.evidence) === "{}"
       && JSON.stringify(o0.evidence) === JSON.stringify({ due_at: "2026-11-01T00:00:00+00:00", due_from: "stated", level: 3 }),
     `the list: all as no status, the kind and limit as given; a stale finding's statements from its evidence, sent once (the evidence keeps the rest), a disagreement's operator and source, an overdue one's none; a kind or status this server does not know read (marked, below), an item kind 142 does not write a fault (${JSON.stringify(listAsked)} ${badRows.join(",")})`);
@@ -8282,7 +8282,30 @@ console.log("\n[36g] The priority review's findings in the core and the words (S
       && laterMade?.ok === true && laterMade.value.status === "accepted" && laterMade.value.outcome === null && laterMade.value.assertion === null && laterMade.value.answerUnread === true
       && laterWords === `Accepted the stale finding ${F} on thought ${T}: the decision is recorded, but what its writer answered is in a shape this server does not read — priority_history shows the item's statements. The same finding is held back until 2027-01-14T10:00:00.000Z while its statements stand.`,
     `a committed decision whose writer's answer is not read: made, accepted, its outcome and assertion null and marked unread, said so (${laterWords.slice(0, 160)})`);
-  const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING", status: "open" }, null]
+  // An item, a NOT_PENDING status or an accept's answer this server does not read is kept as written and marked, never
+  // made up; an envelope is a JSON object, never an array.
+  const boardMade = await R({ decision: "reject" }, { ...rejectedA, item: { kind: "board", key: "B-1" } }).catch(() => null);
+  const noItemMade = await R({ decision: "reject" }, { ...rejectedA, item: null }).catch(() => null);
+  const boardRow = (() => { try { return normalisePriorityFinding({ ...staleRow, item_kind: "board", item_key: "B-1" }); } catch { return null; } })();
+  const boardLine = boardRow ? text(say.renderPriorityFindings({ ok: true, value: { status: "all", kind: null, total: 1, before: 0, findings: [boardRow], cursor: null } })) : "";
+  const openR = await refusedBy({ ok: false, error: "NOT_PENDING", status: "open", message: `finding ${F} is open, not pending` });
+  const openWords = openR ? text(say.renderReviewPriorityFinding({ ok: false, refusal: openR } as never)) : "";
+  const noAnswer = await R({ decision: "accept", level: 2 }, { ...assertedA, answer: null }).catch(() => null);
+  const noAnswerWords = noAnswer ? text(say.renderReviewPriorityFinding(noAnswer)) : "";
+  const arrayEnvelope = (() => { try { normaliseReviewFinding(Object.assign([], rejectedA)); return "read"; } catch { return "threw"; } })();
+  const arrayAnswer = (() => { try { return normaliseReviewFinding({ ok: false, error: "WRITER_REFUSED", answer: Object.assign([], { code: "ITEM_NOT_FOUND" }), message: "refused" }); } catch { return null; } })();
+  assert(boardMade?.ok === true && boardMade.value.itemUnread === true && JSON.stringify(boardMade.value.item) === JSON.stringify({ kind: "board", key: "B-1" })
+      && text(say.renderReviewPriorityFinding(boardMade)).startsWith(`Rejected the stale finding ${F} on an item this server does not read (board B-1): no priority was changed.`)
+      && noItemMade?.ok === true && noItemMade.value.item === null && noItemMade.value.itemUnread === true
+      && text(say.renderReviewPriorityFinding(noItemMade)).startsWith(`Rejected the stale finding ${F} on an item this server does not read: no priority was changed.`)
+      && boardRow?.itemUnread === true && boardRow.item.kind === "board" && boardLine.includes(`- stale finding ${F} on an item this server does not read (board B-1): `)
+      && openR?.code === "REFUSED_FINDING_DECISION" && openR.problem === "NOT_PENDING" && openR.status === "open" && openR.statusUnread === true
+      && JSON.stringify(refusalValue(openR)) === JSON.stringify({ code: "REFUSED_FINDING_DECISION", retryable: false, id: F, problem: "NOT_PENDING", status: "open", statusUnread: true })
+      && openWords === `Refused: finding ${F} is not pending: its status, open, is one this server does not know; list_priority_findings with status all shows it.`
+      && noAnswer?.ok === true && noAnswer.value.answerUnread === true && noAnswer.value.outcome === null && noAnswerWords.includes("the decision is recorded, but what its writer answered") && !noAnswerWords.includes("stated ?")
+      && arrayEnvelope === "threw" && arrayAnswer?.ok === false && (arrayAnswer as { writerCode?: string | null }).writerCode === null,
+    `an item this server does not read kept as written and marked, or none, never made up, on the list and the review; a NOT_PENDING status it does not know refused 409, marked; an accept with no answer unread, never "stated ?"; an array envelope a fault and an array answer no record (${openWords.slice(0, 90)} | ${noAnswerWords.slice(0, 120)})`);
+  const strays = [{ ok: false, error: "NOPE" }, { ok: true, id: F }, { ok: false, error: "NOT_PENDING" }, null]
     .map((a) => { try { normaliseReviewFinding(a); return "read"; } catch { return "threw"; } });
   assert(strays.every((s) => s === "threw"), `an envelope review_priority_finding does not answer throws (${strays.join(",")})`);
   // No agent id: the registry away is PRIORITY_UNATTRIBUTED; a principal with none by design is named so; neither reaches the store.

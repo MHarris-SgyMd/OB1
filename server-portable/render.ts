@@ -33,7 +33,7 @@ import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, Prior
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
 import type { FindingReviewCode, FindingReviewed, FindingsListed } from "./core/findings.ts";
-import type { FindingStatement, PriorityFinding } from "./store.ts";
+import type { FindingItem, FindingStatement, PriorityFinding } from "./store.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
@@ -2503,8 +2503,8 @@ const statementText = (a: PriorityAssertion) =>
  * Where a statement stands, when that is not the item asked about: a ticket and its own rows are one item (migration
  * 133), so a ticket's statements and its rows' answer for either, each on its own item.
  */
-const onOther = (a: PriorityAssertion, asked: PriorityItem) =>
-  a.item.kind === asked.kind && a.item.key === asked.key ? "" : ` on ${itemText(a.item)}`;
+const onOther = (a: PriorityAssertion, asked: PriorityItem | null) =>
+  asked && a.item.kind === asked.kind && a.item.key === asked.key ? "" : ` on ${itemText(a.item)}`;
 /**
  * One statement in a history: the statement, where it stands if not on the item asked, and how its window ended — open,
  * replaced (by which), cleared, or closed when its item was deleted (migration 136).
@@ -2515,7 +2515,7 @@ const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
     : a.closeReason === "deleted" ? `closed at ${a.closedAt}, when its item was deleted`
     : `cleared at ${a.closedAt}`}`;
 /** The item's winner after a write, to a key shown it: its own statement, another's (and where it stands), or none standing. */
-const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem) =>
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem | null) =>
   !v.winnerShown ? ""
   : !v.winner ? " No statement on it stands now: its priority is unknown."
   : v.winner.id === mine ? " Yours is the item's winner."
@@ -2526,7 +2526,7 @@ const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean 
  * two or more between dashes, so the list's end is plain (review pass 2: "…; low (1) (assertion …); they stay" read
  * as one more item).
  */
-const closedList = (closed: PriorityAssertion[], asked: PriorityItem) =>
+const closedList = (closed: PriorityAssertion[], asked: PriorityItem | null) =>
   closed.map((a) => `${levelText(a.level)}${onOther(a, asked)} (assertion ${a.id})`).join("; ");
 const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
@@ -2603,9 +2603,13 @@ const findingState = (f: PriorityFinding) =>
   : f.status === "moot" ? `moot since ${f.mootAt ?? "?"} (its condition no longer holds)`
   : f.statusUnread ? `${oneLine(snipText(f.status, 40))}, a status this server does not know`
   : `${f.status} by ${oneLine(snipText(f.decidedBy ?? "?", 80))} at ${f.decidedAt ?? "?"}${f.note ? `: ${quoted(f.note)}` : ""}${findingOutcome(f)}${f.suppressedUntil ? `; held back until ${f.suppressedUntil}` : ""}`;
+/** A finding's item in words: as the priority replies name one, or one whose kind this server does not read, as written. */
+const findingItemText = (item: FindingItem | null, unread: boolean | undefined) =>
+  !unread && item ? itemText(item as PriorityItem)
+  : item ? `an item this server does not read (${oneLine(snipText(item.kind, 40))} ${oneLine(snipText(item.key, 80))})` : "an item this server does not read";
 const findingLine = (f: PriorityFinding) => {
   const state = findingState(f);
-  return `- ${oneLine(snipText(f.kind, 40))} finding ${f.id} on ${itemText(f.item)}: ${findingWhat(f)}. ${state[0].toUpperCase()}${state.slice(1)}.`;
+  return `- ${oneLine(snipText(f.kind, 40))} finding ${f.id} on ${findingItemText(f.item, f.itemUnread)}: ${findingWhat(f)}. ${state[0].toUpperCase()}${state.slice(1)}.`;
 };
 
 /** The selection a refused findings cursor was made under, in words: its status and its kind. */
@@ -2633,18 +2637,20 @@ export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => ren
 
 export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingReviewCode>): Reply {
   return render(o, (v) => {
-    const lead = `${v.status === "accepted" ? "Accepted" : "Rejected"} the ${oneLine(snipText(v.kind, 40))} finding ${v.id}${v.kindUnread ? " (a kind this server does not know)" : ""} on ${itemText(v.item)}`;
+    const lead = `${v.status === "accepted" ? "Accepted" : "Rejected"} the ${oneLine(snipText(v.kind, 40))} finding ${v.id}${v.kindUnread ? " (a kind this server does not know)" : ""} on ${findingItemText(v.item, v.itemUnread)}`;
+    // The item the statements are measured against: none when it was not read, so each statement names its own.
+    const asked = v.itemUnread || !v.item ? null : (v.item as PriorityItem);
     const held = v.suppressedUntil ? ` The same finding is held back until ${v.suppressedUntil} while its statements stand.` : "";
     if (v.status === "rejected") return `${lead}: no priority was changed.${held}`;
     if (v.answerUnread) return `${lead}: the decision is recorded, but what its writer answered is in a shape this server does not read — priority_history shows the item's statements.${held}`;
-    const winner = winnerText({ winner: v.winner, winnerShown: true }, v.outcome === "cleared" ? null : v.assertion?.id ?? null, v.item);
+    const winner = winnerText({ winner: v.winner, winnerShown: true }, v.outcome === "cleared" ? null : v.assertion?.id ?? null, asked);
     if (v.outcome === "cleared") {
-      return `${lead}: cleared your statement${v.closed.length > 1 ? `s — ${closedList(v.closed, v.item)} —` : v.closed.length ? `, ${closedList(v.closed, v.item)},` : ""} which stay${v.closed.length > 1 ? "" : "s"} in the history.${winner}${held}`;
+      return `${lead}: cleared your statement${v.closed.length > 1 ? `s — ${closedList(v.closed, asked)} —` : v.closed.length ? `, ${closedList(v.closed, asked)},` : ""} which stay${v.closed.length > 1 ? "" : "s"} in the history.${winner}${held}`;
     }
     const said = v.assertion ? statementText(v.assertion) : "?";
     return v.outcome === "unchanged"
       ? `${lead}: your statement already says this — ${said} — so it stands re-confirmed and nothing was written to it.${winner}${held}`
-      : `${lead}: stated ${said}.${v.closed.length ? ` It replaces your earlier statement${v.closed.length === 1 ? "" : "s"}, ${closedList(v.closed, v.item)}, which stay${v.closed.length === 1 ? "s" : ""} in the history.` : ""}${winner}${held}`;
+      : `${lead}: stated ${said}.${v.closed.length ? ` It replaces your earlier statement${v.closed.length === 1 ? "" : "s"}, ${closedList(v.closed, asked)}, which stay${v.closed.length === 1 ? "s" : ""} in the history.` : ""}${winner}${held}`;
   }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
       ? `Refused: only a key the operator classified \`operator\` may decide a priority finding, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
     : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may decide a priority finding.")
@@ -2655,7 +2661,9 @@ export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingR
     : r.code === "REFUSED_FINDING_INPUT" || r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300)).replace(/\.?$/, ".")}`
     : r.code === "REFUSED_FINDING_DECISION"
       ? r.problem === "NOT_PENDING"
-        ? `Refused: finding ${r.id} is ${r.status ?? "decided"} already, not pending${r.status === "moot" ? " (its condition no longer holds)" : ""}; list_priority_findings with status ${r.status ?? "all"} shows it.`
+        ? r.statusUnread
+          ? `Refused: finding ${r.id} is not pending: its status, ${oneLine(snipText(r.status ?? "?", 40))}, is one this server does not know; list_priority_findings with status all shows it.`
+          : `Refused: finding ${r.id} is ${r.status ?? "decided"} already, not pending${r.status === "moot" ? " (its condition no longer holds)" : ""}; list_priority_findings with status ${r.status ?? "all"} shows it.`
         : r.problem === "NOTHING_TO_CLEAR"
         ? `Refused: you hold no statement on the item to clear, so nothing was decided and finding ${r.id} stays pending. State a level instead (0 for none) to outrank another maker's.`
         : `Refused: the writer refused the outcome${r.writerCode ? ` (${r.writerCode})` : ""}, so nothing was decided and finding ${r.id} stays pending.`

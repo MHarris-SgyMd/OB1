@@ -42,13 +42,15 @@ type ClaimFacts = { id: string; forced: boolean; lapsedAt?: string };
  * may answer (unreachable), final until an operator acts (misconfigured, refused). Null when there is no such
  * failure: the caller has its agent id, or no registry was asked for one — a plugin hook's principal, `hook:<plugin>`,
  * has none by design — and what to say then is the caller's (the database's answer, or registry_unknown). One
- * signature per code, so a code widened to a union matches none and a claim's facts can't be left off (review pass 1).
+ * signature per code, and one for the codes that take no facts together (operatorGate's): CLAIM_UNATTRIBUTED is in no
+ * union, so a claim's facts can't be left off (review pass 1).
  */
 export function unattributedAs(code: "CLAIM_UNATTRIBUTED", principal: Principal, facts: ClaimFacts): Outcome<never, "CLAIM_UNATTRIBUTED"> | null;
 export function unattributedAs(code: "PRIORITY_UNATTRIBUTED", principal: Principal): Outcome<never, "PRIORITY_UNATTRIBUTED"> | null;
 export function unattributedAs(code: "ITEM_UNATTRIBUTED", principal: Principal): Outcome<never, "ITEM_UNATTRIBUTED"> | null;
 export function unattributedAs(code: "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, "CLAIM_CAP_UNATTRIBUTED"> | null;
 export function unattributedAs(code: "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, "RELEASE_HOLDER_UNATTRIBUTED"> | null;
+export function unattributedAs<C extends Exclude<UnattributedCode, "CLAIM_UNATTRIBUTED">>(code: C, principal: Principal): Outcome<never, C> | null;
 export function unattributedAs(code: UnattributedCode, principal: Principal, facts?: ClaimFacts): Outcome<never, UnattributedCode> | null {
   if (principal.agentId !== undefined || principal.agentUnresolved === undefined) return null;
   // Typed by the refusal's own shape, PRIORITY_UNATTRIBUTED's causes the narrowest of the three, so a mistyped cause
@@ -70,8 +72,7 @@ export function operatorGate(code: "PRIORITY_UNATTRIBUTED", principal: Principal
 export function operatorGate(code: "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, "CLAIM_CAP_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
 export function operatorGate(code: "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, "RELEASE_HOLDER_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
 export function operatorGate(code: "PRIORITY_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED" | "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, RefusalCode> | null {
-  const away = code === "PRIORITY_UNATTRIBUTED" ? unattributedAs(code, principal)
-    : code === "CLAIM_CAP_UNATTRIBUTED" ? unattributedAs(code, principal) : unattributedAs(code, principal);
+  const away = unattributedAs(code, principal);
   if (away) return away;
   return principal.agentId === undefined ? refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true }) : null;
 }

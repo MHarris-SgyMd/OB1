@@ -9,7 +9,7 @@
 // into values and refusals.
 
 import type { Principal } from "../auth.ts";
-import { closedOf, PriorityRefused, type PriorityAssertion, type PriorityFinding, type PriorityItem } from "../store.ts";
+import { closedOf, PriorityRefused, type FindingItem, type PriorityAssertion, type PriorityFinding } from "../store.ts";
 import type { FindingInputError, FindingKind, FindingStatus } from "../priority-kinds.ts";
 import { findingsCursor, parseFindingsCursor, sameFindingSelection, type FindingSelection } from "./list-cursor.ts";
 import { dueBy } from "../priority-scale.ts";
@@ -47,7 +47,7 @@ export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { st
  * when the decision holds the same finding back.
  */
 export type FindingReviewed = {
-  id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: PriorityItem; status: "accepted" | "rejected";
+  id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: FindingItem | null; itemUnread?: true; status: "accepted" | "rejected";
   outcome: "asserted" | "unchanged" | "cleared" | null; assertion: PriorityAssertion | null; closed: PriorityAssertion[]; winner: PriorityAssertion | null;
   suppressedUntil: string | null; caller: string;
   /** The decision was recorded, but the writer's answer is in a shape this server does not read: `outcome` and `assertion` are then null. */
@@ -78,7 +78,7 @@ export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, inpu
       case "NOT_OPERATOR": return notOperator(principal, r.kind);
       case "NOT_WRITE_SCOPE": return refuse({ code: "WRITE_SCOPE_REQUIRED", retryable: false, key: principal.name });
       case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
-      case "NOT_PENDING": return refuse({ code: "REFUSED_FINDING_DECISION", retryable: false, id, problem: "NOT_PENDING", message: r.message, ...(r.status === "pending" ? {} : { status: r.status }) });
+      case "NOT_PENDING": return refuse({ code: "REFUSED_FINDING_DECISION", retryable: false, id, problem: "NOT_PENDING", message: r.message, ...(r.status === "pending" ? {} : { status: r.status }), ...(r.statusUnread ? { statusUnread: true as const } : {}) });
       case "NOTHING_TO_CLEAR":
       case "WRITER_REFUSED":
         return refuse({ code: "REFUSED_FINDING_DECISION", retryable: false, id, problem: r.error, message: r.message, ...(r.writerCode ? { writerCode: r.writerCode } : {}) });
@@ -90,7 +90,7 @@ export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, inpu
   const a = r.answer;
   // No action-log row, as set_priority_weights: a decision is no search.
   return ok({
-    id: r.id, kind: r.kind, ...(r.kindUnread ? { kindUnread: true as const } : {}), item: r.item, status: r.status, outcome: a ? a.outcome as FindingReviewed["outcome"] : null, assertion: a?.assertion ?? null,
+    id: r.id, kind: r.kind, ...(r.kindUnread ? { kindUnread: true as const } : {}), item: r.item, ...(r.itemUnread ? { itemUnread: true as const } : {}), status: r.status, outcome: a ? a.outcome as FindingReviewed["outcome"] : null, assertion: a?.assertion ?? null,
     closed: a ? closedOf(a) : [], winner: a?.winner ?? null,
     suppressedUntil: r.suppressedUntil, caller: principal.name, ...(r.answerUnread ? { answerUnread: true as const } : {}),
   });

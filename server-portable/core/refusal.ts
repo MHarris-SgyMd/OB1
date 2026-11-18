@@ -128,7 +128,7 @@ export type Refusal =
   // clear, or the writer refusing the outcome (`writerCode`, its own code), the finding left pending. `message`: 142's
   // words, or the core's.
   | { code: "REFUSED_FINDING_INPUT"; retryable: false; problem: FindingInputError; message: string }
-  | { code: "REFUSED_FINDING_DECISION"; retryable: false; id: string; problem: "NOT_PENDING" | "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; message: string; status?: "accepted" | "rejected" | "moot"; writerCode?: string }
+  | { code: "REFUSED_FINDING_DECISION"; retryable: false; id: string; problem: "NOT_PENDING" | "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; message: string; status?: "accepted" | "rejected" | "moot" | (string & {}); statusUnread?: true; writerCode?: string }
   // review_supersession_proposal (029/036, 070, 094; SMD-3338): `id` the proposal's. The first three are the checks
   // `force` waives on an accept, as the CLI's --force does.
   | { code: "REFUSED_EDITED_SINCE"; retryable: false; id: string; olderEdited: boolean; newerEdited: boolean } // a text moved since the pair was judged (a stale row's is one)
@@ -278,7 +278,7 @@ const FACTS: Facts = {
   REFUSED_WEIGHTS: (r) => ({ problem: r.problem, named: r.named }),
   // 142's error as a token, the finding's status and the writer's code: its words ride the text.
   REFUSED_FINDING_INPUT: (r) => ({ problem: r.problem }),
-  REFUSED_FINDING_DECISION: (r) => ({ id: r.id, problem: r.problem, ...(r.status ? { status: r.status } : {}), ...(r.writerCode ? { writerCode: r.writerCode } : {}) }),
+  REFUSED_FINDING_DECISION: (r) => ({ id: r.id, problem: r.problem, ...(r.status ? { status: r.status } : {}), ...(r.statusUnread ? { statusUnread: true } : {}), ...(r.writerCode ? { writerCode: r.writerCode } : {}) }),
   // A decision's refusals: the proposal's and its thoughts' ids, the flags as
   // tokens and the counts — the writers' names are in the text.
   REFUSED_EDITED_SINCE: (r) => ({ id: r.id, olderEdited: r.olderEdited, newerEdited: r.newerEdited }),

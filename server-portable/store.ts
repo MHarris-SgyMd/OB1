@@ -1692,9 +1692,14 @@ export type FindingStatement = { id: string; level: number | null; maker: string
  * server does not read), and until when the decision holds the same finding
  * back.
  */
+/**
+ * A finding's item as 142 wrote it: one of PRIORITY_KINDS and its key, or (`itemUnread`) a kind this server does not
+ * read, kept as written. 142 holds item_kind to no list.
+ */
+export type FindingItem = { kind: PriorityKind | (string & {}); key: string };
 export type PriorityFinding = {
   /** One of FINDING_KINDS, or a kind a brain migrated ahead of this server wrote (`kindUnread`), kept as written. */
-  id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: PriorityItem;
+  id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: FindingItem; itemUnread?: true;
   /** One of FINDING_STATUSES, or one this server does not know (`statusUnread`), kept as written. */
   status: FindingStatus | (string & {}); statusUnread?: true; statements: FindingStatement[];
   evidence: Record<string, unknown>; windowDays: number; foundAt: string; refreshedAt: string; mootAt: string | null;
@@ -1730,20 +1735,22 @@ function findingStatements(evidence: Record<string, unknown>): FindingStatement[
 /** One priority_findings row as the list reads it: a kind, status or answer this server does not know marked unread; a row with no id or item a fault. */
 export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFinding {
   // History outlives the server that reads it: a finding a brain migrated ahead of this server wrote — a fifth kind, a
-  // status, a writer's answer in a later shape — is listed with that part marked unread, never the list's fault. Its id
-  // and item are the row itself: one without them is a fault.
+  // status, an item kind, a writer's answer in a later shape — is listed with that part marked unread, never the list's
+  // fault. Its id and its item's key are the row itself: one without them is a fault.
   const { answer: outcome, unread: outcomeUnread } = readAnswerLeniently(r.outcome, "priority_findings' outcome");
-  const item = priorityItemOf({ kind: r.item_kind, key: r.item_key });
-  if (!item || typeof r.id !== "string" || typeof r.kind !== "string" || typeof r.status !== "string") {
+  if (typeof r.id !== "string" || typeof r.item_key !== "string" || typeof r.kind !== "string" || typeof r.status !== "string") {
     throw new Error(`priority_findings answered a row this server cannot read: ${JSON.stringify({ kind: r.kind, status: r.status, item_kind: r.item_kind })}`);
   }
+  const known = priorityItemOf({ kind: r.item_kind, key: r.item_key });
+  const item: FindingItem = known ?? { kind: typeof r.item_kind === "string" ? r.item_kind : "?", key: r.item_key };
   const kindUnread = !(FINDING_KINDS as readonly unknown[]).includes(r.kind), statusUnread = !(FINDING_STATUSES as readonly unknown[]).includes(r.status);
   const stored = isRecord(r.evidence) ? r.evidence : {};
   // The statements are read out of the evidence once (`statements`), and the evidence sent keeps what they do not
   // cover: a stale finding's last_activity and window_days, an overdue one's due_at, due_from and level.
   const { statements: _listed, operator: _operator, source: _source, ...evidence } = stored;
   return {
-    id: r.id, kind: r.kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, status: r.status, ...(statusUnread ? { statusUnread: true as const } : {}),
+    id: r.id, kind: r.kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(known ? {} : { itemUnread: true as const }),
+    status: r.status, ...(statusUnread ? { statusUnread: true as const } : {}),
     statements: findingStatements(stored), evidence,
     windowDays: Number(r.window_days), foundAt: isoTimestamp(r.found_at), refreshedAt: isoTimestamp(r.refreshed_at), mootAt: isoTimestampOrNull(r.moot_at),
     decidedAt: isoTimestampOrNull(r.decided_at), decidedBy: typeof r.decided_by === "string" ? r.decided_by : null,
@@ -1760,9 +1767,9 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
  * rest in `message` alone.
  */
 export type ReviewFindingResult =
-  | { ok: true; id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: PriorityItem; status: "accepted" | "rejected"; answer: PriorityAnswer | null; answerUnread?: true; suppressedUntil: string | null }
+  | { ok: true; id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: FindingItem | null; itemUnread?: true; status: "accepted" | "rejected"; answer: PriorityAnswer | null; answerUnread?: true; suppressedUntil: string | null }
   | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
-  | { ok: false; error: "NOT_PENDING"; status: FindingStatus; message: string }
+  | { ok: false; error: "NOT_PENDING"; status: FindingStatus | (string & {}); statusUnread?: true; message: string }
   | { ok: false; error: "NOTHING_TO_CLEAR" | "WRITER_REFUSED"; writerCode: string | null; message: string }
   | { ok: false; error: "NOT_WRITE_SCOPE" | "NOT_FOUND" | FindingInputError; message: string };
 const FINDING_PLAIN_ERRORS = new Set<string>(["NOT_WRITE_SCOPE", "NOT_FOUND", ...FINDING_INPUT_ERRORS]);
@@ -1772,24 +1779,36 @@ const FINDING_PLAIN_ERRORS = new Set<string>(["NOT_WRITE_SCOPE", "NOT_FOUND", ..
  * answer are read leniently (marked unread). A refusal it does not name, or no envelope, throws: one this server cannot word is a fault.
  */
 export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
-  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const o = isRecord(r) ? r : undefined;
   const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
   const what = "review_priority_finding";
   if (o?.ok === true && typeof o.id === "string" && (o.status === "accepted" || o.status === "rejected")) {
     // 142 committed the decision: nothing in its answer reports it failed — a retry would meet NOT_PENDING. The finding's
     // kind and the writer's answer, which a brain migrated ahead of this server may give in a shape it does not know,
     // are read as the list reads them (marked unread); the decision itself, its id and its status, strictly.
-    const item = priorityItemOf(o.item) ?? { kind: "thought" as const, key: "" };
-    const { answer, unread: answerUnread } = readAnswerLeniently(o.answer, what);
+    // The item as written when its kind is not one this server reads, none when there is no key: never one made up.
+    const known = priorityItemOf(o.item);
+    const written = isRecord(o.item) && typeof o.item.key === "string" ? { kind: typeof o.item.kind === "string" ? o.item.kind : "?", key: o.item.key } : null;
+    const item: FindingItem | null = known ?? written;
+    // An accept wrote through a writer, so an accept with no answer is one this server did not read.
+    const read = readAnswerLeniently(o.answer, what);
+    const answerUnread = read.unread || (o.status === "accepted" && o.answer == null);
     const kind = typeof o.kind === "string" ? o.kind : "?";
     const kindUnread = !(FINDING_KINDS as readonly unknown[]).includes(kind);
-    return { ok: true, id: o.id, kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, status: o.status, answer, ...(answerUnread ? { answerUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null) };
+    return {
+      ok: true, id: o.id, kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(known ? {} : { itemUnread: true as const }), status: o.status,
+      answer: read.answer, ...(answerUnread ? { answerUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null),
+    };
   }
   const message = word(o?.message) ?? "";
   if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message };
-  if (o?.ok === false && o.error === "NOT_PENDING" && (FINDING_STATUSES as readonly unknown[]).includes(o.status)) return { ok: false, error: "NOT_PENDING", status: o.status as FindingStatus, message };
+  if (o?.ok === false && o.error === "NOT_PENDING" && typeof o.status === "string") {
+    // A status a brain migrated ahead of this server gives is kept as written, marked: the decision was still refused.
+    const statusUnread = !(FINDING_STATUSES as readonly unknown[]).includes(o.status);
+    return { ok: false, error: "NOT_PENDING", status: o.status, ...(statusUnread ? { statusUnread: true as const } : {}), message };
+  }
   if (o?.ok === false && (o.error === "NOTHING_TO_CLEAR" || o.error === "WRITER_REFUSED")) {
-    const a = o.answer !== null && typeof o.answer === "object" ? (o.answer as Record<string, unknown>) : {};
+    const a = isRecord(o.answer) ? o.answer : {};
     return { ok: false, error: o.error, writerCode: word(a.code) ?? word(a.error), message };
   }
   if (o?.ok === false && FINDING_PLAIN_ERRORS.has(o.error as string)) return { ok: false, error: o.error as "NOT_FOUND", message };

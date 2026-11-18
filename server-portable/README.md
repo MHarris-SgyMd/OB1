@@ -1428,8 +1428,8 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   answered, in the shape `review_priority_finding`'s reply gives it (null for a
   reject). A stored answer this server does not read (a later writer's shape) is
   null with `outcomeUnread: true`, the finding still listed; so is one of a kind or a
-  status this server does not know, kept as written with `kindUnread` or
-  `statusUnread`. A brain before 142 faults (500), the MCP text naming the migration.
+  status or item kind this server does not know, kept as written with `kindUnread`,
+  `statusUnread` or `itemUnread`. A brain before 142 faults (500), the MCP text naming the migration.
 - **`review_priority_finding`** (`POST /v1/priority-findings/{id}/review`, write scope;
   SMD-3671 PR 2, migration 142): an operator's decision on a pending finding.
   `decision` is `accept` or `reject`; an accept takes `level` (0 to 5, with `due_at`
