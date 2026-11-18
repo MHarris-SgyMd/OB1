@@ -2696,9 +2696,9 @@ export function enqueueWrite(op) {
 /**
  * Removes the current brain's queued and given-up copies that carry a thought by one of `names` — a capture keyed so,
  * an edit or a delete of it — and returns how many (SMD-1723 PR 3). A forget's own copies stay, and so does a queued
- * copy a drain sent whose answer never came (`sent`): it may have landed, or land late, and the forget behind it is
- * what reaches it there — dropped, a capture committed after the forget's NOT_FOUND kept its text for good (review
- * pass 7). One in flight is a drain's dot file, which this never reads.
+ * copy a send may have reached (`sent`), or one in flight or left so by a killed drain (`sending`): it may have landed,
+ * or land late, and the forget behind it is what reaches it there — dropped, a capture committed after the forget's
+ * NOT_FOUND kept its text for good (review passes 7 and 8).
  */
 export function dropCopiesOf(names) {
   const want = new Set(names.map((n) => String(n).toLowerCase()));
@@ -2710,7 +2710,7 @@ export function dropCopiesOf(names) {
       let op;
       try { op = JSON.parse(readFileSync(join(dir, f), "utf8")); } catch { continue; }
       if (op?.tool === "forget_thought") continue;
-      if (op?.sent === true && dir === WRITES_PENDING()) continue;
+      if ((op?.sent === true || op?.sending === true) && dir === WRITES_PENDING()) continue;
       const named = [op?.args?.client_key, op?.args?.id].filter((x) => typeof x === "string").map((x) => x.toLowerCase());
       if (named.some((x) => want.has(x))) { try { unlinkSync(join(dir, f)); n++; } catch { /* gone: a drain took it */ } }
     }
@@ -2791,10 +2791,12 @@ export async function postWrite(cfg, op) {
     catch (e) {
       const msg = oneLine(String(e?.message ?? e));
       // A real server answers a tool it lacks with a JSON-RPC error, which rpc throws (review pass 7: the lines below
-      // never ran against one). A connection refused, or a name that resolves to nothing, never reached the brain:
-      // the copy is not `sent`, and a forget may drop it.
-      const unsent = NOT_REACHED.has(e?.code) || NOT_REACHED.has(e?.cause?.code);
-      return { keep: true, ...(unsent ? { unsent: true } : {}), line: toolMissing(op, msg) ?? `kept: ${opLabel(op)} — ${msg.slice(0, 200)}` };
+      // never ran against one). A transport failure past the connection (a timeout, a 5xx from a front, a reset) may
+      // have reached the brain: its answer is unknown. One refused at the connection, or a name resolving to nothing,
+      // never did; nor did a JSON-RPC error, which the server answered.
+      const missing = toolMissing(op, msg);
+      const unknown = !missing && !/^JSON-RPC /.test(msg) && !NOT_REACHED.has(e?.code) && !NOT_REACHED.has(e?.cause?.code);
+      return { keep: true, ...(unknown ? { unknown: true } : {}), line: missing ?? `kept: ${opLabel(op)} — ${msg.slice(0, 200)}` };
     }
     const text = textOfResult(result);
     const note = dropped.length ? ` (dropped: ${dropped.join(", ")})` : "";
@@ -2833,7 +2835,7 @@ export async function postWrite(cfg, op) {
     // A fault (FAILED: the REST core away behind the MCP server, the store
     // restarting, a busy registry) carries no `retryable`, which verdictOf reads
     // as final: kept, so a brain mid-restart does not lose its edits (review pass 2).
-    if (v.code === "FAILED") return { keep: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
+    if (v.code === "FAILED") return { keep: true, unknown: true, line: `kept: ${opLabel(op)} — ${oneLine(text).slice(0, 200)}` };
     if (v.mend === "derived" && args.derived_from) {
       const at = v.positions.filter((i) => i < args.derived_from.length);
       dropped.push(at.length ? `derived_from[${at.join(", ")}]` : "derived_from");
@@ -2879,7 +2881,6 @@ export async function drainWrites(cfg) {
     if (!takeDrainLock()) return outcomes;
     let stopped = false;
     try {
-      restoreSending();
       for (const name of pendingWrites()) {
         if (seen.has(name)) continue;
         seen.add(name);
@@ -2891,32 +2892,36 @@ export async function drainWrites(cfg) {
         // its key makes the second land as the same thought.
         if (!holdDrainLock()) { stopped = true; break; }
         const path = join(WRITES_PENDING(), name);
-        // Claimed before it is read: a dot file a forget's drop never reads, so a copy in flight is not dropped under
-        // the drain (review pass 7); gone already, a drop or the holder before took it.
-        const claimed = sendingPath(name);
-        try { renameSync(path, claimed); } catch (e) { if (e?.code === "ENOENT") continue; throw e; }
         let op;
-        try { op = JSON.parse(readFileSync(claimed, "utf8")); } catch (e) {
-          if (e?.code === "ENOENT") continue; // the holder before took it back and finished it
-          moveWrite(claimed, WRITES_DEAD(), name);
+        try { op = JSON.parse(readFileSync(path, "utf8")); } catch (e) {
+          if (e?.code === "ENOENT") { try { unlinkSync(path); } catch { /* gone: the holder before finished it */ } continue; }
+          moveWrite(path, WRITES_DEAD(), name);
           const o = { dead: true, line: `not copied (given up): ${name} does not parse` };
           log(o.line); outcomes.push(o); continue;
         }
+        // A send may reach the brain whatever it answers: the copy says so in its own file before it goes (`sending`),
+        // and a forget's drop leaves it — dropped, a capture committed after the forget's NOT_FOUND kept its text for
+        // good (review pass 7). One a drain killed mid-send left `sending` is read as having been sent (review pass 8).
+        const reachedBefore = op.sent === true || op.sending === true;
+        if (!reachedBefore && !rewriteWrite(name, { ...op, sending: true })) continue; // gone: a drop took it first
         let o = await postWrite(cfg, op);
+        // A lock taken back while this copy was in flight: the queue is its new holder's, and this drain touches no
+        // file of it — not this copy's, which the holder may be sending again (review pass 8: a stale holder's
+        // write-back put a copy back after the forget that followed it).
+        if (!holdDrainLock()) { log(`drain: the lock was taken back while ${opLabel(op)} was in flight; the queue is its new holder's`); stopped = true; break; }
         // Kept for a week: given up, as the capture queue gives a payload up
         // (PENDING_MAX_AGE_MS) — what it named is skipped there afterwards.
         if (o.keep && Date.now() - Date.parse(op.at) > PENDING_MAX_AGE_MS) o = { dead: true, line: `not copied (given up after a week): ${o.line.replace(/^kept: /, "")}${op.tool === "forget_thought" ? " — its text stays on this brain until forgotten there by hand" : ""}` };
         log(o.line);
         outcomes.push(o);
         if (o.keep) {
-          // Back in its place, `sent` once a send may have reached the brain: its answer unknown, it may land late.
-          try {
-            if (!o.unsent && op.sent !== true) writeFileSync(claimed, JSON.stringify({ ...op, sent: true }), { mode: 0o600 });
-            renameSync(claimed, path);
-          } catch (e) { if (e?.code !== "ENOENT") throw e; } // taken back by the drain after this one: theirs now
+          // `sent` once a send may have reached the brain — a transport failure past the connection, or a fault — and
+          // never cleared; an answer the brain gave (a refusal, a code to retry) wrote nothing.
+          const { sending: _s, sent: _t, ...rest } = op;
+          rewriteWrite(name, { ...rest, ...(reachedBefore || o.unknown ? { sent: true } : {}) });
           stopped = true; markHeld(name); break;
         }
-        if (o.dead) moveWrite(claimed, WRITES_DEAD(), name); else removeWrite(claimed); // already gone: the holder before finished it too
+        if (o.dead) moveWrite(path, WRITES_DEAD(), name); else removeWrite(path); // already gone: the holder before finished it too
       }
     } finally { releaseDrainLock(); }
     if (!pendingWrites().length) clearHeld();
@@ -2935,25 +2940,19 @@ function forgetReview(sc) {
   return parts.length ? ` — to review there: ${parts.join("; ")}` : "";
 }
 
-/** A copy a drain has claimed to send: a dot file beside it, which pendingWrites and a forget's drop pass over. */
-const sendingPath = (name) => join(WRITES_PENDING(), `.sending-${name}`);
-/** A refused connection, or a name that resolves to nothing: the copy never reached the brain. */
-const NOT_REACHED = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH"]);
+/** A connection refused, or a name that resolves to nothing: the copy never reached the brain. */
+const NOT_REACHED = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
 /**
- * Copies a drain claimed and never put back (killed mid-send, or its lock taken back): back in their places, `sent`,
- * their answers unknown. Run by the lock's holder before its first copy.
+ * A queued copy's file rewritten whole — a temporary file renamed over it, so a kill or a full disk never leaves half a
+ * copy (review pass 8) — or false when it is gone (a forget's drop took it).
  */
-function restoreSending() {
-  let names = [];
-  try { names = readdirSync(WRITES_PENDING()).filter((f) => f.startsWith(".sending-") && f.endsWith(".json")); } catch { return; }
-  for (const f of names) {
-    const claimed = join(WRITES_PENDING(), f);
-    try {
-      const op = JSON.parse(readFileSync(claimed, "utf8"));
-      writeFileSync(claimed, JSON.stringify({ ...op, sent: true }), { mode: 0o600 });
-    } catch { /* unparsable: put back as it is, and the drain gives it up */ }
-    try { renameSync(claimed, join(WRITES_PENDING(), f.slice(".sending-".length))); } catch { /* gone */ }
-  }
+function rewriteWrite(name, op) {
+  const path = join(WRITES_PENDING(), name);
+  if (!existsSync(path)) return false;
+  const tmp = join(WRITES_PENDING(), `.${name}.${process.pid}.tmp`);
+  writeFileSync(tmp, JSON.stringify(op), { mode: 0o600 });
+  renameSync(tmp, path);
+  return true;
 }
 
 /**
