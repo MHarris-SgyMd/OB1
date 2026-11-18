@@ -7596,6 +7596,63 @@ if (want("10")) {
   assert(refusalCode === 2 && refused === refusedBefore + 1 && refusalMs < 5000,
          `…a worker waiting at the gate wakes when another worker's call meets the provider's refusal: the run ends 2 at once, the gate never opened (${refusalCode} after ${refusalMs} ms, ${refused - refusedBefore} refused)`);
   await sql`SELECT delete_thought(${refusalNote}::uuid, NULL::jsonb)`;
+  // The worker's pause on the provider is the provider's time too (SMD-4352):
+  // a note whose first call answers 503 waits out a 3 s pause, and a hard stop
+  // as its second call is in hand counts the time held from the pause's end —
+  // under a 2.5 s floor the pause alone outlasts, nothing is stalled. The note
+  // is alone in the pool, so the call and the stop are its own.
+  const provNote = await seed("Kenji's kiln note, whose first call the provider turns away.");
+  const provFrom = calls;
+  const provLines: string[] = [];
+  let provHard: PassStop | undefined;
+  let provSecond = false;
+  let provRelease: ReturnType<PassStop> | undefined;
+  let provCode: number | "not run" = "not run";
+  const provRestore = shortenPauses(3000);
+  unavailableCalls = 1;
+  slowMs = 5000;
+  try {
+    const provRun = runExtract({ url: URL_!, env, workers: 1, stallFloorMs: 2500, onPass: (st) => { provHard = st; }, writer: { out: (l) => provLines.push(l), err: (l) => provLines.push(l) } });
+    provSecond = await pollUntil(async () => calls >= provFrom + 2, 20_000);
+    provHard?.();
+    provRelease = provHard?.();
+    await provRelease;
+    provCode = await provRun;
+  } finally {
+    provRestore();
+    unavailableCalls = 0;
+    slowMs = 0;
+  }
+  const [provRow] = (await sql`SELECT stops, stalled FROM extraction_progress WHERE thought_id = ${provNote}::uuid AND work_type = ${KEY}`) as { stops: number; stalled: number }[];
+  assert(provSecond && calls === provFrom + 2 && provLines.some((l) => /provider unavailable .*; pausing 3 s/.test(l)) && provRelease instanceof Promise && provCode === 130 && provRow?.stops === 1 && provRow.stalled === 0
+           && (await statusOf(provNote)) === "pending",
+         `a hard stop on the call after a 3 s pause on the provider, past a 2.5 s floor, counts its stop short — the pause is the provider's time, not the thought's held — so nothing is stalled (SMD-4352; ${calls - provFrom} call(s), exit ${provCode}; ${JSON.stringify(provRow)}; ${await statusOf(provNote)}; ${provLines.find((l) => /pausing/.test(l))?.trim().slice(0, 120) ?? "no pause said"})`);
+  await sql`SELECT delete_thought(${provNote}::uuid, NULL::jsonb)`;
+  // A claim taken from under the worker while its call is in hand — another
+  // holder's name on the row, its lease far ahead, as the reembed thief's —
+  // is learnt at the release, and the line gives the extractor's own three
+  // reasons: an edit, a lapsed lease, a return by hand (SMD-4352).
+  const takenNote = await seed("Kenji's lathe note, taken from under its worker.");
+  const takenFrom = calls;
+  const takenLines: string[] = [];
+  let takenRows = 0;
+  let takenCode: number | "not run" = "not run";
+  slowMs = 1500;
+  try {
+    const takenRun = runExtract({ url: URL_!, env, workers: 1, writer: { out: (l) => takenLines.push(l), err: (l) => takenLines.push(l) } });
+    await pollUntil(async () => calls > takenFrom, 20_000);
+    takenRows = ((await sql`UPDATE thought_work_claims SET worker_id = 'thief', ttl_expires_at = now() + interval '10 minutes' WHERE thought_id = ${takenNote}::uuid AND work_type = ${KEY} AND status = 'claimed' RETURNING thought_id`) as unknown[]).length;
+    takenCode = await takenRun;
+  } finally {
+    slowMs = 0;
+  }
+  const takenSaid = takenLines.find((l) => l.includes("no longer this worker's at release")) ?? "";
+  const takenSummary = takenLines.find((l) => /extracted,/.test(l)) ?? "";
+  assert(takenRows === 1 && takenCode === 1 && calls === takenFrom + 1
+           && takenSaid.includes(`${takenNote}: the claim was no longer this worker's at release — an edit requeued it, its lease lapsed (no beat reached the database for 900 s), or it was returned by hand with release_claims_for_worker; the row is the pool's or another worker's now`)
+           && /\b0 extracted, 0 failed/.test(takenSummary) && /, 1 no longer this worker's when checked/.test(takenSummary) && (await statusOf(takenNote)) === "claimed",
+         `a claim taken from under an extract worker mid-call is learnt at release, the line naming the extractor's three reasons — an edit, a lapsed lease, a return by hand — and the thought is counted lost, not extracted, the run's exit 1 (SMD-4352; ${takenRows} row(s) taken, exit ${takenCode}, ${await statusOf(takenNote)}: ${takenSaid.trim().slice(0, 260)} | ${takenSummary.trim().slice(0, 160)})`);
+  await sql`SELECT delete_thought(${takenNote}::uuid, NULL::jsonb)`;
   // A gate that rejects with no stop, mid-thought, is the caller's error: run()
   // rejects with it, and the thought is not recorded failed (review pass 1).
   const brokenNote = await seed(ledgerOf("broken-gate", "broke"));
