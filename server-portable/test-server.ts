@@ -8287,6 +8287,18 @@ console.log("\n[36g] The priority review's findings in the core and the words (S
   const boardMade = await R({ decision: "reject" }, { ...rejectedA, item: { kind: "board", key: "B-1" } }).catch(() => null);
   const noItemMade = await R({ decision: "reject" }, { ...rejectedA, item: null }).catch(() => null);
   const boardRow = (() => { try { return normalisePriorityFinding({ ...staleRow, item_kind: "board", item_key: "B-1" }); } catch { return null; } })();
+  // Evidence the statements could not be read from stays as written; a disagreement with neither statement read is said
+  // as one; a cursor at an infinite time (a scan run with now 'infinity') reads back as itself.
+  const oddEvidence = normalisePriorityFinding({ ...staleRow, evidence: { statements: { a: 1 }, last_activity: "2026-09-01T00:00:00+00:00" } });
+  const halfPair = normalisePriorityFinding({ ...disagreeRow, evidence: { operator: { level: 4, maker: "op-key" }, source: { id: T, level: 1, maker: "linear" } } });
+  const blindPair = normalisePriorityFinding({ ...disagreeRow, evidence: {} });
+  const blindLine = text(say.renderPriorityFindings({ ok: true, value: { status: "all", kind: null, total: 1, before: 0, findings: [blindPair], cursor: null } }));
+  const infinite = ["Infinity", "-Infinity"].map((sk) => parseFindingsCursor(findingsCursor({ list: "findings", status: "all", kind: null }, { grp: sk === "Infinity" ? 0 : 1, sk, id: F }))?.at.sk);
+  assert(oddEvidence.statements.length === 0 && JSON.stringify(oddEvidence.evidence) === JSON.stringify({ statements: { a: 1 }, last_activity: "2026-09-01T00:00:00+00:00" })
+      && halfPair.statements.map((s) => s.role).join() === "source" && JSON.stringify(halfPair.evidence) === JSON.stringify({ operator: { level: 4, maker: "op-key" } })
+      && blindLine.includes(`- disagree finding ${F} on ticket SMD-3671: the operator's level and the source's, two or more levels apart (neither statement read). `)
+      && infinite.join() === "Infinity,-Infinity" && parseFindingsCursor(findingsCursor({ list: "findings", status: "all", kind: null }, { grp: 0, sk: "Inf", id: F })) === null,
+    `evidence not read into statements kept as written; a disagreement with neither statement read said as one; a cursor at Infinity or -Infinity read back, another word refused (${JSON.stringify(oddEvidence.evidence)} | ${JSON.stringify(halfPair.evidence)} | ${infinite.join()})`);
   const boardLine = boardRow ? text(say.renderPriorityFindings({ ok: true, value: { status: "all", kind: null, total: 1, before: 0, findings: [boardRow], cursor: null } })) : "";
   const openR = await refusedBy({ ok: false, error: "NOT_PENDING", status: "open", message: `finding ${F} is open, not pending` });
   const openWords = openR ? text(say.renderReviewPriorityFinding({ ok: false, refusal: openR } as never)) : "";

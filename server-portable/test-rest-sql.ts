@@ -3696,6 +3696,28 @@ console.log("\n[26] The priority review's findings through both doors (SMD-3671 
         && new RegExp(`Priority findings:\\s+${counts.p} pending \\(`).test(infoM.text) && infoM.text.includes(`decided in the last 30 days`),
       `accepted ones listed with who decided, the note and the writer's answer; all counted in full, the pending first; brain_info's priorityFindings and its row count the pending, by kind, and the decided in 30 days (${decidedRow?.status} ${all.total}/${allTotal} ${JSON.stringify(pf)} ${JSON.stringify(counts)})`);
 
+    // Two findings found at an infinite time (a scan run by hand with now 'infinity'): the first page's cursor is at
+    // Infinity, and the database compares it, so the second page lists the other once.
+    const inf = await sql`
+      INSERT INTO priority_findings (kind, item_kind, item_key, evidence, window_days, found_at, refreshed_at)
+      VALUES ('settled', 'ticket', 'SMD-99981', '{}'::jsonb, 60, 'infinity', 'infinity'), ('settled', 'ticket', 'SMD-99982', '{}'::jsonb, 60, 'infinity', 'infinity')
+      RETURNING id::text AS id`;
+    try {
+      const settledN = Number((await sql`SELECT count(*)::int AS n FROM priority_findings WHERE status = 'pending' AND kind = 'settled'`)[0].n);
+      const shown: string[] = [];
+      let after: string | null = null, steps = 0, lastSk = "";
+      do {
+        const pg = (await rest("GET", `/v1/priority-findings?kind=settled&limit=1${after ? `&after=${after}` : ""}`)).body as unknown as Listed & { cursor: string | null };
+        shown.push(...(pg.findings ?? []).map((f) => f.id));
+        after = pg.cursor ?? null;
+        if (after) lastSk = JSON.parse(Buffer.from(after, "base64url").toString("utf8"))[4];
+      } while (after && ++steps < 20);
+      assert(settledN >= 2 && shown.length === settledN && new Set(shown).size === settledN && inf.every((r: { id: string }) => shown.includes(r.id)) && (settledN > 2 || lastSk === "Infinity"),
+        `findings found at an infinite time paged one at a time: each listed once, the cursor at Infinity compared by the database (${shown.length}/${settledN}, last sk ${lastSk})`);
+    } finally {
+      await sql`DELETE FROM priority_findings WHERE id = ANY(${sql.array(inf.map((r: { id: string }) => r.id), "UUID")}::uuid[])`;
+    }
+
     // A brain without the table (before 142): the read faults, and MCP's words name the migration.
     await sql`ALTER TABLE priority_findings RENAME TO priority_findings_away_24`;
     try {

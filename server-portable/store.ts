@@ -22,7 +22,7 @@ import { withSpan, withStoreSpan } from "./spans.ts";
 import type { Change, Status } from "./stated-status.ts";
 import { PLUGIN_NAME_RE } from "../db/config.mjs";
 import { isRecord } from "./is-record.ts";
-import { FINDING_INPUT_ERRORS, FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS, type FindingInputError, type FindingKind, type FindingStatus, type PriorityKind } from "./priority-kinds.ts";
+import { FINDING_INPUT_ERRORS, isFindingKind, isFindingStatus, PRIORITY_KINDS, type FindingInputError, type FindingKind, type FindingStatus, type PriorityKind } from "./priority-kinds.ts";
 import type { ItemAnswer, ItemListRow, ItemRecord, ItemStatus } from "./open-items.ts";
 import type { DeliverableAnswer, DeliverableRecord, VerifyStatus } from "./deliverables.ts";
 
@@ -1672,9 +1672,11 @@ export function normaliseReleaseHolder(r: unknown): ReleaseHolderResult {
 /**
  * Where a page of priority findings ended (SMD-3671 PR 2): the listing's order as three keys, all ascending — `grp` 0
  * for a pending finding and 1 for the rest, `sk` its found_at's epoch (pending: oldest first) or the negated epoch of
- * when it was decided or mooted (the rest: newest first), as numeric's exact text, and its id. The keys, not the row:
- * a finding decided between pages leaves the pending group, and the page after the cursor starts past these values,
- * never past a count of rows, so nothing not yet shown is skipped.
+ * when it was decided or mooted (the rest: newest first), as numeric's exact text (an infinite time's `Infinity` or
+ * `-Infinity` included), and its id. The keys, not the row: the page after the cursor starts past these values, never
+ * past a count of rows, so a finding that stood in the listing when paging began, and still does, is never skipped. One
+ * that changes status, or one a scan adds (its found_at is its transaction's start), while paging can be missed, and
+ * under `all` a decided one can be listed twice.
  */
 export type FindingPosition = { grp: 0 | 1; sk: string; id: string };
 /**
@@ -1721,15 +1723,24 @@ export function readAnswerLeniently(raw: unknown, what: string): { answer: Prior
   }
 }
 
-/** A finding's statements from its evidence (see FindingStatement); anything the scan did not write there is left out. */
-function findingStatements(evidence: Record<string, unknown>): FindingStatement[] {
+/**
+ * A finding's statements from its evidence (see FindingStatement), and the evidence keys read into them: `statements`
+ * when every entry was read, `operator` and `source` each when it was. A key not read stays in the evidence, as written.
+ */
+function findingStatements(evidence: Record<string, unknown>): { statements: FindingStatement[]; read: string[] } {
   const one = (s: unknown, role: FindingStatement["role"]): FindingStatement | null => {
     if (!isRecord(s) || typeof s.id !== "string") return null;
     const at = typeof s.asserted_at === "string" && !Number.isNaN(Date.parse(s.asserted_at)) ? new Date(s.asserted_at).toISOString() : null;
     return { id: s.id, level: typeof s.level === "number" ? s.level : null, maker: typeof s.maker === "string" ? s.maker : null, assertedAt: at, role };
   };
-  const listed = Array.isArray(evidence.statements) ? evidence.statements.map((s) => one(s, null)) : [one(evidence.operator, "operator"), one(evidence.source, "source")];
-  return listed.filter((s): s is FindingStatement => s !== null);
+  const read = (s: FindingStatement | null): s is FindingStatement => s !== null;
+  if (Array.isArray(evidence.statements)) {
+    const listed = evidence.statements.map((s) => one(s, null));
+    const statements = listed.filter(read);
+    return { statements, read: statements.length === listed.length ? ["statements"] : [] };
+  }
+  const op = one(evidence.operator, "operator"), src = one(evidence.source, "source");
+  return { statements: [op, src].filter(read), read: [...(op ? ["operator"] : []), ...(src ? ["source"] : [])] };
 }
 
 /** One priority_findings row as the list reads it: a kind, status or answer this server does not know marked unread; a row with no id or item a fault. */
@@ -1743,15 +1754,17 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
   }
   const known = priorityItemOf({ kind: r.item_kind, key: r.item_key });
   const item: FindingItem = known ?? { kind: typeof r.item_kind === "string" ? r.item_kind : "?", key: r.item_key };
-  const kindUnread = !(FINDING_KINDS as readonly unknown[]).includes(r.kind), statusUnread = !(FINDING_STATUSES as readonly unknown[]).includes(r.status);
+  const kindUnread = !isFindingKind(r.kind), statusUnread = !isFindingStatus(r.status);
   const stored = isRecord(r.evidence) ? r.evidence : {};
   // The statements are read out of the evidence once (`statements`), and the evidence sent keeps what they do not
-  // cover: a stale finding's last_activity and window_days, an overdue one's due_at, due_from and level.
-  const { statements: _listed, operator: _operator, source: _source, ...evidence } = stored;
+  // cover: a stale finding's last_activity and window_days, an overdue one's due_at, due_from and level, and any key the
+  // statements could not be read from, as written.
+  const { statements, read } = findingStatements(stored);
+  const evidence = Object.fromEntries(Object.entries(stored).filter(([k]) => !read.includes(k)));
   return {
     id: r.id, kind: r.kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(known ? {} : { itemUnread: true as const }),
     status: r.status, ...(statusUnread ? { statusUnread: true as const } : {}),
-    statements: findingStatements(stored), evidence,
+    statements, evidence,
     windowDays: Number(r.window_days), foundAt: isoTimestamp(r.found_at), refreshedAt: isoTimestamp(r.refreshed_at), mootAt: isoTimestampOrNull(r.moot_at),
     decidedAt: isoTimestampOrNull(r.decided_at), decidedBy: typeof r.decided_by === "string" ? r.decided_by : null,
     note: typeof r.decision_note === "string" ? r.decision_note : null, outcome, ...(outcomeUnread ? { outcomeUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(r.suppressed_until),
@@ -1794,7 +1807,7 @@ export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
     const read = readAnswerLeniently(o.answer, what);
     const answerUnread = read.unread || (o.status === "accepted" && o.answer == null);
     const kind = typeof o.kind === "string" ? o.kind : "?";
-    const kindUnread = !(FINDING_KINDS as readonly unknown[]).includes(kind);
+    const kindUnread = !isFindingKind(kind);
     return {
       ok: true, id: o.id, kind, ...(kindUnread ? { kindUnread: true as const } : {}), item, ...(known ? {} : { itemUnread: true as const }), status: o.status,
       answer: read.answer, ...(answerUnread ? { answerUnread: true as const } : {}), suppressedUntil: isoTimestampOrNull(o.suppressed_until ?? null),
@@ -1804,7 +1817,7 @@ export function normaliseReviewFinding(r: unknown): ReviewFindingResult {
   if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message };
   if (o?.ok === false && o.error === "NOT_PENDING" && typeof o.status === "string") {
     // A status a brain migrated ahead of this server gives is kept as written, marked: the decision was still refused.
-    const statusUnread = !(FINDING_STATUSES as readonly unknown[]).includes(o.status);
+    const statusUnread = !isFindingStatus(o.status);
     return { ok: false, error: "NOT_PENDING", status: o.status, ...(statusUnread ? { statusUnread: true as const } : {}), message };
   }
   if (o?.ok === false && (o.error === "NOTHING_TO_CLEAR" || o.error === "WRITER_REFUSED")) {

@@ -22,7 +22,7 @@
 // (142's finding kinds and the plain-object guard, SMD-3671 PR 2): the SQL client is taken structurally rather
 // than from "bun", so a suite can hand it a fake.
 
-import { FINDING_KINDS, type FindingKind } from "./priority-kinds.ts";
+import { FINDING_KINDS, isFindingKind, type FindingKind } from "./priority-kinds.ts";
 import { isRecord } from "./is-record.ts";
 
 /** A tagged-template SQL client — Bun's `SQL`, structurally. */
@@ -1347,7 +1347,7 @@ export function priorityFindingsValue(row: { pending?: unknown; oldest_s?: unkno
   if (!by) throw new Error("the priority findings read answered no counts by kind");
   // Each of 142's kinds, none pending a 0; any other kind's count summed into `other`.
   const known = Object.fromEntries(FINDING_KINDS.map((k) => [k, countOf("priority findings", by[k] ?? 0)])) as Record<FindingKind, number>;
-  const other = Object.entries(by).filter(([k]) => !(FINDING_KINDS as readonly string[]).includes(k)).reduce((n, [, v]) => n + countOf("priority findings", v), 0);
+  const other = Object.entries(by).filter(([k]) => !isFindingKind(k)).reduce((n, [, v]) => n + countOf("priority findings", v), 0);
   return {
     pending, oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)),
     byKind: { ...known, other },

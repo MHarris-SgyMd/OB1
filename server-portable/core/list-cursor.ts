@@ -7,7 +7,7 @@
 
 import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { RELATION_WORDS, UUID_RE, type FindingPosition, type ListSort, type RelationWord } from "../store.ts";
-import { FINDING_KINDS, FINDING_STATUSES, type FindingKind, type FindingStatus } from "../priority-kinds.ts";
+import { isFindingKind, isFindingStatus, type FindingKind, type FindingStatus } from "../priority-kinds.ts";
 
 /**
  * A cursor's text read back to its JSON array of `length` values, or null for anything that is not one: trimmed, at most
@@ -237,11 +237,12 @@ export function parseFindingsCursor(raw: string): { selection: FindingSelection;
   if (!v) return null;
   const [tag, status, kind, grp, sk, id] = v;
   if (tag !== "findings") return null;
-  if (status !== "all" && !(FINDING_STATUSES as readonly unknown[]).includes(status)) return null;
-  if (kind !== null && !(FINDING_KINDS as readonly unknown[]).includes(kind)) return null;
+  if (status !== "all" && !isFindingStatus(status)) return null;
+  if (kind !== null && !isFindingKind(kind)) return null;
   if (grp !== 0 && grp !== 1) return null;
-  // An epoch to the microsecond, negated for the decided: numeric's text, bounded so no cast can fail on it.
-  if (typeof sk !== "string" || !/^-?\d{1,15}(?:\.\d{1,6})?$/.test(sk)) return null;
+  // An epoch to the microsecond, negated for the decided: numeric's text, bounded so no cast can fail on it. An infinite
+  // found_at or decided_at reads as Infinity or -Infinity, which numeric takes from Postgres 14 (the stack's is 16).
+  if (typeof sk !== "string" || !/^(?:-?\d{1,15}(?:\.\d{1,6})?|-?Infinity)$/.test(sk)) return null;
   if (typeof id !== "string" || !UUID_RE.test(id)) return null;
-  return { selection: { list: "findings", status: status as FindingSelection["status"], kind: kind as FindingKind | null }, at: { grp, sk, id: id.toLowerCase() } };
+  return { selection: { list: "findings", status, kind }, at: { grp, sk, id: id.toLowerCase() } };
 }

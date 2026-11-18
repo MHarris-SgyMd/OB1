@@ -1415,11 +1415,11 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   counts every finding matching, `before` those ahead of the page, and `cursor`, while
   more follow (null at the end), is the last listed row's place, made under the status
   and kind asked: one passed with others is refused `REFUSED_CURSOR` (400), `made`
-  naming the status and kind it was made under. A place, not
-  an offset, so none is skipped: a finding decided between pages leaves the pending
-  listing without moving the next page's start. Under `all`, or a status a decision
-  moves findings into, one decided or mooted between pages can come back on a later
-  page with its new status. The pending come oldest found first; the rest most
+  naming the status and kind it was made under. A place, not an offset, so: every
+  finding that stood in the listing's status when paging began, and still does, is
+  listed: none is skipped. One that changes status, or one a scan adds, while paging
+  can be missing from the pages, and under `all` a decided one can be listed twice. A
+  listing with no cursor shows the current state. The pending come oldest found first; the rest most
   recently decided or mooted first, ties by id. Each finding is `{id, kind, item: {kind, key}, status, statements,
   evidence, windowDays, foundAt, refreshedAt, mootAt, decidedAt, decidedBy, note,
   outcome, suppressedUntil}`: `statements` are read out of the evidence (a stale or

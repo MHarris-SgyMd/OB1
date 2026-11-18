@@ -2585,7 +2585,8 @@ function findingWhat(f: PriorityFinding): string {
   }
   if (f.kind === "disagree") {
     const op = f.statements.find((s) => s.role === "operator"), src = f.statements.find((s) => s.role === "source");
-    return op && src ? `the operator's ${findingStatementText(op)} against the source's ${findingStatementText(src)}` : said;
+    return op && src ? `the operator's ${findingStatementText(op)} against the source's ${findingStatementText(src)}`
+      : said || "the operator's level and the source's, two or more levels apart (neither statement read)";
   }
   if (f.kind === "settled") return `${said || "a statement"} left on it, though it has settled`;
   return `a ${oneLine(snipText(f.kind, 40))} finding, a kind this server does not know${said ? `, about ${said}` : ""}`;
