@@ -779,7 +779,11 @@ export function summariseTranscript(path, harness) {
  * keyed branch names its work.
  */
 const TICKET_RE = /\b([A-Za-z]{2,5})-(\d{2,6})\b/g;
-const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML"]);
+// The brain's own denied prefixes (server-portable/subject.ts's NOT_TICKET_PREFIXES) are here too, those this shape can
+// match: a branch's first word the brain denies would else be its ticket here and none there (SMD-4291's review pass 2:
+// `es-2015-target-smd-610` named ES-2015, and the asked smd-610 lost its team).
+export const NOT_TICKETS = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML",
+  "IEEE", "CWE", "WCAG", "GPL", "LGPL", "AGPL", "FSL", "BSD", "MPL", "CC", "ES", "COVID", "FY"]);
 /** The ticket keys a text names, upper-cased, in first-mention order; with `teams`, under the rule for an ask. */
 export function ticketsIn(text, teams) {
   const out = [];
@@ -791,10 +795,32 @@ export function ticketsIn(text, teams) {
   }
   return out;
 }
-/** Whether one directory is the other or lies inside it. */
-const nested = (a, b) => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
-/** The tickets a place — a branch and a directory — names. */
-const anchorOf = (cwd, branch) => [...new Set([...ticketsIn(branch), ...ticketsIn(cwd)])];
+/**
+ * A place's own tickets (SMD-4291): the first ticket-shaped word of `text` is the place's ticket, and the other keys of
+ * its team are tickets beside it (`smd-610-and-smd-611`); a word of another team is the place's description, no ticket
+ * and no team (`node-22` of `smd-610-bump-node-22`). Before, every ticket-shaped word of a branch or a directory was a
+ * ticket of the place and taught its team, so on `smd-610-bump-node-22` an ask's `node-22` headed the summary.
+ */
+const ownTickets = (text) => {
+  const [first] = ticketsIn(text);
+  return first ? ticketsIn(text, new Set([first.split("-")[0]])) : [];
+};
+/** A branch's own tickets: read whole, its first ticket-shaped word the place's (`feature/smd-55-x`). */
+const branchTickets = (branch) => ownTickets(branch);
+/**
+ * A directory's own tickets: those of its deepest part that names one, a worktree's or a project's own name before a
+ * parent's (`~/aoc-2024/smd-55-day1/src` is SMD-55's, not AOC-2024's; `~/aoc-2024/day1` is AOC-2024's). Split at either
+ * slash, so a Windows path is read by its parts too (review pass 1, run-it: read whole, its parent's word won).
+ */
+const dirTickets = (cwd) => {
+  const parts = String(cwd ?? "").split(/[\\/]/);
+  for (let k = parts.length - 1; k >= 0; k--) { const own = ownTickets(parts[k]); if (own.length) return own; }
+  return [];
+};
+/** The tickets of a place's change, a `cwd` or a `branch` event, as the event's kind reads them. */
+const placeTickets = (t, v) => (t === "branch" ? branchTickets(v) : dirTickets(v));
+/** The tickets a place — a branch and a directory — names: each one's own, the branch's first. */
+const anchorOf = (cwd, branch) => [...new Set([...branchTickets(branch), ...dirTickets(cwd)])];
 /** The tickets an episode is known by: those its asks named, and those its branch and its directory name. */
 const knownTickets = (ep) => new Set([...ep.named, ...anchorOf(ep.cwd, ep.branch)]);
 /** Anchored: the episode's branch or directory names a ticket — its work has a home, and a ticket an ask merely mentions does not end it. */
@@ -802,7 +828,7 @@ const anchored = (ep) => anchorOf(ep.cwd, ep.branch).length > 0;
 /** Whether, before the next ask, the session moves to a branch or directory naming one of these tickets: then the ask that named them began that work, whatever branch it was typed on. */
 const movesTo = (events, i, ids) => {
   for (let k = i + 1; k < events.length && events[k].t !== "prompt"; k++) {
-    if ((events[k].t === "cwd" || events[k].t === "branch") && ticketsIn(events[k].v).some((id) => ids.includes(id))) return true;
+    if ((events[k].t === "cwd" || events[k].t === "branch") && placeTickets(events[k].t, events[k].v).some((id) => ids.includes(id))) return true;
   }
   return false;
 };
@@ -867,20 +893,59 @@ function apply(x, ev, teams) {
  */
 const STAMPED = new Set(["prompt", "outcome", "file", "commit", "push", "pr", "ids"]); // the events that carry a line's time onto an episode: its span is that of its content, so an episode closed at an ask does not reach to that ask's line
 export function segment(events, s = emptySummary()) {
-  // The team prefixes the session's branches and directories have named SO
-  // FAR: what a lower-case key in an ask may be a ticket of. Gathered as the
+  // The team prefixes the session's branches and directories (not a folder
+  // of a checkout: `placeOf`) have named SO FAR: what a lower-case key in
+  // an ask may be a ticket of. Gathered as the
   // walk goes, never ahead of it — a branch made later would make an earlier
   // mention a key and move a boundary already captured (second review pass).
   const teams = new Set();
-  const learnTeams = (v) => { for (const id of ticketsIn(v)) teams.add(id.split("-")[0]); }; // the team prefixes a branch or directory names
+  const learnTeams = (t, v) => { for (const id of placeTickets(t, v)) teams.add(id.split("-")[0]); }; // the team of a branch's or a directory's own ticket, not of every word (SMD-4291)
   const episodes = [];
   let cur, lineAt = "", compacted = false; // the open episode; the current line's time; a compaction since the episode's last ask
   const loc = { cwd: "", branch: "" }; // where the session IS, against where the episode runs
   const branchMoved = () => Boolean(loc.branch && cur.branch && loc.branch !== cur.branch);
-  const below = (dir, root) => dir === root || dir.startsWith(`${root}/`);
+  const below = (dir, root) => dir === root || dir.startsWith(`${root}/`) || dir.startsWith(`${root}\\`); // either slash: a Windows path too (SMD-4291's review pass 2)
   const inside = () => !loc.cwd || !cur.cwd || [...cur.roots].some((r) => below(loc.cwd, r)); // at or under a root: an ancestor of the checkout — HOME, ~/Projects — is not inside it (second review pass: it became the episode's directory, and every checkout under it was then inside)
   /** Away: the session is not where the episode runs — another branch, or with no branch to go by, a directory inside none of its roots. */
   const away = () => branchMoved() || (!(loc.branch && cur.branch) && !inside());
+  /** The episode's top root a directory lies below: a root no other root contains. */
+  const topOf = (dir) => { const roots = [...cur.roots]; return roots.find((r) => dir !== r && below(dir, r) && !roots.some((o) => o !== r && below(r, o))) ?? ""; };
+  /**
+   * What a directory below the episode's roots is, read from its parts below the top root. A part begins a checkout of
+   * its own when it sits directly in a worktrees folder (a name ending `worktree` or `worktrees`, or `wt`, `.wt`, in any
+   * case: `.claude/worktrees/smd-…`, `.worktrees`, `repo-worktrees`, a worktree named for no ticket among them), or when
+   * it names a ticket and that ticket is the one `branch` names (`~/Projects/smd-55-day1` on `smd-55-day1`), or it is
+   * the first part naming a ticket below HOME with `branch` naming none, or directly in a top root naming none by its
+   * directory or `branch` (`~/Projects/smd-55-day1`). Any other part naming a ticket is a ticket-shaped folder of the
+   * checkout it is in (`packages/node-22-compat`, `docs/smd-500-notes`). `kind` is "checkout" when the directory's deepest
+   * part naming a ticket begins one, "folder" when it is a folder, "" when no part below the top root names one (`api`)
+   * or it is in no root; `home` is the deepest checkout of its own at or above it, "" for the top root's (read when asked,
+   * as the roots change: `placeAt`). A cd within the roots into a folder teaches its home's team, not the folder's; an
+   * episode opened in a folder runs in its home. The cost: a ticket-shaped folder directly in a checkout naming no ticket
+   * (`app/node-22-compat` on `main`) reads as a checkout of its own (SMD-4291's review passes 3 to 5).
+   */
+  const placeOf = (dir, branch) => {
+    const top = topOf(dir);
+    if (!top) return { kind: "", home: "" };
+    const rel = dir.slice(top.length + 1).split(/[\\/]/), named = rel.map((part) => ownTickets(part).length > 0);
+    const bt = branchTickets(branch), first = named.indexOf(true), k = named.lastIndexOf(true);
+    const begins = (j) => (j > 0 && /worktrees?$|^\.?wt$/i.test(rel[j - 1]))
+      || (named[j] && (bt.includes(ownTickets(rel[j])[0]) || (j === first && ((top === HOME && !bt.length) || (j === 0 && !anchorOf(top, branch).length)))));
+    let end = -1;
+    for (let j = 0; j <= k; j++) if (begins(j)) end = j;
+    return { kind: k < 0 ? "" : k === end ? "checkout" : "folder", home: end < 0 ? "" : dir.slice(0, top.length + 1 + rel.slice(0, end + 1).join("/").length) };
+  };
+  // A directory's place is decided when the session first enters it below the roots, with the branch it has then, and
+  // both readers (the team a cd teaches, the place an episode opens in) read that one answer: read again at a branch
+  // move, `node-22-compat` was a folder to the episode it closed and a checkout to the next line (review pass 4, run-it).
+  // A folder of the top root's checkout takes the current episode's top root as its home, never the one it was entered
+  // under: a compaction there ran in `~/Projects` after the session had moved its episodes to `ob1` (review pass 5).
+  const places = new Map();
+  const placeAt = (dir, branch) => {
+    const place = places.get(dir) ?? placeOf(dir, branch);
+    if (place.kind) places.set(dir, place);
+    return place.kind && !place.home ? { ...place, home: topOf(dir) || dir } : place;
+  };
   /** The episode runs where the session is: its first directory names the project, a subdirectory does not. */
   const settle = () => {
     if (loc.cwd) { cur.roots.add(loc.cwd); if (!cur.cwd || !below(loc.cwd, cur.cwd)) cur.cwd = loc.cwd; }
@@ -907,7 +972,13 @@ export function segment(events, s = emptySummary()) {
     const next = emptySummary(episodes.length + 1);
     if (cur) cur.closed = boundary;
     next.opened = boundary;
-    next.cwd = loc.cwd; next.branch = loc.branch; if (loc.cwd) next.roots.add(loc.cwd);
+    // An episode opened with the shell in a ticket-shaped folder (`placeOf`) runs in the checkout the folder is in: a
+    // compaction, a new ticket or a branch move in `packages/node-22-compat` named NODE-22 as the new episode's place
+    // (SMD-4291's review passes 2 to 4, cold read). Any other takes where the shell is, as before: a
+    // folder naming nothing (`api`), a checkout of its own (a nested worktree), a place out of the roots.
+    const place = boundary && cur?.cwd && loc.cwd && inside() ? placeAt(loc.cwd, loc.branch) : undefined; // the parser writes no empty branch: loc.branch is set whenever cur.branch is
+    next.cwd = place?.kind === "folder" ? place.home : loc.cwd; next.branch = loc.branch;
+    if (next.cwd) next.roots.add(next.cwd);
     if (boundary?.ticket) next.about.add(boundary.ticket); // the key it BEGAN with; its home is read live in `own` (second review pass)
     if (lineAt) next.first = next.last = lineAt;
     episodes.push(next); cur = next; compacted = false;
@@ -921,21 +992,30 @@ export function segment(events, s = emptySummary()) {
     if (ev.t === "compaction") { if (cur.prompts.length) compacted = true; else cur.opened = { kind: "compaction" }; continue; }
     if (ev.t === "cwd" || ev.t === "branch") {
       if (ev.t === "branch" && ev.v === "HEAD") continue; // detached mid-rebase: the session is where it was
-      learnTeams(ev.v);
       loc[ev.t] = ev.v;
+      // A cd within the episode's roots into a ticket-shaped folder (`placeOf`) teaches its home's team: a folder's
+      // name is its checkout's, not a ticket's (review pass 1, run-it: `packages/node-22-compat` taught NODE), but this
+      // repo's worktrees sit under its checkout, the branch still `main`, and a projects folder holds checkouts (review
+      // pass 2; pass 3 made it the rule an episode's opening reads too).
+      // The branch the line moves to when it records both, cwd first: the place is read with it (review pass 4, cold
+      // read), and the pair is one move (below).
+      const pairBranch = ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD" ? events[i + 1].v : "";
+      // A folder teaches its home's team: a nested worktree's `packages/node-22-compat` is that worktree's (review pass 5).
+      const entered = ev.t === "branch" || !cur.cwd || !inside() ? undefined : placeAt(loc.cwd, pairBranch || loc.branch);
+      if (entered?.kind === "folder") learnTeams("cwd", entered.home); else learnTeams(ev.t, ev.v);
       // A line writes its cwd then its branch, so the two are one move: read
       // the branch before judging the cwd, else a cwd-first return to the repo
       // root — a parent of the worktree it was in — settles onto the episode it
       // ends before its branch arrives (second review pass).
-      if (ev.t === "cwd" && events[i + 1]?.t === "branch" && events[i + 1].v !== "HEAD") { const nb = events[++i]; apply(s, nb); learnTeams(nb.v); loc.branch = nb.v; }
+      if (pairBranch) { const nb = events[++i]; apply(s, nb); learnTeams("branch", nb.v); loc.branch = nb.v; }
       if (!cur.prompts.length) { settle(); continue; } // before the first ask, the episode is wherever the session is
       if (!branchMoved()) {
         if (inside()) settle(); // a cd within the checkout
-        else if (!cur.branch && own(ticketsIn(loc.cwd))) settle(); // no branch to go by: a directory naming the episode's ticket is its own
+        else if (!cur.branch && own(dirTickets(loc.cwd))) settle(); // no branch to go by: a directory naming the episode's ticket is its own
         // else: the shell out of the checkout on the same branch — the session's place stands; or, with no branch, a move the next ask decides
         continue;
       }
-      if (own([...ticketsIn(loc.branch), ...(inside() ? [] : ticketsIn(loc.cwd))])) settle(); // a move to the episode's own place — judged by what changed: the branch, and the directory once it too has left the roots, in whichever order the line records them; else pending, decided at the next ask
+      if (own([...branchTickets(loc.branch), ...(inside() ? [] : dirTickets(loc.cwd))])) settle(); // a move to the episode's own place — judged by what changed: the branch, and the directory once it too has left the roots, in whichever order the line records them; else pending, decided at the next ask
       continue;
     }
     if (ev.t === "prompt") {

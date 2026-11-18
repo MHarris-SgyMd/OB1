@@ -1301,7 +1301,7 @@ health path that presents no key, on the REST core a GET or HEAD of `/health`
 — known as it arrives, and not written whatever it answers.
 
 ```
-{"ts":"2026-10-08T16:36:17.603Z","door":"mcp","method":"POST","rpc":"tools/call","tool":"capture_thought","agent":"laptop","status":200,"outcome":"ok","ms":7480,"bytes":612}
+{"ts":"2026-10-08T16:36:17.603Z","door":"mcp","method":"POST","rpc":"tools/call","rev":"2026-07-28","tool":"capture_thought","agent":"laptop","status":200,"outcome":"ok","ms":7480,"bytes":612}
 ```
 
 These keys, and no other, each held to its rule as the line is written — a
@@ -1314,6 +1314,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `method` | the HTTP method |
 | `route` | the route as a template, never the path it was given: the REST core's (`/v1/thoughts/:id`), or an MCP server mirror's (`/health`, `/worker-status`, `/worker-run`, `/jobs/:id/stream` — under whatever prefix it came); the MCP endpoint, the MCP server's preflights, `/.well-known/` answers and 405s, the REST core's 404s and 405s, and an unmatched path have none |
 | `rpc` | the MCP JSON-RPC method (`tools/call`), or `batch` for a body of several messages; one outside the 2025-06-18 schema's client methods and the 2026-07-28 revision's `server/discover` and `subscriptions/listen` is `other` — so another newer method (2025-11-25's `tasks/*`) is too |
+| `rev` | the MCP revision a request to the MCP endpoint named: its 2026-07-28 envelope's, else what an `initialize` offers, else its `MCP-Protocol-Version` header's; `unnamed` where it named none (a request with no such header that is no `initialize`: a client on 2025-03-26 or earlier sending what its revision defines, which is no header, though the SDK's client sends the revision it negotiated whichever that is; a later client that omits it; a batch, or a body unread or not JSON, with no header); `other` for a string that is no revision this server serves. What the request said, not what the server did: a refused request has it too, one refused at its key among them, which is answered 200 and may name any revision; and an offer negotiated down is the offer. So to count the clients on a revision, count the `agent`s of its lines with `status` 200, an `outcome` other than `refused` and an `rpc` other than `initialize`; a client that sends no header shows its revision on its `initialize` line alone. Absent on every other route, and on a request gone before the route read it or whose key check threw (SMD-4363) |
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
@@ -1324,7 +1325,8 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `trace` | the W3C trace id of the request's span (below): its own, or with `OB1_OTEL_TRUST_TRACEPARENT=1` — or at the REST core, for a request its forwarder carried — an incoming `traceparent`'s, continued — and with no collector set, a trusted incoming `traceparent`'s alone, so a line can still be found beside a trusted proxy's; absent otherwise. 32 hex digits, checked like any value |
 
 A line never holds the URL, its query string, a header (but an incoming
-`traceparent`'s trace id, the `trace` key), a key, a body, a tool's arguments
+`traceparent`'s trace id, the `trace` key; an `MCP-Protocol-Version` naming a
+revision served, the `rev` key), a key, a body, a tool's arguments
 or a thought's or a search's text. Search text has its own
 home, the query log (migration 034), behind its own switch and retention; this
 is not a second copy. `test-server.ts` [21] sends a key in `?key=`, planted
@@ -1502,7 +1504,13 @@ request), `http.response.body.size`, `mcp.method.name` (with
 tool that ran — not one refused at its key, nor one that never ran), and
 `ob1.door`, `ob1.tool`, `ob1.agent`, `ob1.outcome` and `ob1.code` as the line
 has them, `ob1.rpc` only for what `mcp.method.name` cannot say (`batch`, or a
-method the `rpc` field writes `other`). No `url.*`: the path is a key's or an id's, and
+method the `rpc` field writes `other`), and the line's `rev` as
+`mcp.protocol.version` where it is a revision, as `ob1.rev` where it is
+`unnamed` or `other`, and as neither for a request refused at its key, which
+used no revision and may name any (what the request named, as on the line: the
+revision used where it was served, the one asked for on a 400 or an
+`initialize`; on the span alone: the duration histogram carries
+neither, so its series are not multiplied by the revisions served). No `url.*`: the path is a key's or an id's, and
 behind the proxy the scheme is not the server's to know. A tool call's span is
 `execute_tool <tool>` with `gen_ai.tool.name`, its outcome and its code — the
 operation's name is its request's alone, so a backend counts a single MCP call once (a REST operation's and a batch's calls carry none). A
@@ -1663,8 +1671,8 @@ Where the signals go is the operator's decision: the brain is personal data,
 and a collector off this machine is a place it then goes; the `observability`
 profile below keeps them on it. What leaves is usage metadata:
 per request `http.request.method`, `http.route`, `http.response.status_code`,
-`http.response.body.size`, `mcp.method.name`, `gen_ai.operation.name`,
-`gen_ai.tool.name`, `ob1.door`, `ob1.rpc`, `ob1.tool`, `ob1.agent`,
+`http.response.body.size`, `mcp.method.name`, `mcp.protocol.version`,
+`gen_ai.operation.name`, `gen_ai.tool.name`, `ob1.door`, `ob1.rpc`, `ob1.rev`, `ob1.tool`, `ob1.agent`,
 `ob1.outcome`, `ob1.code` and `error.type`, a fault's `exception.type` and
 `ob1.fault.code`, and the line's fields again in its log record; per tool call
 `gen_ai.tool.name`, `ob1.outcome`, `ob1.code` and `error.type`; per provider
