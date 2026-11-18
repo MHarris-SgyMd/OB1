@@ -76,8 +76,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   default deny, with no allow term and no endpoint declared local, the tier is
   skipped before any read, and the report says why. Release it with
   `OB1_EGRESS_ALLOW=actor:<the worker key>`, or with a source, type, topic or
-  marker the thoughts to send carry, or run a local model (`OB1_LLM_LOCAL=1`);
-  under `OB1_EGRESS_POLICY=allow` a deny term (`topic:health`) holds its
+  marker the thoughts to send carry, or run a local model (`OB1_LLM_LOCAL=1`).
+  A worker key the server would refuse (not in `MCP_ACCESS_KEYS`, or revoked)
+  refuses the run, exit 2. Under `OB1_EGRESS_POLICY=allow` a deny term (`topic:health`) holds its
   thoughts back. Before the gate, a thought `restricted`, or `personal` unless
   `--include-personal`, by its `sensitivity_tier` key or column or by the
   sensitivity patterns over what is sent and its whole text, is never sent
@@ -109,8 +110,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   or is off); the entities with no edge (exact).
 - **Tier 3, a model's reading:** the newest dated thoughts of the last
   `--days` (365) whose text, trimmed, is 20 characters or more, read newest
-  first until `--sample-size` (100) are left once the hold-back and the gate
-  have kept theirs back (at most 10,000 read), sent 20 a call, at most
+  first until as many as the calls can send are left once the hold-back and
+  the gate have kept theirs back (`--sample-size`, 100 and at least 10, or
+  `--max-llm-calls` × 20 if less; at most 10,000 read), sent 20 a call, at most
   `--max-llm-calls` (5; 0 turns it off). Each batch is read again just before
   its call: a thought deleted or newly held back since is not sent. Each goes
   as a ref (`t1`…), its date, type, first 400 characters and five topics and
@@ -120,9 +122,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   than 10 thoughts left to send skips the tier. The sample is read in the
   sweep's snapshot, and the calls go after its transaction ends.
 
-A run that fails writes no report and exits 1 with the reason; a Tier 3 call
-that fails (after its transient retries) stops that tier alone, and the report
-is written with what came before, exit 1. The samples
+A run that fails writes no report and exits 1 with the reason; a Tier 3 that
+fails (its read, a batch's second read, or a call after its transient retries)
+fails that tier alone, and the report is written with what came before, exit 1. The samples
 read the created_at index; among thoughts sharing a `created_at` at a sample's
 edge (an import's transaction, a day-precision date), which are read is the
 index's order. A far-future `created_at` (a mistyped year) is the newest, and

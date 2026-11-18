@@ -5861,7 +5861,7 @@ bun lint-sweep.ts --url postgres://…                         # every tier; ./l
 bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, another path
 bun lint-sweep.ts --url … --max-llm-calls 0                  # tiers 1 and 2 alone: no model call
 #   --tier 1|2|3|all (all)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
-#   Tier 3: --sample-size N (100, ≤ 1000)   --max-llm-calls N (5, ≤ 100; 0: off)   --days N (365)   --model ID (OB1_METADATA_MODEL's)   --include-personal
+#   Tier 3: --sample-size N (100, 10–1000)   --max-llm-calls N (5, ≤ 100; 0: off)   --days N (365)   --model ID (OB1_METADATA_MODEL's)   --include-personal
 #   exits 0 report written · 1 a read or the write failed (no report), or Tier 3 stopped by a failed call (the report written) · 2 usage, the URL, the worker key, or the connection reached another database (PGDATABASE)
 ```
 
@@ -5896,9 +5896,10 @@ and model (`resolveEmbedConfig`), each put to the egress gate on its own units
 (`OB1_WORKER_KEY`'s name as the actor, its source, type and topics, and as the
 marker what is sent of it and its whole text, both to pass; decided
 2026-11-17), a refused one left out, and the call naming every thought it
-carries (`providerCall` gates each). The sample is read until it fills (at
-most 10,000 rows), and each batch is read and judged again just before its
-call. Before that,
+carries (`providerCall` gates each). The sample is read through one cursor in
+`created_at` order until as many as the calls can send are found (at most
+10,000 rows), and each batch is read and judged again just before its call; a
+Tier 3 that fails leaves the report written with the other tiers, exit 1. Before that,
 weekly-digest's hold-back (`db/sensitivity.ts`): a `restricted` thought, or a
 `personal` one unless `--include-personal`, by its key, the enhanced-thoughts
 column, or the patterns over what is sent and the whole text, never leaves.

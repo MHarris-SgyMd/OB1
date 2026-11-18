@@ -213,6 +213,8 @@ export const TIER_OF_RANK: readonly Tier[] = ["standard", "personal", "restricte
 
 /** The rows whose whole text one statement reads for the patterns: a window of long documents is read a batch at a time, never whole. */
 export const PATTERN_BATCH = 100;
+/** The stored bytes one statement of that read takes, where a caller knows them (a row past it alone): a batch of long documents is not held at once. */
+export const PATTERN_BYTES = 16 * 1024 * 1024;
 
 /** The tiers held back: `restricted` always, `personal` unless the caller includes it. */
 export const heldTiers = (includePersonal: boolean): readonly string[] => (includePersonal ? ["restricted"] : ["restricted", "personal"]);
@@ -251,13 +253,16 @@ export function tierExcluded(hasColumn: boolean, param: string): string {
  * The ids the patterns hold back among `rows`: each row's `sent` (what its prompt would carry) and its whole text, read
  * again, PATTERN_BATCH at a time, so a secret past the part sent is seen. A row that second read does not return
  * (deleted, or out of sight) is held back too. `onText`, given, sees each row's whole text as it is read (lint-sweep's
- * Tier 3 puts it to the egress gate's marker).
+ * Tier 3 puts it to the egress gate's marker). A row's `bytes`, given (its stored size), ends a batch at PATTERN_BYTES.
  */
-export async function heldByPatterns(sql: SQL, rows: readonly { id: string; sent: string }[], tiers: readonly string[], onText?: (id: string, text: string) => void): Promise<Set<string>> {
+export async function heldByPatterns(sql: SQL, rows: readonly { id: string; sent: string; bytes?: number }[], tiers: readonly string[], onText?: (id: string, text: string) => void): Promise<Set<string>> {
   const held = new Set<string>();
   const hold = new Set(tiers);
-  for (let i = 0; i < rows.length; i += PATTERN_BATCH) {
-    const batch = rows.slice(i, i + PATTERN_BATCH);
+  for (let i = 0; i < rows.length;) {
+    let n = 0;
+    for (let size = 0; i + n < rows.length && n < PATTERN_BATCH && (n === 0 || size + (rows[i + n].bytes ?? 0) <= PATTERN_BYTES); n++) size += rows[i + n].bytes ?? 0;
+    const batch = rows.slice(i, i + n);
+    i += n;
     const texts = (await sql.unsafe("SELECT id::text AS id, content FROM thoughts WHERE id = ANY($1::uuid[])", [sql.array(batch.map((r) => r.id), "TEXT")])) as { id: string; content: string }[];
     const whole = new Map(texts.map((t) => [t.id, t.content]));
     for (const r of batch) {

@@ -22472,7 +22472,7 @@ if (want("26")) {
       const refusedDir = join(scratch, "refused");
       mkdirSync(refusedDir);
       const r = (extra: Record<string, string>, ...flags: string[]) => lintIn(refusedDir, extra, ...flags);
-      const sampleZero = await r({ DATABASE_URL: URL_ }, "--tier", "3", "--sample-size", "0");
+      const sampleZero = await r({ DATABASE_URL: URL_ }, "--tier", "3", "--sample-size", "9");
       const callsOver = await r({ DATABASE_URL: URL_ }, "--max-llm-calls", "101");
       const daysZero = await r({ DATABASE_URL: URL_ }, "--days", "0");
       const four = await r({ DATABASE_URL: URL_ }, "--tier", "4");
@@ -22499,7 +22499,7 @@ if (want("26")) {
              && negative.code === 2 && /statement-timeout/.test(negative.stderr) && huge.code === 2 && /statement-timeout/.test(huge.stderr)
              && abs.code === 0 && existsSync(absReport)
              && refused.code === 1 && /lint-sweep FAILED — ERR_POSTGRES_CONNECTION_REFUSED /.test(refused.stderr),
-        `…--tier 4, a --sample-size of 0, a --max-llm-calls of 101, a --days of 0, a removed flag, a climbing, directory, \`~\` or 221-byte --report, a --statement-timeout of -1 or 2147484 and another database each refused, exit 2 and no report; ..dots.md written, and an absolute path elsewhere with --url and --statement-timeout 0; a refused connection exit 1 naming the client's code (${[sampleZero, callsOver, daysZero, four, removed, climb, dir, other, dots, long, tilde, negative, huge, abs, refused].map((x) => x.code).join(" ")}; ${left.join(" ")}; ${refused.stderr.split("\n")[0]})`);
+        `…--tier 4, a --sample-size of 9 (no sample under 10 could run), a --max-llm-calls of 101, a --days of 0, a removed flag, a climbing, directory, \`~\` or 221-byte --report, a --statement-timeout of -1 or 2147484 and another database each refused, exit 2 and no report; ..dots.md written, and an absolute path elsewhere with --url and --statement-timeout 0; a refused connection exit 1 naming the client's code (${[sampleZero, callsOver, daysZero, four, removed, climb, dir, other, dots, long, tilde, negative, huge, abs, refused].map((x) => x.code).join(" ")}; ${left.join(" ")}; ${refused.stderr.split("\n")[0]})`);
 
       // Tier 3 (SMD-3318 PR 2b): a model's reading, against a stub chat endpoint. A brain of its own: 30 thoughts on
       // the release train a minute apart (12 carrying `zq3-public`, 4 `zq3-few`), then the ones that must never reach
@@ -22592,8 +22592,7 @@ if (want("26")) {
         const marked = await lint(t3Env({ OB1_EGRESS_ALLOW: "marker:zq3-public" }), "--tier", "3", "--report", join(scratch, "t3m.md"));
         const sentM = sentRows(from);
         from = prompts.length;
-        // A sample of 5 reads pages of 10: the four thoughts the term names sit on the second page, and are found.
-        const few = await lint(t3Env({ OB1_EGRESS_ALLOW: "marker:zq3-few" }), "--tier", "3", "--sample-size", "5", "--report", join(scratch, "t3f.md"));
+        const few = await lint(t3Env({ OB1_EGRESS_ALLOW: "marker:zq3-few" }), "--tier", "3", "--report", join(scratch, "t3f.md"));
         const off = await lint(t3Env(ALLOW), "--tier", "3", "--max-llm-calls", "0", "--report", join(scratch, "t3o.md"));
         // An actor: term releases a keyed run's thoughts, and the same term with no key skips the tier before any read.
         const { hashKey } = await import("../server-portable/auth.ts");
@@ -22608,13 +22607,14 @@ if (want("26")) {
         from = prompts.length;
         const small = await lint(t3Env(ALLOW), "--tier", "3", "--sample-size", "10", "--report", join(scratch, "t3s.md"));
         // Under deny an allow marker in a tag alone releases its thought, as one in the text does; one past the 400
-        // characters sent does not (the whole text and the part sent must both pass): two left, fewer than ten.
-        const byTag = await lint(t3Env({ OB1_EGRESS_ALLOW: "marker:zq3-private" }), "--tier", "3", "--report", join(scratch, "t3t.md"));
+        // characters sent does not (the whole text and the part sent must both pass): two left, fewer than ten. A
+        // sample of 10 fetches 20 rows at a time: the two sit past the first fetch, and are found.
+        const byTag = await lint(t3Env({ OB1_EGRESS_ALLOW: "marker:zq3-private" }), "--tier", "3", "--sample-size", "10", "--report", join(scratch, "t3t.md"));
         const elsewhere = await lint(t3Env({ ...byActor, OB1_WORKER_KEY: lintKey, PGDATABASE: "template1" }), "--tier", "3", "--report", join(scratch, "t3e.md"));
         // A policy that refuses every thought, even with an actor: the key is not resolved either.
         const refusedKeyed = await lint(t3Env({ MCP_ACCESS_KEYS: byActor.MCP_ACCESS_KEYS, OB1_WORKER_KEY: lintKey }), "--tier", "3", "--report", join(scratch, "t3rk.md"));
         assert(personal.code === 0 && sentP.length === 31 && /3 held back by sensitivity/.test(personal.stdout) && sentP.some((r) => r.content.includes("personal by its key"))
-               && capped.code === 0 && sentC.length === 20 && /20 sent in 1 call/.test(capped.stdout)
+               && capped.code === 0 && sentC.length === 20 && /\[tier 3\] 20 read, 0 held back by sensitivity, 0 by the egress policy; 20 sent in 1 call/.test(capped.stdout)
                && denied.code === 0 && deniedCalls === 0 && /\[tier 3\] skipped: OB1_EGRESS_POLICY=deny \(the default\)/.test(denied.stdout) && /- \*\*Tier 3\*\* — skipped: OB1_EGRESS_POLICY=deny/.test(read(join(scratch, "t3d.md")))
                && marked.code === 0 && sentM.length === 12 && sentM.every((r) => r.content.includes("zq3-public")) && /22 by the egress policy; 12 sent in 1 call/.test(marked.stdout)
                && few.code === 0 && /\[tier 3\] skipped: 4 thought\(s\) left to send of 38 read in the last 365 days, fewer than 10/.test(few.stdout)
@@ -22625,7 +22625,7 @@ if (want("26")) {
                && refusedKeyed.code === 0 && /\[tier 3\] skipped: OB1_EGRESS_POLICY=deny/.test(refusedKeyed.stdout) && !/agent:/.test(refusedKeyed.stdout)
                && elsewhere.code === 2 && /reached database "template1"/.test(elsewhere.stderr) && !/agent:|could not resolve the worker/.test(elsewhere.stdout + elsewhere.stderr) && !existsSync(join(scratch, "t3e.md"))
                && keyed.code === 0 && /agent: {2}lint-live/.test(keyed.stdout) && sentK.length === 34 && /0 by the egress policy; 34 sent in 2 call/.test(keyed.stdout),
-          `…--include-personal sends the personal one; --max-llm-calls 1 sends one batch of 20; under the default deny nothing is read or sent; under deny an allow term releases its own thoughts alone, 12 in one call; four left to send, found on a second page of a sample of 5, a sample of 10 counting the ten it read, an allow marker in a tag releasing its thought and one past the part sent not, another database refused before the key is resolved, and a policy refusing every thought resolving none, --max-llm-calls 0 and an actor: term with no worker key skip the tier with no call; with the key the term releases every thought the hold-back leaves, a deny term naming all of them unread under deny (exit ${personal.code} ${denied.code} ${marked.code} ${few.code} ${off.code} ${unkeyed.code} ${keyed.code}; ${sentP.length}, ${deniedCalls}, ${sentM.length}, ${quiet}, ${sentK.length} sent/calls; ${keyed.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()})`);
+          `…--include-personal sends the personal one; --max-llm-calls 1 reads and sends one batch of 20; under the default deny nothing is read or sent; under deny an allow term releases its own thoughts alone, 12 in one call; four left to send, a sample of 10 counting the ten it read, an allow marker in a tag releasing its thought and one past the part sent not, found past a sample of 10's first fetch, another database refused before the key is resolved, and a policy refusing every thought resolving none, --max-llm-calls 0 and an actor: term with no worker key skip the tier with no call; with the key the term releases every thought the hold-back leaves, a deny term naming all of them unread under deny (exit ${personal.code} ${denied.code} ${marked.code} ${few.code} ${off.code} ${unkeyed.code} ${keyed.code}; ${sentP.length}, ${deniedCalls}, ${sentM.length}, ${quiet}, ${sentK.length} sent/calls; ${keyed.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()})`);
 
         mode = "prose";
         const prose = await lint(t3Env(ALLOW), "--tier", "3", "--report", join(scratch, "t3u.md"));
@@ -22653,13 +22653,58 @@ if (want("26")) {
         onCall = async () => {
           await sql`DELETE FROM thoughts WHERE content = 'zq3 thought 25 on the release train'`;
           await sql`UPDATE thoughts SET metadata = '{"sensitivity_tier": "restricted"}'::jsonb WHERE content = 'zq3 thought 26 on the release train'`;
+          await sql`UPDATE thoughts SET content = 'zq3 short' WHERE content = 'zq3 thought 27 on the release train'`;
         };
         from = prompts.length;
         const moved = await lint(t3Env(ALLOW), "--tier", "3", "--report", join(scratch, "t3mv.md"));
         const second = prompts[from + 1] ?? "";
-        assert(moved.code === 0 && prompts.length - from === 2 && second.includes("zq3 thought 24 on") && !second.includes("zq3 thought 25 on") && !second.includes("zq3 thought 26 on")
-               && /2 gone or held back before their call, 28 sent in 2 call\(s\)/.test(moved.stdout) && /when read again just before their call: \*\*2\*\*/.test(read(join(scratch, "t3mv.md"))),
-          `…a thought deleted and one marked restricted while the first call is out are not in the second: each batch is read again before its call (exit ${moved.code}; ${moved.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()})`);
+        assert(moved.code === 0 && prompts.length - from === 2 && second.includes("zq3 thought 24 on") && !second.includes("zq3 thought 25 on") && !second.includes("zq3 thought 26 on") && !second.includes("zq3 short")
+               && /3 gone or held back before their call, 27 sent in 2 call\(s\)/.test(moved.stdout) && /when read again just before their call: \*\*3\*\*/.test(read(join(scratch, "t3mv.md"))),
+          `…a thought deleted, one marked restricted and one cut under 20 characters while the first call is out are not in the second: each batch is read again before its call, under the sample's filters (exit ${moved.code}; ${moved.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()})`);
+
+        // In process: the read stops at its cap exactly; a read that fails (here its fetch, as a statement bound would)
+        // fails Tier 3 alone, the report written with tiers 1 and 2; and the patterns' whole-text read ends a batch at
+        // 16 MB stored.
+        const { run: lintRun } = await import("./lint-sweep.ts");
+        const { resolveEmbedConfig } = await import("../server-portable/embed.ts");
+        const { heldByPatterns } = await import("./sensitivity.ts");
+        const one = new SQL({ url: URL_!, max: 1 });
+        try {
+          const lines: string[] = [];
+          const writer = { out: (l: string) => lines.push(l), err: (l: string) => lines.push(l) };
+          const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_ALLOW: "marker:zq3-private" } as unknown as Parameters<typeof resolveEmbedConfig>[0]);
+          const o3 = { cfg, model: "stub", sampleSize: 10, maxCalls: 5, days: 365, includePersonal: false };
+          const capCode = await lintRun({ sql: one, tier: "3", report: join(scratch, "t3cap.md"), tier3: { ...o3, readMax: 7 }, writer });
+          const capLine = lines.filter((l) => l.startsWith("[tier 3]")).join(" / ");
+          lines.length = 0;
+          const failFetch = (tx: SQL) => new Proxy(tx, {
+            get(t, k) {
+              const v = (t as unknown as Record<string | symbol, unknown>)[k];
+              if (k === "unsafe") return (q: string, params?: unknown[]) => /^FETCH /.test(q)
+                ? Promise.reject(Object.assign(new Error("canceling statement due to statement timeout"), { errno: "57014" })) : t.unsafe(q, params);
+              return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
+            },
+          });
+          const failing = { unsafe: one.unsafe.bind(one), array: one.array.bind(one), begin: (mode: string, fn: (tx: SQL) => Promise<unknown>) => one.begin(mode, (tx) => fn(failFetch(tx as unknown as SQL))) } as unknown as SQL;
+          const failCode = await lintRun({ sql: failing, tier: "all", report: join(scratch, "t3fail.md"), tier3: o3, writer });
+          const failText = read(join(scratch, "t3fail.md"));
+          const failLines = lines.join(" / ");
+          let statements = 0;
+          const counting = { unsafe: (q: string, params?: unknown[]) => { statements++; return one.unsafe(q, params); }, array: one.array.bind(one) } as unknown as SQL;
+          const big = 10 * 1024 * 1024;
+          const ids = ["00000000-0000-0000-0000-00000000000a", "00000000-0000-0000-0000-00000000000b", "00000000-0000-0000-0000-00000000000c"];
+          await heldByPatterns(counting, ids.map((id) => ({ id, sent: "", bytes: big })), ["restricted"]);
+          const bySize = statements;
+          statements = 0;
+          await heldByPatterns(counting, ids.map((id) => ({ id, sent: "" })), ["restricted"]);
+          assert(capCode === 0 && /\[tier 3\] skipped: 0 thought\(s\) left to send of 7 read in the last 365 days \(the read stopped at 7\)/.test(capLine)
+                 && failCode === 1 && /## Tier 1 — thoughts/.test(failText) && /## Tier 2 — the entity graph/.test(failText) && /\*Stopped: its sample's read: 57014 canceling statement/.test(failText)
+                 && /\[tier 3\] failed: its sample's read: 57014/.test(failLines)
+                 && bySize === 3 && statements === 1,
+            `…in process: the read stops at its cap, 7 of 7; a read that fails fails Tier 3 alone, tiers 1 and 2 reported, exit 1; three 10 MB rows read whole one a statement, three unsized in one (${capCode}, ${failCode}; ${capLine}; ${bySize}, ${statements})`);
+        } finally {
+          await one.close();
+        }
       } finally {
         stub.stop(true);
       }

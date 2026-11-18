@@ -52,12 +52,16 @@
  * OB1_WORKER_KEY set and Tier 3 able to send, the key is resolved first, as
  * every worker's is (resolve_agent registers it, or stamps its last use, in
  * the agent registry); a lookup that fails is warned of and the tier runs
- * with no actor. A role with SELECT on `thoughts`,
+ * with no actor, while a key the server would refuse (not in MCP_ACCESS_KEYS,
+ * revoked, or MCP_ACCESS_KEYS unset) refuses the run, exit 2. A role with SELECT on `thoughts`,
  * `thought_entities`, `ob1_entities` and `ob1_entity_edges` is enough. The
  * report is written only once every read succeeded, to a new file of the
  * run's own (O_EXCL, 0600) renamed over the path: never through a symlink
  * there, never keeping an older file's mode, and a failed write leaves an
- * earlier report as it was. A run that fails writes no report and exits 1 with
+ * earlier report as it was; a Tier 3 that fails (its read under a savepoint,
+ * a batch's second read, or a call) leaves the report written with the other
+ * tiers and exits 1. A batch's second read, after the transaction, is bounded
+ * by the session's statement bound, a lock wait's included. A run that fails writes no report and exits 1 with
  * the reason (the database's, the file system's, or the connection's). The
  * tables are named unqualified, as `db/backup.ts` names them: the role's
  * search_path finds them.
@@ -104,15 +108,21 @@
  * prompt carries and its whole text, is never sent.
  *
  * The sample: the newest dated thoughts of the last --days (365) whose text,
- * trimmed, is 20 characters or more, read in the sweep's snapshot a page
- * (twice --sample-size, at most 2,000) at a time, newest first, ties by id,
- * each judged, until --sample-size (100) are to be sent, the window ends, or
- * TIER3_READ_MAX (10,000) rows are read, so an allow term naming a few older
- * thoughts finds them; the counts stop at the row that filled it. Then they go
+ * trimmed, is 20 characters or more, read in the sweep's snapshot through one
+ * cursor in created_at order alone (the index's: a group sharing a created_at
+ * is read in its order, never sorted, review pass 2), at most 50 rows a fetch,
+ * each judged, until as many as the calls can send are to be sent
+ * (--sample-size, 100 and at least 10, or --max-llm-calls × 20 if less), the
+ * window ends, or TIER3_READ_MAX (10,000) rows are read, so an allow term
+ * naming a few older thoughts finds them; the counts stop at the row that
+ * filled it, or at the cap. The whole-text read for the patterns takes 100
+ * rows or 16 MB stored a statement, whichever comes first. The judging is
+ * JavaScript inside the snapshot, which no statement bound covers. Then they go
  * TIER3_BATCH (20) a call, at most --max-llm-calls (5; 0 turns the tier off),
  * after the transaction, so no lock or snapshot is held across a model's
- * answer; each batch is read again and judged again just before its call, so
- * a thought deleted, forgotten, edited or newly held back since the snapshot
+ * answer; each batch is read again under the same filters and judged again
+ * just before its call, so a thought deleted, forgotten, edited, moved out of
+ * the window or newly held back since the snapshot
  * (minutes, with the retries' pauses) is not sent as it was. Each thought goes
  * as a ref (t1…t20), its date, type, first 400 characters and five topics and
  * tags, each type, topic and tag cut to 100 characters; today's date goes too,
@@ -295,7 +305,7 @@ export const TIER3_BATCH = 20;
 /** Tier 3's defaults: the sample, the calls, the window in days. */
 export const TIER3_DEFAULTS = { sampleSize: 100, maxCalls: 5, days: 365 } as const;
 /** Tier 3's bounds, each [min, max]. */
-export const TIER3_BOUNDS = { sampleSize: [1, 1000], maxCalls: [0, 100], days: [1, 36500] } as const;
+export const TIER3_BOUNDS = { sampleSize: [10, 1000], maxCalls: [0, 100], days: [1, 36500] } as const;
 /** Fewer thoughts left to send than this, and Tier 3 is skipped: a contradiction needs company. */
 export const TIER3_MIN = 10;
 /** Characters of a thought the prompt carries. */
@@ -308,6 +318,8 @@ const FINDING_TEXT = 300;
 const TIER3_FIELD = 100;
 /** The most rows Tier 3 reads looking for its sample: past it, the window's older thoughts go unread. */
 export const TIER3_READ_MAX = 10_000;
+/** The most rows one fetch of Tier 3's read takes (twice a smaller sample's target): each is judged before the next. */
+const TIER3_FETCH = 50;
 /** The kinds of finding, in the report's order. The recipe's sixth, low_signal, read importance, which the core retired. */
 export const CATEGORIES = ["contradictions", "stale_facts", "superseded", "orphans", "missing_links"] as const;
 export type Category = (typeof CATEGORIES)[number];
@@ -334,6 +346,8 @@ export interface Tier3Options {
   resolveActor?: () => Promise<{ ok: true; actor?: string } | { ok: false; message: string }>;
   /** The pauses before each retry of a transient failure (worker-bootstrap's by default). */
   pausesMs?: readonly number[];
+  /** The most rows the read takes, TIER3_READ_MAX by default (a test's lever). */
+  readMax?: number;
 }
 
 export interface Tier3Row { id: string; created: string; content: string; metadata: Record<string, unknown> | null }
@@ -465,12 +479,19 @@ export function readTier3Answer(raw: unknown, batch: readonly Tier3Row[]): { fin
   return { findings, dropped };
 }
 
-/** Tier 3's rows as read: what the prompt carries of each, and whether its tier holds it back (`$1`, the held tiers). */
-const rowsSql = (hasColumn: boolean, rest: string) => `
+/**
+ * Tier 3's rows as read: what the prompt carries of each, its stored size, and whether its tier holds it back. The held
+ * tiers go as a literal, not a parameter, so the statement can be a cursor's (DECLARE takes no parameters): they are
+ * heldTiers' fixed words, never input.
+ */
+const rowsSql = (hasColumn: boolean, o: Tier3Options, rest: string) => `
   SELECT id::text AS id, to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS created, left(content, ${TIER3_CONTENT}) AS content, metadata,
-         NOT (true${tierExcluded(hasColumn, "$1")}) AS tier_held
+         pg_column_size(content) AS bytes,
+         NOT (true${tierExcluded(hasColumn, `ARRAY[${heldTiers(o.includePersonal).map((t) => `'${t}'`).join(", ")}]::text[]`)}) AS tier_held
     FROM thoughts ${rest}`;
-type ReadRow = Tier3Row & { tier_held: boolean };
+/** The window's filter: a dated thought of the last `days`, its text, trimmed, 20 characters or more. */
+const inWindow = (days: number) => `${DATED} AND created_at >= now() - make_interval(days => ${Math.trunc(days)}) AND char_length(${TRIMMED}) >= ${TIER3_MIN_CHARS}`;
+type ReadRow = Tier3Row & { tier_held: boolean; bytes: number | null };
 type Verdict = "send" | "sensitive" | "egress";
 
 /**
@@ -480,12 +501,12 @@ type Verdict = "send" | "sensitive" | "egress";
  * both pass); else sent.
  */
 async function judge(sql: SQL, rows: readonly ReadRow[], o: Tier3Options): Promise<{ row: Tier3Row; verdict: Verdict }[]> {
-  const shaped = rows.map(({ tier_held, ...r }) => ({ row: { ...r, metadata: objectOr(r.metadata) } as Tier3Row, tierHeld: tier_held }));
-  const candidates = shaped.filter((s) => !s.tierHeld).map((s) => s.row);
-  const byId = new Map(candidates.map((r) => [r.id, r]));
+  const shaped = rows.map(({ tier_held, bytes, ...r }) => ({ row: { ...r, metadata: objectOr(r.metadata) } as Tier3Row, tierHeld: tier_held, bytes }));
+  const candidates = shaped.filter((s) => !s.tierHeld);
+  const byId = new Map(candidates.map((c) => [c.row.id, c.row]));
   const leaves = (r: Tier3Row, text?: string) => mayLeaveBox(lintSubject(r, o.actor, text), o.cfg.chat, o.cfg.egress).allowed;
   const refusedWhole = new Set<string>();
-  const held = await heldByPatterns(sql, candidates.map((r) => ({ id: r.id, sent: sentOf(r) })), heldTiers(o.includePersonal), (id, text) => {
+  const held = await heldByPatterns(sql, candidates.map((c) => ({ id: c.row.id, sent: sentOf(c.row), bytes: c.bytes ?? 0 })), heldTiers(o.includePersonal), (id, text) => {
     const r = byId.get(id);
     if (r && !leaves(r, `${text}\n${sentOf(r)}`)) refusedWhole.add(id);
   });
@@ -497,41 +518,54 @@ async function judge(sql: SQL, rows: readonly ReadRow[], o: Tier3Options): Promi
 
 interface Tier3Sample { rows: Tier3Row[]; read: number; readCapped: boolean; heldSensitive: number; heldEgress: number; hasColumn: boolean }
 
+/** How many thoughts Tier 3 can send: --sample-size, or the calls' room if less. */
+const tier3Target = (o: Tier3Options) => Math.min(o.sampleSize, o.maxCalls * TIER3_BATCH);
+
 /**
  * Tier 3's sample, read in the sweep's snapshot: the newest dated thoughts of the window whose text, trimmed, is 20
- * characters or more, a page (twice the sample, at most 2,000) at a time, newest first (ties by id), each judged, until
- * --sample-size are to be sent, the window ends, or TIER3_READ_MAX rows are read: so an allow term that names a few
- * older thoughts finds them. A sensitivity_tier column the role may not read refuses the run. The counts stop at the
- * row that filled the sample.
+ * characters or more, through one cursor ordered by created_at alone (the index's order, ties included: no page sorts a
+ * group of thoughts sharing a created_at, as an OFFSET with an id tiebreak did, review pass 2), a fetch of at most
+ * TIER3_FETCH rows at a time, each judged before the next, until as many as the calls can send (tier3Target) are to be
+ * sent, the window ends, or TIER3_READ_MAX rows are read: so an allow term that names a few older thoughts finds them.
+ * A sensitivity_tier column the role may not read fails the tier. The counts stop at the row that filled the sample, or
+ * at the cap.
  */
 async function tier3Sample(tx: SQL, o: Tier3Options): Promise<Tier3Sample> {
   const hasColumn = await sensitivityColumn(tx, true,
     "public.thoughts has a sensitivity_tier column this role may not read: refusing rather than send the rows it marks to a model (grant SELECT on it)");
-  const page = Math.min(o.sampleSize * 2, 2000);
+  const target = tier3Target(o);
+  const readMax = o.readMax ?? TIER3_READ_MAX;
+  const fetch = Math.min(target * 2, TIER3_FETCH);
   const out: Tier3Sample = { rows: [], read: 0, readCapped: false, heldSensitive: 0, heldEgress: 0, hasColumn };
-  for (let offset = 0; ; offset += page) {
-    const rows = (await tx.unsafe(rowsSql(hasColumn, `
-     WHERE ${DATED} AND created_at >= now() - make_interval(days => $2::int) AND char_length(${TRIMMED}) >= ${TIER3_MIN_CHARS}
-     ORDER BY created_at DESC, id DESC LIMIT ${page} OFFSET ${offset}`), [tx.array([...heldTiers(o.includePersonal)], "TEXT"), o.days])) as ReadRow[];
-    for (const { row, verdict } of await judge(tx, rows, o)) {
-      out.read++;
-      if (verdict === "sensitive") out.heldSensitive++;
-      else if (verdict === "egress") out.heldEgress++;
-      else out.rows.push(row);
-      if (out.rows.length === o.sampleSize) return out;
+  // Nothing to send, nothing to read: run() skips --max-llm-calls 0 before this, and `FETCH 0` would return the
+  // cursor's current row again for ever (a mutant that dropped that skip hung a run for hours, review pass 2).
+  if (target < 1) return out;
+  await tx.unsafe(`DECLARE tier3_sample NO SCROLL CURSOR FOR ${rowsSql(hasColumn, o, `WHERE ${inWindow(o.days)} ORDER BY created_at DESC`)}`);
+  try {
+    for (;;) {
+      const rows = (await tx.unsafe(`FETCH ${fetch} FROM tier3_sample`)) as ReadRow[];
+      for (const { row, verdict } of await judge(tx, rows, o)) {
+        out.read++;
+        if (verdict === "sensitive") out.heldSensitive++;
+        else if (verdict === "egress") out.heldEgress++;
+        else out.rows.push(row);
+        if (out.rows.length === target) return out;
+        if (out.read === readMax) return { ...out, readCapped: true };
+      }
+      if (rows.length < fetch) return out;
     }
-    if (rows.length < page) return out;
-    if (out.read >= TIER3_READ_MAX) return { ...out, readCapped: true };
+  } finally {
+    await tx.unsafe("CLOSE tier3_sample").catch(() => {});
   }
 }
 
 /**
- * A batch read again just before its call, outside the snapshot: a thought deleted since, or one its tier, the patterns
- * or the gate now hold back (a tier set, a `forget_thought`, an edit), is not sent; an edited one goes as it is now.
+ * A batch read again just before its call, outside the snapshot, under the sample's own filters: a thought deleted
+ * since, moved out of the window, emptied, or one its tier, the patterns or the gate now hold back (a tier set, a
+ * `forget_thought`, an edit), is not sent; an edited one goes as it is now.
  */
 async function recheck(sql: SQL, batch: readonly Tier3Row[], o: Tier3Options, hasColumn: boolean): Promise<Tier3Row[]> {
-  const fresh = (await sql.unsafe(rowsSql(hasColumn, "WHERE id = ANY($2::uuid[])"),
-    [sql.array([...heldTiers(o.includePersonal)], "TEXT"), sql.array(batch.map((r) => r.id), "TEXT")])) as ReadRow[];
+  const fresh = (await sql.unsafe(rowsSql(hasColumn, o, `WHERE id = ANY($1::uuid[]) AND ${inWindow(o.days)}`), [sql.array(batch.map((r) => r.id), "TEXT")])) as ReadRow[];
   const verdicts = new Map((await judge(sql, fresh, o)).map((v) => [v.row.id, v]));
   return batch.flatMap((r) => {
     const v = verdicts.get(r.id);
@@ -539,9 +573,9 @@ async function recheck(sql: SQL, batch: readonly Tier3Row[], o: Tier3Options, ha
   });
 }
 
-/** A Tier 3 that did not run, and why. */
-const skipped3 = (o: Tier3Options, reason: string, counts: Partial<Tier3> = {}): Tier3 => ({
-  status: "skipped", reason: safeReason(reason), model: o.model, days: o.days, read: 0, readCapped: false, heldSensitive: 0, heldEgress: 0, changed: 0,
+/** A Tier 3 that did not run, and why: skipped, or failed before any call. */
+const skipped3 = (o: Tier3Options, reason: string, counts: Partial<Tier3> = {}, status: "skipped" | "failed" = "skipped"): Tier3 => ({
+  status, reason: safeReason(reason), model: o.model, days: o.days, read: 0, readCapped: false, heldSensitive: 0, heldEgress: 0, changed: 0,
   sent: 0, calls: 0, unreadable: 0, dropped: 0, findings: [], ...counts,
 });
 
@@ -571,7 +605,7 @@ async function withRetry<T>(pauses: readonly number[], w: Writer, fn: () => Prom
 async function tier3Calls(sql: SQL, sample: Tier3Sample, o: Tier3Options, w: Writer): Promise<Tier3> {
   const counts = { read: sample.read, readCapped: sample.readCapped, heldSensitive: sample.heldSensitive, heldEgress: sample.heldEgress };
   if (sample.rows.length < TIER3_MIN) {
-    return skipped3(o, `${sample.rows.length} thought(s) left to send of ${sample.read} read in the last ${o.days} days${sample.readCapped ? ` (the read stopped at ${TIER3_READ_MAX})` : ""}, fewer than ${TIER3_MIN}`, counts);
+    return skipped3(o, `${sample.rows.length} thought(s) left to send of ${sample.read} read in the last ${o.days} days${sample.readCapped ? ` (the read stopped at ${o.readMax ?? TIER3_READ_MAX})` : ""}, fewer than ${TIER3_MIN}`, counts);
   }
   const batches: Tier3Row[][] = [];
   for (let i = 0; i < sample.rows.length && batches.length < o.maxCalls; i += TIER3_BATCH) batches.push(sample.rows.slice(i, i + TIER3_BATCH));
@@ -622,7 +656,7 @@ export function renderReport(r: { tier: string; database: string; startedAt: str
   const L: string[] = [
     "---", `title: Lint Sweep — ${day}`, `database: ${r.database}`, `tier: ${r.tier}`, `started_at: ${r.startedAt}`, `finished_at: ${r.finishedAt}`, "---", "",
     `# Brain Lint Sweep — ${day}`, "",
-    "*Read-only audit: the tiers' reads are one snapshot, and the tiers write nothing to the brain. Tier 3's findings are a model's reading: suggestions, not facts.*", "",
+    "*Read-only audit: the tiers' reads are one snapshot (Tier 3 reads each batch again just before its call), and the tiers write nothing to the brain. Tier 3's findings are a model's reading: suggestions, not facts.*", "",
     "## Scan scope", "",
   ];
   if (r.t1) L.push(`- **Tier 1** — the table's row count and its rows with no content_fingerprint or no finite created_at, exact; the per-row checks over the **${r.t1.sampled} newest dated thoughts** (\`created_at desc\`; at most ${TIER1_SAMPLE}).`);
@@ -742,7 +776,8 @@ function reasonOf(e: unknown): string {
 
 /**
  * The sweep: the tiers asked for, from one snapshot, then Tier 3's calls, then the report. Exit code: 0 written; 1 not
- * written, or written with Tier 3 stopped by a failed call; 2 another database.
+ * written, or written with Tier 3 failed (its read, a batch's second read, or a call); 2 another database, or the worker
+ * key refused.
  */
 export async function run(opts: SweepOptions): Promise<number> {
   const w = opts.writer ?? consoleWriter;
@@ -817,16 +852,21 @@ export async function run(opts: SweepOptions): Promise<number> {
         w.out(`[tier 2] of the newest ${t2.sampled}: ${t2.unmentionedCount} with no entity mention; ${t2.entitiesWithNoEdges} of ${t2.entities} entities with no edge`);
       }
       if (o3 && !t3) {
+        // Under a savepoint: a read that fails (its bound, a column the role may not read) fails Tier 3 alone, and the
+        // report keeps tiers 1 and 2 (review pass 2).
+        await tx.unsafe("SAVEPOINT tier3");
         try {
           sample = await tier3Sample(tx, o3);
+          await tx.unsafe("RELEASE SAVEPOINT tier3");
         } catch (e) {
-          throw new Error(`tier 3: ${reasonOf(e)}`);
+          await tx.unsafe("ROLLBACK TO SAVEPOINT tier3");
+          t3 = skipped3(o3, `its sample's read: ${reasonOf(e)}`, {}, "failed");
         }
       }
     });
     if (o3 && sample) t3 = await tier3Calls(opts.sql, sample, o3, w);
     if (t3) {
-      w.out(t3.status === "skipped" ? `[tier 3] skipped: ${t3.reason}`
+      w.out(t3.status === "skipped" ? `[tier 3] skipped: ${t3.reason}` : t3.status === "failed" && t3.calls === 0 && t3.read === 0 ? `[tier 3] failed: ${t3.reason}`
         : `[tier 3] ${t3.read} read, ${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy; ${t3.changed ? `${t3.changed} gone or held back before their call, ` : ""}${t3.sent} sent in ${t3.calls} call(s): ${t3.findings.length} finding(s)${t3.unreadable ? `, ${t3.unreadable} answer(s) not JSON` : ""}${t3.dropped ? `, ${t3.dropped} dropped` : ""}`);
     }
   } catch (e) {
