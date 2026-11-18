@@ -182,8 +182,12 @@ const HEADER_TICKETS = /^\s*Session summary — ([A-Z][A-Z0-9]*-[0-9]+(?:, [A-Z]
 const HEADER_TICKETS_MAX = 3;
 /** A ticket-shaped word as the capture hook reads one in a branch or a directory (its TICKET_RE). */
 const HOOK_TICKETS = /\b([A-Za-z]{2,5})-([0-9]{2,6})\b/g;
-/** The prefixes the capture hook takes for no ticket (its NOT_TICKETS), beside this module's NOT_TICKET_PREFIXES. */
-const HOOK_NOT_TICKETS: ReadonlySet<string> = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML"]);
+/**
+ * The prefixes the capture hook takes for no ticket (its NOT_TICKETS), beside this module's NOT_TICKET_PREFIXES: since
+ * hook 1.8.1 its list holds this module's too, those its shape can match, and IPV, MD, ED and HTML besides.
+ */
+export const HOOK_NOT_TICKETS: ReadonlySet<string> = new Set(["SHA", "UTF", "ISO", "RFC", "CVE", "IPV", "TLS", "SSL", "HTTP", "PR", "MD", "AES", "RSA", "GPT", "ED", "HTML",
+  "IEEE", "CWE", "WCAG", "GPL", "LGPL", "AGPL", "FSL", "BSD", "MPL", "CC", "ES", "COVID", "FY"]);
 /** The header's branch part, `(branch)` before the day: renderSummary writes `… project (branch) — day`. */
 const HEADER_BRANCH = /\(([^()]*)\)\s+—\s+[^—]*$/;
 /** The hook's own line breaks: a character LINE_BREAK also reads as one stays inside the prompt the hook wrote it in (review pass 2: a pasted NEL ended the read). */
@@ -222,10 +226,14 @@ export const TICKETS_FROM = "tickets_from";
  * The hook's header lists the tickets the session's prompts named, and the branch's or directory's only when they named
  * none; on Verify item 1 (post hoc) the header's ticket was the session's own subject for 0.857 of the sessions whose
  * prompts named it and 0.667 of those whose prompts did not, where a session on a branch did other work: a triage, a
- * release, a review. The hook learns a team from every ticket-shaped word of a branch or a directory, so on
- * `smd-610-bump-node-22` a prompt's `node-22` is a ticket to it (SMD-4291): a header listing a ticket of another team
- * than the session's is the model's. The session's team is the first ticket of the header's own branch, else of its
- * project, as the hook's anchorOf reads a place, read with the hook's own shape (two to five letters, two to six
+ * release, a review. The hook before 1.8.1 learned a team from every ticket-shaped word of a branch or a directory, so
+ * on `smd-610-bump-node-22` a prompt's `node-22` was a ticket to it; from 1.8.1 a place teaches its own ticket's team
+ * alone (SMD-4291), but a place with no ticket teaches its first ticket-shaped word's (`node-22-pin`) and the session's
+ * teams are every place it has been but a folder entered from within its checkout, so the guard stays for those
+ * summaries too: a header listing a ticket of another
+ * team than the session's is the model's. The session's team is the first ticket of the header's own branch, else of
+ * its project (the directory's last part, which the header shows; the hook reads the deepest part that names one), as
+ * the hook's anchorOf reads a branch, read with the hook's own shape (two to five letters, two to six
  * digits) and no prefix either list denies (PR 7a-3b-2's review passes 3, 5 and 6). A denied prefix the hook listed is
  * no ticket (isTicket), and a header listing more than the hook's three is not the hook's. The hook's layout is read as
  * it is written: the header; a blank line between its parts; `Title: …`, passed over; `Asked (N prompts):` and its
