@@ -16,7 +16,7 @@ import type { Ctx } from "./context.ts";
 import { ok, refuse, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 import { weightsRefused } from "./weights.ts";
-import { unreviewedFor, unreviewedOf } from "./reads.ts";
+import { markItems } from "./reads.ts";
 
 export type { AgendaResult };
 /** The agenda's answer: the store's, and the weights the call passed (SMD-4193), null for the defaults. */
@@ -57,10 +57,12 @@ export async function agenda(ctx: Ctx, principal: Principal, input: Input<"agend
     if (bad) return refuse(bad);
     throw e;
   }
-  await ctx.logAgenda(principal, { ...scope, ...(input.holder ? { holder: input.holder } : {}), include_blocked: input.include_blocked, include_claimed: input.include_claimed, include_proposed: input.include_proposed, include_started: input.include_started, order: input.order, ...(weights ? { weights } : {}) },
-    input.limit, r.items.map((i) => ({ kind: i.kind, key: i.key, effective: i.effective })));
   // The unreviewed mark (SMD-3671 PR 3): each listed item's pending stale finding, read after the agenda decided its
-  // list, so it never moves a place; best-effort, a failed read every mark null.
-  const read = await unreviewedOf(store, r.items);
-  return ok({ ...r, items: r.items.map((i) => ({ ...i, unreviewed: unreviewedFor(read, i) })), weights: weights ?? null });
+  // list, so it never moves a place, beside the log row (review pass 1); best-effort, a failed read every mark null.
+  const [, marked] = await Promise.all([
+    ctx.logAgenda(principal, { ...scope, ...(input.holder ? { holder: input.holder } : {}), include_blocked: input.include_blocked, include_claimed: input.include_claimed, include_proposed: input.include_proposed, include_started: input.include_started, order: input.order, ...(weights ? { weights } : {}) },
+      input.limit, r.items.map((i) => ({ kind: i.kind, key: i.key, effective: i.effective }))),
+    markItems(store, r.items),
+  ]);
+  return ok({ ...r, items: marked.items, weights: weights ?? null });
 }

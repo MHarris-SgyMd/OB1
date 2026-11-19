@@ -1785,13 +1785,16 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
  * the newest `asserted_at` among the finding's statements, so the days never overstate how long the statement has
  * stood; `days` the whole days from it to the database's now (the clock that stamped it), 0 at the least. Both null
  * when the evidence's statements, or any one's time, could not be read: the item is still marked, without a count, as a
- * finding stands on it. `windowDays` is the scan's window the finding was found under.
+ * finding stands on it. `level` and `maker` are that newest statement's (review pass 1: the statement under review
+ * need not be the one setting the level a read shows, as a source's counted High beside an agent's stale Low), null
+ * when its time, or they, could not be read. `windowDays` is the scan's window the finding was found under.
  */
-export type Unreviewed = { findingId: string; statedAt: string | null; days: number | null; windowDays: number };
+export type Unreviewed = { findingId: string; statedAt: string | null; days: number | null; level: number | null; maker: string | null; windowDays: number };
 /**
  * A priority label's unreviewed mark (SMD-3671 PR 3): the item's pending stale finding; `false` when it has none; null
- * when it was not read — the findings read failed (a brain before 142, a role without its SELECT), the item was past
- * the read's reach, or the answer came from a store or REST core that does not read them.
+ * when it was not checked — the findings read failed (a brain before 142, a role without its SELECT) or ran out of
+ * time, the item was past the read's reach (a result counts those in `unreviewedNotRead`), or the answer came from a
+ * store or REST core that does not read them.
  */
 export type UnreviewedMark = Unreviewed | false | null;
 const DAY_MS = 86_400_000;
@@ -1805,12 +1808,12 @@ const DAY_MS = 86_400_000;
 export function normaliseStaleUnreviewed(r: Record<string, unknown>): { item: { kind: string; key: string }; unreviewed: Unreviewed } | null {
   if (typeof r.id !== "string" || typeof r.item_kind !== "string" || typeof r.item_key !== "string") return null;
   const { statements, read } = findingStatements(isRecord(r.evidence) ? r.evidence : {});
-  const times = statements.map((s) => s.assertedAt);
-  const whole = read.includes("statements") && times.length > 0 && times.every((t): t is string => t !== null);
-  const statedAt = whole ? times.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : null;
+  const whole = read.includes("statements") && statements.length > 0 && statements.every((s) => s.assertedAt !== null);
+  const newest = whole ? statements.reduce((a, b) => (Date.parse(b.assertedAt!) > Date.parse(a.assertedAt!) ? b : a)) : null;
+  const statedAt = newest?.assertedAt ?? null;
   const now = r.now instanceof Date ? r.now.getTime() : typeof r.now === "string" ? Date.parse(r.now) : NaN;
   const days = statedAt === null || Number.isNaN(now) ? null : Math.max(0, Math.floor((now - Date.parse(statedAt)) / DAY_MS));
-  return { item: { kind: r.item_kind, key: r.item_key }, unreviewed: { findingId: r.id, statedAt, days, windowDays: Number(r.window_days) } };
+  return { item: { kind: r.item_kind, key: r.item_key }, unreviewed: { findingId: r.id, statedAt, days, level: newest?.level ?? null, maker: newest?.maker ?? null, windowDays: Number(r.window_days) } };
 }
 
 /**
@@ -2950,8 +2953,10 @@ export interface ThoughtStore {
    * label: one statement over 142's partial index of the pending (kind, item kind, item key), each item as a finding keys
    * it (a thought its lower-case id, a ticket its upper-case key, a ticket's own rows as the ticket). The caller bounds
    * the items (1000). An item with none is absent. A database before 142, or a role without SELECT on the table, throws.
+   * `timeoutMs` (plan_context's deadline, review pass 1) is a statement timeout local to the call, as the agenda's is;
+   * past it, it throws 57014.
    */
-  staleUnreviewedOn(items: readonly { kind: string; key: string }[]): Promise<{ item: { kind: string; key: string }; unreviewed: Unreviewed }[]>;
+  staleUnreviewedOn(items: readonly { kind: string; key: string }[], opts?: { timeoutMs?: number }): Promise<{ item: { kind: string; key: string }; unreviewed: Unreviewed }[]>;
   /**
    * An operator's decision on a pending finding (migration 142's review_priority_finding): accept with a level (and a
    * due time) or clear, or reject. The function decides who may — a key the registry classifies operator, by its agent

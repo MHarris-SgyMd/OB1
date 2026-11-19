@@ -22,7 +22,8 @@ import type { AgendaItem, AgendaOther, AgendaWaiting, ThoughtHybridMatch } from 
 import { TOOLS, unlocks, visibleToolNames, type ToolScope } from "../tools.ts";
 import type { Ctx } from "./context.ts";
 import { loadPlugins } from "./plugins.ts";
-import { labelHits, runSearch, ticketsNamedBy, unreviewedFor, unreviewedOf, type QueryVectorFailed, type SearchHit } from "./reads.ts";
+import { knownMarks, labelHits, markItems, runSearch, ticketsNamedBy, type QueryVectorFailed, type SearchHit } from "./reads.ts";
+import type { Unreviewed } from "../store.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 
@@ -224,6 +225,8 @@ export type PlanGap =
   | { gap: "tickets_missing"; keys: string[]; more?: number }
   | { gap: "tickets_not_read"; count: number }
   | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number }
+  /** The board's unreviewed marks (SMD-3671 PR 3 review pass 1) not read: out of the deadline, or failed; each such mark null. A note, not a coverage gap. */
+  | { gap: "unreviewed_not_read"; reason: "deadline" | "failed" }
   | PlanTrimmed;
 
 /**
@@ -331,7 +334,9 @@ const sqlState = (e: unknown) => String((e as { errno?: unknown; code?: unknown 
  * cancelled, 57014: the deadline, or a stricter timeout the database keeps), an agenda before 126 (which refuses the
  * keys scope by name), or any other failure, which the server's log names. A failure never fails the read.
  */
-export async function boardOf(ctx: Pick<Ctx, "store">, given: { keys: string[]; notRead: number }, leftMs: number): Promise<{ board: PlanBoard; gaps: PlanGap[] }> {
+export async function boardOf(ctx: Pick<Ctx, "store">, given: { keys: string[]; notRead: number }, leftMs: number,
+  known: ReadonlyMap<string, Unreviewed | false> = new Map(), clock: () => number = () => performance.now()): Promise<{ board: PlanBoard; gaps: PlanGap[] }> {
+  const started = clock();
   const gaps: PlanGap[] = [];
   let named = given;
   let board: PlanBoard;
@@ -347,11 +352,12 @@ export async function boardOf(ctx: Pick<Ctx, "store">, given: { keys: string[]; 
       });
       // An agenda before 126 refuses a keys scope (below), so an answer without `keyed` is a fault.
       if (a.keyed === null) throw new Error("agenda answered no keyed tickets for a keys scope");
-      // The unreviewed mark (SMD-3671 PR 3), as the agenda's: one indexed read of the listed tickets' pending stale
-      // findings, best-effort (it never throws), outside the deadline's statement timeout: at most 100 keys, by 142's index.
-      const read = await unreviewedOf(store, a.items);
-      const tickets = a.items.map((i) => ({ ...i, unreviewed: unreviewedFor(read, i) }));
-      board = { available: true, tickets, others: a.keyed.others, waiting: a.keyed.waiting, claimsRead: a.claimsRead, claimsLive: a.claimsLive, boardSync: a.boardSync };
+      // The unreviewed mark (SMD-3671 PR 3), as the agenda's: the tickets the knowledge hits' marks already read are not
+      // asked again (review pass 1: two reads a reply), the rest under what is left of the deadline, its statement
+      // timeout as the agenda's; out of time or failed, every mark not read is null, and a gap says why. It never throws.
+      const marked = await markItems(store, a.items, { known, timeoutMs: leftMs - (clock() - started) });
+      if (marked.failed) gaps.push({ gap: "unreviewed_not_read", reason: marked.failed });
+      board = { available: true, tickets: marked.items, others: a.keyed.others, waiting: a.keyed.waiting, claimsRead: a.claimsRead, claimsLive: a.claimsLive, boardSync: a.boardSync };
       if (a.keyed.missing.length) gaps.push({ gap: "tickets_missing", keys: a.keyed.missing });
       // Open named tickets past the list's 100: in total alone (review pass 2).
       named = { ...named, notRead: named.notRead + Math.max(0, a.total - a.items.length) };
@@ -398,7 +404,8 @@ export async function planContext(ctx: Ctx, principal: Principal, input: Input<"
 
   // Board: the named tickets, in one agenda call, with what is left of the deadline.
   const named = boardKeysOf(hits);
-  const { board, gaps: boardGaps } = await boardOf(ctx, named, deadlineMs - (clock() - started));
+  // The marks the knowledge's labels read are the board's too, where they name its tickets (SMD-3671 PR 3 review pass 1).
+  const { board, gaps: boardGaps } = await boardOf(ctx, named, deadlineMs - (clock() - started), knownMarks(hits), clock);
   gaps.push(...boardGaps);
 
   // Held to the reply's budget (SMD-4191); the log below names every hit and ticket read, cut or not.

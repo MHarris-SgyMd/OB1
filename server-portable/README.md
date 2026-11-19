@@ -582,26 +582,44 @@ thought, which is its id. Over REST every field is there, with the terms.
 label names carries `unreviewed`: sleep's pending stale finding on it (migration
 142's `priority_findings`), a statement by the brain's own keys older than the
 review's window, with nothing done on the item since, that no operator has
-decided. It is `{findingId, statedAt, days, windowDays}`: `statedAt` the newest
-`asserted_at` among the finding's statements, so `days`, whole days from it to
-the database's now, never overstates how long a statement has stood; both null
+decided. It is `{findingId, statedAt, days, level, maker, windowDays}`: the
+newest of the finding's statements — its `asserted_at`, so `days`, whole days
+from it to the database's now, never overstates how long a statement has stood,
+and its level and maker, as that statement need not be the one setting the
+level shown (a source's counted High beside an agent's stale Low). Each is null
 when the finding's statements, or any one's time, could not be read (the item is
-still marked, without an age, as a finding stands on it). `false` is none;
-`null` is not read: a brain before 142, a role without SELECT on the table, a
-read that failed (one log line names why), or an item past the read's reach of
-1000. The agenda's items and `plan_context`'s board tickets carry it too. Over
-MCP a marked item reads `…, stated 75 days ago, unreviewed` (`1 day`, `today`,
-or no age) in the `Priority` line, the title and the agenda's line, the reply
-says once what it means, and marks not read are said once; the compact value
-carries `unreviewed` only where an item is marked, or null where the marks were
-not read. One read per reply, of the labelled items alone, after the priorities
-(none when nothing is labelled), by 142's partial index of the pending; it never
-fails or nulls the priority. It is a mark, never a weight: no order, rank or
-filter reads it, so a ranked search, the agenda and the board order alike with
-it or without. It lags the review, whose scan writes and moots findings at most
-every six hours, and with sleep off nothing is marked. An operator's accept or
-reject (`review_priority_finding`), or the scan mooting the finding, takes the
-mark away.
+still marked). `false` is none; `null` is not checked. A level read from an open
+item or inherited carries its source's mark on `fromItem.unreviewed` and
+`inheritedFrom.unreviewed`: the statement under review is the source's, and the
+item itself is not said stale for it. The agenda's items and `plan_context`'s
+board tickets carry it too.
+
+Not checked is one of two things, kept apart: a read that failed (a brain before
+142, a role without SELECT on the table, one log line naming why), said once a
+reply; or a mark past the read's reach of 1000 items, counted on its result in
+`unreviewedNotRead` and said as not checked. The board's marks, read under
+what is left of `plan_context`'s deadline, out of time or failed, are a gap of
+their own, `unreviewed_not_read`.
+
+Over MCP a marked item reads `…, medium (2) by codex, stated 75 days ago,
+unreviewed` (`1 day`, `today`, or no statement and no age when not read) in the
+`Priority` line, the title and the agenda's and board's lines, a source's in
+brackets after the source; the reply says once what it means. The compact value
+carries `unreviewed` (no maker: a key's name rides the text) only where a mark is
+present, never a null; a failed read is the value's top-level
+`unreviewedRead: false`. `search` and `fetch` carry the meaning, or the failed
+read, once in `unreviewedNote`, as `priorityNote`.
+
+At most two reads a reply: the first of the keys the priority read asks, beside
+it; a second only for what its answer names that the first did not ask (a
+level's source, or the board's tickets the knowledge's marks did not cover). By
+142's partial index of the pending, and never failing or nulling the priority.
+It is a mark, never a weight: no order, rank or filter reads it, so a ranked
+search, the agenda and the board order alike with it or without. It lags the
+review, whose scan writes and moots findings at most every six hours, and with
+sleep off nothing is marked. An operator's accept or reject
+(`review_priority_finding`), or the scan mooting the finding, takes the mark
+away.
 
 ### Tickets that moved since a hit was written (migration 095)
 

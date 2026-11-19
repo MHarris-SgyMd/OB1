@@ -1312,14 +1312,29 @@ export class SqlStore implements ThoughtStore {
   // SMD-3671 PR 3: the unreviewed mark's read, one statement for a page. Both literals are in its text, so a cached
   // generic plan can still use 142's partial index of the pending (kind, item_kind, item_key), as the pending listing's
   // does; the items are two parallel arrays, unnested in step. The database's now rides each row, so the days count on
-  // the clock that stamped the statements.
-  async staleUnreviewedOn(items: readonly { kind: string; key: string }[]): Promise<{ item: { kind: string; key: string }; unreviewed: Unreviewed }[]> {
+  // the clock that stamped the statements. Under plan_context's deadline, the agenda's ceiling (review pass 1).
+  async staleUnreviewedOn(items: readonly { kind: string; key: string }[], opts: { timeoutMs?: number } = {}): Promise<{ item: { kind: string; key: string }; unreviewed: Unreviewed }[]> {
     if (items.length === 0) return [];
-    const rows = await this.sql`
+    const read = (q: typeof this.sql) => q`
       SELECT f.id::text AS id, f.item_kind, f.item_key, f.evidence, f.window_days, now() AS now
-        FROM unnest(${this.sql.array(items.map((i) => i.kind), "TEXT")}::text[], ${this.sql.array(items.map((i) => i.key), "TEXT")}::text[]) AS i(kind, key)
-        JOIN priority_findings f ON f.kind = 'stale' AND f.status = 'pending' AND f.item_kind = i.kind AND f.item_key = i.key` as Record<string, unknown>[];
+        FROM unnest(${q.array(items.map((i) => i.kind), "TEXT")}::text[], ${q.array(items.map((i) => i.key), "TEXT")}::text[]) AS i(kind, key)
+        JOIN priority_findings f ON f.kind = 'stale' AND f.status = 'pending' AND f.item_kind = i.kind AND f.item_key = i.key` as Promise<Record<string, unknown>[]>;
+    const rows = opts.timeoutMs === undefined ? await read(this.sql) : await this.underCeiling(opts.timeoutMs, read);
     return rows.map(normaliseStaleUnreviewed).filter((r) => r !== null);
+  }
+
+  /**
+   * A read under a deadline (plan_context, SMD-2684): a statement-timeout ceiling, as readDatabaseFacts sets one — 0
+   * (none) or a looser setting is lowered to it, a stricter one kept — local to the read's own transaction. The agenda's
+   * and the unreviewed read's (SMD-3671 PR 3 review pass 1).
+   */
+  private async underCeiling<T>(timeoutMs: number, run: (q: typeof this.sql) => Promise<T>): Promise<T> {
+    const ms = Math.max(1, Math.floor(timeoutMs));
+    return await this.sql.begin(async (tx) => {
+      await tx`SELECT set_config('statement_timeout', (CASE WHEN s.st = 0 OR s.st > ${ms}::int THEN ${ms}::int ELSE s.st END)::text, true)
+                 FROM (SELECT setting::int AS st FROM pg_settings WHERE name = 'statement_timeout') s`;
+      return run(tx as unknown as typeof this.sql);
+    }) as T;
   }
 
   // SMD-3671 PR 2: 142's operator decision, one statement. The envelope states the key's scope (116's rule, which 142
@@ -1361,14 +1376,8 @@ export class SqlStore implements ThoughtStore {
       return r;
     };
     if (opts.timeoutMs === undefined) return checked(normaliseAgenda((await call(this.sql))[0]?.a, "agenda"));
-    // A deadline (plan_context, SMD-2684): a ceiling, as readDatabaseFacts sets one — 0 (none) or a looser setting is
-    // lowered to it, a stricter one kept — local to the call's own transaction.
-    const ms = Math.max(1, Math.floor(opts.timeoutMs));
-    const rows = await this.sql.begin(async (tx) => {
-      await tx`SELECT set_config('statement_timeout', (CASE WHEN s.st = 0 OR s.st > ${ms}::int THEN ${ms}::int ELSE s.st END)::text, true)
-                 FROM (SELECT setting::int AS st FROM pg_settings WHERE name = 'statement_timeout') s`;
-      return call(tx as unknown as typeof this.sql);
-    });
+    // A deadline (plan_context, SMD-2684): underCeiling's statement timeout, local to the call's own transaction.
+    const rows = await this.underCeiling(opts.timeoutMs, call);
     return checked(normaliseAgenda(rows[0]?.a, "agenda"));
   }
 
