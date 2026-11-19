@@ -4244,6 +4244,9 @@ if (want("9f")) {
   let afford402Next = 0;
   /** Every row's call that arrived, whatever its answer (SMD-4352). */
   let rowCalls = 0;
+  /** While set, a row's call is answered by it, whatever its text (SMD-4143): every one, or with `rowAnswerOnce` the next alone. */
+  let rowAnswer: (() => Response) | null = null;
+  let rowAnswerOnce = false;
   /** While above zero, the next row's call is held quickMs, not slowMs, whatever its text (SMD-4401): one worker done while the other's call is in flight. */
   let quickNext = 0;
   let quickMs = 1500;
@@ -4346,6 +4349,11 @@ if (want("9f")) {
       }
       // Past the worker line's 200 characters and the closing line's 300, as OpenRouter's is with its advice (review pass 3).
       if (!probe) rowCalls++;
+      if (!probe && rowAnswer !== null) {
+        const answer = rowAnswer;
+        if (rowAnswerOnce) rowAnswer = null;
+        return answer();
+      }
       if (!probe && afford402Next > 0) {
         afford402Next--;
         // Late, so the other worker's call is made by then: answered at once, the refusal met it between its claim and its call.
@@ -4965,34 +4973,58 @@ if (want("9f")) {
         `one of two workers' calls refused as the request's ends the other with the thought it holds, no call made after the two: at most one of five re-embedded, the rest pending, none failed, the follower ended 2 (SMD-4352; ${pairEnd}; ${JSON.stringify(pairClaims)}; ${pairRefusals} refusal(s) said; ${rowCalls - pairCalls} row call(s); ${pairStop.lines.filter((l) => /reembed-|returned|pool:/.test(l)).map((l) => l.trim().replace(/reembed-\S+-(\d)-\w+/g, "w$1").slice(0, 110)).join(" | ").slice(0, 600)})`);
       await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(pairIds, "TEXT")}::uuid[])`;
 
-      // A one-shot run whose probe the gate skips, its first row's call refused 401 (SMD-4352): the first row stands in
-      // for the probe, the run halts, and the worker claims no more of its batch — that row recorded failed, the
-      // other three left pending, not failed one by one. The four are the only thoughts not at the model, so the pool is theirs.
+      // A one-shot run whose probe the gate skips (SMD-4352, SMD-4143): the first row stands in for the probe. Its
+      // call failing as the configuration's would — a 400 to 404, a redirect, a body that is not JSON, a vector of
+      // another width, no vector at all — halts the run, and the worker claims no more of its batch: that row
+      // recorded failed, the other three left pending, not failed one by one. Failing as the moment's would, a 408,
+      // a 429, a 500 or a 503, it is the row's alone: no halt, and the run goes on to the other three. Each case's
+      // four are the only thoughts not at the model, so the pool is theirs.
       const haltEnv = { ...env, OB1_LLM_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "type:halt-row" } as Record<string, string>;
       const haltOthers = Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM 'stub-embed'`)[0].n);
-      const haltIds = ((await sql`INSERT INTO thoughts (content, metadata) SELECT 'a thought of four the halted run leaves pending, number ' || g, ${{ type: "halt-row" }}::jsonb FROM generate_series(1, 4) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
-      const haltLines: string[] = [];
-      let haltCode: number | null = null;
-      keyRefused401 = true;
-      try {
-        const haltAc = new AbortController();
-        const haltRun = runReembed({ url: URL_!, env: haltEnv, workers: 1, batch: 4, signal: haltAc.signal, writer: { out: (l) => haltLines.push(l), err: (l) => haltLines.push(l) } });
-        haltCode = await Promise.race([haltRun, Bun.sleep(15_000).then(() => null)]);
-        if (haltCode === null) {
-          haltAc.abort();
-          await haltRun;
+      assert(haltOthers === 0, `before the halted runs, no other thought waits to be pooled: an earlier row's left behind would be claimed beside each case's four (${haltOthers} not at the model)`);
+      const refusedAs = (status: number) => () => Response.json({ error: { message: `stub: the endpoint answers ${status}` } }, { status });
+      const standIns: { what: string; answer: () => Response; halts: boolean; once?: boolean }[] = [
+        ...[400, 401, 402, 403, 404].map((status) => ({ what: `refused ${status}`, answer: refusedAs(status), halts: true })),
+        { what: "redirected, a 302", answer: () => new Response(null, { status: 302, headers: { location: "http://127.0.0.1:9/elsewhere" } }), halts: true },
+        { what: "answered a body that is not JSON", answer: () => new Response("<html>the gateway's page</html>", { status: 200, headers: { "content-type": "text/html" } }), halts: true },
+        { what: "answered a vector of another width", answer: () => Response.json({ data: [{ embedding: new Array(DIM + 1).fill(0.5) }] }), halts: true },
+        { what: "answered no vector", answer: () => Response.json({ data: [] }), halts: true },
+        // The moment's: the first call alone, the rest answered as any.
+        ...[408, 429, 500, 503].map((status) => ({ what: `refused ${status}, once`, answer: refusedAs(status), halts: false, once: true })),
+      ];
+      for (const c of standIns) {
+        const haltIds = ((await sql`INSERT INTO thoughts (content, metadata) SELECT 'a thought of four the first row stands in for, number ' || g, ${{ type: "halt-row" }}::jsonb FROM generate_series(1, 4) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        const haltLines: string[] = [];
+        let haltCode: number | null = null;
+        rowAnswer = c.answer;
+        rowAnswerOnce = c.once === true;
+        try {
+          const haltAc = new AbortController();
+          const haltRun = runReembed({ url: URL_!, env: haltEnv, workers: 1, batch: 4, signal: haltAc.signal, writer: { out: (l) => haltLines.push(l), err: (l) => haltLines.push(l) } });
+          haltCode = await Promise.race([haltRun, Bun.sleep(15_000).then(() => null)]);
+          if (haltCode === null) {
+            haltAc.abort();
+            await haltRun;
+          }
+        } finally {
+          rowAnswer = null;
+          rowAnswerOnce = false;
         }
-      } finally {
-        keyRefused401 = false;
+        const haltClaims = (await sql`SELECT status, count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND thought_id = ANY(${sql.array(haltIds, "TEXT")}::uuid[]) GROUP BY status`) as { status: string; n: number }[];
+        const haltOf = (status: string) => haltClaims.find((r) => r.status === status)?.n ?? 0;
+        const haltSaid = haltLines.filter((l) => /the first row failed before any succeeded — .* halting so the pool is not marked failed row by row/.test(l));
+        const haltPending = haltLines.some((l) => /3 row\(s\) are still pending: every worker stopped before the pool was empty — the provider's first answer was a failure/.test(l));
+        const skipped = haltLines.some((l) => /probe: +skipped — /.test(l));
+        const shown = `exit ${haltCode}; ${JSON.stringify(haltClaims)}; halt said ${haltSaid.length} time(s)${haltSaid[0] ? `: ${haltSaid[0].trim().slice(0, 200)}` : ""}; pending said ${haltPending}`;
+        if (c.halts) {
+          assert(haltCode === 1 && skipped && haltSaid.length === 1 && haltOf("failed") === 1 && haltOf("pending") === 3 && haltPending,
+            `a one-shot run with its probe skipped, the first row's call ${c.what}, halts: that row failed, the batch's other three left pending and said so, not failed row by row (SMD-4352, SMD-4143; ${shown})`);
+        } else {
+          assert(haltCode === 1 && skipped && haltSaid.length === 0 && haltOf("failed") === 1 && haltOf("succeeded") === 3 && !haltPending,
+            `…its first row's call ${c.what}, does not halt: the moment's failure is the row's alone, recorded failed, and the run goes on to re-embed the other three (SMD-4143; ${shown})`);
+        }
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(haltIds, "TEXT")}::uuid[])`;
       }
-      const haltClaims = (await sql`SELECT status, count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND thought_id = ANY(${sql.array(haltIds, "TEXT")}::uuid[]) GROUP BY status`) as { status: string; n: number }[];
-      const haltOf = (status: string) => haltClaims.find((c) => c.status === status)?.n ?? 0;
-      const haltSaid = haltLines.filter((l) => /the first row failed before any succeeded — .* 401 .* halting so the pool is not marked failed row by row/.test(l)).length;
-      const haltPending = haltLines.some((l) => /3 row\(s\) are still pending: every worker stopped before the pool was empty — the provider's first answer was a failure/.test(l));
-      assert(haltOthers === 0, `before the halted run, no other thought waits to be pooled: an earlier row's left behind would be claimed beside the four (${haltOthers} not at the model)`);
-      assert(haltCode === 1 && haltLines.some((l) => /probe: +skipped — /.test(l)) && haltSaid === 1 && haltOf("failed") === 1 && haltOf("pending") === 3 && haltPending,
-        `a one-shot run with its probe skipped, the first row's call refused 401, halts: that row failed, the batch's other three left pending and said so, not failed row by row (SMD-4352; exit ${haltCode}; ${JSON.stringify(haltClaims)}; halt said ${haltSaid} time(s), pending said ${haltPending})`);
-      await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(haltIds, "TEXT")}::uuid[])`;
 
       // The record moved, seen by one worker while the other's call is in flight, and moved back before that call
       // ends (SMD-4352, SMD-4401): the follower has seen the move and ends, so the second worker, through the gate
