@@ -50,9 +50,19 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   `-h` (`--help` prints the flags). `--sample-size`, `--max-llm-calls` and
   `--days` are Tier 3's as before; `--llm-model` is `--model` now, and
   `--verbose` went with the recipe's progress lines (each refused saying why).
-  `OPENROUTER_API_KEY` is not read: Tier 3 reaches the brain's own chat
-  endpoint, and only as the egress policy lets each thought leave (below), so a
-  job that ran Tier 3 needs that policy to say so, or runs tiers 1 and 2 alone. A read-only role the old README granted
+  Tier 3 no longer calls OpenRouter itself: it reads the endpoint, the model
+  and the egress policy from the environment it runs in, as the brain's server
+  reads them from its own (below), and nothing from the stack's `deploy/.env`.
+  So the job's `.env` carries them: `OB1_LLM_BASE_URL` (or `OB1_CHAT_BASE_URL`)
+  at an address the host reaches (the stack's default, `http://ollama:11434/v1`,
+  resolves only inside it), its key as `OB1_LLM_API_KEY` (or
+  `OB1_CHAT_API_KEY`), `OB1_METADATA_MODEL` or `--model` naming a model that
+  endpoint serves, the `OB1_EGRESS_*` terms, and, for an `actor:` term,
+  `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS`. `OPENROUTER_API_KEY` is still read,
+  as `OB1_LLM_API_KEY`'s fallback: left in the file, it goes as the bearer key
+  to whatever endpoint the job names, so remove it unless that endpoint is
+  OpenRouter. A job that ran Tier 3 needs the policy to let its thoughts leave,
+  or runs tiers 1 and 2 alone (`--max-llm-calls 0`). A read-only role the old README granted
   `entities` and `edges` needs SELECT on `ob1_entities` and `ob1_entity_edges`
   in their place: the run locks every table its tiers read first, so a missing
   grant fails the whole run, Tier 1 included (`--tier 1` needs `thoughts`
@@ -66,19 +76,25 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   `--statement-timeout` (60 s; 0 for none), lifted for the whole-table counts,
   and every lock wait by the same bound. In `pg_stat_activity` the run is
   `lint-sweep`.
-- **Tier 3's egress.** The thoughts go to the chat endpoint and model the
-  brain's server resolves (`OB1_CHAT_BASE_URL` or `OB1_LLM_BASE_URL`,
-  `OB1_METADATA_MODEL`; `--model` names another), each put to the egress gate on
+- **Tier 3's egress.** The thoughts go to the chat endpoint and model resolved
+  as the brain's server resolves them, from the run's own environment
+  (`OB1_CHAT_BASE_URL` or `OB1_LLM_BASE_URL`, their keys, `OB1_METADATA_MODEL`;
+  `--model` names another; the `[tier 3] model …; egress: …` line says which),
+  each put to the egress gate on
   its own units: `OB1_WORKER_KEY`'s name as the actor, its source, type and
   topics, and what is sent of it (its text, type, topics and tags) and its
   whole text as the marker: it goes only when both pass, so a marker anywhere
   in a thought is the thought's. A refused thought is left out. Under the
   default deny, with no allow term and no endpoint declared local, the tier is
   skipped before any read, and the report says why. Release it with
-  `OB1_EGRESS_ALLOW=actor:<the worker key>`, or with a source, type, topic or
-  marker the thoughts to send carry, or run a local model (`OB1_LLM_LOCAL=1`).
-  A worker key the server would refuse (not in `MCP_ACCESS_KEYS`, or revoked)
-  refuses the run, exit 2. Under `OB1_EGRESS_POLICY=allow` a deny term (`topic:health`) holds its
+  `OB1_EGRESS_ALLOW=actor:<the worker key's name>` (the `--name` keygen gave
+  it, never the key itself, which the run would print and match nothing), or
+  with a source, type, topic or marker the thoughts to send carry, or run a
+  local model (`OB1_LLM_LOCAL=1`; `OB1_CHAT_LOCAL=1` for a chat endpoint of its
+  own). Once a thought could leave, a worker key the server would refuse (not
+  in `MCP_ACCESS_KEYS`, or revoked) refuses the run, exit 2. A skipped tier
+  exits 0: the `[tier 3] skipped:` line and the report say why, with what was
+  read and held back. Under `OB1_EGRESS_POLICY=allow` a deny term (`topic:health`) holds its
   thoughts back. Before the gate, a thought `restricted`, or `personal` unless
   `--include-personal`, by its `sensitivity_tier` key or column or by the
   sensitivity patterns over what is sent and its whole text, is never sent
@@ -111,9 +127,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
 - **Tier 3, a model's reading:** the newest dated thoughts of the last
   `--days` (365) whose text, trimmed, is 20 characters or more, read newest
   first until as many as the calls can send are left once the hold-back and
-  the gate have kept theirs back (`--sample-size`, 100 and at least 10, or
+  the gate have kept theirs back (`--sample-size`, 100, 10 to 1,000, or
   `--max-llm-calls` × 20 if less; at most 10,000 read), sent 20 a call, at most
-  `--max-llm-calls` (5; 0 turns it off). Each batch is read again just before
+  `--max-llm-calls` (5, up to 100; 0 turns it off); `--days` is 1 to 36,500. Each batch is read again just before
   its call: a thought deleted or newly held back since is not sent. Each goes
   as a ref (`t1`…), its date, type, first 400 characters and five topics and
   tags (each cut to 100 characters), with today's date. The model names contradictions, stale facts, superseded

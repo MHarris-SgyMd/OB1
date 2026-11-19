@@ -90,9 +90,10 @@
  * ── Tier 3: a model's reading (SMD-3318 PR 2b) ───────────────────────────────
  * The recipe sent its sample to OpenRouter with its own key and no egress
  * handling. Here the thoughts leave as the brain's own passes' do: to the chat
- * endpoint and model the server resolves (resolveEmbedConfig: OB1_CHAT_BASE_URL
- * or OB1_LLM_BASE_URL, OB1_METADATA_MODEL, OB1_LLM_TIMEOUT; --model names
- * another), and only as the egress policy lets each one leave (decided
+ * endpoint and model resolved as the server resolves them (resolveEmbedConfig),
+ * from this run's environment — OB1_CHAT_BASE_URL or OB1_LLM_BASE_URL, their
+ * keys (OPENROUTER_API_KEY is OB1_LLM_API_KEY's fallback there),
+ * OB1_METADATA_MODEL, OB1_LLM_TIMEOUT; --model names another — and only as the egress policy lets each one leave (decided
  * 2026-11-17, as consolidation's judge does): every thought is put to the gate
  * on its own units — OB1_WORKER_KEY's name as the actor, its source, type and
  * topics, and as the marker what the prompt carries of it (its text, type,
@@ -687,14 +688,21 @@ export function renderReport(r: { tier: string; database: string; startedAt: str
     if (r.t2.unmentionedCount > r.t2.unmentioned.length) L.push(`  - …and ${r.t2.unmentionedCount - r.t2.unmentioned.length} more`);
     L.push(`- Entities with no edge either way (exact, of ${r.t2.entities}): **${r.t2.entitiesWithNoEdges}**`, "");
   }
+  if (t3 && t3.status === "skipped" && t3.read > 0) {
+    // A skip after the read keeps its counts: a policy that let few thoughts leave reads otherwise as a small brain.
+    L.push("## Tier 3 — a model's reading of sampled thoughts", "", `*Skipped: ${t3.reason}.*`, "");
+    L.push(`- Read (dated, the last ${t3.days} days, 20 characters or more, newest first): **${t3.read}**${t3.readCapped ? ` (the read stopped at its cap)` : ""}`);
+    L.push(`- Held back by their sensitivity tier or the sensitivity patterns: **${t3.heldSensitive}**`);
+    L.push(`- Held back by the egress policy: **${t3.heldEgress}**`, "");
+  }
   if (t3 && t3.status !== "skipped") {
     L.push("## Tier 3 — a model's reading of sampled thoughts", "");
     if (t3.status === "failed") L.push(`*Stopped: ${t3.reason}. The findings below are the calls' before it.*`, "");
-    L.push(`- Read (dated, the last ${t3.days} days, 20 characters or more, newest first, until the sample filled): **${t3.read}**`);
+    L.push(`- Read (dated, the last ${t3.days} days, 20 characters or more, newest first, until the sample filled or the window ended): **${t3.read}**`);
     L.push(`- Held back by their sensitivity tier or the sensitivity patterns: **${t3.heldSensitive}**`);
     L.push(`- Held back by the egress policy: **${t3.heldEgress}**`);
     L.push(`- Gone, or held back, when read again just before their call: **${t3.changed}**`);
-    if (t3.readCapped) L.push(`- The read stopped at ${TIER3_READ_MAX.toLocaleString("en-US")} thoughts with the sample not full: older thoughts of the window were not read.`);
+    if (t3.readCapped) L.push("- The read stopped at its cap with the sample not full: older thoughts of the window were not read.");
     L.push(`- Sent to ${t3.model}: **${t3.sent}** in **${t3.calls}** call(s), a failed one's included${t3.unreadable ? `; **${t3.unreadable}** answer(s) not JSON, their findings lost` : ""}${t3.dropped ? `; **${t3.dropped}** finding(s) dropped, naming no thought of their batch` : ""}`, "");
     for (const c of CATEGORIES) {
       const of = t3.findings.filter((f) => f.category === c);
@@ -866,7 +874,7 @@ export async function run(opts: SweepOptions): Promise<number> {
     });
     if (o3 && sample) t3 = await tier3Calls(opts.sql, sample, o3, w);
     if (t3) {
-      w.out(t3.status === "skipped" ? `[tier 3] skipped: ${t3.reason}` : t3.status === "failed" && t3.calls === 0 && t3.read === 0 ? `[tier 3] failed: ${t3.reason}`
+      w.out(t3.status === "skipped" ? `[tier 3] skipped: ${t3.reason}${t3.read > 0 ? ` (${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy)` : ""}` : t3.status === "failed" && t3.calls === 0 && t3.read === 0 ? `[tier 3] failed: ${t3.reason}`
         : `[tier 3] ${t3.read} read, ${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy; ${t3.changed ? `${t3.changed} gone or held back before their call, ` : ""}${t3.sent} sent in ${t3.calls} call(s): ${t3.findings.length} finding(s)${t3.unreadable ? `, ${t3.unreadable} answer(s) not JSON` : ""}${t3.dropped ? `, ${t3.dropped} dropped` : ""}`);
     }
   } catch (e) {
@@ -899,8 +907,8 @@ if (import.meta.main) {
     {
       hints: {
         url: "<postgres://…>", tier: "<1|2|3|all> (all)", report: "<path> (./lint-report-YYYY-MM-DD.md, the UTC date)", "statement-timeout": `<seconds> (${STATEMENT_TIMEOUT_S}; 0: none)`,
-        "sample-size": `<thoughts> (Tier 3: ${TIER3_DEFAULTS.sampleSize})`, "max-llm-calls": `<calls> (Tier 3: ${TIER3_DEFAULTS.maxCalls}; 0: off)`,
-        days: `<days> (Tier 3's window: ${TIER3_DEFAULTS.days})`, model: "<id> (Tier 3: OB1_METADATA_MODEL's)", "include-personal": "(Tier 3 sends personal thoughts too)",
+        "sample-size": `<thoughts> (Tier 3: ${TIER3_DEFAULTS.sampleSize}; ${TIER3_BOUNDS.sampleSize.join("–")})`, "max-llm-calls": `<calls> (Tier 3: ${TIER3_DEFAULTS.maxCalls}; ${TIER3_BOUNDS.maxCalls.join("–")}, 0: off)`,
+        days: `<days> (Tier 3's window: ${TIER3_DEFAULTS.days}; ${TIER3_BOUNDS.days.join("–")})`, model: "<id> (Tier 3: OB1_METADATA_MODEL's)", "include-personal": "(Tier 3 sends personal thoughts too)",
       },
       removed: REMOVED_FLAGS,
     },
@@ -926,7 +934,7 @@ if (import.meta.main) {
     // worker key's name as each thought's actor.
     const cfg = resolveEmbedConfig(process.env as unknown as EmbedEnv);
     const model = (cli.value("model") ?? "").trim() || cfg.metadataModel;
-    console.log(`[tier 3] model ${model}; egress: ${egressDescription(cfg.chat, cfg.egress, cfg.chat.declaredBy ?? "OB1_LLM_LOCAL")}`);
+    if (maxCalls > 0) console.log(`[tier 3] model ${model}; egress: ${egressDescription(cfg.chat, cfg.egress, cfg.chat.declaredBy ?? "OB1_LLM_LOCAL")}`);
     tier3 = {
       cfg, model, sampleSize, maxCalls, days, includePersonal: cli.has("include-personal"),
       resolveActor: async () => {

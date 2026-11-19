@@ -5861,7 +5861,7 @@ bun lint-sweep.ts --url postgres://…                         # every tier; ./l
 bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, another path
 bun lint-sweep.ts --url … --max-llm-calls 0                  # tiers 1 and 2 alone: no model call
 #   --tier 1|2|3|all (all)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
-#   Tier 3: --sample-size N (100, 10–1000)   --max-llm-calls N (5, ≤ 100; 0: off)   --days N (365)   --model ID (OB1_METADATA_MODEL's)   --include-personal
+#   Tier 3: --sample-size N (100, 10–1000)   --max-llm-calls N (5, ≤ 100; 0: off)   --days N (365, ≤ 36500)   --model ID (OB1_METADATA_MODEL's)   --include-personal
 #   exits 0 report written · 1 a read or the write failed (no report), or Tier 3 stopped by a failed call (the report written) · 2 usage, the URL, the worker key, or the connection reached another database (PGDATABASE)
 ```
 
@@ -5891,8 +5891,10 @@ last `--days`, 20 a call: contradictions, stale facts, superseded decisions,
 orphans and missing links, each naming its thoughts' ids (the model sees refs,
 `t1`…`t20`, mapped back). Its sample is read in the same snapshot, and its
 calls go after the transaction, so no lock is held across a model's answer.
-The thoughts leave as the brain's passes' do: to the server's chat endpoint
-and model (`resolveEmbedConfig`), each put to the egress gate on its own units
+The thoughts leave as the brain's passes' do: to the chat endpoint and model
+`resolveEmbedConfig` reads from the run's own environment (not the stack's
+`deploy/.env`; `OPENROUTER_API_KEY` is read there as `OB1_LLM_API_KEY`'s
+fallback), each put to the egress gate on its own units
 (`OB1_WORKER_KEY`'s name as the actor, its source, type and topics, and as the
 marker what is sent of it and its whole text, both to pass; decided
 2026-11-17), a refused one left out, and the call naming every thought it
@@ -5905,8 +5907,8 @@ weekly-digest's hold-back (`db/sensitivity.ts`): a `restricted` thought, or a
 column, or the patterns over what is sent and the whole text, never leaves.
 Under the default deny with no allow term and no local endpoint, the tier is
 skipped before any read; release it with `OB1_EGRESS_ALLOW=actor:<the worker
-key>` (or a source, type, topic or marker), or declare a local model
-(`OB1_LLM_LOCAL=1`). An answer that is no JSON object loses its batch's
+key's name>` (never the key itself; or a source, type, topic or marker), or declare a local model
+(`OB1_LLM_LOCAL=1`, or `OB1_CHAT_LOCAL=1` for a chat endpoint of its own). An answer that is no JSON object loses its batch's
 findings, counted; a call that fails after the transient retries stops the
 tier, and the report is written with what came before (exit 1). The recipe's
 `low_signal` read `importance`, which the core retired. test-live [26] holds every count against a
