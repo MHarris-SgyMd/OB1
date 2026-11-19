@@ -11,7 +11,7 @@
  *
  * `false` until the stop, the stream's record and the caps have landed and been run against a real client (PR 2b).
  * One word, in a module of its own, and read by the entry alone: no setting turns it on. The suite's own apps are
- * given `createListenStreams(true)`, and its spawned entry is started with this module swapped for one that says
+ * given `createListenStreams(true, …)`, and its spawned entry is started with this module swapped for one that says
  * `true` (test-listen-on.ts, a preload).
  */
 export const HOLD_LISTEN_STREAMS = false;
@@ -32,8 +32,9 @@ export const LISTEN_STREAMS_PER_NAME = 32;
 export interface ListenStreams {
   /** Whether a stream is held open at all. */
   readonly hold: boolean;
-  /** The most held at once, and the most under one caller's name. */
+  /** The most held at once. */
   readonly max: number;
+  /** The most held under one caller's name. */
   readonly perName: number;
   /** How many are open now: kept by the app. */
   open: number;

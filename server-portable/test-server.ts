@@ -2649,8 +2649,8 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     `a drain that ends late gives the close what is left of the bound, not its full second (${lateClose} ms of a 200 ms bound ended at about 170)`);
 
   // Streams a server holds open on purpose (the MCP server's listen streams, SMD-4347): not waited on, and closed by
-  // the stop itself, last. The stand-in is Bun's shape: its count holds each stream, and its stop() resolves only
-  // once every answer has ended, a held stream's among them.
+  // the stop itself, last. The stand-in's count holds each stream, as Bun's does, and neither of its stops ever
+  // resolves (below): a stop that waited on the server's own end would not end.
   const { HELD_CLOSE_MS, HELD_POLL_MS } = await import("./shutdown.ts");
   assert(HELD_CLOSE_MS === 100 && HELD_POLL_MS === 20, `the stop's bounds for held streams: 100 ms to close them and 100 ms for their answers to end, the requests looked for every 20 ms (${HELD_CLOSE_MS}, ${HELD_POLL_MS})`);
   const holding = (others: number, streams = 1) => {
@@ -2677,7 +2677,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
       state.streams = 0;
     };
     const opts = { server: () => server, held: () => state.streams, closeHeld, onCut: () => said("onCut"), afterDrain: () => said("afterDrain"), flush: async () => { said("flush"); return "sent" as const; }, close: async () => { said("close"); return false; } };
-    return { calls, at, state, opts, end: () => { state.others = 0; } };
+    return { calls, at, state, opts, said, end: () => { state.others = 0; } };
   };
 
   let kept = holding(0);
@@ -2724,7 +2724,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   // Cut at the bound: the connections are not closed there, where it would drop each stream with no last word, but
   // after the streams are closed and their answers have left (the runtime's count fallen by as many).
   kept = holding(1);
-  h = harness({ ...kept.opts, closeHeld: async () => { kept.calls.push("closeHeld"); kept.at.closeHeld = performance.now(); setTimeout(() => { kept.state.streams = 0; }, 40); } });
+  h = harness({ ...kept.opts, closeHeld: async () => { kept.said("closeHeld"); setTimeout(() => { kept.state.streams = 0; }, 40); } });
   h.handlers.get("SIGTERM")!();
   c = await settled(h.stopped);
   const leftFor = kept.at["stop(true)"] - kept.at.closeHeld;
@@ -2755,7 +2755,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
 
   // A close that never returns, its streams never ended: each of its two waits bounded, the connections cut, and the last line says what was not closed.
   kept = holding(0, 3);
-  h = harness({ ...kept.opts, closeHeld: () => { kept.calls.push("closeHeld"); kept.at.closeHeld = performance.now(); return new Promise<void>(() => {}); } });
+  h = harness({ ...kept.opts, closeHeld: () => { kept.said("closeHeld"); return new Promise<void>(() => {}); } });
   h.handlers.get("SIGTERM")!();
   c = await settled(h.stopped);
   const hungFor = kept.at["stop(true)"] - kept.at.closeHeld;
@@ -2763,13 +2763,13 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
     `a close of the held streams that never returns, and answers that never end: bounded twice over, the connections cut, and the stop says they were not closed (${kept.calls.join()}; ${Math.round(hungFor)} ms; ${h.lines.at(-1)})`);
   // …and one that closed some: the count of those left.
   kept = holding(0, 3);
-  h = harness({ ...kept.opts, closeHeld: async () => { kept.calls.push("closeHeld"); kept.state.streams = 1; } });
+  h = harness({ ...kept.opts, closeHeld: async () => { kept.said("closeHeld"); kept.state.streams = 1; } });
   h.handlers.get("SIGTERM")!();
   c = await settled(h.stopped);
   assert(c === 0 && /; 1 of 3 streams held open not closed; exit 0$/.test(h.lines.at(-1) ?? ""), `…and a close that leaves one of three open says so (${h.lines.at(-1)})`);
   // A second signal while the streams are being closed ends both of its waits: 20 ms in, where either alone would run to 100.
   kept = holding(0);
-  h = harness({ ...kept.opts, closeHeld: () => { kept.calls.push("closeHeld"); kept.at.closeHeld = performance.now(); setTimeout(() => h.handlers.get("SIGTERM")!(), 20); return new Promise<void>(() => {}); } });
+  h = harness({ ...kept.opts, closeHeld: () => { kept.said("closeHeld"); setTimeout(() => h.handlers.get("SIGTERM")!(), 20); return new Promise<void>(() => {}); } });
   h.handlers.get("SIGTERM")!();
   c = await settled(h.stopped);
   const hurriedFor = kept.at["stop(true)"] - kept.at.closeHeld;
@@ -2783,7 +2783,7 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   assert(c === 0 && !kept.calls.includes("afterDrain") && !kept.calls.includes("stop()"), `a stop that had no server tells its app of no drain ended: what arrives is still served, as it was (exit ${c}; ${kept.calls.join()})`);
   // A close that throws at once, not as a rejection, and a count that throws: guarded as the stop's other callbacks are.
   kept = holding(0);
-  h = harness({ ...kept.opts, closeHeld: () => { kept.calls.push("closeHeld"); throw new Error("close failed at once"); } });
+  h = harness({ ...kept.opts, closeHeld: () => { kept.said("closeHeld"); throw new Error("close failed at once"); } });
   h.handlers.get("SIGTERM")!();
   c = await settled(h.stopped);
   assert(c === 0 && kept.calls.at(-1) === "stop(true)" && /1 stream held open not closed; exit 0$/.test(h.lines.at(-1) ?? ""), `a close that throws at once: the stop still ends, the connections closed, and says the stream was not closed (exit ${c}; ${kept.calls.join()}; ${h.lines.at(-1)})`);
@@ -2796,20 +2796,15 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
 
   // A close that throws takes nothing with it: what it closed before it threw is closed, and the stop ends as it would have.
   kept = holding(0);
-  const closeThenThrow = kept.opts.closeHeld;
-  h = harness({ ...kept.opts, closeHeld: async () => { await closeThenThrow(); throw new Error("close failed"); } });
+  h = harness({ ...kept.opts, closeHeld: async () => { await kept.opts.closeHeld(); throw new Error("close failed"); } });
   h.handlers.get("SIGTERM")!();
   c = await settled(h.stopped);
   assert(c === 0 && h.exits.join() === "0" && kept.calls.at(-1) === "stop(true)" && /1 stream held open closed; exit 0$/.test(h.lines.at(-1) ?? ""),
     `a close that throws takes nothing with it: the stop ends, exit 0, and says what was closed (exit ${c}; ${kept.calls.join()}; ${h.lines.at(-1)})`);
 
   // The two bounds of the streams' close come out of the flush's, so a stop that closes streams ends no later than one that holds none.
-  const flushBound = async (extra: Record<string, unknown>) => {
-    const run = harness({ server: () => ({ pendingRequests: 0, stop: async () => {} }), graceMs: 1_300, drainBoundMs: 100, closeBoundMs: 50, flushBudgetMs: 5_000, flush: () => new Promise<never>(() => {}), ...extra });
-    run.handlers.get("SIGTERM")!();
-    await settled(run.stopped);
-    return Number(/telemetry not all sent within (\d+) ms/.exec(run.lines.at(-1) ?? "")?.[1] ?? NaN);
-  };
+  const flushBound = async (extra: Partial<Parameters<typeof drainOnSignal>[0]>) =>
+    (await bounded({ server: () => ({ pendingRequests: 0, stop: async () => {} }), graceMs: 1_300, drainBoundMs: 100, closeBoundMs: 50, flushBudgetMs: 5_000, flush: stall, ...extra })).within;
   const flushPlain = await flushBound({});
   const flushHeld = await flushBound({ held: () => 0, closeHeld: async () => {} });
   assert(flushPlain > 200 && flushPlain <= 300 && flushPlain - flushHeld >= 2 * HELD_CLOSE_MS - 40 && flushPlain - flushHeld <= 2 * HELD_CLOSE_MS + 40,

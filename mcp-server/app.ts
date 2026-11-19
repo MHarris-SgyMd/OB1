@@ -527,15 +527,6 @@ export function createMcpApp(deps: McpDeps): Hono {
   // asked, and gives the place back when the stream ends, however it ends.
   const listen = deps.listen?.hold ? deps.listen : null;
   const listening = new Map<string, number>();
-  /**
-   * Whether the stop has cut what is in flight, on a server whose connections outlast the cut: one that holds
-   * listen streams closes no connection at the bound, where that would drop each stream with no closing frame, so
-   * this app does the cutting. From the cut nothing more is answered and nothing more of an answer goes out, by
-   * any route; each connection goes when the stop closes it, as it went at the bound before.
-   */
-  const cutNow = () => listen !== null && deps.stop?.cut === true;
-  /** Whether the stop's drain has ended, on such a server: what arrives from then is not served. An app that holds no stream heeds neither flag. */
-  const overNow = () => listen !== null && deps.stop?.over === true;
   /** A place for one more stream under this name, to be given back once; or which bound refused it. */
   const placeFor = (held: ListenStreams, name: string): { release: () => void } | { full: "server" | "name" } => {
     if (held.open >= held.max) return { full: "server" };
@@ -555,6 +546,15 @@ export function createMcpApp(deps: McpDeps): Hono {
       },
     };
   };
+  /**
+   * Whether the stop has cut what is in flight, on a server whose connections outlast the cut: one that holds
+   * listen streams closes no connection at the bound, where that would drop each stream with no closing frame, so
+   * this app does the cutting. From the cut nothing more is answered and nothing more of an answer goes out, by
+   * any route; each connection goes when the stop closes it, as it went at the bound before.
+   */
+  const cutNow = () => listen !== null && deps.stop?.cut === true;
+  /** Whether the stop's drain has ended, on such a server: what arrives from then is not served. An app that holds no stream heeds neither flag. */
+  const overNow = () => listen !== null && deps.stop?.over === true;
 
   // The SDK's handler for the 2026-07-28 revision (SMD-4345), one for the app. It builds a server for each request
   // by the function the request's route hands it (forRequest), so that server is the caller's, as a 2025-era
@@ -569,12 +569,12 @@ export function createMcpApp(deps: McpDeps): Hono {
   // them, which it answers 500 and says nowhere else. The route cannot tell the two apart there, so the error is
   // kept for the request that is running (handlerSaid) and the route reads it once it has the answer's status.
   const handlerSaid = new AsyncLocalStorage<{ err?: Error }>();
+  // The handler's own bound (`maxSubscriptions`), set to the server's: the route's count is the bound, and this one
+  // is what a stream that count has lost runs into, at 256 and not the handler's 1,024.
   const modern = createMcpHandler((ctx) => {
     const build = (ctx.authInfo?.extra as { build?: () => McpServer } | undefined)?.build;
     if (!build) throw new Error("a 2026-07-28 request reached the SDK's handler with no caller");
     return build();
-    // The handler's own bound, set to the server's: the route's count is the bound, and this one is what a stream
-    // that count has lost runs into, at 256 and not the handler's 1,024.
   }, { legacy: "reject", responseMode: "sse", onerror: (err) => { const said = handlerSaid.getStore(); if (said) said.err ??= err; }, ...(listen ? { maxSubscriptions: listen.max } : {}) });
   // The entry's stop ends the streams through this, last (listen-streams.ts): the handler's own close, which sends each its closing frame.
   if (listen) listen.close = () => modern.close();
@@ -1058,9 +1058,9 @@ export function createMcpApp(deps: McpDeps): Hono {
         // Which request is one: its `Mcp-Method` header says so. The handler holds a stream only for a request
         // whose header names the method (one whose header and body disagree it refuses, 400: a row of the suite
         // holds it to that), and it reads the body with a decoder of its own: a body that begins with two
-        // byte-order marks it reads, and this route's parse does not. Asked by the body as this route read it,
-        // such a listen was held with no place, under neither bound, and held the stop to its bound (found in
-        // review). A place taken for a request the handler then refuses is given straight back.
+        // byte-order marks it reads, and this route's parse does not. Asked by the body as this route reads it,
+        // such a listen would be held with no place, under neither bound, and would hold the stop to its bound
+        // (found in review). A place taken for a request the handler then refuses is given straight back.
         if (listen && request.headers.get("mcp-method") === "subscriptions/listen") {
           const asked = placeFor(listen, standing.name);
           if ("full" in asked) {
@@ -1068,9 +1068,10 @@ export function createMcpApp(deps: McpDeps): Hono {
             settled = true;
             trace.rpc ??= "subscriptions/listen";
             // A notification by that name opens no stream and is owed no answer: refused bare, as this route's other refusals are.
-            trace.status = target.expectsReply ? 200 : 202;
+            const refusal = target.expectsReply ? listenLimitResponse(target.id, asked.full) : notificationRefusedResponse();
+            trace.status = refusal.status;
             finish("refused", "LISTEN_LIMIT");
-            return target.expectsReply ? listenLimitResponse(target.id, asked.full) : notificationRefusedResponse();
+            return refusal;
           }
           place = asked;
         }

@@ -245,8 +245,8 @@ export interface DrainOptions {
 
 const requests = (n: number) => `${n} request${n === 1 ? "" : "s"}`;
 const heldStreams = (n: number) => `${n} stream${n === 1 ? "" : "s"} held open`;
-const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
 const toolCalls = (n: number) => `${n} tool call${n === 1 ? "" : "s"}`;
+const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
 
 /** Install the SIGTERM and SIGINT handlers. The returned promise settles when a stop has run to its exit, for a test. */
 export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } {
@@ -290,21 +290,21 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     // A second signal while the drain runs: the operator is not waiting for the rest, the flush included (review pass 1).
     let again = false;
     // A stop() that rejects has stopped accepting all the same; read as drained, not as an unhandled rejection that skips the close and the line.
-    const stopping: Promise<true> = server ? server.stop().then(() => true as const, () => true as const) : Promise.resolve(true as const);
+    const stopping = server ? server.stop().then(() => true, () => true) : true;
     // With streams held, stop() does not resolve until they end, and they end last: what is waited on is the rest, looked for.
     // The requests and the calls are looked at together, so the drain's end is decided in one turn, with nothing in flight in it.
     const looked = opts.held && server;
-    const rest: Promise<true> = looked
-      ? new Promise<true>((resolve) => {
+    const rest: Promise<unknown> = looked
+      ? new Promise<void>((resolve) => {
         const look = () => {
-          if (inFlight() === 0 && (calls?.running ?? 0) === 0) resolve(true);
+          if (inFlight() === 0 && (calls?.running ?? 0) === 0) resolve();
           else poll = setTimeout(look, HELD_POLL_MS);
         };
         look();
       })
-      : stopping;
+      : Promise.all([stopping, calls?.idle()]);
     let drained = await Promise.race([
-      (looked ? rest : Promise.all([rest, calls?.idle()])).then(() => true),
+      rest.then(() => true),
       new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), drainBoundMs); cutShort = () => { again = true; resolve(false); }; }),
     ]);
     clearTimeout(timer);
@@ -322,7 +322,8 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
       // for every handler to settle, and one stalled before it returned a
       // response (a lookup on a database that never answers) would hold it
       // until the grace period's kill (review pass 1, measured on 1.4.0).
-      // With streams to close last, the connections are closed after them (below): here it would drop each stream with no last word.
+      // With streams to close last, the connections are closed after them
+      // (below): here it would drop each stream with no last word.
       if (!opts.closeHeld) server.stop(true).catch(() => {});
     }
     // No await since the drain's end was decided: what is told here is true of every request that arrives after it.

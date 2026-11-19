@@ -56,8 +56,9 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   line. What differs for a 2026-07-28 client:
   - its server declares `tools.listChanged: false`, since this server holds no
     connection open to send a notification on; a `subscriptions/listen` is acknowledged
-    with nothing honoured and ended at once. SMD-4347 decided that it will hold them
-    (`docs/mcp-listen-streams.md`); the server can since its PR 2a, and does not until its PR 2b;
+    with nothing honoured and ended at once. SMD-4347 decided that this server will hold
+    such streams (`docs/mcp-listen-streams.md`); it can since that ticket's PR 2a, and
+    does not until its PR 2b;
   - list results carry the revision's cache fields, `ttlMs: 0` and
     `cacheScope: "private"` (SMD-4346 chooses a real `ttlMs`);
   - the SDK's handler refuses in its own words a request whose `Mcp-Method` header
