@@ -3306,6 +3306,266 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
       && drained.code === 0 && !queueIn().length && copy32 && forgottenIds.has(copy32),
     `a canary with no forget_thought holds the copy and names the upgrade; upgraded, the copy lands (${f4.err.trim().slice(0, 150)})`);
 
+  // SMD-4411: the forget's drop reaches every brain's queue, and a brain with no write key now is held the forget.
+  const readIn = (root) => { const d = join(root, "writes", "pending"); return existsSync(d) ? readdirSync(d).filter((f) => f.endsWith(".json")).sort().map((f) => JSON.parse(readFileSync(join(d, f), "utf8"))) : []; };
+  const seedIn = (root, name, op) => { mkdirSync(join(root, "writes", "pending"), { recursive: true }); writeFileSync(join(root, "writes", "pending", name), JSON.stringify({ from: "canary", at: new Date().toISOString(), ...op })); };
+  const tagOf = (o) => `${o.tool}:${o.args.client_key ?? o.args.id}${o.sent ? ":sent" : ""}`;
+
+  // Two-way: stable has a write key too, so copies of the canary's writes queue for it. Both brains are the one fake
+  // store here (stable's write key is the canary's), stable's own thought S(80) forgotten there already. A forget through
+  // stable drops stable's queued copies of the thought by its own key (it began on the canary as K80), keeps a sent one,
+  // and queues the forget behind it on stable too: the sent copy, sent again, lands as a new thought under K80, and the
+  // forget, answered FORGOTTEN by S(80), is sent again by K80 and forgets it (review pass 1: no forget followed it).
+  const TWO_CFG = join(TMP, "fan-two-way.json");
+  writeFileSync(TWO_CFG, JSON.stringify({ brains: [{ ...fanCfg.brains[0], url: CANARY_URL, write_key_file: WRITE_KEYFILE }, fanCfg.brains[1]] }), { mode: 0o600 });
+  const twoEnv = { ...env, OB1_SESSION_CAPTURE_CONFIG: TWO_CFG };
+  const K80 = uuid(7300);
+  thoughts.set(K80, { key: null, content: "a secret the canary made" });
+  forgottenIds.add(S(80));
+  seedIn(STATE, "000000000000080-000000000000001-1.json", { tool: "capture_thought", args: { content: "a secret the canary made, never sent", client_key: K80 } });
+  seedIn(STATE, "000000000000080-000000000000002-1.json", { tool: "update_thought", args: { id: K80, content: "the secret, edited" } });
+  seedIn(STATE, "000000000000080-000000000000003-1.json", { tool: "capture_thought", args: { content: "a secret the canary made, sent", client_key: K80 }, sent: true });
+  seedIn(STATE, "000000000000080-000000000000004-1.json", { tool: "capture_thought", args: { content: "another thought", client_key: uuid(7301) } });
+  calls.length = 0;
+  const f80 = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(80), confirm: S(80) },
+    tool_response: [{ type: "text", text: `Forgot ${S(80)}, its client_key ${K80} at 2026-11-16T00:00:00.000Z.` }] }, twoEnv);
+  // Whatever the hook's run left on stable's queue, drained (a forget not queued there would leave the sent copy to land).
+  const f80drain = await spawnScript(["--drain-writes", "--brain", "stable"], { env: twoEnv });
+  const secret80 = [...thoughts.values()].filter((t) => t.content.startsWith("a secret the canary made"));
+  const f80Calls = calls.map((c) => `${c.name}:${c.args.client_key ?? c.args.id}`);
+  assert(f80.code === 0 && f80drain.code === 0 && !secret80.length && !readIn(STATE).length
+      && new RegExp(`dropped 2 queued or given-up copies of ${S(80)}`).test(logOf(STATE)) && new RegExp(`queued forget_thought of ${S(80)} from stable, where it was made`).test(logOf(STATE))
+      && f80Calls.includes(`capture_thought:${K80}`) && f80Calls.filter((c) => c === `forget_thought:${K80}`).length === 2 && !queueIn().length,
+    `in a two-way fan-out a forget drops the first brain's own unsent copies and queues itself behind its sent one, which lands again and is forgotten by the thought's own key (${JSON.stringify({ f80Calls, left: secret80.length })})`);
+  rmSync(join(STATE, "writes"), { recursive: true, force: true });
+
+  // A canary with no write key at the forget's run (its entry edited): its unsent copy of the thought is dropped, the
+  // forget held in its queue behind a sent copy of another, and --check says so; once the key is back, the drain lands
+  // the sent copy, then the forgets.
+  away = true;
+  await post("capture_thought", { content: "a secret sent while the canary is away" }, captured(S(82)));
+  await post("capture_thought", { content: "a secret queued behind it" }, captured(S(81)));
+  away = false;
+  const NOKEY_CFG = join(TMP, "fan-no-key.json");
+  const { write_key_file: _wk, ...canaryNoKey } = fanCfg.brains[1];
+  writeFileSync(NOKEY_CFG, JSON.stringify({ brains: [fanCfg.brains[0], canaryNoKey] }), { mode: 0o600 });
+  const noKeyEnv = { ...env, OB1_SESSION_CAPTURE_CONFIG: NOKEY_CFG };
+  calls.length = 0;
+  const f81 = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(81), confirm: S(81) }, tool_response: forgot(S(81)) }, noKeyEnv);
+  const f82 = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(82), confirm: S(82) }, tool_response: forgot(S(82)) }, noKeyEnv);
+  const heldNoKey = readIn(CANARY_ROOT).map(tagOf);
+  const ckNoKey = await spawnScript(["--check"], { env: noKeyEnv });
+  const drained82 = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  const order82 = calls.map((c) => `${c.name}:${c.args.client_key ?? c.args.id}`);
+  assert(f81.code === 0 && f82.code === 0 && JSON.stringify(heldNoKey) === JSON.stringify([`capture_thought:${S(82)}:sent`, `forget_thought:${S(81)}`, `forget_thought:${S(82)}`])
+      && new RegExp(`held forget_thought of ${S(81)} from stable: this brain has no write_key now`).test(logOf(CANARY_ROOT))
+      && /\[canary\] warning: 3 copies queued for this brain, 2 of them forgets, wait for a write_key/.test(ckNoKey.err)
+      && drained82.code === 0 && !queueIn().length && JSON.stringify(order82) === JSON.stringify([`capture_thought:${S(82)}`, `forget_thought:${S(81)}`, `forget_thought:${S(82)}`]) && !byName(S(82)),
+    `a brain with no write key at a forget's run has its unsent copy dropped and the forget held, --check says so, and with its key back the sent copy lands and is forgotten (${JSON.stringify({ heldNoKey, order82, check: ckNoKey.err.trim().slice(0, 160) })})`);
+  // A held forget's week starts at its first send (review pass 1): the key back after eight days, the canary away at the
+  // first drain, the sent copy ahead of it is given up but the forget is kept, re-dated; the next drain lands it, and
+  // the given-up copy in dead/, which holds the text, is removed as its forget lands.
+  away = true;
+  await post("capture_thought", { content: "a secret held for a week" }, captured(S(90)));
+  await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(90), confirm: S(90) }, tool_response: forgot(S(90)) }, noKeyEnv);
+  const PEND = join(CANARY_ROOT, "writes", "pending"), DEADDIR = join(CANARY_ROOT, "writes", "dead");
+  const weekAgo = new Date(Date.now() - 8 * 24 * 3600_000).toISOString();
+  for (const f of readdirSync(PEND).filter((x) => x.endsWith(".json"))) writeFileSync(join(PEND, f), JSON.stringify({ ...JSON.parse(readFileSync(join(PEND, f), "utf8")), at: weekAgo }));
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  const afterFirst = readIn(CANARY_ROOT);
+  const deadOf90 = () => (existsSync(DEADDIR) ? readdirSync(DEADDIR).filter((f) => JSON.parse(readFileSync(join(DEADDIR, f), "utf8")).args?.client_key === S(90)) : []);
+  const deadFirst = deadOf90().length;
+  away = false;
+  const drained90 = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  assert(afterFirst.length === 1 && afterFirst[0].tool === "forget_thought" && afterFirst[0].held === undefined && Date.now() - Date.parse(afterFirst[0].at) < 3600_000 && deadFirst === 1
+      && drained90.code === 0 && !queueIn().length && deadOf90().length === 0 && new RegExp(`removed 1 given-up copy of ${S(90)}, which its forget followed`).test(logOf(CANARY_ROOT)),
+    `a held forget is re-dated at its first send, so a key set back after a week does not give it up at its first fault; as it lands, the given-up copy ahead of it is removed (${JSON.stringify({ afterFirst: afterFirst.map(tagOf), deadFirst })})`);
+  // A queue left on disk by a brain no longer in the config (renamed, removed) loses its copies of the thought too, and
+  // is held no forget (review pass 1).
+  const OLD_ROOT = join(STATE, "brains", "canary-old");
+  seedIn(OLD_ROOT, "000000000000098-000000000000001-1.json", { tool: "capture_thought", args: { content: "a secret on a renamed brain's queue", client_key: S(98) } });
+  seedIn(OLD_ROOT, "000000000000098-000000000000002-1.json", { tool: "capture_thought", args: { content: "another thought there", client_key: uuid(7306) } });
+  seedIn(OLD_ROOT, "000000000000098-000000000000003-1.json", { tool: "update_thought", args: { id: S(98), content: "the secret, sent" }, sent: true });
+  await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(98), confirm: S(98) }, tool_response: forgot(S(98)) }, env);
+  const oldLeft = readIn(OLD_ROOT).map(tagOf);
+  const oldLog = logOf(STATE);
+  const oldOwnLog = existsSync(join(OLD_ROOT, "log"));
+  rmSync(OLD_ROOT, { recursive: true, force: true });
+  assert(JSON.stringify(oldLeft) === JSON.stringify([`capture_thought:${uuid(7306)}`, `update_thought:${S(98)}:sent`]) && !queueIn().length
+      && new RegExp(`a copy of ${S(98)} in .*canary-old was sent to the brain that queue was for and may have landed there, and no forget follows it: .*session-capture\\.mjs --copy-forget ${S(98)} --from stable --brain canary-old --yes`).test(oldLog)
+      && new RegExp(`dropped 1 queued or given-up copy of ${S(98)} from .*canary-old`).test(oldLog) && !oldOwnLog,
+    `a queue a brain no longer in the config left on disk loses the forgotten thought's unsent copies, no forget is held there, and a sent one is named in the first brain's log with the command that follows it (${JSON.stringify(oldLeft)})`);
+  // A forget queued while the canary had its key, the key then taken away: a session event marks it held, so its week
+  // starts again at its first send once the key is back (review pass 2: given up at its first fault).
+  seedIn(CANARY_ROOT, "000000000000099-000000000000001-1.json", { tool: "forget_thought", args: { id: S(99), confirm: S(99), detach_citations: true }, at: weekAgo });
+  await runHook({ session_id: "s-fan-end", hook_event_name: "SessionEnd", transcript_path: join(TMP, "no-such-transcript.jsonl"), cwd: TMP }, noKeyEnv);
+  const markedHeld = readIn(CANARY_ROOT).find((o) => o.args.id === S(99))?.held;
+  away = true;
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  const keptAway = readIn(CANARY_ROOT).filter((o) => o.args.id === S(99)).length;
+  away = false;
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  assert(markedHeld === true && keptAway === 1 && !queueIn().length,
+    `a forget queued before its brain lost its key is marked held at a session event, and is not given up at its first fault once the key is back (${JSON.stringify({ markedHeld, keptAway })})`);
+  // A brain whose queue cannot be written (here stable's, two-way) does not stop the others: the canary still gets its
+  // drop and its forget, and the log names the forget lost for stable with the command that redoes it (review pass 2).
+  // Root writes through a mode-500 directory, so the case holds only for another user, as the claims' EACCES case
+  // does (review pass 3).
+  if (process.getuid?.() !== 0) {
+    const STABLE_PEND = join(STATE, "writes", "pending");
+    mkdirSync(STABLE_PEND, { recursive: true });
+    chmodSync(STABLE_PEND, 0o500);
+    calls.length = 0;
+    thoughts.set(uuid(7312), { key: S(79), content: "a secret both brains hold" });
+    seedIn(CANARY_ROOT, "000000000000079-000000000000001-1.json", { tool: "update_thought", args: { id: S(79), content: "a secret edit never sent" } });
+    forgottenIds.add(S(79));
+    const fWrite = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(79), confirm: S(79) }, tool_response: forgot(S(79)) }, twoEnv);
+    chmodSync(STABLE_PEND, 0o700);
+    const stableWriteLog = logOf(STATE);
+    rmSync(join(STATE, "writes"), { recursive: true, force: true });
+    assert(fWrite.code === 1 && forgottenIds.has(uuid(7312)) && !queueIn().length && !calls.some((c) => c.name === "update_thought" && c.args.id === S(79))
+        && new RegExp(`forget_thought of ${S(79)} was not queued for stable; once that is mended, run: bun .*session-capture\\.mjs --copy-forget ${S(79)} --from stable --yes`).test(stableWriteLog),
+      `a brain whose queue cannot be written is named with the command that redoes it, exit 1 under sync; the next brain still gets the drop and the forget (${stableWriteLog.split("\n").filter((l) => l.includes("not queued")).at(-1)?.slice(0, 200)})`);
+  }
+  // A brain with no write key never copied to (no writes/ of its own) is held nothing: a one-brain-ish config logs the
+  // forget not copied.
+  rmSync(join(CANARY_ROOT, "writes"), { recursive: true, force: true });
+  const notCopied = () => (logOf(STATE).match(/fan-out: forget_thought through open-brain: no other brain has a write_key, so nothing is copied/g) ?? []).length;
+  const notCopiedBefore = notCopied();
+  const f83 = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(83), confirm: S(83) }, tool_response: forgot(S(83)) }, noKeyEnv);
+  assert(f83.code === 0 && !existsSync(join(CANARY_ROOT, "writes")) && notCopied() === notCopiedBefore + 1,
+    "a brain without a write key that was never copied to is held no forget, and the log says nothing was copied");
+
+  // --copy-forget: a forget the hook never queued (its run failed before the queue) copied by hand. The canary forgets
+  // its copy; a second run finds nothing there and says so, exit 1 (review pass 1: exit 0 read as success); one the
+  // canary knows by the thought's own key alone goes by --client-key; the thought's unsent copy still queued is dropped
+  // first. Ids with letters, so upper case differs (review pass 3: S(n) and uuid(n) are digits alone, and toUpperCase
+  // changed nothing).
+  const L84 = "abcdef84-0000-4000-8000-0000000000ab", K85 = "abcdef85-0000-4000-8000-0000000000ab";
+  await post("capture_thought", { content: "a secret whose forget's hook run failed" }, captured(L84));
+  const copy84 = byName(L84);
+  calls.length = 0;
+  const cf1 = await spawnScript(["--copy-forget", L84.toUpperCase(), "--from", "stable", "--yes"], { env });
+  const cf2 = await spawnScript(["--copy-forget", L84, "--from", "stable", "--yes"], { env });
+  thoughts.set(K85, { key: null, content: "a thought the canary captured itself, forgotten on stable" });
+  const cf3 = await spawnScript(["--copy-forget", S(85), "--brain", "canary", "--client-key", K85.toUpperCase(), "--from", "stable", "--yes"], { env });
+  thoughts.set(uuid(7304), { key: S(86), content: "a secret copied once" });
+  seedIn(CANARY_ROOT, "000000000000086-000000000000001-1.json", { tool: "update_thought", args: { id: S(86), content: "a secret edit never sent" } });
+  const cf4 = await spawnScript(["--copy-forget", S(86), "--from", "stable", "--yes"], { env });
+  const cfCalls = calls.map((c) => `${c.name}:${c.args.client_key ?? c.args.id}/${c.args.confirm ?? ""}/${c.args.detach_citations ?? ""}`);
+  assert(cf1.code === 0 && copy84 && forgottenIds.has(copy84) && new RegExp(`^\\[canary\\] copied forget_thought of ${L84} → ${copy84}`, "m").test(cf1.out)
+      && cf2.code === 1 && new RegExp(`^\\[canary\\] skipped forget_thought of ${L84}: no thought there`, "m").test(cf2.out) && /nothing was forgotten on canary: .* run this again with --client-key <that uuid>.* Only if it was forgotten there already/.test(cf2.out)
+      && cf3.code === 0 && forgottenIds.has(K85)
+      && cf4.code === 0 && !queueIn().length && forgottenIds.has(uuid(7304))
+      && JSON.stringify(cfCalls) === JSON.stringify([`forget_thought:${L84}/${L84}/true`, `forget_thought:${L84}/${L84}/true`, `forget_thought:${S(85)}/${S(85)}/true`, `forget_thought:${K85}/${K85}/true`, `forget_thought:${S(86)}/${S(86)}/true`]),
+    `--copy-forget copies a forget the hook missed, its id and --client-key lower-cased, confirmed and detaching; a repeat finds nothing and says so, --client-key first, exit 1; --client-key reaches a thought by its own key; a queued edit is dropped first (${JSON.stringify(cfCalls)})`);
+  // Given the receiving brain's own id, forgotten there already, with a sent copy queued ahead (review pass 1): the copy
+  // lands again as a new thought under the thought's key, and the forget, answered FORGOTTEN, is sent again by
+  // --client-key and forgets it.
+  const C89 = uuid(7303);
+  forgottenIds.add(C89);
+  seedIn(CANARY_ROOT, "000000000000089-000000000000001-1.json", { tool: "capture_thought", args: { content: "a secret sent, its answer lost", client_key: S(89) }, sent: true });
+  calls.length = 0;
+  const cf5 = await spawnScript(["--copy-forget", C89, "--client-key", S(89), "--brain", "canary", "--from", "stable", "--yes"], { env });
+  const cf5Calls = calls.map((c) => `${c.name}:${c.args.client_key ?? c.args.id}`);
+  assert(cf5.code === 0 && ![...thoughts.values()].some((t) => t.content === "a secret sent, its answer lost") && !queueIn().length
+      && JSON.stringify(cf5Calls) === JSON.stringify([`capture_thought:${S(89)}`, `forget_thought:${C89}`, `forget_thought:${S(89)}`]),
+    `a forget answered FORGOTTEN is sent again by the thought's own key, reaching the copy a sent capture ahead of it made again (${JSON.stringify(cf5Calls)})`);
+  // The canary away: the forget stays queued, said so, exit 1; the next drain sends it.
+  away = true;
+  const cfAway = await spawnScript(["--copy-forget", S(87), "--from", "stable", "--yes"], { env });
+  away = false;
+  const cfAwayQueued = readIn(CANARY_ROOT).map(tagOf);
+  calls.length = 0;
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  assert(cfAway.code === 1 && new RegExp(`forget_thought of ${S(87)} stays queued: it lands, in order, at this brain's next drain`).test(cfAway.out)
+      && JSON.stringify(cfAwayQueued) === JSON.stringify([`forget_thought:${S(87)}:sent`]) && !queueIn().length && calls.some((c) => c.name === "forget_thought" && c.args.id === S(87)),
+    `--copy-forget with the brain away keeps the forget queued, says so and exits 1; the next drain sends it (${cfAway.out.trim().slice(0, 160)})`);
+  // A drain already running holds the lock: the forget is queued behind it, said so (review pass 1: "next drain" misled).
+  const CF_LOCK = join(CANARY_ROOT, "writes", "drain.lock");
+  writeFileSync(CF_LOCK, String(process.pid));
+  const cfLocked = await spawnScript(["--copy-forget", S(93), "--from", "stable", "--yes"], { env });
+  rmSync(CF_LOCK, { force: true });
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  assert(cfLocked.code === 1 && new RegExp(`forget_thought of ${S(93)} is queued behind a drain already running, which sends it in order`).test(cfLocked.out) && !queueIn().length,
+    `--copy-forget behind a running drain says the running drain sends it (${cfLocked.out.trim().slice(0, 160)})`);
+  // With no write key on the canary (before setting one back, the upgrade's case): --brain canary holds the forget there,
+  // exit 1; with its key back it lands.
+  const cfHeld = await spawnScript(["--copy-forget", S(94), "--brain", "canary", "--from", "stable", "--yes"], { env: noKeyEnv });
+  const heldTag = readIn(CANARY_ROOT).map((o) => `${o.tool}:${o.args.id}:${o.held}`);
+  calls.length = 0;
+  await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  assert(cfHeld.code === 1 && /\[canary\] held forget_thought of [^ ]+: this brain has no write_key now/.test(cfHeld.out) && JSON.stringify(heldTag) === JSON.stringify([`forget_thought:${S(94)}:true`])
+      && calls.some((c) => c.name === "forget_thought" && c.args.id === S(94)) && !queueIn().length,
+    `--copy-forget --brain on a brain with no write key that was copied to holds the forget there, exit 1; with its key back it lands (${cfHeld.out.trim().slice(0, 140)})`);
+  // --brain narrows the drop to that brain; --from's brain is held no forget unless its queue carries a copy, while
+  // another keyless brain copied to is (review passes 1 and 2).
+  seedIn(STATE, "000000000000095-000000000000001-1.json", { tool: "capture_thought", args: { content: "a copy on stable's old queue", client_key: S(95) } });
+  await spawnScript(["--copy-forget", S(95), "--brain", "canary", "--from", "stable", "--yes"], { env });
+  const stableKept = readIn(STATE).length;
+  await spawnScript(["--copy-forget", S(95), "--from", "stable", "--yes"], { env });
+  const stableAfterFrom = readIn(STATE).map(tagOf);
+  await spawnScript(["--copy-forget", S(96), "--from", "canary", "--yes"], { env });
+  const stableAfterOther = readIn(STATE).map(tagOf);
+  rmSync(join(STATE, "writes"), { recursive: true, force: true });
+  assert(stableKept === 1 && stableAfterFrom.length === 0 && JSON.stringify(stableAfterOther) === JSON.stringify([`forget_thought:${S(96)}`]) && !queueIn().length,
+    `--brain leaves other brains' queues alone; without it the drop reaches them; --from's brain is held no forget, which another keyless brain copied to gets (${JSON.stringify({ stableKept, stableAfterFrom, stableAfterOther })})`);
+  // Without --yes it says what it would do and does nothing (review pass 2: a wrong id pasted forgot a kept thought).
+  thoughts.set(uuid(7311), { key: S(92), content: "a thought the person keeps" });
+  calls.length = 0;
+  const cfPlan = await spawnScript(["--copy-forget", S(92), "--from", "stable"], { env });
+  assert(cfPlan.code === 0 && /^would forget, for good, the thought named /m.test(cfPlan.out) && /\[canary\] its queued copies of it dropped, then the forget sent/.test(cfPlan.out)
+      && /\[stable\] where it was forgotten: .* only if a copy that may have landed is still queued there/.test(cfPlan.out) && /queues of brains no longer in the config/.test(cfPlan.out)
+      && new RegExp(`No line in this machine's logs records a forget of ${S(92)}: the hook never saw one`).test(cfPlan.out) && /A forget is not undone\. Check that .* then run this again with --yes/.test(cfPlan.out)
+      && !calls.length && !queueIn().length && byName(S(92)) === uuid(7311),
+    `--copy-forget without --yes prints its plan, sends nothing and forgets nothing (${cfPlan.out.trim().slice(0, 160)})`);
+  // The brain it was forgotten on, with a write key (two-way): sent nothing, so a wrong id does not forget the person's
+  // own thought there; the other brains are sent it (review pass 2).
+  calls.length = 0;
+  const cfTwo = await spawnScript(["--copy-forget", S(92), "--from", "stable", "--yes"], { env: twoEnv });
+  const cfTwoForgets = calls.filter((c) => c.name === "forget_thought").length;
+  assert(cfTwo.code === 0 && cfTwoForgets === 1 && !/^\[stable\]/m.test(cfTwo.out) && /^\[canary\] copied forget_thought/m.test(cfTwo.out),
+    `--copy-forget sends the brain it was forgotten on no forget, even with a write key there, unless its queue carries a copy (${JSON.stringify({ cfTwoForgets, out: cfTwo.out.trim().slice(0, 160) })})`);
+  // A repeat after the hook's forget, kept for the canary while it was away, lands in the same drain: the forget landing
+  // first, the repeat's "nothing was forgotten" is not said (review pass 2).
+  await post("capture_thought", { content: "a secret forgotten while the canary was away" }, captured(S(91)));
+  away = true;
+  await post("forget_thought", { id: S(91), confirm: S(91) }, forgot(S(91)));
+  away = false;
+  // Its plan names the forget already queued, and the log line recording it (review pass 3).
+  const cfRepeatPlan = await spawnScript(["--copy-forget", S(91), "--from", "stable"], { env });
+  const cfRepeat = await spawnScript(["--copy-forget", S(91), "--from", "stable", "--yes"], { env });
+  assert(/\[canary\] its queued copies of it dropped, then the forget sent; a forget of it is already queued here/.test(cfRepeatPlan.out)
+      && new RegExp(`This machine's logs record a forget of ${S(91)}, the latest of each:\\n .*forget_thought of ${S(91)}`).test(cfRepeatPlan.out)
+      && cfRepeat.code === 0 && new RegExp(`^\\[canary\\] copied forget_thought of ${S(91)} → `, "m").test(cfRepeat.out) && !/nothing was forgotten/.test(cfRepeat.out)
+      && new RegExp(`^\\[canary\\] skipped forget_thought of ${S(91)}: forgotten by the forget of it above, in this drain$`, "m").test(cfRepeat.out) && !/its text kept/.test(cfRepeat.out)
+      && !byName(S(91)) && !queueIn().length,
+    `--copy-forget's plan names a forget already queued and the log's record of it; after the hook's own forget lands in the same drain it says neither "nothing was forgotten" nor "its text kept" (${cfRepeat.out.trim().slice(0, 200)})`);
+  // Refused, exit 2, nothing queued: no id, an id that is no uuid, a --client-key that is none, no --from, --brain the
+  // same as --from, a brain the config lacks (by --brain or --from), one with no write key never copied to, and a config
+  // where no brain but --from's can be reached.
+  const NONE_CFG = join(TMP, "fan-none.json");
+  writeFileSync(NONE_CFG, JSON.stringify({ brains: [fanCfg.brains[0], { name: "lonely", url: CANARY_URL, key: "canary-cap-key" }] }), { mode: 0o600 });
+  const cfBad = [];
+  const yes = ["--from", "stable", "--yes"];
+  for (const [argv, e] of [[["--copy-forget", "--from", "stable"], env], [["--copy-forget", "not-a-uuid", ...yes], env], [["--copy-forget", S(88), "--client-key", "x", ...yes], env],
+    [["--copy-forget", S(88), "--yes"], env], [["--copy-forget", S(88), "--brain", "canary", "--from", "canary", "--yes"], env],
+    [["--copy-forget", S(88), "--brain", "nope", ...yes], env], [["--copy-forget", S(88), "--from", "nope", "--yes"], env], [["--copy-forget", S(88), "--brain", "stable", "--from", "canary", "--yes"], env],
+    [["--copy-forget", S(88), ...yes], { ...env, OB1_SESSION_CAPTURE_CONFIG: NONE_CFG }]]) {
+    const r = await spawnScript(argv, { env: e });
+    cfBad.push(`${r.code}:${r.err.trim().slice(0, 60)}`);
+  }
+  assert(cfBad.every((x) => x.startsWith("2:")) && !queueIn().length && !calls.some((c) => c.args?.id === S(88)),
+    `--copy-forget refuses a missing or malformed id or key, no --from, --brain as --from, an unknown brain, one with no write key never copied to, and a config with none to reach, exit 2 (${JSON.stringify(cfBad)})`);
+  // A hook run whose config does not load names the forget it could not copy, and the command that copies it.
+  const BADKEY_CFG = join(TMP, "fan-bad-key.json");
+  writeFileSync(BADKEY_CFG, JSON.stringify({ brains: [fanCfg.brains[0], { ...fanCfg.brains[1], write_key_file: join(TMP, "no-such-write.key") }] }), { mode: 0o600 });
+  const lost = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(97), confirm: S(97) },
+    tool_response: [{ type: "text", text: `Forgot ${S(97)}, its client_key ${uuid(7305)} at 2026-11-16T00:00:00.000Z.` }] }, { ...env, OB1_SESSION_CAPTURE_CONFIG: BADKEY_CFG });
+  assert(lost.code === 1 && /the write_key_file in .*\(brain "canary"\), .*no-such-write\.key, cannot be read \(ENOENT\)/.test(lost.err)
+      && new RegExp(`forget_thought of ${S(97)} was not copied .* --copy-forget ${S(97)} --client-key ${uuid(7305)} --from stable, then again with --yes`).test(lost.err),
+    `a forget whose hook run could not load the config is named, with the --copy-forget that copies it; the unreadable key file named by its setting (${lost.err.trim().slice(0, 200)})`);
+
   // Never copied: another server's write (the canary's own connector, its test traffic), a read, a write that failed, a reply with no id.
   calls.length = 0;
   await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain-canary__capture_thought", tool_input: { content: "the canary's own probe" }, tool_response: captured(uuid(7999)) }, env);
