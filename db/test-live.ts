@@ -27,13 +27,13 @@
  *   DATABASE_URL=... bun test-live.ts          # against a LOCAL one you already have
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  *
- * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
- * (SHARDS below). Brain Checks runs the four side by side, one matrix cell each,
- * every one on a database of its own (SMD-3048, SMD-3169), and so does
- * db/ci-parity.sh, from one checkout, each on a Postgres of its own under a
- * with-postgres.sh (SMD-3688): [2] edits a copy of the migrations, not the
- * tracked tree (SMD-3639). Never two in one Postgres: each drops the schema,
- * and roles and backends are the cluster's.
+ * OB1_LIVE_SHARD=sleep|long|extract|sweep|claims|rest runs one shard of the
+ * sections (SHARDS below). Brain Checks runs the six side by side, one matrix
+ * cell each, every one on a database of its own (SMD-3048, SMD-3169), and so
+ * does db/ci-parity.sh, from one checkout, each on a Postgres of its own
+ * under a with-postgres.sh (SMD-3688): [2] edits a copy of the migrations,
+ * not the tracked tree (SMD-3639). Never two in one Postgres: each drops the
+ * schema, and roles and backends are the cluster's.
  */
 
 import { SQL } from "bun";
@@ -156,17 +156,35 @@ if (!URL_) {
  * ~220 s, and with [9f] ~190 s on main's CI long's live step passed 600 s
  * under ci-parity's load, so it runs in sweep (~376 s here with it, against
  * long's ~450 and the rest's ~600 on CI), the sleep scaffold being the
- * module's, not [38r]'s. The two met in a merge: [26] stays in sweep beside
- * [38p], the rest having no room for it.
+ * module's, not [38r]'s. The two met in a merge: [26] stayed in sweep beside
+ * [38p], the rest having no room for it. By then the rest was the run's
+ * longest cell by ~110 s, a live step of 571 s at the median of main's 15
+ * runs to 42ab662a (max 604), and db/ci-parity.sh stopped it at its 600 s
+ * limit in seven runs of twenty on the maintainer's laptop with nothing
+ * failed (SMD-4366). Of its 545 s of sections [10] was 238 and [16] 200, by
+ * the medians of main's runs 44529853317, 44538524681 and 44557642841, each
+ * mostly real clocks: in [10] 211 s is waits of 2 s or more before a row, in
+ * [16] 161 s, and across the three runners [10] moved 0.4 s and [16] 2.5.
+ * Neither fits beside another cell's sections, so [10] runs in a sixth cell,
+ * claims, with [38b] (~100 s) from long, by then the next longest (a 460 s
+ * live step): on those runs' section times the rest ~308 s, claims ~338,
+ * long ~347, against sweep's ~365, sleep's ~296 and extract's ~313, a live
+ * step some 10-27 s more for the module's load. The rest keeps [16] and the
+ * most room, since a section no shard lists is its own. This met [26] in a
+ * merge too: with its ~72 s (main's runs 44570891422, 44576704741 and
+ * 44588332017) sweep was ~435 s of sections, the longest cell once the rest
+ * was cut, so [26] runs in sleep, ~292 s without it: sleep ~364 s, sweep
+ * ~363, the rest ~303.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["5d", "10g", "37b", "38"],
-  long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
+  sleep: ["5d", "10g", "26", "37b", "38"],
+  long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
-  sweep: ["26", "38s", "50", "51", "38p"],
+  sweep: ["38s", "50", "51", "38p"],
+  claims: ["10", "38b"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -3808,23 +3826,51 @@ if (want("9")) {
     const keyClaims = async (key: string) =>
       Object.fromEntries((await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${key} GROUP BY status`)
         .map((r: { status: string; c: number }) => [r.status, Number(r.c)])) as Record<string, number>;
-    // In hand: a claim held and an embedding call at the stub since `from`.
-    const inHand = async (key: string, from: number) => { for (let i = 0; i < 100 && !(((await keyClaims(key)).claimed ?? 0) >= 1 && embedCalls > from); i++) await Bun.sleep(50); };
+    // In hand: a claim held and an embedding call at the stub since `from`. What it saw is returned, and how long it
+    // waited: a row that signals with nothing in hand says so, not only what followed (SMD-4400).
+    const inHand = async (key: string, from: number) => {
+      const began = Date.now();
+      let claimed = 0;
+      let seen = false;
+      for (let i = 0; i < 100 && !seen; i++) {
+        claimed = (await keyClaims(key)).claimed ?? 0;
+        seen = claimed >= 1 && embedCalls > from;
+        if (!seen) await Bun.sleep(50);
+      }
+      return { seen, said: seen ? "" : `; no row was in hand after ${Date.now() - began} ms: ${claimed} claimed, ${embedCalls - from} call(s) at the stub` };
+    };
+    /** What a row says when the thought it named was not the pool's first, and a CLI's last lines for a row that failed. */
+    const notFirst = (first: boolean, which: string) => (first ? "" : `; the ${which} thought was not put first in the pool`);
+    const lastLines = (text: string, n: number) => text.trim().split("\n").slice(-n).map((l) => l.trim().slice(0, 120)).join(" | ") || "none";
+    /** The CLI's line at its first signal. */
+    const CLI_STOPPING = "\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n";
+    // The thought a pass claims first, where a case needs to know it (SMD-4400): the pool under a fresh key is made in
+    // one statement, its dates tie, and the first claim is whichever the tie gives. Most of the 42 are one call; the
+    // three long ones are several at once, and with the background slots on a first stop gives such a thought back
+    // (below). CI and ci-parity run the suites with the slots off, where every thought finishes; run by hand, the
+    // slots are at their defaults, and the rows that expect the thought in hand to finish failed whenever the tie put
+    // a long one first. So the pool is made here and the named thought dated ahead of it; the run finds nothing to add.
+    const firstInPool = async (key: string, content: string) => {
+      await sql`SELECT enqueue_thoughts(${key})`;
+      const moved = (await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 hour' WHERE work_type = ${key} AND thought_id IN (SELECT id FROM thoughts WHERE content = ${content}) RETURNING 1 AS ok`) as unknown[];
+      return moved.length === 1;
+    };
     const [{ n: thoughtCount }] = await sql`SELECT count(*)::int AS n FROM thoughts`;
     const vectors = async () => new Map(((await sql`SELECT id::text AS id, embedding::text AS e FROM thoughts`) as { id: string; e: string | null }[]).map((r) => [r.id, r.e]));
 
     // A caller's AbortSignal: the worker after the row in hand, run() 130.
     slowMs = 600;
     const ac = new AbortController();
+    const softFirst = await firstInPool(stopKey(1), shorts[0]);
     const softFrom = embedCalls;
     const softRun = reembedInProcess({ job: stopKey(1), env: STOP_ENV, workers: 1, batch: 1, signal: ac.signal });
-    await inHand(stopKey(1), softFrom);
+    const softIn = await inHand(stopKey(1), softFrom);
     const softDone = (await keyClaims(stopKey(1))).succeeded ?? 0;
     ac.abort();
     const soft = await softRun;
     const afterSoft = await keyClaims(stopKey(1));
-    assert(soft.code === 130 && soft.stderr.includes("\n  stopping after the current thought; unfinished claims go back to the pool\n") && !afterSoft.claimed && (afterSoft.succeeded ?? 0) === softDone + 1,
-      `a caller's AbortSignal stops reembed's pass after the row in hand, and run() returns 130 (exit ${soft.code}, claims ${JSON.stringify(afterSoft)})`);
+    assert(softFirst && softIn.seen && soft.code === 130 && soft.stderr.includes("\n  stopping after the current thought; unfinished claims go back to the pool\n") && !afterSoft.claimed && (afterSoft.succeeded ?? 0) === softDone + 1,
+      `a caller's AbortSignal stops reembed's pass after the row in hand, a one-call thought, and run() returns 130 (exit ${soft.code}, claims ${JSON.stringify(afterSoft)}${notFirst(softFirst, "short")}${softIn.said})`);
 
     // The hard stop: the leases returned at once, the row in hand abandoned —
     // its vector not written, its claim not released by the worker — and run()
@@ -3852,22 +3898,47 @@ if (want("9")) {
       `the hard stop abandons reembed's row in hand: run() returns 130 at once, the embedding aborted, every vector written is a succeeded row's, none released after the leases went, a second hard call the first's, said once, and the stop inert after (exit ${hard.code} after ${hardMs} ms, ${moved} written, claims ${JSON.stringify(hardClaims)})`);
 
     // The CLI's signals: one SIGINT after the row in hand, two at once.
-    const cliRun = (key: string) => Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--job", key, "--workers", "1", "--batch", "1"], { env: STOP_ENV as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+    const cliRun = (key: string, more: Record<string, string> = {}) => Bun.spawn(["bun", "--no-env-file", join(HERE, "reembed.ts"), "--url", URL_!, "--job", key, "--workers", "1", "--batch", "1"], { env: { ...STOP_ENV, ...more } as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
     slowMs = 600;
+    const onceFirst = await firstInPool(stopKey(3), shorts[0]);
     const onceFrom = embedCalls;
     const once = cliRun(stopKey(3));
-    await inHand(stopKey(3), onceFrom);
+    const onceIn = await inHand(stopKey(3), onceFrom);
     const onceDone = (await keyClaims(stopKey(3))).succeeded ?? 0;
+    const onceCalls = embedCalls - onceFrom;
     once.kill("SIGINT");
     const [, onceErr] = await Promise.all([new Response(once.stdout).text(), new Response(once.stderr).text()]);
     const onceCode = await once.exited;
     const afterOnce = await keyClaims(stopKey(3));
-    assert(onceCode === 130 && onceErr.includes("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n") && (afterOnce.succeeded ?? 0) === onceDone + 1 && !afterOnce.claimed,
-      `one SIGINT stops reembed's CLI after the row in hand and exits 130 (exit ${onceCode}, claims ${JSON.stringify(afterOnce)})`);
+    const onceOk = onceFirst && onceIn.seen && onceCode === 130 && onceErr.includes(CLI_STOPPING) && (afterOnce.succeeded ?? 0) === onceDone + 1 && !afterOnce.claimed;
+    assert(onceOk,
+      `one SIGINT stops reembed's CLI after the row in hand, a one-call thought, and exits 130 (exit ${onceCode}, claims ${JSON.stringify(afterOnce)}${notFirst(onceFirst, "short")}${onceIn.said}; ${onceDone} done and ${onceCalls} call(s) at the signal, ${embedCalls - onceFrom} after${onceOk ? "" : `; stderr: ${lastLines(onceErr, 3)}`})`);
+    // …and with a long thought in hand, one SIGINT gives it back (SMD-4400, which found it; SMD-4444, which asks
+    // whether it should): its windows are several calls at once, those past the brain's share of slots wait behind
+    // its own, and the pass's first stop gives back a thought whose call waits for a slot (SMD-3379 PR 2b-1). Nothing
+    // is written, no call follows the signal, and the summary says the set-back. The share is this row's own, two
+    // embedding calls at once: the suites run with the slots off, where nothing waits and the thought finishes. Its
+    // calls take 5 s, so the signal lands while those past the share still wait.
     slowMs = 5000;
+    const longFirst = await firstInPool(stopKey(30), long);
+    const longFrom = embedCalls;
+    const longRun = cliRun(stopKey(30), { OB1_BACKGROUND_SLOTS: "embed=2" });
+    const longIn = await inHand(stopKey(30), longFrom);
+    // Both of the share's slots taken, each on a connection of its own and an advisory lock, which a slow runner
+    // takes its time over: the count is waited for, not slept for. Past two it cannot move, the calls 5 s long.
+    await pollUntil(async () => embedCalls - longFrom >= 2, 10_000);
+    const longCalls = embedCalls - longFrom;
+    longRun.kill("SIGINT");
+    const [longOut, longErr] = await Promise.all([new Response(longRun.stdout).text(), new Response(longRun.stderr).text()]);
+    const longCode = await longRun.exited;
+    const afterLong = await keyClaims(stopKey(30));
+    const longSaid = /\n {2}0 re-embedded, 0 failed, 0 deleted mid-pass, 1 set back in the queue, the embedding call in hand aborted by the pass's caller, or by its stop as it waited for a slot/.test(longOut);
+    assert(longFirst && longIn.seen && longCalls === 2 && longCode === 130 && longErr.includes(CLI_STOPPING) && longSaid
+        && !afterLong.succeeded && !afterLong.failed && !afterLong.claimed && embedCalls - longFrom === longCalls,
+      `…and with a long thought in hand under a share of two slots, its other calls waiting behind its own, one SIGINT gives it back: nothing written or failed, no call after the signal, the summary saying it was set back as it waited for a slot (SMD-4400, SMD-4444; exit ${longCode}, claims ${JSON.stringify(afterLong)}${notFirst(longFirst, "long")}${longIn.said}; ${longCalls} call(s) at the signal, ${embedCalls - longFrom} after; set-back said ${longSaid}; ${longOut.split("\n").find((l) => /re-embedded,/.test(l))?.trim().slice(0, 200) ?? "no summary"})`);
     const twiceFrom = embedCalls;
     const twice = cliRun(stopKey(4));
-    await inHand(stopKey(4), twiceFrom);
+    const twiceIn = await inHand(stopKey(4), twiceFrom);
     twice.kill("SIGINT");
     await Bun.sleep(100);
     const twiceAt = Date.now();
@@ -3875,8 +3946,9 @@ if (want("9")) {
     const [, twiceErr] = await Promise.all([new Response(twice.stdout).text(), new Response(twice.stderr).text()]);
     const twiceCode = await twice.exited;
     const twiceMs = Date.now() - twiceAt;
-    assert(twiceCode === 130 && twiceErr.includes("second signal — exiting now") && twiceMs < 2500 && !(await keyClaims(stopKey(4))).claimed,
-      `a second SIGINT exits reembed's CLI 130 at once, its lease returned (exit ${twiceCode} after ${twiceMs} ms)`);
+    const twiceOk = twiceIn.seen && twiceCode === 130 && twiceErr.includes("second signal — exiting now") && twiceMs < 2500 && !(await keyClaims(stopKey(4))).claimed;
+    assert(twiceOk,
+      `a second SIGINT exits reembed's CLI 130 at once, its lease returned (exit ${twiceCode} after ${twiceMs} ms${twiceIn.said}${twiceOk ? "" : `; stderr: ${lastLines(twiceErr, 2)}`})`);
     slowMs = 0;
 
     // A signal aborted during start-up: at the chunks line the record and the
@@ -29666,9 +29738,9 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] and [38p] leave recorded, in a full run and the
-  // long cell alike, is another model's, which every pass's start would refuse:
-  // set aside, and put back at the end.
+  // The extraction key [38r] and [38p] leave recorded in a full run is another
+  // model's, which every pass's start would refuse: set aside, and put back at
+  // the end. In its own cell, claims, there is none: [10] ends by deleting it.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */

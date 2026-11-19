@@ -1073,18 +1073,20 @@ jobs:
     env:
       OB1_TEST_COUNTS: /tmp/ob1-test-counts/counts.jsonl
 
-    # The live suite in five shards, one cell each, on a database of its own
+    # The live suite in six shards, one cell each, on a database of its own
     # (SMD-3048): sleep, long and extract are the sections test-live.ts's
     # SHARDS lists, split by their CI times into cells about equally long
-    # (SMD-3469); sweep is [38s] alone, the subject sweep under sleep, which
-    # no other cell had room for (SMD-3306 PR 6b-2); rest is [1] and every
-    # section SHARDS does not list. One job, not five copies of it, since
-    # the ruleset requires "Brain Checks passed" alone and not the cells'
-    # names (SMD-3168, SMD-3169).
+    # (SMD-3469); sweep began as [38s] alone, the subject sweep under sleep,
+    # which no other cell had room for (SMD-3306 PR 6b-2); claims is [10],
+    # which with [16] was four fifths of the rest, the run's longest cell by
+    # ~110 s, and [38b] from long, the next longest (SMD-4366); rest is [1]
+    # and every section SHARDS does not list. One job, not six copies of it,
+    # since the ruleset requires "Brain Checks passed" alone and not the
+    # cells' names (SMD-3168, SMD-3169).
     strategy:
       fail-fast: false
       matrix:
-        shard: [rest, sleep, long, extract, sweep]
+        shard: [rest, sleep, long, extract, sweep, claims]
 
     steps:
       # The job's Postgres, started by its first step in the background
