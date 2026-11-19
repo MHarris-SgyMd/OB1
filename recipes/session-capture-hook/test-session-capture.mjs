@@ -3271,13 +3271,23 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   // does not read, a list) threw on
   // every drain ahead of the week's give-up, or was never given up, and the copies behind it waited for good: each is
   // given up as one that does not parse, and the copy behind them lands in the same drain (SMD-4412).
-  const NOT_COPY = (n) => `000000000000009-000000000000009-${n}.json`;
+  const NOT_COPY = (n) => `000000000000009-000000000000009-${String(n).padStart(2, "0")}.json`; // padded: the queue drains in name order
   const nowAt = new Date().toISOString();
   const notCopies = [null, {}, { from: "stable", at: nowAt, tool: "capture_thought" }, { from: "stable", at: nowAt, tool: "capture_thought", args: ["x"] },
     { from: "stable", tool: "capture_thought", args: { content: "a copy with no date", client_key: S(51) } }, [], { from: "stable", at: nowAt, tool: 7, args: {} }, { from: "stable", at: nowAt, tool: "update_thought", args: null },
     // A date there but no date the week's give-up can read: a string that does not parse, and a number (review pass 1: mutants checking presence, or new Date(), survived).
     { from: "stable", at: "2026-13-45", tool: "capture_thought", args: { content: "a copy with a date that does not parse", client_key: S(51) } },
-    { from: "stable", at: Date.now(), tool: "capture_thought", args: { content: "a copy dated by a number", client_key: S(51) } }];
+    { from: "stable", at: Date.now(), tool: "capture_thought", args: { content: "a copy dated by a number", client_key: S(51) } },
+    // A tool the fan-out never copies (a typo): held a week before, the log saying to mint a write key that was fine (review pass 2).
+    { from: "stable", at: nowAt, tool: "update_thougt", args: { id: S(51), content: "an edit whose tool is misspelt" } },
+    // A name that is no string, which a template or String() cannot print (`{"toString":1}`), threw in the log's label,
+    // in the catch that keeps a throw's copy, and in a landed forget's drop of dead/ copies, stopping the queue for good
+    // (review passes 1 and 2); and a forget among them says its text stays.
+    { from: "stable", at: nowAt, tool: "capture_thought", args: { content: "a copy whose key is no string", client_key: { toString: 1 } } },
+    { from: "stable", at: nowAt, tool: "update_thought", args: { id: { toString: null, valueOf: null }, content: "an edit whose id is no string" } },
+    { from: "stable", at: nowAt, tool: "forget_thought", args: { id: S(53), confirm: S(53), detach_citations: true }, alt: { toString: 1 } },
+    { from: "stable", tool: "forget_thought", args: { id: S(53), confirm: S(53), detach_citations: true }, held: true }];
+  const FORGETS_NOT_COPIES = [notCopies.length - 1, notCopies.length];
   notCopies.forEach((op, i) => writeFileSync(join(CANARY_ROOT, "writes", "pending", NOT_COPY(i + 1)), JSON.stringify(op)));
   const BEHIND = NOT_COPY(notCopies.length + 1);
   writeFileSync(join(CANARY_ROOT, "writes", "pending", BEHIND), JSON.stringify({ from: "stable", at: nowAt, tool: "capture_thought", args: { content: "the copy behind the files that are no copies", client_key: S(52) } }));
@@ -3286,7 +3296,9 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const deadBad = readdirSync(join(CANARY_ROOT, "writes", "dead")).filter((f) => f.startsWith("000000000000009-")).sort();
   const notCopyLines = (logOf(CANARY_ROOT).match(/not copied \(given up\): 000000000000009-\S+ is not a copy/g) ?? []).length;
   assert(drainedBad.code === 1 && !queueIn().length && deadBad.length === notCopies.length && !deadBad.includes(BEHIND) && notCopyLines === notCopies.length
-      && calls.length === 1 && calls[0].args?.client_key === S(52) && byName(S(52)),
+      && calls.length === 1 && calls[0].args?.client_key === S(52) && byName(S(52))
+      && FORGETS_NOT_COPIES.every((n) => logOf(CANARY_ROOT).includes(`${NOT_COPY(n)} is not a copy — a forget: its text stays on this brain until forgotten there by hand`))
+      && !/^session-capture: /m.test(drainedBad.err),
     `queued files that parse but are no copy go to dead/, each logged "is not a copy", and the copy behind them lands in the same drain (${JSON.stringify({ code: drainedBad.code, dead: deadBad.length, lines: notCopyLines, queue: queueIn(), calls: calls.map((c) => c.args?.client_key ?? null) })})`);
   for (const f of deadBad) rmSync(join(CANARY_ROOT, "writes", "dead", f), { force: true });
 
@@ -3302,24 +3314,9 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const threwOldDead = existsSync(join(CANARY_ROOT, "writes", "dead", THREW_OLD));
   rmSync(join(CANARY_ROOT, "writes", "dead", THREW_OLD), { force: true });
   assert(drainedThrew.code === 1 && !/^session-capture: /m.test(drainedThrew.err) && threwAfter?.sent === true && threwAfter?.sending === undefined
-      && /kept: capture_thought \(client_key [^)]+\) — the copy failed in the hook: /.test(logOf(CANARY_ROOT))
-      && drainedThrewOld.code === 1 && threwOldDead && !queueIn().length && /not copied \(given up after a week\): capture_thought \(client_key [^)]+\) — the copy failed in the hook/.test(logOf(CANARY_ROOT)),
+      && /kept: capture_thought \(client_key [^)]+\) — the brain's answer could not be read \(.*\): check that the url is this brain's \/mcp/.test(logOf(CANARY_ROOT))
+      && drainedThrewOld.code === 1 && threwOldDead && !queueIn().length && /not copied \(given up after a week\): capture_thought \(client_key [^)]+\) — the brain's answer could not be read \(/.test(logOf(CANARY_ROOT)),
     `a copy whose answer throws in the hook is kept, sent, and logged, not an exception; a week old, it is given up (${JSON.stringify({ code: drainedThrew.code, err: drainedThrew.err.slice(0, 200), threwAfter: threwAfter && { sent: threwAfter.sent, sending: threwAfter.sending }, old: drainedThrewOld.code, threwOldDead })})`);
-
-  // A copy whose name a template cannot print (`{"toString":1}`, a hand edit's) threw in opLabel, in postWrite and again
-  // in the catch that keeps a throw's copy, so the queue stopped for good (review pass 1): the log prints such a name as
-  // JSON, and at a week old each is given up, the copy behind them landing.
-  const ODD_NAMES = [NOT_COPY(22), NOT_COPY(23)], ODD_BEHIND = NOT_COPY(24), weekOld = new Date(Date.now() - 8 * 24 * 3600_000).toISOString();
-  writeFileSync(join(CANARY_ROOT, "writes", "pending", ODD_NAMES[0]), JSON.stringify({ from: "stable", at: weekOld, tool: "capture_thought", args: { content: "a copy whose key is no string", client_key: { toString: 1 } } }));
-  writeFileSync(join(CANARY_ROOT, "writes", "pending", ODD_NAMES[1]), JSON.stringify({ from: "stable", at: weekOld, tool: "update_thought", args: { id: { toString: null, valueOf: null }, content: "an edit whose id is no string" } }));
-  writeFileSync(join(CANARY_ROOT, "writes", "pending", ODD_BEHIND), JSON.stringify({ from: "stable", at: nowAt, tool: "capture_thought", args: { content: "the copy behind two whose names are no strings", client_key: S(53) } }));
-  const drainedOdd = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
-  const oddDead = ODD_NAMES.filter((f) => existsSync(join(CANARY_ROOT, "writes", "dead", f)));
-  for (const f of oddDead) rmSync(join(CANARY_ROOT, "writes", "dead", f), { force: true });
-  assert(drainedOdd.code === 1 && !/^session-capture: /m.test(drainedOdd.err) && oddDead.length === 2 && !queueIn().length && byName(S(53))
-      && logOf(CANARY_ROOT).includes('not copied (given up after a week): capture_thought (client_key {"toString":1})')
-      && logOf(CANARY_ROOT).includes('not copied (given up after a week): update_thought of {"toString":null,"valueOf":null}'),
-    `copies whose names are no strings are logged with their names as JSON and given up at a week, not an exception that stops the queue; the copy behind them lands (${JSON.stringify({ code: drainedOdd.code, err: drainedOdd.err.slice(0, 200), dead: oddDead.length, queue: queueIn() })})`);
 
   // The receiving brain's own forget leaves things for a person to review there: the log names them (review pass 7).
   canaryReview = true;
