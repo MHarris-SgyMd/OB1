@@ -3810,14 +3810,19 @@ if (want("9")) {
     const inHand = async (key: string, from: number) => {
       const began = Date.now();
       let claimed = 0;
-      for (let i = 0; i < 100; i++) {
+      let seen = false;
+      for (let i = 0; i < 100 && !seen; i++) {
         claimed = (await keyClaims(key)).claimed ?? 0;
-        if (claimed >= 1 && embedCalls > from) break;
-        await Bun.sleep(50);
+        seen = claimed >= 1 && embedCalls > from;
+        if (!seen) await Bun.sleep(50);
       }
-      const seen = claimed >= 1 && embedCalls > from;
       return { seen, said: seen ? "" : `; no row was in hand after ${Date.now() - began} ms: ${claimed} claimed, ${embedCalls - from} call(s) at the stub` };
     };
+    /** What a row says when the thought it named was not the pool's first, and a CLI's last lines for a row that failed. */
+    const notFirst = (first: boolean, which: string) => (first ? "" : `; the ${which} thought was not put first in the pool`);
+    const lastLines = (text: string, n: number) => text.trim().split("\n").slice(-n).map((l) => l.trim().slice(0, 120)).join(" | ") || "none";
+    /** The CLI's line at its first signal. */
+    const CLI_STOPPING = "\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n";
     // The thought a pass claims first, where a case needs to know it (SMD-4400): the pool under a fresh key is made in
     // one statement, its dates tie, and the first claim is whichever the tie gives. Most of the 42 are one call; the
     // three long ones are several at once, and with the background slots on a first stop gives such a thought back
@@ -3844,7 +3849,7 @@ if (want("9")) {
     const soft = await softRun;
     const afterSoft = await keyClaims(stopKey(1));
     assert(softFirst && softIn.seen && soft.code === 130 && soft.stderr.includes("\n  stopping after the current thought; unfinished claims go back to the pool\n") && !afterSoft.claimed && (afterSoft.succeeded ?? 0) === softDone + 1,
-      `a caller's AbortSignal stops reembed's pass after the row in hand, a one-call thought, and run() returns 130 (exit ${soft.code}, claims ${JSON.stringify(afterSoft)}${softFirst ? "" : "; the short thought was not put first in the pool"}${softIn.said})`);
+      `a caller's AbortSignal stops reembed's pass after the row in hand, a one-call thought, and run() returns 130 (exit ${soft.code}, claims ${JSON.stringify(afterSoft)}${notFirst(softFirst, "short")}${softIn.said})`);
 
     // The hard stop: the leases returned at once, the row in hand abandoned —
     // its vector not written, its claim not released by the worker — and run()
@@ -3884,9 +3889,9 @@ if (want("9")) {
     const [, onceErr] = await Promise.all([new Response(once.stdout).text(), new Response(once.stderr).text()]);
     const onceCode = await once.exited;
     const afterOnce = await keyClaims(stopKey(3));
-    const onceOk = onceFirst && onceIn.seen && onceCode === 130 && onceErr.includes("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n") && (afterOnce.succeeded ?? 0) === onceDone + 1 && !afterOnce.claimed;
+    const onceOk = onceFirst && onceIn.seen && onceCode === 130 && onceErr.includes(CLI_STOPPING) && (afterOnce.succeeded ?? 0) === onceDone + 1 && !afterOnce.claimed;
     assert(onceOk,
-      `one SIGINT stops reembed's CLI after the row in hand, a one-call thought, and exits 130 (exit ${onceCode}, claims ${JSON.stringify(afterOnce)}${onceFirst ? "" : "; the short thought was not put first in the pool"}${onceIn.said}; ${onceDone} done and ${onceCalls} call(s) at the signal, ${embedCalls - onceFrom} after${onceOk ? "" : `; stderr: ${onceErr.trim().split("\n").slice(-3).map((l) => l.trim().slice(0, 120)).join(" | ") || "none"}`})`);
+      `one SIGINT stops reembed's CLI after the row in hand, a one-call thought, and exits 130 (exit ${onceCode}, claims ${JSON.stringify(afterOnce)}${notFirst(onceFirst, "short")}${onceIn.said}; ${onceDone} done and ${onceCalls} call(s) at the signal, ${embedCalls - onceFrom} after${onceOk ? "" : `; stderr: ${lastLines(onceErr, 3)}`})`);
     // …and with a long thought in hand, one SIGINT gives it back (SMD-4400, which found it; SMD-4444, which asks
     // whether it should): its windows are several calls at once, those past the brain's share of slots wait behind
     // its own, and the pass's first stop gives back a thought whose call waits for a slot (SMD-3379 PR 2b-1). Nothing
@@ -3907,9 +3912,9 @@ if (want("9")) {
     const longCode = await longRun.exited;
     const afterLong = await keyClaims(stopKey(30));
     const longSaid = /\n {2}0 re-embedded, 0 failed, 0 deleted mid-pass, 1 set back in the queue, the embedding call in hand aborted by the pass's caller, or by its stop as it waited for a slot/.test(longOut);
-    assert(longFirst && longIn.seen && longCalls === 2 && longCode === 130 && longErr.includes("\n  stopping after the current thought; unfinished claims go back to the pool (again to exit now)\n") && longSaid
+    assert(longFirst && longIn.seen && longCalls === 2 && longCode === 130 && longErr.includes(CLI_STOPPING) && longSaid
         && !afterLong.succeeded && !afterLong.failed && !afterLong.claimed && embedCalls - longFrom === longCalls,
-      `…and with a long thought in hand under a share of two slots, its other calls waiting behind its own, one SIGINT gives it back: nothing written or failed, no call after the signal, the summary saying it was set back as it waited for a slot (SMD-4400, SMD-4444; exit ${longCode}, claims ${JSON.stringify(afterLong)}${longFirst ? "" : "; the long thought was not put first in the pool"}${longIn.said}; ${longCalls} call(s) at the signal, ${embedCalls - longFrom} after; set-back said ${longSaid}; ${longOut.split("\n").find((l) => /re-embedded,/.test(l))?.trim().slice(0, 200) ?? "no summary"})`);
+      `…and with a long thought in hand under a share of two slots, its other calls waiting behind its own, one SIGINT gives it back: nothing written or failed, no call after the signal, the summary saying it was set back as it waited for a slot (SMD-4400, SMD-4444; exit ${longCode}, claims ${JSON.stringify(afterLong)}${notFirst(longFirst, "long")}${longIn.said}; ${longCalls} call(s) at the signal, ${embedCalls - longFrom} after; set-back said ${longSaid}; ${longOut.split("\n").find((l) => /re-embedded,/.test(l))?.trim().slice(0, 200) ?? "no summary"})`);
     const twiceFrom = embedCalls;
     const twice = cliRun(stopKey(4));
     const twiceIn = await inHand(stopKey(4), twiceFrom);
@@ -3922,7 +3927,7 @@ if (want("9")) {
     const twiceMs = Date.now() - twiceAt;
     const twiceOk = twiceIn.seen && twiceCode === 130 && twiceErr.includes("second signal — exiting now") && twiceMs < 2500 && !(await keyClaims(stopKey(4))).claimed;
     assert(twiceOk,
-      `a second SIGINT exits reembed's CLI 130 at once, its lease returned (exit ${twiceCode} after ${twiceMs} ms${twiceIn.said}${twiceOk ? "" : `; stderr: ${twiceErr.trim().split("\n").slice(-2).map((l) => l.trim().slice(0, 120)).join(" | ") || "none"}`})`);
+      `a second SIGINT exits reembed's CLI 130 at once, its lease returned (exit ${twiceCode} after ${twiceMs} ms${twiceIn.said}${twiceOk ? "" : `; stderr: ${lastLines(twiceErr, 2)}`})`);
     slowMs = 0;
 
     // A signal aborted during start-up: at the chunks line the record and the
