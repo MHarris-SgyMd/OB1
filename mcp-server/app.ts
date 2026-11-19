@@ -527,6 +527,15 @@ export function createMcpApp(deps: McpDeps): Hono {
   // asked, and gives the place back when the stream ends, however it ends.
   const listen = deps.listen?.hold ? deps.listen : null;
   const listening = new Map<string, number>();
+  /**
+   * Whether the stop has cut what is in flight, on a server whose connections outlast the cut: one that holds
+   * listen streams closes no connection at the bound, where that would drop each stream with no closing frame, so
+   * this app does the cutting. From the cut nothing more is answered and nothing more of an answer goes out, by
+   * any route; each connection goes when the stop closes it, as it went at the bound before.
+   */
+  const cutNow = () => listen !== null && deps.stop?.cut === true;
+  /** Whether the stop's drain has ended, on such a server: what arrives from then is not served. An app that holds no stream heeds neither flag. */
+  const overNow = () => listen !== null && deps.stop?.over === true;
   /** A place for one more stream under this name, to be given back once; or which bound refused it. */
   const placeFor = (held: ListenStreams, name: string): { release: () => void } | { full: "server" | "name" } => {
     if (held.open >= held.max) return { full: "server" };
@@ -564,7 +573,9 @@ export function createMcpApp(deps: McpDeps): Hono {
     const build = (ctx.authInfo?.extra as { build?: () => McpServer } | undefined)?.build;
     if (!build) throw new Error("a 2026-07-28 request reached the SDK's handler with no caller");
     return build();
-  }, { legacy: "reject", responseMode: "sse", onerror: (err) => { const said = handlerSaid.getStore(); if (said) said.err ??= err; } });
+    // The handler's own bound, set to the server's: the route's count is the bound, and this one is what a stream
+    // that count has lost runs into, at 256 and not the handler's 1,024.
+  }, { legacy: "reject", responseMode: "sse", onerror: (err) => { const said = handlerSaid.getStore(); if (said) said.err ??= err; }, ...(listen ? { maxSubscriptions: listen.max } : {}) });
   // The entry's stop ends the streams through this, last (listen-streams.ts): the handler's own close, which sends each its closing frame.
   if (listen) listen.close = () => modern.close();
   /** What the handler is given for one request: no token and no identity of the SDK's, only the function that builds the caller's server. */
@@ -578,10 +589,11 @@ export function createMcpApp(deps: McpDeps): Hono {
   app.use("*", async (c, next) => {
     const probe = (c.req.method === "GET" || c.req.method === "HEAD") && HEALTH_PATH.test(c.req.path)
       && !c.req.path.startsWith("/.well-known/") && presentedKeys(c.req.raw).length === 0;
-    // Arrived after the stop's drain ended, on a connection opened before the signal: the stop waits on nothing
+    // Arrived after the stop's drain ended, on a connection the runtime kept through its stop with no whole
+    // request on it (its headers half sent at the signal; on macOS, one never used): the stop waits on nothing
     // more, and its handler is about to be closed. Not served and not answered: its line `cut`, and its connection
     // goes with the process, as one that arrived a moment later would find it.
-    if (deps.stop?.over === true) {
+    if (overNow()) {
       if (!probe) beginRequest("mcp", c.req.raw).end({ outcome: "cut" });
       return new Promise<Response>(() => {});
     }
@@ -594,6 +606,9 @@ export function createMcpApp(deps: McpDeps): Hono {
       trace.end({ status: 500, outcome: "error" });
       throw err;
     }
+    // Cut by the stop while it ran: whatever it came to, an answer or a route's 500, is not sent. Its line is the
+    // stop's own, `cut`, written at the cut with every open record's.
+    if (cutNow()) return new Promise<Response>(() => {});
     if (trace.deferred || trace.ended) return;
     const at = performance.now();
     const gone = trace.clientGone;
@@ -897,7 +912,7 @@ export function createMcpApp(deps: McpDeps): Hono {
       // Its line written where the stream ends, with its bytes, as index.ts's job stream's is.
       const trace = traceOf(c.req.raw);
       const ends = trace ? endsWithStream(trace, c.req.raw.signal) : {};
-      return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream`, ...ends });
+      return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream`, cut: cutNow, ...ends });
     }
     const answered = await deps.rest.call("job_status", { job_id: id }, credOf(caller));
     const word = turned(answered);
@@ -946,8 +961,6 @@ export function createMcpApp(deps: McpDeps): Hono {
     const signal = c.req.raw.signal;
     let label = "?";
     let settled = false;
-    /** Whether the stop has cut this request, on a server whose connections outlast the cut (one that holds listen streams). */
-    const cutHere = () => listen !== null && deps.stop?.cut === true;
     const abandoned = () => {
       if (settled) return;
       settled = true;
@@ -1019,7 +1032,7 @@ export function createMcpApp(deps: McpDeps): Hono {
       const request = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined });
       // Cut by the stop before it reached a transport (its key still being looked up at the bound): not begun now,
       // where the handler may be closed already and would answer it 500.
-      if (cutHere()) {
+      if (cutNow()) {
         abandoned();
         return new Promise<Response>(() => {});
       }
@@ -1096,13 +1109,13 @@ export function createMcpApp(deps: McpDeps): Hono {
           // duration is a request's. Its end writes nothing: a client that closes it has not abandoned a call, and
           // one open after ten minutes has not stalled. The SDK keeps it alive, a comment every 15 s.
           try {
-            settled = true;
             trace.rpc ??= "subscriptions/listen";
             finish("ok");
             // The request's own listener is taken off: left on, it kept this request alive, its body with it, for
             // as long as the stream was held (measured: 30 streams opened with 3 MiB bodies, 90 MiB kept).
             signal.removeEventListener("abort", abandoned);
             signal.addEventListener("abort", release, { once: true });
+            // Its client gone while it was being opened: the listener above will never fire.
             if (signal.aborted) release();
             // This app's own interval and bound are given like any answer's: `held` is what sets them aside.
             return withSseKeepalive(response, { held: true, signal, label, ...keepalive, onEnd: release, onCancel: release });
@@ -1122,7 +1135,7 @@ export function createMcpApp(deps: McpDeps): Hono {
         // the cut, through the flush, and closes the streams through the SDK's handler, which ends each call in
         // flight with them as an answer of nothing that ends whole (measured without this: a 200, an empty
         // stream, no warning; and a call that ended by its own work in that time answered in full, its line `cut`).
-        cut: cutHere,
+        cut: cutNow,
         onEnd: (bytes) => { settled = true; finish(undefined, undefined, bytes); },
         onStall: () => { settled = true; finish("stalled"); },
         onCancel: abandoned,
@@ -1132,9 +1145,10 @@ export function createMcpApp(deps: McpDeps): Hono {
 
   // A throw from a route — the REST core away, this server's forwarder refused, a job store's fault — is a 500, as
   // Hono's default answers it, and one line naming the route at most once a minute, not a stack trace per request;
-  // none for a client already gone, whose abandoned line says it (review passes 3 and 4).
+  // none for a client already gone, whose abandoned line says it (review passes 3 and 4), and none for a request the
+  // stop had cut, whose line says that: at a whole stack's stop the REST core goes away under it, and its 500 is not sent.
   app.onError((err, c) => {
-    if (!c.req.raw.signal.aborted) sayOnce(err, `${c.req.method} ${HEALTH_PATH.test(c.req.path) ? "/health" : "a route"} failed`);
+    if (!c.req.raw.signal.aborted && !cutNow()) sayOnce(err, `${c.req.method} ${HEALTH_PATH.test(c.req.path) ? "/health" : "a route"} failed`);
     return c.text("Internal Server Error", 500);
   });
 

@@ -87,7 +87,7 @@ This is what must hold, not how to wire it. Three reviews each found a draft's w
 
 **The stop.**
 
-- A stop with nothing in flight but listen streams ends inside its bound and exits 0. Today one open stream holds the stop to its bound, 8 seconds, and ends it as a cut with exit 1: Bun's `stop()` waits for every response body.
+- A stop with nothing in flight but listen streams ends inside its bound and exits 0. Before the build, one open stream held the stop to its bound, 8 seconds, and ended it as a cut with exit 1: Bun's `stop()` waits for every response body.
 - Every open stream is sent its closing frame before the process exits, also when a call is cut at the bound. There the frames go out in the stop's last second.
 - The streams are closed as late as the stop can close them: after the other requests have drained and after the telemetry flush. The client's 12 seconds start when its stream ends, and whatever the stop does after that is spent from them.
 - No connection is accepted after the signal, and no request is answered by a handler already closed.
@@ -110,7 +110,7 @@ This rule was first written as one line at the stream's end, its `ms` its lifeti
 - The server's cap is 256, not the SDK's 1,024.
 - A cap for each caller's name, since the SDK's is the whole server's and one key filled it in a fraction of a second, in a reviewer's test: 32. One name is every session of one key, so the number is sessions, not clients.
 - A stream refused at either cap is `refused` on its line, with a code. The SDK's own refusal is a 200 whose line reads `ok`.
-- Both are counted by the route, which knows a listen by its `Mcp-Method` header: the handler serves none that header does not name. The SDK's own bound stays at its 1,024, above the server's.
+- Both are counted by the route, which knows a listen by its `Mcp-Method` header: the handler serves none that header does not name. The SDK's own bound, 1,024 as it comes, is set to the server's too.
 - A caller's name is its key's name; for a token it is its subject and its client together, so one person signed in through eight clients has eight names, and could fill the server's 256.
 
 Both numbers are a first guess, to be set against the sessions a key really holds.
@@ -134,23 +134,28 @@ Both numbers are a first guess, to be set against the sessions a key really hold
 
 ## As built in PR 2a
 
-What the build settled, against a real process, and where it left the rules above. Its review changed three of these, and they are given as they now are; the ticket's record says what was found.
+What the build settled, against a real process, and where it left the rules above. Two reviews changed several of these, and they are given as they now are; the ticket's record says what each found.
 
 - **The switch.** One constant, `HOLD_LISTEN_STREAMS = false`, in `mcp-server/listen-streams.ts`, read by the entry alone. No setting turns it on. The suite's own apps are given their streams; its spawned entry is started with a preload, `mcp-server/test-listen-on.ts`, that loads that one module with the one word changed, and fails to start if the line is not there to change. PR 2b changes the word.
-- **Inert where it is off.** The stop is given its new steps only by a server that holds streams, and the route cuts and refuses nothing of its own where it holds none. With the capability `false` the entry stops as it did: a row holds it to that at the cut, where the two differ most. The page first said 2a would not be inert.
+- **Inert where it is off.** The stop is given its new steps only by a server that holds streams, and an app that holds none heeds neither of the stop's two flags. With the capability `false` the entry stops as it did: rows hold it to that at the cut, where the two differ most, and hold the app to it. The page first said 2a would not be inert.
 - **The line at the open.** A stream's record ends when its stream opens: `ok`, its `ms` the time to open it. The rule as first written, one line at the end with the stream's lifetime, set the stop against itself: a record still open at the stop must be ended before the flush or it is never sent, and the stream must be closed after the flush. Ended at the open, the record is sent with the next batch like any request's, the stop has nothing of the stream to end or to cut, and `server-portable/telemetry.ts` needs no change. The cost: nothing records when a stream ended or how long it was held. A client that asks again writes a new line.
 - **The stop's order,** for a server that holds streams:
-  1. It stops accepting, and waits for the requests and the tool calls, looked at together. The streams are not counted, and neither is a connection opened and not yet used, which Bun's own end would wait on to the bound.
-  2. The drain's end, finished or cut, is told to the app in the turn that decides it. A request that arrives after it, on a connection opened before the signal, is not served and not answered: its line is `cut`, and its connection goes with the process.
-  3. At the bound no connection is closed, since that would drop every stream with no closing frame. The route does the cutting: nothing more of a cut answer goes out, and it does not end.
+  1. It stops accepting, and waits for the requests and the tool calls, looked at together. The streams are not counted. Neither is a connection with no whole request on it yet, which Bun's own end would wait on to the bound: one whose headers were half sent at the signal, and on macOS one opened and never used (Linux closes that one at the signal; both measured).
+  2. The drain's end, finished or cut, is told to the app in the turn that decides it. A request made whole on such a connection after it is not served and not answered: its line is `cut`, and its connection goes with the process. An entry that has served no request yet has no server to stop: it tells nothing, and serves what arrives until it exits, as it did.
+  3. At the bound no connection is closed, since that would drop every stream with no closing frame. The app does the cutting, on every route: nothing is answered after the cut, nothing more of an answer already begun goes out, and it does not end. A request whose key was still being checked is not begun.
   4. The open records are ended, the telemetry flushed and the pool closed, as ever.
-  5. The streams are closed through the handler, then their answers waited on to have ended, 100 ms at most for each; then every connection is closed, and the process exits. Those two bounds come out of the flush's, so the stop ends no later than one that holds no stream. The last line says how many streams were closed, or how many were not.
-- **What that changes for other requests, against a server that holds none.** A call in flight at the bound is cut the same: its client gets nothing more. Two things differ. A connection opened and never used no longer holds the stop to its bound. And a request that arrives on such a connection after the drain has ended is dropped, where a server that holds none would still be waiting on that connection and would serve it.
-- **What the stop waits on after closing the streams.** Measured on the entry. With the exit straight after the close, a stream's closing frame was lost. With every connection closed straight after it, the frame was lost again where the drain had finished, a reset in its place, and not after a cut. Waiting for the streams' answers to have ended, which the runtime's count of requests says, lost none, with one stream and with 24. All on macOS; Linux is CI's.
-- **The caps** are the route's count, by caller name and for the server, of the requests whose header names the method. The handler's own `maxSubscriptions` was set to the same number at first and taken out, since no row could tell the two apart; the review then found a listen the route's count missed, one whose body begins with two byte-order marks, which that second bound would have stopped at 256 where the route stopped nothing. The count was mended at its cause, and the second bound is still out.
+  5. The streams are closed through the handler, then their answers waited on to have ended, 100 ms at most for each; then every connection is closed, and the process exits. Those two bounds come out of the flush's, so the latest the stop can end is as it was at a grace of 2 s or more, a second before the kill. Closing the streams takes a few milliseconds; where a close hangs, a stop whose flush ended early ends up to 0.2 s later than it would have, and at a grace of 1 s the latest is 0.95 s where it was 0.75. The last line says how many streams were closed, or how many were not.
+- **What that changes for other requests, against a server that holds none.** A request in flight at the bound is cut the same, whatever its route: its client gets nothing more. Two things differ. A connection with no whole request on it no longer holds the stop to its bound. And a request made whole on such a connection after the drain has ended is dropped, where a server that holds none would still be waiting on that connection and would serve it.
+- **What the stop waits on after closing the streams.** Measured on the entry. With the exit straight after the close, a stream's closing frame was lost. With every connection closed straight after it, the frame was lost again where the drain had finished, a reset in its place, and not after a cut. Waiting for the streams' answers to have ended, which the runtime's count of requests says, lost none, with one stream and with 24, on macOS and in CI's Linux image.
+- **The caps** are the route's count, by caller name and for the server, of the requests whose header names the method. The handler's own `maxSubscriptions` is set to the server's bound as well. It was taken out once, since no row could tell the two apart, and put back after the reviews: a listen the route's count missed (its body behind two byte-order marks) and a stream a throw left in the handler each ran into nothing before the handler's 1,024. Both were mended at their cause. The second bound is what such a stream would run into now, and what the suite sees one by.
 - **A held stream keeps nothing of its request.** The route's own listener on the request is taken off once the stream is held. Left on, each stream kept its request's body: 30 streams opened with 3 MiB bodies kept 90 MiB.
 - **Not built in 2a:** the capability, the documents, a count of open streams anywhere but the stop's lines, and anything from "To measure in the build".
-- **Left as it is:** a listen whose header and body disagree, from a caller at its bound, is refused at the bound and not with the handler's 400. A cut call's warning carries the time it was written, which for a call that never ends is the connections' close, a moment after its line's `ms`.
+- **Left as it is:**
+  - A request whose header names the method, from a caller at its bound, is refused at the bound whatever else is wrong with it, where the handler would answer 400, 413 or 415; and a notification the route cannot read is answered there as a request.
+  - A cut call's warning carries the time it was written, which for a call that never ends is the connections' close, a moment after its line's `ms`.
+  - A request dropped after the drain's end is written `cut` with no caller's name: its key was never checked.
+  - A path that holds an encoded line break never reaches the app's first middleware, and is still answered its 405 after the drain has ended.
+  - A listen whose client goes before its stream opens is written `abandoned`, with the warning any abandoned request gets, that a capture may have landed.
 
 ## Considered and not taken
 
@@ -171,17 +176,17 @@ What the build settled, against a real process, and where it left the rules abov
 
 ## Verify, for the build
 
-In 2a, with the suite's own switch, each held by a row of `mcp-server/test-mcp.ts` ([8h] against the entry in a process of its own, [9c] in process):
+In 2a, with the suite's own switch, each held by a row of `mcp-server/test-mcp.ts` ([8h] against the entry in a process of its own, [9c] in process), on macOS and in CI's Linux image:
 
 - A stop with a listen stream open and nothing else exits 0 inside its bound; the stream's client reads its closing frame; the log has one line for it, `ok`. No collector.
 - A stop with a stream open and a call in flight waits for the call, which is answered in full, then closes the stream. With a collector: the stream's span is sent by the stop's flush.
 - A stop with 24 streams open and a call of each revision cut at the bound: each call's line is `cut` and its client gets nothing, each stream's line is `ok` and its closing frame read, exit 1. With a collector.
-- A stop whose collector never answers: the streams are closed after the flush has run out its bound, not before.
-- A connection attempted after the signal is refused. A request that arrives after the drain has ended, on a connection opened before the signal, is not served, and not answered 500 by a handler already closed.
+- A stop whose collector never answers: the streams are closed after the flush has run out its bound of 1.8 s, not before. Cut, with such a collector: a call and a job poll whose work ends in the 0.8 s the flush then takes are not answered.
+- A connection attempted after the signal is refused. A request whose headers were half sent at the signal, made whole after the drain has ended, is not served, and not answered 500 by a handler already closed.
 - A stream held past the stall bound, shortened for the test, is not `stalled`; one its client closed is not `abandoned`; its line is written as it opens, its `ms` the time to open it.
-- A call whose work ends after the cut is not answered late under a line that says `cut`.
+- In flight at the cut, and not answered after it: a call whose work ends later, a job poll, a refusal of the route's own, a job's stream, a key's check that throws.
 - The stream past each cap is refused, and its line says so; a listen the route cannot read and the handler can is counted like any other.
-- Today's entry, which holds none, cuts as it did.
+- Today's entry, which holds none, cuts as it did; and an app that holds none heeds neither of the stop's flags.
 
 In 2b, a Claude Code session connected to a scratch stack, with no reconnect in any:
 

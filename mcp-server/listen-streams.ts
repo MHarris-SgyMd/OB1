@@ -17,8 +17,8 @@
 export const HOLD_LISTEN_STREAMS = false;
 
 /**
- * The most streams this server holds at once, counted by the route with the bound below. The SDK's own bound, 1,024
- * for the whole server, stays where it is, above this one and never reached.
+ * The most streams this server holds at once, counted by the route with the bound below. The SDK's own bound for
+ * the whole server, 1,024 as it comes, is set to this too: what a stream the route's count has lost would run into.
  */
 export const LISTEN_STREAMS_MAX = 256;
 

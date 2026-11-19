@@ -73,7 +73,11 @@ const plugins = enabledPlugins();
 knowTools(plugins.flatMap((p) => p.operations.map((op) => op.tool)));
 /** The tool calls running, counted for the stop (SMD-2250), as server-portable's index.ts counted its own: a call whose client left still runs to its end. */
 const toolCalls = createCallCount();
-/** The stop's word: set when it cuts what is still in flight, so a request it ends then is `cut`, not `abandoned`. */
+/**
+ * The stop's word. `cut`: set when it cuts what is still in flight, so a request it ends then is `cut`, not
+ * `abandoned`. `over`: set when its drain has ended, by a stop that closes listen streams last (SMD-4347): the app
+ * then serves nothing that arrives.
+ */
 const stop = { cut: false, over: false };
 const edge = edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN });
 // The token exchange (SMD-2286): on a configured stack with the `mcp` client's secret; without the secret a token is
