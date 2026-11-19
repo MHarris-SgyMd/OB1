@@ -13774,7 +13774,7 @@ console.log("\n[79] Migration 088: update_thought answers what it did — the ro
   assert(JSON.stringify(await q(`SELECT id, metadata, updated_at FROM thoughts ORDER BY id`)) === rows && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'update_thought'`)).n === 1,
     "088 re-applied: one update_thought, and no row moved");
   // 088 re-applied puts its gate back (an unlink taking no review lock); the
-  // sections after run on the shipped 099 (SMD-3045).
+  // sections after run on the shipped body (148's, carrying 099's: SMD-3045, SMD-2298).
   await restoreShipped("update_thought");
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM ob1_agents`);
@@ -22349,7 +22349,7 @@ console.log("\n[133] Migration 148: a re-tag that came out the same settles the 
   const call = (patch: unknown, lineage: unknown) => one<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, p_metadata_patch => $2::jsonb, p_lineage => $3::jsonb) AS r`,
     [t, patch === null ? null : JSON.stringify(patch), lineage === null ? null : JSON.stringify(lineage)]);
   type TagsRow = { recipe: Record<string, unknown>; fp: string; stale: string | null; reason: string | null; at: string };
-  const tagsRow = async () => (await q<TagsRow>(`SELECT recipe, input_fingerprints[1] AS fp, stale_since::text AS stale, stale_reason AS reason, produced_at::text AS at
+  const tagsRow = async () => (await q<TagsRow>(`SELECT recipe, input_fingerprints[1] AS fp, stale_since::text AS stale, stale_reason AS reason, produced_at::text || '#' || xmin::text AS at
                                                     FROM derivations WHERE artifact_kind = 'metadata' AND artifact_id = $1::uuid AND produced_by = 'metadata'`, [t]))[0];
   const fpNow = async () => String((await one<{ f: string }>(`SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) AS f FROM thoughts WHERE id = $1::uuid`, [t])).f);
   const state = async () => JSON.stringify(await one(`SELECT (SELECT count(*)::int FROM thought_audit WHERE thought_id = $1::uuid) AS events, updated_at::text AS at, metadata FROM thoughts WHERE id = $1::uuid`, [t]));
@@ -22391,6 +22391,26 @@ console.log("\n[133] Migration 148: a re-tag that came out the same settles the 
   const events = JSON.parse(await state()).events as number;
   assert(moved.r.ok && movedRow?.stale === null && movedRow.recipe.model === "m1" && events === JSON.parse(before).events + 1,
     `…a patch that moves the tags records the row with its event, as before (${events} events)`);
+
+  // Review pass 1: a row whose metadata is SQL NULL (a raw writer's) takes no patch, so nothing is settled there;
+  // a row in 018's state (content_fingerprint NULL) compares at its text's fingerprint, so a re-send records nothing.
+  const nul = (await one<{ r: { id: string } }>(`SELECT upsert_thought('[133] a raw writer''s row with no metadata', '{"metadata":{}}'::jsonb) AS r`)).r.id;
+  await db.query(`UPDATE thoughts SET metadata = NULL WHERE id = $1::uuid`, [nul]);
+  const nulReply = (await one<{ r: { ok: boolean; patch_dropped?: boolean } }>(`SELECT update_thought($1::uuid, p_metadata_patch => $2::jsonb, p_lineage => $3::jsonb) AS r`,
+    [nul, JSON.stringify(SAME), JSON.stringify({ metadata: R1 })])).r;
+  const nulRow = (await q(`SELECT 1 FROM derivations WHERE artifact_kind = 'metadata' AND artifact_id = $1::uuid`, [nul])).length;
+  // 018's state: a row moved raw onto text another row holds, its fingerprint NULL (the unique key is the other's).
+  await one(`SELECT upsert_thought('[133] the twins'' text', '{"metadata":{}}'::jsonb) AS r`);
+  const twin = (await one<{ r: { id: string } }>(`SELECT upsert_thought('[133] a twin row before its move', '{"metadata":{"type":"note","topics":["alpha"]}}'::jsonb) AS r`)).r.id;
+  const twinCall = () => db.query(`SELECT update_thought($1::uuid, p_metadata_patch => $2::jsonb, p_lineage => $3::jsonb)`, [twin, JSON.stringify(SAME), JSON.stringify({ metadata: R1 })]);
+  await db.query(`UPDATE thoughts SET content = '[133] the twins'' text', content_fingerprint = NULL WHERE id = $1::uuid`, [twin]);
+  const twinFp = (await one<{ f: string | null }>(`SELECT content_fingerprint AS f FROM thoughts WHERE id = $1::uuid`, [twin])).f;
+  await twinCall();
+  const twinAt = (await one<{ at: string }>(`SELECT produced_at::text || '#' || xmin::text AS at FROM derivations WHERE artifact_kind = 'metadata' AND artifact_id = $1::uuid`, [twin]))?.at;
+  await twinCall();
+  const twinAgain = (await one<{ at: string }>(`SELECT produced_at::text || '#' || xmin::text AS at FROM derivations WHERE artifact_kind = 'metadata' AND artifact_id = $1::uuid`, [twin]))?.at;
+  assert(nulReply.ok && nulReply.patch_dropped === true && nulRow === 0 && twinFp === null && twinAt !== undefined && twinAgain === twinAt,
+    `…a row whose metadata is SQL NULL takes no patch and is not settled (${nulRow} row(s)); a twin row with no fingerprint is recorded once at its text's fingerprint, a re-send moving nothing (${twinAt} vs ${twinAgain})`);
 
   // 099 re-applied puts the old rule back: a marked row a same-tags re-tag leaves marked; the shipped file restores it.
   await mark();
