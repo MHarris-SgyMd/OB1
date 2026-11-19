@@ -134,26 +134,32 @@ cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT
 # reads one; a long name cut at 40 characters), and the assertions it had
 # passed and failed by then, by the rows it printed, as db/test-support.ts's
 # createAssert prints them and the self-checks do (a ✓ or ✗ after the line's
-# indent; a "(doc)" row is no assertion, createAssert counts it apart; a
-# failed row printed on both streams counts once, as in excerpt, and so two
-# that failed under one label count once too). A raw line that begins as a
-# header does, a dumped "[0,1,0]" or a child's "[stub] listening", printed
-# after the section's own would be named in its place: test-live prints none
-# today, and suite-sections.ts would read it as a section too. A stopped
-# suite prints no tally, so without this its row said only that it stopped: a
-# shard 30 assertions from its end and one hung at its first read alike. A
-# suite that printed no header says its counts alone, and one that printed no
-# row either adds nothing.
+# indent; a "(doc)" row is no assertion, createAssert counts it apart). Every
+# row counts, so two that failed under one label are two: test-live's rest
+# has labels that repeat, one seven times, and createAssert prints a failed
+# row on stderr alone, so there is no second copy to drop as excerpt drops
+# one. A suite that printed no ✓ row says what failed alone, never "0
+# passed": test-cli, test-connect, test-slot-relay and others here print
+# nothing for an assertion that held, so none printed is not none passed. A
+# raw line that begins as a header does, a dumped "[0,1,0]" or a child's
+# "[stub] listening", printed after the section's own would be named in its
+# place: test-live prints none today, and suite-sections.ts would read it as
+# a section too. A stopped suite prints no tally, so without this its row
+# said only that it stopped: a shard 30 assertions from its end and one hung
+# at its first read alike. A suite that printed no header says its counts
+# alone, one that printed no row its section alone, and one that printed
+# neither adds nothing.
 reached() {
   [ "$1" -eq 124 ] || return 0
-  local at passed failed
+  local at passed failed said=''
   at=$(printf '%s\n' "$2" | grep -E '^\[[^][:space:]][^]]*\]([[:space:]]|$)' | tail -1)
   at=${at%%]*}
   [ "${#at}" -le 40 ] || at="$(printf '%s' "$at" | cut -c1-40)…"
   passed=$(printf '%s\n' "$2" | grep -E '^[[:space:]]*✓[[:space:]]' | grep -cvE '^[[:space:]]*✓[[:space:]]+\(doc\)[[:space:]]')
-  failed=$(printf '%s\n' "$2" | grep -E '^[[:space:]]*✗[[:space:]]' | grep -vE '^[[:space:]]*✗[[:space:]]+\(doc\)[[:space:]]' | awk '!seen[$0]++' | grep -c .)
-  [ -n "$at" ] || [ "$((passed + failed))" -gt 0 ] || return 0
-  printf '%s, %s passed and %s failed by then' "${at:+ in $at]}" "$passed" "$failed"
+  failed=$(printf '%s\n' "$2" | grep -E '^[[:space:]]*✗[[:space:]]' | grep -cvE '^[[:space:]]*✗[[:space:]]+\(doc\)[[:space:]]')
+  if [ "$passed" -gt 0 ]; then said=", $passed passed and $failed failed by then"
+  elif [ "$failed" -gt 0 ]; then said=", $failed failed by then"; fi
+  printf '%s%s' "${at:+ in $at]}" "$said"
 }
 
 # keep_output NAME OUT: a failing row's whole output, kept in a file of its own
