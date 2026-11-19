@@ -15,6 +15,14 @@ Amended 2026-10-22 (SMD-3203 item 3 PR 2b): decide version 4 is built (pass key 
 - **A capped pair's evolves or duplicate** becomes related at H2O's P(related): H2O's own verdict, or the best a capped outdates takes. It is floored on the relation words' mass, as any relation is. A related or unrelated verdict stands, and a capped outdates is written no proposal.
 - **Nothing else of H2O's distribution moves onto related.** On a mediated pair, much of it is about the subject that mediates the pair, such as a third subject's later status read as outdates.
 
+Amended 2026-11-19 (SMD-3340): the maintainer decided what the pass records for a settling pair, on a review of every proposal decide version 5 had made on the canary. Of those 41, 2 are right as a whole, 32 are right about a part (a statement of the falling thought is outdated, and the thought still stands) and 7 are neither. So:
+- **the pass records the settled part,** not a typed whole-thought supersession (row 8);
+- **the word is kept as data and read by its group** (row 9);
+- **a part the writer names is a proposal for review,** and a whole-thought supersession stays as the reviewed exception (row 10);
+- **the tier's verdict is the screen,** and no tier question is asked per label (row 11).
+
+The build is SMD-4446.
+
 The decision table marks which rows the maintainer decided, which follow from them, which this record proposes, and which are built.
 
 ## Terms
@@ -29,6 +37,9 @@ The decision table marks which rows the maintainer decided, which follow from th
   - **none:** they share no specific subject, only words or an area.
 - **Mediated** means half or full; under the mediated-pair test, H-state, H-name, F-state or F-name. Only a full pair runs through a third subject.
 - **Settling:** a pair whose primary typed label (SMD-3116) is corrects, reverses, revises, withdraws, resolves, implements, updates or prioritizes, so that the later thought outdates part of the earlier.
+- **A settled part** (SMD-3340, 2026-11-19) is one statement of a thought that another thought shows is no longer true or no longer open: the statement's words, the words that show it, a reason and the word. A pair may hold several.
+  - **The word** is one of the eight settling labels.
+  - **Its group** says whether the statement no longer holds (corrects, reverses, revises, withdraws) or is done or settled (implements, resolves, updates, prioritizes).
 - **SMD-3116's via slot** is part of a pair's label: the third subject the pair relates through, as in `resolves, via SMD-2310's blockers`.
 - **The pass:**
   - The consolidation pass judges candidate pairs of near neighbours, and keeps a floor: its minimum confidence.
@@ -70,6 +81,10 @@ The question was how far that shape goes beyond tickets, and what consolidation 
 | 5 | **A subject has a timeline when its state at a past time can be read from a record of the subject itself,** not from the thoughts that mention it. For a ticket, that record is its board-sync rows: 068's head, and the audit history of the rows carrying its key (095). | proposed here; built for tickets (068, 095, 098) | a subject's state taken from the thoughts that mention it |
 | 6 | **Code artifacts are the next subject to get a timeline**, a spike first. A note that names a code artifact would be read against when the artifact changed; the spike measures that first. Whether that is a file, a function or both, and how one is found in a note, is for the spike to decide. | decided by the maintainer (2026-10-22); the spike is SMD-3207, its bar to be fixed before the run | deployed brains; pull requests through a GitHub sync; tickets alone until SMD-1729's claim log |
 | 7 | **Deployed brains, pull requests and other entities wait.** | follows from 6 | building a timeline for each now |
+| 8 | **The pass records the settled part, not a typed whole-thought supersession.** A part is the statement quoted from one thought, the words quoted from the other that show it, a reason and the word. A pair may hold several. A part never sets `supersedes` and never demotes a thought. | decided by the maintainer (2026-11-19, SMD-3340), on the review of version 5's 41 proposals; the build is SMD-4446 | a supersession that keeps its label set (SMD-3116's item 4, SMD-3340's title); one standing relation per label |
+| 9 | **The word is kept as data and read by its group.** Anything that acts on a part reads only whether the statement no longer holds, or is done or settled. | decided by the maintainer (2026-11-19): the writer's word was right by group on all 29 parts the maintainer kept and as given on 24, and two blind readers gave the same label set on 12 of 20 pairs | acting on each of the eight words; a tier question per word |
+| 10 | **A part the writer names is a proposal for review, and a whole-thought supersession stays as the reviewed exception.** | decided by the maintainer (2026-11-19): the maintainer kept 29 of the 49 parts the writer named, and marked 2 of the 41 proposals right as a whole. A local check for parts is SMD-4441's to measure | recording the writer's parts unreviewed; dropping the whole-thought supersession |
+| 11 | **The tier's verdict is the screen.** P(outdates) at the floor means something in one thought is settled by the other, and sends the pair to the writer. No tier question is asked per label. | decided by the maintainer (2026-11-19): eight binary tier questions a pair missed their bars (SMD-3340's measurement 2) | a tier question per settling label |
 
 Code artifacts are entities by the maintainer's decision of 2026-09-24 (`evals/README.md`, where rubric v2 counts them). Files, scripts, tables, functions, environment variables, branches and CI jobs belong in the brain's graph as tools (or as projects, for a directory of work).
 
@@ -378,11 +393,44 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
 | Other entity | 016's type and normalized name | none: no status, validity or supersession column | 016 |
 | Pull request | none | none | none |
 
+### Version 5's proposals, marked by the maintainer (2026-11-19)
+
+SMD-3340 set out to measure SMD-3116's settling labels on the canary, and then to decide what the pass records. Rows 8 to 11 rest on what follows.
+
+**The first gold set did not carry its readings.** 171 pairs (version 5's 41 proposals, 40 of version 4's, 70 related and 20 distinct relations) were labelled blind by model readers. The frame was the tier's own stored verdicts, and the labels were scored before a person had checked them. SMD-4417 is the set that replaces it.
+
+**Eight binary tier questions, one per settling label,** were asked over each whole pair. The questions for resolves, implements and updates missed a precision and recall of 0.60 at every threshold, and the tier could not tell resolves from implements. A newer tier revision read two-way did no better on them (SMD-4369).
+
+**The maintainer then marked every proposal version 5 had made.** Each was shown with its direction, the writer's reason and its two quotes in context. The rules were on the sheet before the first mark, and a pilot of eight had a stop rule.
+
+| Mark | Of 41 | 95% interval |
+|---|---|---|
+| whole: accept as proposed | 2 | 1% to 16% |
+| reversed | 0 | 0% to 9% |
+| part: a statement of the falling thought is outdated, and the thought still stands | 32 | 63% to 88% |
+| neither | 7 | 9% to 31% |
+
+- **Two blind model readings, frozen before the marks,** each gave the maintainer's mark on 35 of the 41 (κ 0.68). Both found both wholes, and each called two more. Where both said whole, it was the maintainer's two.
+- **The first labels agree with the maintainer** on whether something was settled for 38 of the 41 (κ 0.76), read in each proposal's own direction.
+- **A rule the review added:** a ticket row that already shows its work closed is read like any other record. A statement in its body that the other thought shows settled is a part, whatever the row's own status line says. Left unstated, it split two readers on 8 of 40 pairs.
+
+**The writer was then asked for parts** (`qwen3.8:27b`, its rules tuned on version 4's pairs and frozen before the test). It named 49 parts on the 41 pairs. The maintainer kept 29, marked 1 as the other thought's and 19 as no part.
+
+| Bar, fixed before the run | Count | 95% interval | Reading |
+|---|---|---|---|
+| precision at least 60%: kept, of the parts whose quotes pass | 24 of 43 | 41% to 70% | undecided |
+| recall at least 50%: proposals marked whole or part that the writer reaches | 16 of 34 | 31% to 63% | undecided |
+| direction at least 90%: real parts named in the right thought | 29 of 30 | 83% to 99% | undecided |
+
+- **The word** was right as given on 24 of the 29 kept parts, and right by group on all 29.
+- **A second reading separates good parts from bad.** Two blind model looks at the same 49 parts gave the maintainer's keep-or-not on 46 and 47 of them (κ 0.87 and 0.92). The tier, asked one yes/no a part, did not (AUC 0.59, one wording, after the fact).
+
 ## What this amends
 
 - **SMD-3203's title** proposed superseding a claim about a third subject on that subject's timeline. Row 1 reads the timeline instead, and writes nothing.
 - **SMD-3116's via slot** was to mark a pair that relates through a third subject until SMD-3203's model carried it. Row 2 now makes such a pair distinct when both thoughts give the third subject's state (F-state), and related at most when they only share its name (F-name). Decide version 4 builds the cap, for both; the distinct is not built. Row 4 keeps the slot for review. The blind sample also gave half pairs a via subject, which is one thought's own subject.
 - **SMD-3203's item 3,** decide mode treating a mediated pair explicitly, waited until this record said what consolidation writes for a mediated pair (the maintainer, 2026-10-22). Row 2 now says it for both shapes, so the wait is over, and the second rater's count puts item 3 next. Its first step, the mediated-pair test, met its bar, and rows 2 and 3 are mapped onto it (amended 2026-10-22).
+- **SMD-3116's item 4 and SMD-3340's title** proposed a supersession that keeps its label set. Rows 8 to 11 record the settled part instead, and leave the whole-thought supersession as the reviewed exception (amended 2026-11-19).
 
 ## The path
 
@@ -402,6 +450,13 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
    - label a hit `Changed since written: …`;
    - measure it on the canary, against a bar fixed before the run. The canary holds Daemonic Brain's change records, which SMD-3006 ingested, as canary-only rows; it holds no commits.
 4. If the spike passes, the label is built beside SMD-2540's, and applied only when a thought is read.
+5. **SMD-4446, the build of rows 8 to 11** (amended 2026-11-19):
+   - a store for proposed parts, which no write of `supersedes` touches;
+   - the writer's parts answer, as a new decide version;
+   - review and read surfaces for a part;
+   - a re-judge of the proposals pending under older versions.
+
+   Beside it, SMD-4441 measures a local check for the parts the writer names, and SMD-4442 the quote check's rule for a part.
 
 ## Not decided here
 
@@ -410,6 +465,8 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
 - **Whether a moved label ever demotes.** For tickets, that is SMD-3054's measurement.
 - **Timelines for deployed brains and pull requests.** Another brain's state is an HTTP read through the edge (SMD-2872).
 - **Entities' state in general,** which would come from claims about them in SMD-1729's claim log.
+- **What an accepted part does beyond being shown.** Closing an open item is SMD-3665's, with a question of its own (an item against a thought). A validity window is SMD-2011's.
+- **How the pass comes to propose a whole-thought supersession** under rows 8 to 11. The tuned writer called neither of the maintainer's two. SMD-4446 measures it.
 
 ## Related
 
@@ -421,3 +478,4 @@ Two fresh blind raters per set re-labelled both sets under version 3, against a 
 - SMD-3006 and SMD-3011: the brain learns its own codebase, and then any repo's.
 - SMD-2872: `docs/one-brain-per-stack.md`, where brains reach each other through the edge.
 - SMD-2937: consolidation and genre.
+- SMD-3340: the settling labels measured, and rows 8 to 11. SMD-4446 builds them; SMD-4441, SMD-4442 and SMD-4417 measure beside it.
