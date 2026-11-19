@@ -19,7 +19,7 @@ import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { DecisionRefused } from "../server-portable/jev.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { REEMBED_THOUGHT_BACKOFF_MS, REEMBED_THOUGHT_PERIOD_MS, REEMBED_THOUGHT_PROBE_MS, REEMBED_THOUGHT_WAIT_MS, ThoughtWaitBackoff } from "./sleep.ts";
+import { REEMBED_THOUGHT_BACKOFF_MAX_MS, REEMBED_THOUGHT_BACKOFF_MS, REEMBED_THOUGHT_PERIOD_MS, REEMBED_THOUGHT_PROBE_MS, REEMBED_THOUGHT_WAIT_MS, ThoughtWaitBackoff } from "./sleep.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeUntil, ProbeRefused, ProviderDown, ProviderOutage, EXTRACT_REQUEST_FIELDS, JUDGE_REQUEST_FIELDS, sameModel, regateMessage, requestShapeRefused, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
@@ -993,12 +993,13 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
 // 2026-11-18), on a clock the row passes.
 // ---------------------------------------------------------------------------
 {
-  ok(REEMBED_THOUGHT_WAIT_MS === 120_000 && REEMBED_THOUGHT_PERIOD_MS === 240_000 && REEMBED_THOUGHT_PROBE_MS === 5_000 && REEMBED_THOUGHT_BACKOFF_MS === 240_000,
-    `the shipped numbers: 2 min a wait, 4 min of isolation a period, a probe every 5 s, a 4 min back-off at first (${REEMBED_THOUGHT_WAIT_MS}, ${REEMBED_THOUGHT_PERIOD_MS}, ${REEMBED_THOUGHT_PROBE_MS}, ${REEMBED_THOUGHT_BACKOFF_MS})`);
-  // A crasher that never comes back, on a busy brain: a period every 30 s, each try held to the 240 s cap and set down
-  // there. Backed off by time, the tries fall at 0, 480, 1200 and 2400 s — 4, 8, then 16 min after each try's limit —
-  // whatever the periods between; backed off by periods (review pass 2), at 0, 300, 630, 1020 s (each try's limit,
-  // then 1, 2, 4 periods of 30 s), the claim passes held most of the hour.
+  ok(REEMBED_THOUGHT_WAIT_MS === 120_000 && REEMBED_THOUGHT_PERIOD_MS === 240_000 && REEMBED_THOUGHT_PROBE_MS === 5_000 && REEMBED_THOUGHT_BACKOFF_MS === 240_000 && REEMBED_THOUGHT_BACKOFF_MAX_MS === 3_600_000,
+    `the shipped numbers: 2 min a wait, 4 min of isolation a period, a probe every 5 s, a 4 min back-off at first, an hour at most (${REEMBED_THOUGHT_WAIT_MS}, ${REEMBED_THOUGHT_PERIOD_MS}, ${REEMBED_THOUGHT_PROBE_MS}, ${REEMBED_THOUGHT_BACKOFF_MS}, ${REEMBED_THOUGHT_BACKOFF_MAX_MS})`);
+  // A crash that ends between about 80 and 120 s, on a busy brain: a period every 30 s, each try held to the 240 s cap
+  // and set down there. Backed off by time, the tries fall at 0, 480, 1200 and 2400 s — 4, 8, then 16 min after each
+  // try's limit — whatever the periods between, and the next window 32 min doubled to 64, held at the hour's ceiling
+  // (review pass 4); backed off by periods (review pass 2), at 0, 300, 630, 1020 s (each try's limit, then 1, 2, 4
+  // periods of 30 s), the claim passes held most of the hour.
   const b = new ThoughtWaitBackoff();
   const tries: number[] = [];
   for (let t = 0; t < 3600;) {
@@ -1012,8 +1013,30 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     t += 30;
   }
   const heldS = tries.length * 240;
-  ok(tries.join() === "0,480,1200,2400" && b.windowMs === 3_840_000 && heldS === 960,
-    `the back-off by time: a try ending at a limit backs off 4 min, then 8, 16, 32, a period every 30 s between (tries at ${tries.join()} s; next ${b.windowMs / 1000} s; held ${heldS} s of the hour)`);
+  ok(tries.join() === "0,480,1200,2400" && b.windowMs === 3_600_000 && heldS === 960,
+    `the back-off by time: a try ending at a limit backs off 4 min, then 8, 16, 32, a period every 30 s between, the next held at the hour (tries at ${tries.join()} s; next ${b.windowMs / 1000} s; held ${heldS} s of the hour)`);
+  // The ceiling (review pass 4): the window doubles 240, 480, 960, 1920 s, then is held at 3600 s, the hourly rescan's
+  // scale — without it the eleventh window was 68 hours. Each limit at the end of the last window, a try at once.
+  const c = new ThoughtWaitBackoff();
+  const windows: number[] = [];
+  for (let i = 0, t = 0; i < 8; i++) {
+    c.limited(t);
+    const w = (c.state()?.until ?? t) - t;
+    windows.push(w / 1000);
+    t += w;
+  }
+  ok(windows.join() === "240,480,960,1920,3600,3600,3600,3600" && c.windowMs === 3_600_000,
+    `the back-off's ceiling: the window doubles to 1920 s, then is held at 3600 s (windows ${windows.join()} s; next ${c.windowMs / 1000} s)`);
+  // The ceiling a test passes, and a reset back to the base below it.
+  const s = new ThoughtWaitBackoff(10_000, 25_000);
+  s.limited(0);
+  s.limited(10_000);
+  s.limited(30_000);
+  const scaled = JSON.stringify(s.state());
+  s.reset();
+  s.limited(100_000);
+  ok(scaled === JSON.stringify({ until: 55_000, nextMs: 25_000 }) && JSON.stringify(s.state()) === JSON.stringify({ until: 110_000, nextMs: 20_000 }),
+    `a ceiling passed: 10, 20, then 25 s held; a reset backs off the base again (${scaled} | ${JSON.stringify(s.state())})`);
   // The window's edges and a limit inside it, on a clock.
   const m = new ThoughtWaitBackoff(10_000);
   const fresh = m.state();

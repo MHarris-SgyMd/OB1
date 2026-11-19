@@ -401,7 +401,7 @@ const providerRows = (passes: readonly string[]) =>
  * scheduler backs off between such tries (ThoughtWaitBackoff).
  */
 const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = false): string =>
-  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it) — or, if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages (2 min a wait, 4 min of isolation a period, the retries between the waits counted; a crashing thought takes four waits, so one whose crash lasts about 80 s or more is never failed, and the scheduler then sets re-embed down at once at such an outage for 4 min, then 8, 16, … between tries, its suspects moved behind the pool so the backlog is re-embedded meanwhile), which its log names at each period's start: the same thought id \"goes back to the pool unrecorded\""
+  kind === "outage" ? "its provider did not answer: check it, and the embedding provider row here (--deep calls it) — or, if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages (2 min a wait, 4 min of isolation a period, the retries between the waits counted; a crashing thought takes four waits, so one whose crash lasts about 80 s or more is never failed, and the scheduler then sets re-embed down at once at such an outage for 4 min, then 8, 16, … up to an hour between tries, its suspects moved behind the pool so the backlog is re-embedded meanwhile), which its log names at each period's start: the same thought id \"goes back to the pool unrecorded\""
   // Under OB1_SLEEP_STATEMENT_TIMEOUT 0 the role's or the database's own timed it out, as the claim passes' held fix says (review pass 3 of SMD-3379 PR 1c-4b).
   : kind === "statement" ? `a statement passed ${ownTimeout ? "the role's or the database's own statement_timeout" : "its statement_timeout"}, which its log names: ${ownTimeout ? "set OB1_SLEEP_STATEMENT_TIMEOUT above theirs (a startup setting beats it), or raise theirs," : "raise OB1_SLEEP_STATEMENT_TIMEOUT"} in deploy/.env${stopped ? "" : `, then ${restartCommand("sleep", null)}`}`
   : kind === "failed" ? "it ended by itself, and its log gives the reason"
@@ -5625,10 +5625,11 @@ if (configFailed) {
                 const remains = Math.max(0, Math.min(w.boundS - waited, w.periodS - w.earlierS - waited));
                 const backoff = h.reembedBackoff;
                 // The back-off its limit begins, which the row carries (review pass 3): none once a suspect of this
-                // isolation was recorded failed alone; a try after an earlier back-off said so.
+                // isolation was recorded failed alone; a try after an earlier back-off said so. The log hint only
+                // while no suspect is failed: once one is, the crashing thought is found (review pass 4).
                 return `re-embed is left waiting: an outage made the thought in hand a suspect — a thought's embedding may have crashed the provider — so the scheduler waits it out and, once it answers, retries the suspects one at a time; it sets re-embed down for the period, extraction going on, in ${remains} s and a poll at most — ${w.boundS} s from this wait's start (${waited} s ago), or ${w.periodS} s of isolation this period, its waits and the retries between them (${w.earlierS} s before this wait) — `
                   + (w.backoffS > 0 ? `and then backs off ${w.backoffS} s, a period that meets such an outage meanwhile setting it down at once, its suspects moved behind the pool${backoff ? " (a try: an earlier back-off has run out)" : ""}` : "and does not back off: a suspect was recorded failed alone in this isolation")
-                  + (w.earlierS > 0 ? `; a thought that crashes the provider at each retry is named in the scheduler's log: the same thought id "goes back to the pool unrecorded" at each outage` : "");
+                  + (w.earlierS > 0 && w.backoffS > 0 ? `; a thought that crashes the provider at each retry is named in the scheduler's log: the same thought id "goes back to the pool unrecorded" at each outage` : "");
               };
               const reembedWords = (mid: boolean) => mid && left
                 ? leftWords(left)

@@ -4844,11 +4844,13 @@ else {
       const [, , , , , tryEarlier, tryNext, tryTail] = LEFT_FIX.exec(tryFix) ?? [];
       assert(tryEarlier === "0" && tryNext === "480" && tryTail === " (a try: an earlier back-off has run out)",
         `a try after backing off: the back-off its limit begins and that it is a try, no log hint before the period has isolated (${tryFix})`);
-      // A suspect of this isolation recorded failed alone: its limit begins no back-off, and the fix says so (review pass 3).
+      // A suspect of this isolation recorded failed alone: its limit begins no back-off, and the fix says so (review pass 3);
+      // the crashing thought found, the log hint that names one is left off, the period's earlier isolation whatever
+      // (review pass 4).
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed"], reembedWait: { since: await at(20), earlierS: 40, boundS: 120, periodS: 240, backoffS: 0 }, slept: { from: await at(130), to: null } }), 10);
       const blamedFix = fix((await run(LOG_ON)).out, "sleep");
-      assert(/\(40 s before this wait\) — and does not back off: a suspect was recorded failed alone in this isolation; a thought that crashes/.test(blamedFix) && !/and then backs off/.test(blamedFix),
-        `left waiting after a suspect was recorded failed alone: no back-off said (${blamedFix})`);
+      assert(/\(40 s before this wait\) — and does not back off: a suspect was recorded failed alone in this isolation\.$/.test(blamedFix) && !/and then backs off|goes back to the pool unrecorded/.test(blamedFix),
+        `left waiting after a suspect was recorded failed alone: no back-off said, and no log hint (${blamedFix})`);
       // The mark read only beside re-embed waiting mid-pass, and only of its shape: else the next poll's words, as before.
       for (const [label, extra] of [
         ["beside a wait at re-embed's start", { waiting: ["reembed"], reembedWait: { since: await at(40), earlierS: 0, boundS: 120, periodS: 240, backoffS: 240 } }],
@@ -5109,7 +5111,7 @@ else {
       assert(/; re-embed set down for its last period \(outage\)$/.test(row(lastDown.out, "sleep"))
           && /Re-embed was set down for its last period — its provider did not answer: check it, and the embedding provider row here \(--deep calls it\)/.test(fix(lastDown.out, "sleep"))
           // …and, coming back every period, a thought that crashes the provider, as its log names it (SMD-4254).
-          && /if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages \(2 min a wait, 4 min of isolation a period, the retries between the waits counted; a crashing thought takes four waits, so one whose crash lasts about 80 s or more is never failed, and the scheduler then sets re-embed down at once at such an outage for 4 min, then 8, 16, … between tries, its suspects moved behind the pool so the backlog is re-embedded meanwhile\), which its log names at each period's start: the same thought id "goes back to the pool unrecorded"; the other passes run on, and the next period with work tries it again\.$/.test(fix(lastDown.out, "sleep")),
+          && /if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages \(2 min a wait, 4 min of isolation a period, the retries between the waits counted; a crashing thought takes four waits, so one whose crash lasts about 80 s or more is never failed, and the scheduler then sets re-embed down at once at such an outage for 4 min, then 8, 16, … up to an hour between tries, its suspects moved behind the pool so the backlog is re-embedded meanwhile\), which its log names at each period's start: the same thought id "goes back to the pool unrecorded"; the other passes run on, and the next period with work tries it again\.$/.test(fix(lastDown.out, "sleep")),
         `idle, a set-down speaks of the last period, an outage naming the embedding provider, and a thought crashing it as the cause of one that comes back every period (${row(lastDown.out, "sleep")} | ${fix(lastDown.out, "sleep")})`);
       // Backing off (SMD-4254 review pass 2, the maintainer's decision; by time since review pass 3): the row's back-off
       // said with the set-down, by state (review pass 3, run-it: "this period waits once more" on an idle row, and on a

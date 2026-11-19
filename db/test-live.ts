@@ -28568,9 +28568,15 @@ if (want("38p")) await (async () => {
       const yewBehind = await vectorless("A note pooled behind the one down four seconds.");
       await poolFirst(yew, [yewBehind]);
       let yewEnd = false, yewClaim: Awaited<ReturnType<typeof reClaim>>, yewCode = -9, yewBeat: unknown = null;
+      /** The left wait's back-off on the row once the thought is failed: the fourth wait's, 0 (review pass 4, the cold lane). */
+      const yewMarkS: number[] = [];
       const yewStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 15_500 });
       try {
-        yewEnd = await pollUntil(async () => (await reClaim(yew))?.status === "failed" && lines.some((l) => DOWN.test(l) || /re-embed drained/.test(l)), 45_000);
+        yewEnd = await pollUntil(async () => {
+          const m = ((await beat()) as { reembedWait?: { backoffS: number } } | null)?.reembedWait;
+          if (m && (await reClaim(yew))?.status === "failed") yewMarkS.push(m.backoffS);
+          return (await reClaim(yew))?.status === "failed" && lines.some((l) => DOWN.test(l) || /re-embed drained/.test(l));
+        }, 45_000);
         yewClaim = await reClaim(yew);
         yewBeat = ((await beat()) as { reembedBackoff?: unknown } | null)?.reembedBackoff ?? null;
       } finally {
@@ -28581,8 +28587,8 @@ if (want("38p")) await (async () => {
         restoreScaled();
       }
       const yewLimits = lines.filter((l) => PAST_CAP.test(l) || PAST_BOUND.test(l)).map((l) => l.trim().slice(0, 300));
-      assert(yewEnd && yewClaim?.status === "failed" && yewLimits.length === 1 && NO_BACKOFF.test(yewLimits[0]) && yewBeat === null && yewCode === 0,
-        `the outage a thought failed alone leaves, passing the cap, begins no back-off: said so, the row with none (ended ${yewEnd}; ${JSON.stringify(yewClaim)}; limit lines ${yewLimits.join(" | ")}; back-off ${JSON.stringify(yewBeat)}; ${sw.embedCrashes} crash(es); exit ${yewCode})`);
+      assert(yewEnd && yewClaim?.status === "failed" && yewLimits.length === 1 && NO_BACKOFF.test(yewLimits[0]) && yewBeat === null && yewMarkS.length > 0 && yewMarkS.every((x) => x === 0) && yewCode === 0,
+        `the outage a thought failed alone leaves, passing the cap, begins no back-off: said so, the row with none (ended ${yewEnd}; ${JSON.stringify(yewClaim)}; limit lines ${yewLimits.join(" | ")}; back-off ${JSON.stringify(yewBeat)}; the left wait's back-off after the failure ${JSON.stringify(yewMarkS)}; ${sw.embedCrashes} crash(es); exit ${yewCode})`);
     }
 
     // A thought that brings the provider down for good: left waiting to the bound (3 s here), then set down as at any
@@ -28688,7 +28694,7 @@ if (want("38p")) await (async () => {
     let capFirst: string[] = [], capCode = -9, maxEarlier = -1, crashesAtDown = -1, backoffAfter: BackoffMark | null = null, behindAfterOne = true, behindInTwo = false;
     /** Each later period's lines once it has said what the case waits for, and whether it said it; and the first one failed alone, and in which period. */
     const later: { n: number; said: boolean; lines: string[] }[] = [];
-    let firstFailed = false, firstFailedIn = -1, markGone = false;
+    let firstFailed = false, firstFailedIn = -1, markGone = false, skippedInTwo = false, skippedInThree: boolean | undefined;
     /** Where each period's "working:" line is. */
     const periodsAt = () => lines.flatMap((l, i) => (/^ {2}working:/.test(l) ? [i] : []));
     /** Period n's lines (1 the first), as far as they go. */
@@ -28736,8 +28742,10 @@ if (want("38p")) await (async () => {
       // backing off 24 s; 4, 5 and 6 back off, the crash 1.5 s (the back-off reads none of it); then 0.3 s.
       if (await thenPeriod(2, backedOff)) {
         behindInTwo = await atEmbed(cappedBehind);
+        skippedInTwo = await pollUntil(async () => ((await beat()) as { reembedBackoff?: BackoffMark } | null)?.reembedBackoff?.skipped === true, 5000);
         await windowOut();
         if (await thenPeriod(3, cappedBacking("24"))) {
+          skippedInThree = ((await beat()) as { reembedBackoff?: BackoffMark } | null)?.reembedBackoff?.skipped;
           sw.embedCrashMs = 1500;
           if (await thenPeriod(4, backedOff) && await thenPeriod(5, backedOff)) {
             if (await thenPeriod(6, backedOff)) {
@@ -28792,12 +28800,70 @@ if (want("38p")) await (async () => {
     const saidAt = (n: number) => later.find((p) => p.n === n)?.said === true;
     /** A period's lines the back-off reads, in short: left waiting, a limit and the back-off it begins, a period backed off and the time left, a move, a drain. */
     const told = (ls: string[]) => ls.flatMap((l) => (LEFT.test(l) ? ["left waiting"] : PAST_CAP.test(l) ? [`cap, ${NO_BACKOFF.test(l) ? "no back-off" : `backing off ${BACKS_OFF.exec(l)?.[1]} s`}`] : PAST_BOUND.test(l) ? [`bound, backing off ${BACKS_OFF.exec(l)?.[1]} s`] : BACKED_OFF.test(l) ? [`backed off, ${BACKED_OFF.exec(l)?.[1]} s more`] : MOVED.test(l) ? [`${MOVED.exec(l)?.[1]} moved behind`] : /re-embed drained/.test(l) ? ["drained"] : [])).join(", ");
-    assert(saidAt(2) && behindInTwo,
-      `inside the back-off, the thought's outage sets re-embed down at once, said with the time left, and the note pooled behind it — ahead of it since the limit's move — is re-embedded in that period, the thought moved behind again (${later.filter((p) => p.n === 2).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}; re-embedded in it ${behindInTwo}${saidAt(2) ? "" : `; its last lines: ${lines.slice(-20).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    assert(saidAt(2) && behindInTwo && skippedInTwo && skippedInThree === false,
+      `inside the back-off, the thought's outage sets re-embed down at once, said with the time left, and the note pooled behind it — ahead of it since the limit's move — is re-embedded in that period, the thought moved behind again, the row's back-off marked skipped in it and not in the try after (${later.filter((p) => p.n === 2).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}; re-embedded in it ${behindInTwo}; skipped in period 2 ${skippedInTwo}, in period 3 ${skippedInThree}${saidAt(2) ? "" : `; its last lines: ${lines.slice(-20).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
     assert(saidAt(3) && saidAt(4) && saidAt(5) && saidAt(6),
       `the window out, a try waits again, the cap begun again, and its limit backs off 24 s, the window doubled; the three periods inside it set down at once (${later.filter((p) => p.n >= 3 && p.n <= 6).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}${saidAt(6) ? "" : `; its last lines: ${lines.slice(-20).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
     assert(firstFailed && firstFailedIn === 7 && saidAt(7) && saidAt(8) && markGone,
       `the shortened crash failed at the first try after the window, which ends the back-off — the second thought's cap in the same period backs off 12 s, not 48 — and a drain ends it too, the row's mark gone (first failed ${firstFailed} in period ${firstFailedIn}; ${later.filter((p) => p.n >= 7).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}; mark gone ${markGone}${firstFailed && firstFailedIn === 7 ? "" : `; periods 7 on: ${[7, 8, 9].map((n) => periodOf(n).map((l) => l.trim().slice(0, 220)).join(" / ")).join(" || ")}`})`);
+
+    // A pause before a try's limit (review pass 4, the cold lane: the back-off begun on re-embed's clock, which a pause
+    // holds back — `limited(now)` for `limited(wall)` — lived every row above): the back-off runs on the scheduler's clock
+    // from the limit, its whole window ahead on the row whatever pause came before. A provider down for good, a 6 s
+    // bound, a 30 s back-off; live writes for 8 s mid-wait, the pause about 9 s. Begun on re-embed's clock, the row's
+    // `until` is about 9 s nearer, and the next period within it waits again, a try.
+    // Then the provider back and a period begun just past `until` on the database's clock: a try, left waiting again, its
+    // bound's limit backing off 60 s, the window doubled. Read on re-embed's clock (`skipping(now)` for `skipping(wall)`),
+    // which the pause holds about 9 s behind, that period met the back-off still running and was set down at once —
+    // every row above lived it, no pause in their runs.
+    {
+      sw.embedCrashOn = "mandrake";
+      sw.embedCrashProbes = Infinity;
+      sw.embedCrashes = 0;
+      const man = await vectorless("A mandrake note whose embedding brings the provider down for good.");
+      await poolFirst(man, []);
+      let manLeft = false, manLimit = false, manPaused = false, manAhead = -1, manCode = -9, manLine = "", manWaitAge = -1;
+      let manTry = false, manTryLines: string[] = [];
+      const manStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 6000, reembedThoughtBackoffMs: 30_000 });
+      try {
+        manLeft = await pollUntil(async () => lines.some((l) => LEFT.test(l)), 30_000);
+        for (let i = 0; i < 8; i++) {
+          await liveWrite(sql, `mandrake pause ${i}`);
+          await Bun.sleep(1000);
+        }
+        // At the resume the left wait's start on the row moves past the pause: its age is the wait's own time on
+        // re-embed's clock, about 1 s before the pause, not the pause's ~9 s besides.
+        if (await pollUntil(async () => lines.some((l) => /^ {2}resumed: no live write/.test(l)), 30_000)) {
+          const w = ((await beat()) as { reembedWait?: { since: string } } | null)?.reembedWait;
+          const [{ now: atResume }] = (await sql`SELECT now() AS now`) as { now: Date }[];
+          manWaitAge = w ? (new Date(atResume).getTime() - Date.parse(w.since)) / 1000 : -1;
+        }
+        manLimit = await pollUntil(async () => lines.some((l) => PAST_BOUND.test(l)), 30_000);
+        manLine = lines.find((l) => PAST_BOUND.test(l)) ?? "";
+        manPaused = lines.some((l) => /^ {2}resumed: no live write/.test(l));
+        const b = ((await beat()) as { reembedBackoff?: { until: string } } | null)?.reembedBackoff;
+        const [{ now }] = (await sql`SELECT now() AS now`) as { now: Date }[];
+        manAhead = b ? (Date.parse(b.until) - new Date(now).getTime()) / 1000 : -1;
+        if (manLimit) {
+          // The provider back; the window out on the row's `until`, the next period begun at once (review pass 4).
+          sw.embedCrashLeft = null;
+          await windowOut();
+          const at = periodsAt().length;
+          if (await nextPeriod("A note that begins the period after the mandrake back-off")) {
+            manTry = await pollUntil(async () => periodOf(at + 1).some((l) => PAST_BOUND.test(l) || BACKED_OFF.test(l)), 30_000);
+            manTryLines = periodOf(at + 1);
+          }
+        }
+      } finally {
+        sw.embedCrashOn = null;
+        sw.embedCrashLeft = null;
+        manCode = await manStop();
+      }
+      assert(manLeft && manPaused && manLimit && BACKS_OFF.exec(manLine)?.[1] === "30" && manAhead >= 27 && manAhead <= 31 && manWaitAge >= 0 && manWaitAge < 5 && manCode === 0,
+        `a pause before a try's limit: the back-off runs its whole window from the limit on the scheduler's clock, not on re-embed's, which the pause held back (left ${manLeft}; paused ${manPaused}; limit ${manLimit}: ${manLine.trim().slice(0, 160)}; the row's until ${manAhead.toFixed(1)} s ahead; the left wait's start ${manWaitAge.toFixed(1)} s old at the resume; exit ${manCode})`);
+      assert(manTry && manTryLines.some((l) => LEFT.test(l)) && manTryLines.some((l) => BACKS_OFF.exec(l)?.[1] === "60" && PAST_BOUND.test(l)) && !manTryLines.some((l) => BACKED_OFF.test(l)),
+        `a period begun just past the back-off's end, after a pause: a try, left waiting, its limit backing off 60 s — the back-off read on the scheduler's clock, not on re-embed's, which the pause holds behind (${told(manTryLines) || "nothing said"}${manTry ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    }
   } finally {
     sw.embedCrashOn = null;
     sw.embedCrashLeft = null;

@@ -146,11 +146,24 @@
  * the next REEMBED_THOUGHT_BACKOFF_MS (4 min) set re-embed down at once, as
  * before SMD-4254, said ("backing off"); the first one met after that is
  * waited out once more, a try, and a try ending at a limit backs off 8 min,
- * then 16, and so on, until re-embed drains or a suspect retried alone is
- * recorded failed — the crashing thought found — for the scheduler's life.
- * At a limit's set-down and a backed-off one the outage's suspects, handed
- * back at the pool's front, are moved behind it, so the next periods
- * re-embed the backlog before claiming them again. An endpoint
+ * then 16, 32, then an hour at each (REEMBED_THOUGHT_BACKOFF_MAX_MS, review
+ * pass 4), until re-embed drains or a suspect retried alone is recorded
+ * failed — the crashing thought found — for the scheduler's life. So a crash
+ * that ends between about 80 and 120 s is tried at 0, 8, 20, 40, … min, each
+ * try held to the cap; one longer than the bound that ends, at 0, 6, 16, 34,
+ * … min, each held to the bound, plus the wait for the provider to come back;
+ * one that never ends, once, every period after finding the provider down at
+ * its start. A try with a provider that hangs costs about 6 min (two
+ * OB1_LLM_TIMEOUTs and the bound) when it hangs for good, about 8 (the two
+ * and the cap) for a hang of about 240-360 s. The back-off spares the claim
+ * passes, not the provider: a crasher outlasting the limits crashes it every
+ * crash length, as on main. At a limit's set-down and a backed-off one the
+ * outage's suspects, handed back at the pool's front, are moved behind the
+ * backlog pooled then, so the next periods re-embed it before claiming them
+ * again; thoughts captured after land behind them, so under a steady inflow
+ * each period still claims the crashing thought before its new captures, a
+ * new note waiting about one crash length, and on an idle brain the move pays
+ * at the next rescan. An endpoint
  * simply down that a call first meets mid-pass with a 5xx, a refused or reset
  * connection or a timeout makes a suspect too, and costs up to the bound
  * once; the next period's start finds it down and sets re-embed down at once.
@@ -595,9 +608,19 @@ export const REEMBED_THOUGHT_PROBE_MS = 5_000;
  * reaches. By time, not periods: a period is capture-driven on a busy brain, about 30 s apart, and a back-off counted
  * in periods set re-embed down at once in a crash's own aftermath — the periods after a skipped one met the provider
  * still down from its crash — so a crash of 80 s or more still held the claim passes 40-63% of the time (review pass 3,
- * run-it). Exported for test-worker-bootstrap.ts's row on the shipped numbers.
+ * run-it). Doubling up to REEMBED_THOUGHT_BACKOFF_MAX_MS. It spares the claim passes, not the provider: a crasher
+ * outlasting the limits is claimed by each period once the provider is back, and crashes it every crash length, as on
+ * main (about 24 times an hour at 150 s a crash, 40 at 90 s). Exported for test-worker-bootstrap.ts's row on the
+ * shipped numbers.
  */
 export const REEMBED_THOUGHT_BACKOFF_MS = 240_000;
+/**
+ * The longest re-embed backs off after a try's limit (ThoughtWaitBackoff; SMD-4254 review pass 4): the window doubles
+ * from REEMBED_THOUGHT_BACKOFF_MS — 4, 8, 16, 32 min — and is then held at an hour, the hourly rescan's scale, so a
+ * crasher outlasting the limits is tried at most an hour after each try's limit; without it the next try after ten
+ * limits was about 68 hours away. Exported for test-worker-bootstrap.ts's row on the shipped numbers.
+ */
+export const REEMBED_THOUGHT_BACKOFF_MAX_MS = 3_600_000;
 /** The back-off's state on the scheduler's clock (ThoughtWaitBackoff.state): when it ends, and the back-off the next limit a try reaches begins. */
 export type ThoughtWaitBackoffState = { until: number; nextMs: number };
 /**
@@ -605,8 +628,9 @@ export type ThoughtWaitBackoffState = { until: number; nextMs: number };
  * 2026-11-18): a crasher whose crash outlasts the limits cost the cap every period, where main set it down in a poll.
  * A try — a wait on such an outage met outside a back-off — set down at a limit, the bound or the cap, with no suspect
  * recorded failed alone in its isolation (`limited`), makes such an outage met before `until`, `windowMs` from then,
- * set re-embed down at once, as before SMD-4254 (`skipping`): 4 min (REEMBED_THOUGHT_BACKOFF_MS), then 8, 16, … — the
- * first such outage met after `until` is waited out once more, a try, and a try ending at a limit again doubles it.
+ * set re-embed down at once, as before SMD-4254 (`skipping`): 4 min (REEMBED_THOUGHT_BACKOFF_MS), then 8, 16, 32, then
+ * an hour at each (REEMBED_THOUGHT_BACKOFF_MAX_MS, `maxMs`) — the first such outage met after `until` is waited out once
+ * more, a try, and a try ending at a limit again doubles it, up to the ceiling.
  * By time, not by periods (review pass 3): see REEMBED_THOUGHT_BACKOFF_MS. Re-embed drained, or a suspect retried alone
  * recorded failed — the isolation worked, the crashing thought found — resets it (`reset`). For the scheduler's life,
  * not persisted: a restart tries at once. Pure: the scheduler passes its clock.
@@ -614,26 +638,26 @@ export type ThoughtWaitBackoffState = { until: number; nextMs: number };
 export class ThoughtWaitBackoff {
   /** The back-off's end on the caller's clock; null while none has begun since the last reset. */
   until: number | null = null;
-  /** The back-off the next limit a try reaches begins: `baseMs`, doubled at each. */
+  /** The back-off the next limit a try reaches begins: `baseMs`, doubled at each, held at `maxMs`. */
   windowMs: number;
-  constructor(readonly baseMs: number = REEMBED_THOUGHT_BACKOFF_MS) {
-    this.windowMs = baseMs;
+  constructor(readonly baseMs: number = REEMBED_THOUGHT_BACKOFF_MS, readonly maxMs: number = REEMBED_THOUGHT_BACKOFF_MAX_MS) {
+    this.windowMs = Math.min(baseMs, maxMs);
   }
   /** Whether such an outage met at `now` sets re-embed down at once. */
   skipping(now: number): boolean {
     return this.until !== null && now < this.until;
   }
-  /** A try set down at a limit at `now`: back off `windowMs` from now, and double it. Within a back-off none begins (false): only a try's limit begins one. */
+  /** A try set down at a limit at `now`: back off `windowMs` from now, and double it up to `maxMs`. Within a back-off none begins (false): only a try's limit begins one. */
   limited(now: number): boolean {
     if (this.skipping(now)) return false;
     this.until = now + this.windowMs;
-    this.windowMs *= 2;
+    this.windowMs = Math.min(this.windowMs * 2, this.maxMs);
     return true;
   }
   /** Re-embed drained, or a suspect retried alone recorded failed: no back-off. */
   reset(): void {
     this.until = null;
-    this.windowMs = this.baseMs;
+    this.windowMs = Math.min(this.baseMs, this.maxMs);
   }
   /** The state while it backs off, or has since its last reset — `until` past then, a try due; null otherwise. */
   state(): ThoughtWaitBackoffState | null {
@@ -797,6 +821,8 @@ export interface SleepOptions {
   reembedThoughtProbeMs?: number;
   /** How long re-embed first backs off after a try at such an outage ends at a limit, in ms, in place of REEMBED_THOUGHT_BACKOFF_MS, when a test scales it (SMD-4254 review pass 3). */
   reembedThoughtBackoffMs?: number;
+  /** The longest re-embed backs off after such a try, in ms, in place of REEMBED_THOUGHT_BACKOFF_MAX_MS, when a test reaches it sooner (SMD-4254 review pass 4). */
+  reembedThoughtBackoffMaxMs?: number;
 }
 
 /** The scheduler's numbers, its flags' or their defaults. */
@@ -1300,7 +1326,7 @@ export async function run(opts: SleepOptions): Promise<number> {
   // --follow at all. The rule the flags' numbers keep (SMD-3048).
   const followProblem = opts.passFollowS === undefined ? null : numberProblem("passFollowS", opts.passFollowS, { min: 1 });
   if (followProblem !== null) throw new RangeError(followProblem);
-  for (const [name, v] of [["pollMs", opts.pollMs], ["captureMs", opts.captureMs], ["rescanMs", opts.rescanMs], ["sweepLimit", opts.sweepLimit], ["reembedThoughtWaitMs", opts.reembedThoughtWaitMs], ["reembedThoughtPeriodMs", opts.reembedThoughtPeriodMs], ["reembedThoughtProbeMs", opts.reembedThoughtProbeMs], ["reembedThoughtBackoffMs", opts.reembedThoughtBackoffMs]] as const) {
+  for (const [name, v] of [["pollMs", opts.pollMs], ["captureMs", opts.captureMs], ["rescanMs", opts.rescanMs], ["sweepLimit", opts.sweepLimit], ["reembedThoughtWaitMs", opts.reembedThoughtWaitMs], ["reembedThoughtPeriodMs", opts.reembedThoughtPeriodMs], ["reembedThoughtProbeMs", opts.reembedThoughtProbeMs], ["reembedThoughtBackoffMs", opts.reembedThoughtBackoffMs], ["reembedThoughtBackoffMaxMs", opts.reembedThoughtBackoffMaxMs]] as const) {
     const problem = v === undefined ? null : numberProblem(name, v, { min: 1 });
     if (problem !== null) throw new RangeError(problem);
   }
@@ -1631,7 +1657,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   let reembedDown: ReembedDown | null = null;
   /** Re-embed's back-off from waiting out outages that made a thought a suspect, for the scheduler's life (SMD-4254, review pass 2), by time on the scheduler's clock (review pass 3): ThoughtWaitBackoff. */
-  const reembedBackoff = new ThoughtWaitBackoff(opts.reembedThoughtBackoffMs ?? REEMBED_THOUGHT_BACKOFF_MS);
+  const reembedBackoff = new ThoughtWaitBackoff(opts.reembedThoughtBackoffMs ?? REEMBED_THOUGHT_BACKOFF_MS, opts.reembedThoughtBackoffMaxMs ?? REEMBED_THOUGHT_BACKOFF_MAX_MS);
   /** Whether the period in hand set re-embed down at once, backed off: the row's `skipped`, so preflight says "this period" only of one that was (review pass 3). */
   let reembedSkipped = false;
   /**
@@ -3098,7 +3124,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
      * pool (SMD-4254 review pass 3, the maintainer's decision), as re-embed is set down at a limit or backed off, its
      * leases returned: at the front, the crashing thought among them was every next period's first claim, which crashed
      * the provider again, so a period backed off re-embedded nothing and the one after met the provider still down.
-     * Dated now, as setBackAborted's set-back is (lease.ts' setBack): behind every row pooled before it. Pending rows
+     * Dated now, as setBackAborted's set-back is (lease.ts' setBack): behind every row pooled before it, ahead of every
+     * thought captured after — so under a steady inflow each period still claims it before that period's new captures,
+     * a new note waiting about one crash length (review pass 4: a median 120-228 s measured), and on an idle brain the
+     * move pays at the next rescan. Pending rows
      * alone — one re-embedded, recorded failed or claimed meanwhile is not the pool's to move. A courtesy, as
      * stoppedLast is: one that fails is said, and the period goes on. The rows moved.
      */
