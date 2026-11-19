@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-4363]
-migrations: []
----
-
-## Changelog
-
-A request to the MCP endpoint now says on its log line which protocol revision it named, wherever the server read its body: a new `rev` field (`2026-07-28`, a 2025-era revision, `unnamed` or `other`), and on its span as `mcp.protocol.version` or `ob1.rev`, a request refused at its key apart (SMD-4363). No migration.
-
-## Record
-
-The MCP request's line says which revision it named — `rev`, held to the revisions served, so the log can count the clients on each (SMD-4363)
+# 539. The MCP request's line says which revision it named — `rev`, held to the revisions served, so the log can count the clients on each (SMD-4363)
 
 **Why.** Since SMD-4345 `/mcp` serves the 2026-07-28 revision beside the 2025-era ones, and a request's line read the same for both: the method, the tool, the key's name, how it ended. Nothing said how many requests, or which keys, used either. Whether a client had moved to 2026-07-28 could be read only sideways, from a `server/discover` answered 200 with no `initialize` after it, which is how the canary's upgrade was checked. Three hosted clients went unmeasured in SMD-4344 because measuring them needed a probe at a public address; a brain they already reach shows it, once its line says.
 

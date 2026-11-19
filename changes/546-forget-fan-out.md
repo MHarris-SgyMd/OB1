@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-1723]
-migrations: []
----
-
-## Changelog
-
-The session hook's fan-out (1.9.0) copies a forget to the other brains (SMD-1723), always detaching citations there, and drops that brain's queued copies of the thought. On the server, a forget takes every thought its name is: the id, standing or deleted, the thought keeping it as its `client_key`, and each deleted one whose tombstone kept it. No migration. **Upgrading:** upgrade the brains' servers before the hook: a v2.1.0 server takes the one thought a name resolves to, finding a deleted copy by its id alone, so a copy deleted there by its key answers `NOT_FOUND`, and a second thought under the name is left, each keeping its text; and a v2.1.0 first brain's reply does not name the thought's own `client_key`, so a copy known there by that key alone is skipped. A fan-out hook pasted before 1.9.0 needs its matcher replaced to copy forgets.
-
-## Record
-
-Forget fan-out — the session hook copies a forget to the other brains, and a forget takes every thought its name is (SMD-1723)
+# 546. Forget fan-out — the session hook copies a forget to the other brains, and a forget takes every thought its name is (SMD-1723)
 
 **What changed.** The write fan-out (SMD-3314) copies `forget_thought` (session hook 1.9.0); SMD-1723's earlier record, migrations 139 and 144, is the forget itself.
 - **The copy:** a forget through the connector's brain is repeated on each brain with a write key, by the id the first brain answered and `confirm` the same. It always detaches citations there (the maintainer's choice: a copy copies the text), and is retried by the thought's own `client_key`, which the reply names, where a brain knows it by that alone.

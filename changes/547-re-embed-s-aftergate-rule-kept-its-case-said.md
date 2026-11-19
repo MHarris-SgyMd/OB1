@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-4401]
-migrations: []
----
-
-## Changelog
-
-Re-embed's rule that a worker claims nothing once its follower has seen the model record move is kept, said where it is passed, and held by a row under the scheduler's own gate (SMD-4401). No behaviour changes.
-
-## Record
-
-Re-embed's afterGate rule kept: its case said in the loop's docblock, and its row driven by the scheduler's own gate, not one that breaks Admit's contract (SMD-4401)
+# 547. Re-embed's afterGate rule kept: its case said in the loop's docblock, and its row driven by the scheduler's own gate, not one that breaks Admit's contract (SMD-4401)
 
 **Problem.** `db/claim-loop.ts`'s loop takes an optional `afterGate`, which only re-embed passes: a worker through the admit gate claims nothing once the follower has seen the record's model move. SMD-4352 PR 3 wrote its first row and recorded that the rule was reached only past a gate that does not reject when its signal aborts. That row's gate held a worker and resolved after the abort, which `db/lease.ts`'s `Admit` contract forbids: a gate a worker waits at "must reject, never resolve, once its signal aborts". So the row held the rule with a gate no caller may write, and the ticket asked whether the rule should go.
 

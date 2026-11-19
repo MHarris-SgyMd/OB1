@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-3671]
-migrations: []
----
-
-## Changelog
-
-An operator lists and decides the priority findings sleep proposes, over REST and MCP (SMD-3671 PR 2, no migration; the findings are migration 142's): `list_priority_findings` (`GET /v1/priority-findings`, any key that reads; pending by default, oldest first, by status and kind, `total` counted in full, paged by a cursor) and `review_priority_finding` (`POST /v1/priority-findings/{id}/review`, an operator key's alone: accept with a level or clear, or reject). `brain_info` counts the pending by kind, and preflight's `priority findings` row says them.
-
-## Record
-
-Priority findings over REST and MCP — an operator lists and decides sleep's findings, and brain_info and preflight count them; PR 2 (SMD-3671)
+# 543. Priority findings over REST and MCP — an operator lists and decides sleep's findings, and brain_info and preflight count them; PR 2 (SMD-3671)
 
 **Why.** PR 1 (change 533, migration 142) has sleep propose findings and gives the operator a decision in SQL alone: no door reached either, and nothing said how many waited.
 
