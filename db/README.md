@@ -5385,7 +5385,9 @@ over a 5-minute inflow, main 15 s). So once the claim passes have run as long
 as the share with re-embed's pool not drained, they wait at a gate of their
 own between thoughts, windows and pairs, as at a live write's pause ("the
 claim passes have had their turn"), and re-embed runs alone again for its
-share; then they go on, consolidation still joined. Either side hands over
+share; then they go on, consolidation still joined — in a period whose
+start found re-embed not set aside: one taken up at a poll mid-period waits
+for the next period, as before. Either side hands over
 sooner once caught up — re-embed with nothing pending or in hand, only
 thoughts its follower has yet to pool; the claim passes with nothing in hand
 and nothing pending since before the last turn floor, as each capture is pooled

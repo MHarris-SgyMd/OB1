@@ -3364,6 +3364,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     if (REEMBED_OK && switched(recorded)) await setReembedAside(recorded);
     else if (reembedAside !== null) await takeUpReembed(recorded, true);
     /**
+     * Whether re-embed is this period's at all (SMD-4384 review pass 3, ci-parity's [38r]): not set aside at its start,
+     * its key formed, no statement holding it. A set-aside cleared at a poll mid-period — a --switch-model run by hand —
+     * takes no turn in it: the next period re-embeds, as before, and a one-shot run exits 1 with its pool left.
+     */
+    const reembedThisPeriod = REEMBED_OK && reembedAside === null && !statementHeld.has("reembed");
+    /**
      * Re-embed's pool as this period reads it: the leases this process can
      * work — its own taken in this period, not one an earlier period's failed
      * release stranded, which its follower could not claim either (review
@@ -3746,7 +3752,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // tables, a refusal mid-pass — which the next period or rescan tries, as before (review pass 3, cold read: each
       // was tried again every turn). Not one set aside, or a statement holds.
       const retryable = reembedDown === null || (reembedDown === "outage" && !reembedBackoff.skipping(Date.now()));
-      if (REEMBED_SHARE > 0 && claimsFrom !== null && REEMBED_OK && reembedAside === null && !statementHeld.has("reembed") && retryable) {
+      if (REEMBED_SHARE > 0 && claimsFrom !== null && reembedThisPeriod && reembedAside === null && !statementHeld.has("reembed") && retryable) {
         const at = reembedClock();
         const ran = at - claimsFrom;
         if (ran >= TURN_FLOOR && at >= turnReadAt) {
