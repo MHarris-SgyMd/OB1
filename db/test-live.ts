@@ -29176,9 +29176,9 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] and [38p] leave recorded, in a full run and the
-  // long cell alike, is another model's, which every pass's start would refuse:
-  // set aside, and put back at the end.
+  // The extraction key [38r] and [38p] leave recorded in a full run is another
+  // model's, which every pass's start would refuse: set aside, and put back at
+  // the end. In its own cell, claims, there is none: [10] ends by deleting it.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */

@@ -132,9 +132,14 @@ cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT
 # cut_off's words: the section it was in, by the last header it printed
 # ("[16] …", a bracketed id beginning a line, as scripts/suite-sections.ts
 # reads one; a long name cut at 40 characters), and the assertions it had
-# passed and failed by then, by the rows it printed (a ✓ or ✗ after the
-# line's indent; a "(doc)" row is no assertion, createAssert counts it apart;
-# a failed row printed on both streams counts once, as in excerpt). A stopped
+# passed and failed by then, by the rows it printed, as db/test-support.ts's
+# createAssert prints them and the self-checks do (a ✓ or ✗ after the line's
+# indent; a "(doc)" row is no assertion, createAssert counts it apart; a
+# failed row printed on both streams counts once, as in excerpt, and so two
+# that failed under one label count once too). A raw line that begins as a
+# header does, a dumped "[0,1,0]" or a child's "[stub] listening", printed
+# after the section's own would be named in its place: test-live prints none
+# today, and suite-sections.ts would read it as a section too. A stopped
 # suite prints no tally, so without this its row said only that it stopped: a
 # shard 30 assertions from its end and one hung at its first read alike. A
 # suite that printed no header says its counts alone, and one that printed no
@@ -282,9 +287,11 @@ typecheck() {
 
 # The schema lane (SMD-3715): the schema on PGlite, at the default width and
 # at 768, each as CI's db-schema job runs it. They were the database-free
-# lane's longest rows, and that lane set a run's length; apart, this lane and
-# that one each end inside the longest test-live shard. The widths stay one
-# after the other: a lane more is more load on every lane's timing rows, and
+# lane's longest rows, and that lane set a run's length; apart, this lane
+# ends inside the longest test-live shard, as that one did until SMD-4366 cut
+# the rest shard in two: the database-free lane, ~470 s of rows against ~380 s
+# for the longest shard, sets a run's length again (SMD-4440). The widths stay
+# one after the other: a lane more is more load on every lane's timing rows, and
 # the run would end no sooner. Like the database-free lane's below, its FAILED
 # is its own. schema_rows NOWFILE: at_row's file.
 schema_rows() {
@@ -407,7 +414,10 @@ free_rows() {
 # SMD-3195, SMD-3468), and the rest runs in a job of its own, preflight-rest,
 # on a runner of its own (SMD-3691); here one after the other on one, each
 # shard dropping the schema before its first database section, which costs
-# nothing while the lane's length stays inside the longest test-live shard's.
+# nothing while the lane's length stays inside the run's longest lane's: the
+# database-free lane's since SMD-4366 (463-497 s over ten runs against this
+# lane's 323-465, which passed the longest test-live shard's ~380 s in three
+# of them; SMD-4440).
 # The script runs itself again under a with-postgres.sh of its own with
 # --pair, and that run does only this — so a run needs podman or docker even
 # when DATABASE_URL is given, and without one this lane fails with
