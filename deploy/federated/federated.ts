@@ -199,13 +199,15 @@ async function main(cmd: string, args: string[]) {
   // down and logs read compose.yaml, whose settings are all required: they are given placeholders, which neither
   // command uses (review pass 4: a bare `compose logs` the operator was told to paste refused on each).
   if (cmd === "down" || cmd === "logs") {
-    const r = Bun.spawnSync(composeArgs(o.runtime, cmd === "down" ? ["down", "--remove-orphans"] : ["logs", "--follow", "slots"]), { env: composeEnv(process.env, { port: 1 }, BROKER, cmd, cmd), stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+    const r = Bun.spawnSync(composeArgs(o.runtime, cmd === "down" ? ["down", "--remove-orphans"] : ["logs", "--follow", "--timestamps", "slots"]), { env: composeEnv(process.env, { port: 1 }, BROKER, cmd, cmd), stdin: "inherit", stdout: "inherit", stderr: "inherit" });
     process.exit(r.exitCode === 0 ? 0 : 1);
   }
   if (!existsSync(o.registry)) { console.error(`no registry at ${o.registry} — copy deploy/federated/federation.example.yaml there and name your servers and brains, or give --registry PATH`); process.exit(2); }
   const text = readFileSync(o.registry, "utf8");
-  const { registry, problems } = parseRegistry(text);
+  const { registry, problems, warnings } = parseRegistry(text);
   if (!registry) { console.error(`${o.registry}:\n${problems.map((p) => `  ${p}`).join("\n")}`); process.exit(2); }
+  // Taken, and said: a `ps` the broker's container may not reach as written (it reads each list itself, from there).
+  for (const w of warnings) console.error(`federated: ${o.registry}: ${w}`);
   const refusals: string[] = [];
   for (const path of [o.registry, BROKER]) { const problem = modeProblem(statSync(path).mode, path); if (problem) refusals.push(problem); }
   const facts = factsOf(o.runtime);
@@ -235,7 +237,7 @@ async function main(cmd: string, args: string[]) {
   if (!ours && await listens(host, registry.port)) refusals.push(`${host}:${registry.port} (broker.port) already answers, and not as this broker: stop it, or set broker.port in the registry to a free port`);
   if (refusals.length) { for (const x of refusals) console.error(x); process.exit(2); }
   const alias = shape?.alias ?? LOOPBACK.alias;
-  const summary = `the slot broker: ${registry.brains.map((b) => b.name).join(", ")} on ${registry.servers.map((s) => `${s.name} (${s.slots} slots, ${s.reserve} reserved${s.ps ? ", its loaded models read" : ""})`).join(", ")}; brains reach it at ws://${alias}:${registry.port}/v1/slots (published on ${host})`;
+  const summary = `the slot broker: ${registry.brains.map((b) => b.name).join(", ")} on ${registry.servers.map((s) => `${s.name} (${s.slots} slots, ${s.reserve} reserved${s.ps ? `, its loaded models to be read at ${s.ps}` : ""})`).join(", ")}; brains reach it at ws://${alias}:${registry.port}/v1/slots (published on ${host})`;
   if (cmd === "check") { console.log(summary); return; }
   const env = composeEnv(process.env, registry, o.registry, sha256(readFileSync(BROKER, "utf8")), sha256(text), host);
   const rt = o.runtime === "podman" ? "" : ` --runtime ${o.runtime}`;

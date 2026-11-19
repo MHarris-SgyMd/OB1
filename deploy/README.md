@@ -426,24 +426,36 @@ free:
       calls still run, turn about, and the log says so. So a load waiting
       on a model that live calls keep busy has the server's background out
       of its way half the time. The other half is the loaded models': no
-      drain for another model begins while a load is left out.
-  - **A model whose calls end without the list ever naming it** is handled
-    by what each call did to the list, from its grant to the read after
-    its end. A call granted while another model's load was under way
-    says nothing either way.
-    - **A model gone from the list and none come** (but ones some brain
-      asks for by name): the call put a model out and loaded nothing. From the first such call its next load waits
-      60 s more each time, up to ten minutes, and the log says so at the
-      third. None of its asks is granted meanwhile. Such a load begins no
-      stay, and what it put out is taken for due, whatever its asks' age.
-    - **Otherwise, three reads running:** it disturbs nothing, so it is
-      left out of the rule until it is listed. This is a model the server
-      lists under another name, or one it doesn't know. The first call of
-      its that puts a model out brings it back under the rule.
-  - **A live call running two minutes or more** holds back no load. A brain
-    gives a model call up at `OB1_LLM_TIMEOUT` (120 s unset), so one older
-    is taken for lost. A brain with that setting raised has its longer
-    live calls taken for lost too.
+      load for another model begins while a load is left out and its calls
+      still run.
+  - **A load whose calls all end without the list ever naming its model**
+    is judged once, by the list as the load began and as it is at the next
+    read after its last call ends, whether or not it was left out at its
+    120 s bound meanwhile. Once one of its calls has ended, no more of
+    that model's asks join the load.
+    - **A model a brain was using is gone from the list, and none has
+      come** (but ones some brain asks for by name): the load put that
+      model out and loaded nothing. The model's next load waits 60 s more
+      for each such load in a row, up to ten minutes, and the log says so.
+      None of its background asks is granted meanwhile. Such a load begins
+      no stay, and what it put out is taken for due, whatever its asks'
+      age. A model no brain had used in the two minutes before the load
+      doesn't count: the server's own idle timer may have unloaded it.
+    - **Otherwise** nothing is held against it, and that count starts
+      again.
+
+    Either way the model stays under the rule. A model the list never
+    names is a misconfiguration: the server lists it under another name,
+    or doesn't know it. Each call to it waits its turn as a load, so it
+    runs slowly (see the costs below).
+    From its third such load the log says so, with any model the server
+    lists that no brain asks for. Name the model in the brain's settings
+    as the server lists it.
+  - **A live call running two minutes or more** on a listed model holds
+    back no load. A brain gives a model call up at `OB1_LLM_TIMEOUT` (120 s
+    unset), so one older is taken for lost. A brain with that setting
+    raised has its longer live calls taken for lost too. A live call to a
+    model the list doesn't name is a load, with the bounds above.
 
   What this costs:
   - Where the loaded models can't share the server's memory, the next live
@@ -455,14 +467,31 @@ free:
   - A brain's call to a model that isn't listed pauses the server's other
     background: up to 120 s a load, or until the list's next read where the
     call ends first. A call that runs on unlisted for longer (one never
-    given back, say) pauses it every other 120 s until `lease_s`. The broker logs each load at most once a minute a
-    brain, with the count since, and doesn't cap it, as with a brain's live
-    calls.
+    given back, say) pauses it every other 120 s until `lease_s`, and no
+    other model is loaded for background in all that time. The broker logs
+    each load at most once a minute a brain, with the count since, and
+    doesn't cap it, as with a brain's live calls.
     An ask's age and `max_wait_s` are its brain's own word too: they order
     the loads between brains, and `stay_s` keeps the turns.
   - After one call to a model that put another out, that other's backlog
     waits out `stay_s` before it is loaded again, even if the first has no
     more work.
+  - A model named another way than the server lists it runs at a fraction
+    of its speed. It has one batch of calls a turn, and each turn waits
+    out `stay_s`, or its ask's `max_wait_s` where live calls leave no
+    quiet. Its turn begins no stay, so the model it put out waits the same
+    way to be loaded again, with nothing running meanwhile. In simulations
+    it had a tenth of the calls it had under the right name, and the
+    server sat idle a third of the time. Another brain's backlog on a
+    rightly named model was not slowed.
+  - A model that takes longer to load than its callers wait
+    (`OB1_LLM_TIMEOUT`, 120 s unset) reads as one that doesn't load. Its
+    callers give up, the broker backs it off and loads what it put out,
+    and the load, finished too late, is put out in turn. In a simulation
+    of two such models with 150 s loads, the brains had 48 and 24 calls in
+    half an hour, against 415 and 131 with no rule. For scale: 1,600
+    loads on one Mac (Ollama 0.33.3) took 4.6 s on average and 46 s at
+    most. Raise the timeout above the load time.
   - Models that would all fit still load one per `stay_s`, since the broker
     can't see the server's memory. After a server unloaded three idle
     models, they came back with work waiting at 8, 68 and 136 s in a
@@ -560,18 +589,53 @@ bun --no-env-file deploy/federated/federated.ts down
 - **`ps` is where the server lists its loaded models**, read by the broker's
   own container: `http://host.containers.internal:11434/api/ps` for the
   host's Ollama (`host.docker.internal` under Docker Engine on Linux).
-  Optional, and for a `per_model` server only. The broker reads it every 3 s,
-  and every second while a model loads. Unreadable for 10 s (no answer in
-  2 s, no 200, a redirect, not a list of models), the server has no
-  residency rule until it reads again, and the broker's log says each
-  change once. A model's name is matched as Ollama lists it: lower-cased,
-  with `:latest` where a brain names no tag.
+  Optional, and for a `per_model` server only.
+  - **It is the broker that dials it,** from inside its container, so
+    write the address a brain reaches the server by, not the host's own
+    `127.0.0.1`. `check` and `up` warn about a loopback address, a host
+    that is none of the server's `bases`, a `ps` that is one of the bases,
+    and a path that isn't `/api/ps`.
+  - **Under podman machine** an Ollama listening on the host's loopback
+    answers at `host.containers.internal`. **Under Docker Engine on Linux**
+    Ollama must listen on the bridge's address (see "Local models"), and a
+    firewall must let the `ob1-federated` network reach its port. `up`
+    doesn't test this: the broker's log says within seconds whether the
+    list read.
+  - **What it must answer:** a 200 with `{"models": [{"name": …}, …]}`,
+    each entry a `name` or a `model`, as Ollama's `/api/ps` does. Ollama's
+    `/api/tags` has the same shape and lists every model on disk, which
+    would make every model look loaded.
+  - **It must list a model only once it has loaded,** as Ollama 0.33
+    does (its log says `llama-server started` before `loaded runners`).
+    A server that lists a model from the start of its load ends the hold
+    on the others early, counts `stay_s` from the load's start, and has
+    its failed loads go unpaced.
+  - The broker reads it every 3 s, and every second while a model loads.
+    Unreadable for 10 s, the server has no residency rule until it reads
+    again. The log says `its loaded models could not be read (<why>): no
+    residency rule there until they can` when that begins and each hour
+    it lasts. The reasons are `no answer`, `no answer in 2 s`, `HTTP
+    <status>`, `a redirect, not followed`, `a list over 1 MiB` and `not a
+    list of models`.
+  - A model's name is matched as Ollama lists it: lower-cased, with
+    `:latest` where a brain names no tag. Where the two spellings differ
+    the log gives both: `ollama/Foo (foo:latest)`.
 - **`stay_s` is how long a model that background loaded stays** before
-  background loads another on that server (60 unset, 0 to 86400, with `ps`
-  only), busy or idle. A brain's `max_wait_s` decides when its own ask is
-  due. `stay_s` is the host's, so one brain asking with a small
-  `max_wait_s` can't shorten another brain's turn. A live call's load
-  doesn't count: it is never held back, and begins no stay.
+  background loads another on that server (60 unset, 0 to 86400, fractions
+  allowed, with `ps` only), busy or idle. 0 means no stay. A turn costs a
+  load, so set it to several times the slowest model's load time. A
+  brain's `max_wait_s` decides when its own ask is due. `stay_s` is the
+  host's, so one brain asking with a small `max_wait_s` can't shorten
+  another brain's turn. A live call's load doesn't count: it is never held
+  back, and begins no stay.
+- **`max_wait_s` is each brain's own,** not the registry's: the sleep
+  scheduler's `OB1_SLEEP_MAX_WAIT` (60 s unset; the api's background calls
+  use 60). On a server with `ps` it is how long that brain's background
+  ask for a model that isn't loaded waits before the broker drains for
+  it. To keep one brain's background from putting out models another
+  brain's live calls use, raise that brain's `OB1_SLEEP_MAX_WAIT`: its
+  loads then wait for the server to be idle. No registry setting protects
+  a model that only live calls loaded, beyond the two-minute quiet.
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1` (`host.docker.internal` for a
   brain under Docker Engine on Linux). A call to any other base isn't
@@ -614,24 +678,36 @@ bun --no-env-file deploy/federated/federated.ts down
 - **Is it working:** `curl -s 127.0.0.1:8095/health` answers `ok`, and the
   broker's log (`bun --no-env-file deploy/federated/federated.ts logs`) says
   each brain's connections, and any server over its slots, at most once a
-  minute. For a server with `ps`, it says `its loaded models read (N
-  loaded): the residency rule is on` once they read (`read again` after a
-  failure, the broker starting before the model server included). It says
-  each load at most once a minute a brain: `not loaded, and granted to
-  brain <name> after N s` for background, `brain <name>'s live call to a
-  model not loaded` for a live call, and `re-registers a call to a model
-  not loaded` for one a brain says it already holds. Once a minute a
-  server it says `given up` for a drain not done in 120 s, and `listed
+  minute. `logs` shows each line's time. For a server with `ps`, the start
+  line says where its loaded models are to be read, and the broker says
+  `its loaded models read (N loaded): the residency rule is on` once they
+  read (`read again` after a failure, the broker starting before the model
+  server included). It says each load at most once a minute a brain:
+  - `not loaded, and brain <name>'s ask is N s old` as a drain begins that
+    has running background to wait for;
+  - `not loaded, and granted to brain <name> after N s` as background's
+    load is granted. A wait behind another model's turn shows only here,
+    in the N;
+  - `brain <name>'s live call to a model not loaded` for a live call;
+  - `re-registers a call to a model not loaded` for one a brain says it
+    already holds.
+
+  Once a minute a server it says `given up` for a drain not done in 120 s,
+  with the brain and model of the oldest call it waited on, and `listed
   now, and under the residency rule again`. A line said once a minute
   names the first model and counts the rest (`and N more since the last
-  said`). Three lines are
-  worth a look:
-  - `left out of the residency rule until it is listed`: the model's name
-    in a brain's settings may differ from the server's.
+  said`). Three lines are worth a look:
+  - `loads of it have ended and the server's loaded models never named
+    it`: the model's name in a brain's settings differs from the server's,
+    or the server doesn't know the model. The line names any model the
+    server lists that no brain asks for. Until the name is fixed each call
+    to it waits its turn. Expect the line after three calls, each up to
+    `max_wait_s` apart.
   - `left out of the residency rule 120 s`: a load waited two minutes on a
     model that calls kept busy, or a call to it was never given back.
-  - `a model that does not load`: its loads put other models out and it
-    never appeared. The server may lack the memory for it.
+  - `a model that does not load`: its load ended with a model that a brain
+    was using gone from the list, named in the line, and itself never
+    listed. The server may lack the memory for it.
 
 ## What is reachable from where
 
@@ -2742,7 +2818,10 @@ takes its slot — after older ones that go first; not a timeout. It orders, and
 the share is the same; the order matters once the scheduler's calls queue —
 consolidation's workers two or more past the share hold the other passes to
 about a call a worker a max-wait — and a lower value gives them more turns;
-SMD-3379 PR 2c-2),
+SMD-3379 PR 2c-2. Where the host's slot broker reads a model server's loaded
+models (its registry's `ps`, PR 3c-1) it is also how long one of these calls
+for a model that isn't loaded waits before the broker drains the server for
+it: a higher value leaves the loaded models to other brains for longer),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep
