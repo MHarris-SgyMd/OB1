@@ -65,6 +65,7 @@
  *   bun session-capture.mjs --dry-run <transcript.jsonl> # print what WOULD be sent; sends nothing (--event PreCompact --trigger auto previews a checkpoint's)
  *   bun session-capture.mjs --print-hook claude-code --claims   # the claims hook: renews a worktree's work claims while a session works (SMD-3602)
  *   bun session-capture.mjs --renew-claims [--cwd <dir>] [--claim <id>]  # renew the claims this worktree keeps tokens for, now
+ *   bun session-capture.mjs --copy-forget <id> --from <name> [--client-key <uuid>] [--brain <name>] [--yes]  # copy a forget the hook missed (SMD-4411); says what it would do until --yes
  *   bun session-capture.mjs                              # as the hook: hook JSON on stdin
  *
  * Bun or Node 18+, no dependencies. Config (0600, never in a hook command line):
@@ -423,7 +424,10 @@ export function loadBrains() {
     } catch { /* unreadable stat: the read above already succeeded */ }
   }
   const shared = sharedSettings(cfg);
-  const keyOf = (b) => { const k = b.key || (b.key_file ? readFileSync(b.key_file, "utf8").trim() : ""); return k ? String(k) : ""; };
+  // A key file that cannot be read is named by its setting and path, not the bare errno (SMD-4411 review pass 1: the log
+  // said `EACCES … open '…/canary-write.key'` alone, and nothing named the forget it cost).
+  const readKeyFile = (file, setting, where) => { try { return readFileSync(file, "utf8").trim(); } catch (e) { throw new Error(`the ${setting} in ${where}, ${file}, cannot be read (${e?.code ?? "error"})${String(file).startsWith("~") ? " — write it as a full path: ~ is not expanded" : ""}`); } };
+  const keyOf = (b, where = CONFIG_PATH) => { const k = b.key || (b.key_file ? readKeyFile(b.key_file, "key_file", where) : ""); return k ? String(k) : ""; };
   // The work claims' key (SMD-3602): the very key an agent claims with — its
   // connector's own, since a server takes one key per name — which renews the
   // claims a worktree keeps tokens for. Claims are an add-on: a claim key that
@@ -487,7 +491,7 @@ export function loadBrains() {
     seen.add(name);
     const where = `${CONFIG_PATH} (brain "${name}")`;
     const endpoint = b.url ? endpointOf(b.url, where) : undefined;
-    const key = keyOf(b);
+    const key = keyOf(b, where);
     if (!endpoint || !key) throw new Error(`brain "${name}" in ${CONFIG_PATH} has no url or key — give it both (a capture key minted on that brain: bun server-portable/keygen.ts --name session-hook --scope capture)`);
     // The write fan-out (SMD-3314): `connector`, the name of the harness's MCP
     // server whose writes reach this brain directly — its writes are copied to
@@ -495,7 +499,7 @@ export function loadBrains() {
     // written to this brain with. Both optional: without them nothing is copied.
     if (b.connector !== undefined && !(typeof b.connector === "string" && CONNECTOR_RE.test(b.connector))) throw new Error(`brain "${name}" in ${CONFIG_PATH} has a "connector" that is no MCP server's name — letters, digits, hyphens and underscores, as the harness names it (open-brain)`);
     if (b.write_key !== undefined && b.write_key_file !== undefined) throw new Error(`brain "${name}" in ${CONFIG_PATH} sets both "write_key" and "write_key_file" — give one`);
-    const writeKey = b.write_key || (b.write_key_file ? readFileSync(b.write_key_file, "utf8").trim() : "");
+    const writeKey = b.write_key || (b.write_key_file ? readKeyFile(b.write_key_file, "write_key_file", where) : "");
     if ((b.write_key !== undefined || b.write_key_file !== undefined) && !writeKey) throw new Error(`brain "${name}" in ${CONFIG_PATH} has an empty write key — mint one on that brain: bun server-portable/keygen.ts --name claude-code --scope write`);
     if (b.connector !== undefined && seenConnectors.has(b.connector)) throw new Error(`${CONFIG_PATH} names connector "${b.connector}" for two brains — a connector's writes reach one brain`);
     if (b.connector !== undefined) seenConnectors.add(b.connector);
@@ -2626,7 +2630,8 @@ export function fanOutPlan(hook, brains) {
   const source = brains.find((b) => b.cfg.connector === server);
   if (!source) return { skip: null };
   const targets = brains.filter((b) => b !== source && b.cfg.writeKey);
-  if (!targets.length) return { skip: `${tool} through ${server}: no other brain has a write_key, so nothing is copied` };
+  // A forget goes on with none: its drop reaches every brain's queue, and a brain left without a key that has been copied to (its writes/ is there) is held it (queueForget, SMD-4411).
+  if (!targets.length && tool !== "forget_thought") return { skip: `${tool} through ${server}: no other brain has a write_key, so nothing is copied` };
   const input = hook.tool_input && typeof hook.tool_input === "object" && !Array.isArray(hook.tool_input) ? hook.tool_input : {};
   const resp = hook.tool_response;
   const text = resultText(resp);
@@ -2699,12 +2704,12 @@ export function enqueueWrite(op) {
  * an edit or a delete of it — and returns how many (SMD-1723 PR 3). A forget's own copies stay, and so does a queued
  * copy a send may have reached (`sent`), or one in flight or left so by a killed drain (`sending`): it may have landed,
  * or land late, and the forget behind it is what reaches it there — dropped, a capture committed after the forget's
- * NOT_FOUND kept its text for good (review passes 7 and 8).
+ * NOT_FOUND kept its text for good (review passes 7 and 8). `dirs` narrows it to one of the two (SMD-4411).
  */
-export function dropCopiesOf(names) {
+export function dropCopiesOf(names, dirs = [WRITES_PENDING(), WRITES_DEAD()]) {
   const want = new Set(names.map((n) => String(n).toLowerCase()));
   let n = 0;
-  for (const dir of [WRITES_PENDING(), WRITES_DEAD()]) {
+  for (const dir of dirs) {
     let files = [];
     try { files = readdirSync(dir).filter((f) => f.endsWith(".json") && !f.startsWith(".")); } catch { continue; }
     for (const f of files) {
@@ -2712,11 +2717,102 @@ export function dropCopiesOf(names) {
       try { op = JSON.parse(readFileSync(join(dir, f), "utf8")); } catch { continue; }
       if (op?.tool === "forget_thought") continue;
       if ((op?.sent === true || op?.sending === true) && dir === WRITES_PENDING()) continue;
-      const named = [op?.args?.client_key, op?.args?.id].filter((x) => typeof x === "string").map((x) => x.toLowerCase());
-      if (named.some((x) => want.has(x))) { try { unlinkSync(join(dir, f)); n++; } catch { /* gone: a drain took it */ } }
+      if (namesOf(op).some((x) => want.has(x))) { try { unlinkSync(join(dir, f)); n++; } catch { /* gone: a drain took it */ } }
     }
   }
   return n;
+}
+/** The names a queued copy carries a thought by: a capture's client_key, an edit's or a delete's id. */
+const namesOf = (op) => [op?.args?.client_key, op?.args?.id].filter((x) => typeof x === "string").map((x) => x.toLowerCase());
+/** Whether the current brain's queue still holds a copy of a thought by one of `names` — after a drop, one kept for having maybe landed. */
+function queueCarries(names) {
+  const want = new Set(names.map((n) => String(n).toLowerCase()));
+  return pendingWrites().some((f) => { try { const op = JSON.parse(readFileSync(join(WRITES_PENDING(), f), "utf8")); return op?.tool !== "forget_thought" && namesOf(op).some((x) => want.has(x)); } catch { return false; } });
+}
+
+/**
+ * A forget queued (SMD-1723 PR 3, SMD-4411). Each brain it covers — every configured brain with `all`, else the
+ * `targets` — first loses its queued and given-up copies of the thought (dropCopiesOf). Then the forget goes into its
+ * queue: queued where the brain has a write key, held where it has none but has been copied to (its writes/ is there),
+ * to land behind whatever was sent before it once a key is set, as a brain away holds its queue. The brain the forget
+ * was made on (`source`) has forgotten it already, but a copy its queue kept for having maybe landed (a two-way
+ * fan-out queues copies to it too) would land again, as a new thought under its key: so it is queued the forget too
+ * where it has a write key — whatever its queue shows, since a drain racing the drop can write such a copy back after
+ * the drop read the queue — and held where it has none and its queue still carries one (review pass 1). By hand
+ * (`sourceAlways` false: --copy-forget, which cannot tell a forgotten id from a wrong one) it is queued the forget only
+ * where its queue carries a copy, so a wrong id never forgets the person's own thought there (review pass 2). With
+ * `all`, a queue left on disk by a brain no longer in the config (renamed, removed) loses its copies too, said in the
+ * first brain's log, with the command for one still carrying a copy that may have landed. Each brain is its own step:
+ * one whose queue cannot be written is logged, in its own log and the first brain's, with the --copy-forget that
+ * redoes it, and the others go on (review passes 2 and 3). Returns `{ queued, held, failed }`: `{ brain, name }` for
+ * each queue the forget was queued or held in, and the brains that failed.
+ */
+export function queueForget(op, brains, { source = null, targets, all, sourceAlways = true }) {
+  const names = [op.args.id, op.alt].filter(Boolean);
+  const queued = [], held = [], failed = [];
+  // Lines for the first brain's log too, the one an operator reads: a forget lost on a brain, a stray queue's copy (review pass 3).
+  const notices = [];
+  // The command that redoes a forget lost on one brain: --brain names it, save the brain the forget was made on, which --copy-forget sends one only where its queue carries a copy.
+  const redo = (name) => `bun ${shellWord(SELF)} --copy-forget ${op.args.id}${op.alt ? ` --client-key ${op.alt}` : ""} --from ${source?.name ?? "<the brain you forgot it on>"}${source && name === source.name ? "" : ` --brain ${name}`} --yes`;
+  for (const b of all ? brains : targets) {
+    try {
+      useStateRoot(b.root);
+      const dropped = dropCopiesOf(names);
+      if (dropped) log(`fan-out: dropped ${dropped} queued or given-up cop${dropped === 1 ? "y" : "ies"} of ${op.args.id}, which a forget follows`);
+      const owed = b !== source || (b.cfg.writeKey && sourceAlways) || queueCarries(names);
+      if (!owed) continue;
+      if (b.cfg.writeKey) {
+        queued.push({ brain: b, name: enqueueWrite(op) });
+        log(`fan-out: queued ${opLabel(op)} from ${op.from}${b === source ? ", where it was made: a copy kept here for having maybe landed is sent again before it" : ""}`);
+      } else if (existsSync(WRITES_DIR())) {
+        held.push({ brain: b, name: enqueueWrite({ ...op, held: true }) });
+        log(`fan-out: held ${opLabel(op)} from ${op.from}: this brain has no write_key now; once one is set, it lands, in order, at its next drain`);
+      }
+    } catch (e) {
+      failed.push(b);
+      const line = `fan-out: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)} — ${opLabel(op)} was not queued for ${b.name}; once that is mended, run: ${redo(b.name)}`;
+      log(line);
+      notices.push(line);
+    }
+  }
+  if (all) {
+    const configured = new Set(brains.map((b) => b.root));
+    let stray = [];
+    try { stray = readdirSync(join(STATE_BASE, "brains")).map((n) => join(STATE_BASE, "brains", n)).filter((r) => !configured.has(r) && existsSync(join(r, "writes"))); } catch { /* none */ }
+    for (const root of stray) {
+      // Its own log is no one's now, and log() would make a state there: what it lost and kept is said in the first brain's.
+      try {
+        useStateRoot(root);
+        const dropped = dropCopiesOf(names);
+        if (dropped) notices.push(`fan-out: dropped ${dropped} queued or given-up cop${dropped === 1 ? "y" : "ies"} of ${op.args.id} from ${root}, the queue of a brain no longer in the config`);
+        // A copy kept for having maybe landed, on a brain no forget can be queued for: named, with what sends one.
+        if (queueCarries(names)) notices.push(`fan-out: a copy of ${op.args.id} in ${root} was sent to the brain that queue was for and may have landed there, and no forget follows it: once that brain is back in the config, run: ${redo(basename(root))}`);
+      } catch (e) { notices.push(`fan-out: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)} — reading ${root}`); }
+    }
+  }
+  if (notices.length && brains.length) { useStateRoot(brains[0].root); for (const line of notices) if (!failed.includes(brains[0]) || !line.includes(`not queued for ${brains[0].name};`)) log(line); }
+  return { queued, held, failed };
+}
+
+/**
+ * For a PostToolUse run of a forget that landed, the words naming it and the --copy-forget that copies it — for a run
+ * whose config did not load, which copies nothing (SMD-4411 review pass 1) — or null. Read from the reply, and the
+ * --from brain's name from the config's JSON where it still reads: with no config loaded, which connector the fan-out
+ * copies from is unknown, so the words say it applies to that one.
+ */
+export function lostForget(hook) {
+  if (hook?.hook_event_name !== "PostToolUse" || !/^mcp__.+__forget_thought$/.test(String(hook?.tool_name ?? ""))) return null;
+  const text = resultText(hook.tool_response);
+  if (resultIsError(hook.tool_response, text)) return null;
+  const first = text.split("\n")[0];
+  const id = new RegExp(`^Forgot (${UUID})\\b`, "i").exec(first)?.[1]?.toLowerCase();
+  if (!id) return null;
+  const ownName = new RegExp(`\\bclient_key (${UUID})\\b`, "i").exec(first)?.[1]?.toLowerCase();
+  const server = /^mcp__(.+)__forget_thought$/.exec(String(hook.tool_name))[1];
+  // The brain whose connector it is, where the config's JSON still reads (a key file failed, not the file): named (review pass 3).
+  let from = `<the brain whose connector is ${server}>`;
+  try { const named = JSON.parse(readFileSync(CONFIG_PATH, "utf8").replace(/^\uFEFF/, "")).brains?.find?.((b) => b?.connector === server)?.name; if (typeof named === "string" && BRAIN_NAME_RE.test(named)) from = named; } catch { /* unreadable: the placeholder */ }
+  return `forget_thought of ${id} was not copied to the other brains, as the config did not load. If it went through the connector the fan-out copies from, run once the config loads: bun ${shellWord(SELF)} --copy-forget ${id}${ownName && ownName !== id ? ` --client-key ${ownName}` : ""} --from ${from}, then again with --yes`;
 }
 
 /** The current brain's queued copies, oldest first. */
@@ -2776,18 +2872,22 @@ const opLabel = (op) => `${op.tool}${op.tool === "capture_thought" ? ` (client_k
 
 /**
  * One copy onto a brain, through its write key. `done` — landed, or skipped
- * for good: the thought it names was never copied there (NOT_FOUND); `keep` —
- * the brain did not answer, or answered a transient: the queue stops here, in
- * order, with `unknown` when the send may have reached the brain (a transport
- * failure past the connection, a fault, a store it could not reach); `dead` —
- * refused for good. A pointer the brain does not know (a thought each brain's
- * own writers made, a board-sync row) is dropped and the write tried again, as
- * the server's contract asks (SMD-3314 PR 1).
+ * for good: the thought it names was never copied there (NOT_FOUND, marked
+ * `notFound`); `keep` — the brain did not answer, or answered a transient: the
+ * queue stops here, in order, with `unknown` when the send may have reached the
+ * brain (a transport failure past the connection, a fault, a store it could not
+ * reach); `dead` — refused for good. A pointer the brain does not know (a
+ * thought each brain's own writers made, a board-sync row) is dropped and the
+ * write tried again, as the server's contract asks (SMD-3314 PR 1). A forget
+ * answered NOT_FOUND or FORGOTTEN is sent again by the thought's own client_key
+ * (`alt`) where it carries one (SMD-4411).
  */
 export async function postWrite(cfg, op) {
   const wcfg = { ...cfg, key: cfg.writeKey };
   const args = structuredClone(op.args);
   const dropped = [];
+  let forgottenBefore = false; // a forget whose id answered FORGOTTEN, sent again by the thought's own client_key
+  let byKey = ""; // why a forget went again by the thought's own client_key, for its line
   for (let attempt = 0; attempt < 5; attempt++) {
     let result;
     try { result = await rpc(wcfg, "tools/call", { name: op.tool, arguments: args }); }
@@ -2802,7 +2902,7 @@ export async function postWrite(cfg, op) {
       return { keep: true, ...(unknown ? { unknown: true } : {}), line: missing ?? `kept: ${opLabel(op)} — ${msg.slice(0, 200)}` };
     }
     const text = textOfResult(result);
-    const note = dropped.length ? ` (dropped: ${dropped.join(", ")})` : "";
+    const note = `${dropped.length ? ` (dropped: ${dropped.join(", ")})` : ""}${byKey ? ` (sent again by its client_key ${op.alt}, ${byKey})` : ""}`;
     // A forget that left some of the thought there (a replay, a fault, on a copy after the first): kept, to be sent
     // again, so its text does not stay there for a copy logged done (SMD-1723 PR 3, review pass 2).
     const missedThere = op.tool === "forget_thought" && !result.isError && Array.isArray(result.structuredContent?.notForgotten) ? result.structuredContent.notForgotten : [];
@@ -2816,8 +2916,14 @@ export async function postWrite(cfg, op) {
       return { done: true, line: `copied ${opLabel(op)}${id ? ` → ${id.toLowerCase()}` : ""}${keyed}${onto}${note}${op.tool === "forget_thought" ? forgetReview(result.structuredContent) : ""}` };
     }
     const v = verdictOf(result, text);
-    // Forgotten there already (its own forget, or a copy that landed before a lost answer): done (SMD-1723 PR 3).
-    if (op.tool === "forget_thought" && v.code === "FORGOTTEN") return { done: true, line: `copied ${opLabel(op)}: forgotten there already${note}` };
+    // Forgotten there already (its own forget, or a copy that landed before a lost answer): done (SMD-1723 PR 3) — once
+    // the thought's own client_key is tried too. A copy queued there ahead of this forget, kept for having maybe landed,
+    // was sent again and lands as a new thought under that key, which a forget by this name no longer reaches (SMD-4411
+    // review pass 1: the first brain's own queue, and --copy-forget given the receiving brain's own id).
+    if (op.tool === "forget_thought" && v.code === "FORGOTTEN") {
+      if (op.alt && args.id !== op.alt) { args.id = op.alt; args.confirm = op.alt; forgottenBefore = true; byKey = "its id forgotten there already"; continue; }
+      return { done: true, line: `copied ${opLabel(op)}: forgotten there already${note}` };
+    }
     // A tool this brain cannot call (toolMissing says which): a server from before forget_thought (migration 144),
     // the copy waiting for it, in order, as a brain away does — given up only after the week — so the forget is not
     // lost (SMD-1723 PR 3); or a key that cannot call it (a capture key in write_key), the operator's to fix, which
@@ -2829,12 +2935,14 @@ export async function postWrite(cfg, op) {
     // A forget the brain knows by the thought's own client_key alone (the thought began there): sent again by it.
     if (op.tool === "forget_thought" && v.code === "NOT_FOUND" && op.alt && args.id !== op.alt) {
       args.id = op.alt; args.confirm = op.alt;
-      dropped.push(`its id, sent again by its client_key ${op.alt}`);
+      byKey = "its id not found there";
       continue;
     }
+    // Its id forgotten there already, and nothing there under its client_key either: done.
+    if (forgottenBefore && v.code === "NOT_FOUND") return { done: true, line: `copied ${opLabel(op)}: forgotten there already, and nothing there keeps its client_key ${op.alt}` };
     // A forget's NOT_FOUND may also be one forgotten there already, by a copy whose answer was lost — a forgotten copy
-    // keeps no key to resolve (SMD-1723 PR 3).
-    if (v.code === "NOT_FOUND") return { done: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${op.tool === "forget_thought" ? ", or forgotten there already (also, its text kept: a copy deleted there before by its key, on a v2.1.0 server; a thought that began here, its forget from a v2.1.0 first brain, whose reply names no client_key — upgrade both and forget it here)" : ""}${note}` };
+    // keeps no key to resolve (SMD-1723 PR 3). `notFound` lets --copy-forget say a name that found nothing (review pass 1).
+    if (v.code === "NOT_FOUND") return { done: true, notFound: true, line: `skipped ${opLabel(op)}: no thought there has that id or keeps it as its client_key — never copied to this brain${op.tool === "forget_thought" ? ", or forgotten there already (also, its text kept: a copy deleted there before by its key, on a v2.1.0 server; a thought that began here, its forget from a v2.1.0 first brain, whose reply names no client_key — upgrade both and forget it here)" : ""}${note}` };
     // A fault (FAILED: the REST core away behind the MCP server, the store
     // restarting, a busy registry) carries no `retryable`, which verdictOf reads
     // as final: kept, so a brain mid-restart does not lose its edits (review pass 2).
@@ -2876,7 +2984,8 @@ export async function postWrite(cfg, op) {
  * empty or a copy is kept — the rest wait behind it, in order. One drain per
  * brain: a drain that finds the lock held leaves the queue to its holder, and a
  * holder looks once more after it lets go, so a copy queued meanwhile is not
- * left behind. Returns each copy's outcome; each is also a line in the log.
+ * left behind. Returns each copy's outcome, with its file's `name` and a
+ * forget's `forgetOf`; each is also a line in the log.
  */
 export async function drainWrites(cfg) {
   const outcomes = [];
@@ -2903,12 +3012,16 @@ export async function drainWrites(cfg) {
         try { op = JSON.parse(readFileSync(path, "utf8")); } catch (e) {
           if (e?.code === "ENOENT") { try { unlinkSync(path); } catch { /* gone: the holder before finished it */ } continue; }
           moveWrite(path, WRITES_DEAD(), name);
-          const o = { dead: true, line: `not copied (given up): ${name} does not parse` };
+          const o = { dead: true, name, line: `not copied (given up): ${name} does not parse` };
           log(o.line); outcomes.push(o); continue;
         }
         // A send may reach the brain whatever it answers: the copy says so in its own file before it goes (`sending`),
         // and a forget's drop leaves it — dropped, a capture committed after the forget's NOT_FOUND kept its text for
         // good (review pass 7). One a drain killed mid-send left `sending` is read as having been sent (review pass 8).
+        // A forget held for a brain with no write key (queueForget): its week starts at its first send, now that the
+        // brain has one, not when it was made — else a key set back after a week gave it up at its first fault, its text
+        // left there (SMD-4411 review pass 1).
+        if (op.held === true) { const { held: _h, ...rest } = op; op = { ...rest, at: new Date().toISOString() }; if (!rewriteWrite(name, op)) continue; }
         const reachedBefore = op.sent === true || op.sending === true;
         if (!reachedBefore && !rewriteWrite(name, { ...op, sending: true })) continue; // gone: a drop took it first
         // Still this drain's, just before the send: a holder whose lock was taken back while it was suspended does not
@@ -2923,8 +3036,17 @@ export async function drainWrites(cfg) {
         // Kept for a week: given up, as the capture queue gives a payload up
         // (PENDING_MAX_AGE_MS) — what it named is skipped there afterwards.
         if (o.keep && Date.now() - Date.parse(op.at) > PENDING_MAX_AGE_MS) o = { dead: true, line: `not copied (given up after a week): ${o.line.replace(/^kept: /, "")}${op.tool === "forget_thought" ? " — its text stays on this brain until forgotten there by hand" : ""}` };
+        // A forget of a name a forget landed for earlier in this drain finds nothing: said so, not as a copy never sent
+        // with its text kept (review pass 3: alarming after a success).
+        if (o.notFound && op.tool === "forget_thought" && outcomes.some((x) => x.done && !x.notFound && x.forgetOf === op.args.id)) o = { ...o, line: `skipped ${opLabel(op)}: forgotten by the forget of it above, in this drain` };
         log(o.line);
-        outcomes.push(o);
+        outcomes.push({ ...o, name, ...(op.tool === "forget_thought" ? { forgetOf: op.args.id } : {}) });
+        // A forget landed: a copy of its thought given up since the forget's drop (sent again ahead of it, then refused
+        // for good) holds its text in dead/ — removed now (SMD-4411 review pass 1).
+        if (o.done && op.tool === "forget_thought") {
+          const gone = dropCopiesOf([op.args.id, op.alt].filter(Boolean), [WRITES_DEAD()]);
+          if (gone) log(`fan-out: removed ${gone} given-up cop${gone === 1 ? "y" : "ies"} of ${op.args.id}, which its forget followed`);
+        }
         if (o.keep) {
           // `sent` once a send may have reached the brain — a transport failure past the connection, a fault, a
           // store it could not reach (`unknown`) — and never cleared; any other answer the brain gave (a refusal, a
@@ -3036,20 +3158,25 @@ async function fanOutHook(hook, brains) {
       if (plan.skip) { useStateRoot(brains[0].root); log(`fan-out: ${plan.skip}`); }
       return 0;
     }
-    for (const t of plan.targets) {
-      useStateRoot(t.root);
-      // A forget drops the copies still queued, or given up, that carry the thought and that no send may have reached
-      // (dropCopiesOf): they hold its text, and one landing after the forget was made would put it back there (review
-      // pass 1). The forget itself is queued all the same, a copy having maybe landed already.
-      if (plan.op.tool === "forget_thought") {
-        const dropped = dropCopiesOf([plan.op.args.id, plan.op.alt].filter(Boolean));
-        if (dropped) log(`fan-out: dropped ${dropped} queued or given-up cop${dropped === 1 ? "y" : "ies"} of ${plan.op.args.id}, which a forget follows`);
+    // A forget goes through queueForget (SMD-4411): the copies of its thought no send may have reached are dropped
+    // from every brain's queue, the first brain's own among them, and the forget is queued behind those kept, or held
+    // for a brain with no write key now. dropCopiesOf's and queueForget's docblocks say why.
+    let drains = plan.targets, lost = 0;
+    if (plan.op.tool === "forget_thought") {
+      const { queued, held, failed } = queueForget(plan.op, brains, { source: plan.source, targets: plan.targets, all: true });
+      drains = queued.map((q) => q.brain);
+      lost = failed.length; // a brain whose queue could not be written: a copy not landed, exit 1 under sync (review pass 3)
+      // Said only when no other brain was queued, held or failed: the first brain's own forget is no copy (review pass 2).
+      if (![...queued, ...held].some((x) => x.brain !== plan.source) && !failed.length) { useStateRoot(plan.source.root); log(`fan-out: forget_thought through ${plan.source.cfg.connector}: no other brain has a write_key, so nothing is copied`); }
+    } else {
+      for (const t of plan.targets) {
+        useStateRoot(t.root);
+        enqueueWrite(plan.op);
+        log(`fan-out: queued ${opLabel(plan.op)} from ${plan.op.from}`);
       }
-      enqueueWrite(plan.op);
-      log(`fan-out: queued ${opLabel(plan.op)} from ${plan.op.from}`);
     }
-    let code = 0;
-    for (const t of plan.targets) code = Math.max(code, await startDrain(t, `[${t.name}] `));
+    let code = lost ? 1 : 0;
+    for (const t of drains) code = Math.max(code, await startDrain(t, `[${t.name}] `));
     return sync ? code : 0;
   } catch (e) {
     log(`fan-out: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`);
@@ -3064,7 +3191,8 @@ async function fanOutHook(hook, brains) {
  * edit, delete and forget (a server with no forget_thought is a warning), that
  * the brain keeps a client_key (a server from before migration 112 drops the
  * argument unread, and every later edit of the copy would find nothing), and
- * what its queue holds. Returns the exit code.
+ * what its queue holds; for one without, a warning of the copies its queue
+ * still holds (SMD-4411). Returns the exit code.
  */
 async function checkWrites(brain, brains, tag) {
   const cfg = brain.cfg;
@@ -3073,7 +3201,19 @@ async function checkWrites(brain, brains, tag) {
     const to = brains.filter((b) => b !== brain && b.cfg.writeKey).map((b) => b.name);
     console.log(`${tag}fan-out: writes through ${cfg.connector} ${to.length ? `are copied to ${to.join(", ")}` : "stay on this brain (no other brain has a write_key)"}`);
   }
-  if (!cfg.writeKey) return 0;
+  if (!cfg.writeKey) {
+    // Copies queued while it had a key, and forgets held for it since (SMD-4411): nothing sends them until one is set.
+    useStateRoot(brain.root);
+    const held = pendingWrites();
+    if (held.length) {
+      let forgets = 0;
+      for (const f of held) { try { if (JSON.parse(readFileSync(join(WRITES_PENDING(), f), "utf8"))?.tool === "forget_thought") forgets++; } catch { /* unreadable: the drain says so */ } }
+      // A copy of a thought forgotten before 1.10.0 while this brain had no key was neither dropped nor held a forget
+      // (review pass 1): it would land with its text, so the warning says how to forget it first.
+      console.error(`session-capture: ${tag}warning: ${held.length} cop${held.length === 1 ? "y" : "ies"} queued for this brain${forgets ? `, ${forgets === 1 ? "1 of them a forget" : `${forgets} of them forgets`},` : ""} wait for a write_key; once one is set (write_key or write_key_file), they land, in order, at its next drain. Before setting it, run bun session-capture.mjs --copy-forget <id> --from <the brain you forgot it on> --brain ${brain.name} --yes for each thought you forgot while it had none on a hook before 1.10.0, which held no forget for it`);
+    }
+    return 0;
+  }
   let tools;
   try { tools = (await rpc({ ...cfg, key: cfg.writeKey }, "tools/list", {}, 15_000)).tools ?? []; } catch (e) { console.error(`session-capture: ${tag}the write key: ${shownUrl(cfg.url)} did not answer tools/list — ${e.message}`); return 1; }
   const names = tools.map((t) => t.name);
@@ -3093,11 +3233,25 @@ async function checkWrites(brain, brains, tag) {
   return 0;
 }
 
+/** Marks the current brain's queued forgets `held`: drainWrites re-dates one at its first send. */
+function holdForgets() {
+  for (const f of pendingWrites()) {
+    let op;
+    try { op = JSON.parse(readFileSync(join(WRITES_PENDING(), f), "utf8")); } catch { continue; }
+    if (op?.tool === "forget_thought" && op.held !== true) rewriteWrite(f, { ...op, held: true });
+  }
+}
+
 /** Any other hook run: a brain whose queue holds copies a drain left (it was away) gets a drain, so they land without waiting for the next write. */
 async function kickWriteDrains(brains, { atEnd = false } = {}) {
   for (const b of brains) {
-    if (!b.cfg.writeKey) continue;
     useStateRoot(b.root);
+    if (!b.cfg.writeKey) {
+      // A forget queued while this brain had a key, which it no longer has: held, so its week starts again at its first
+      // send once a key is set, as a forget held for it does (SMD-4411 review pass 2: given up at its first fault).
+      try { holdForgets(); } catch (e) { log(`fan-out: error: ${oneLine(String(e?.message ?? e)).slice(0, 200)}`); }
+      continue;
+    }
     // A queue held on a copy tried within HELD_RETRY_MS waits for the next
     // write or the next window (review pass 1) — save at a session's end, its
     // last chance before the next session (review pass 2). Never the session's
@@ -3846,6 +4000,99 @@ export async function main(argv) {
     // A renewal that revived a lapsed claim others claimed meanwhile is renewed and blocked: 1, as a blocked one is (review pass 1).
     return outcomes.some((o) => (!o.ok || o.blocked) && !o.ended) ? 1 : 0;
   }
+  if (has(args, "--copy-forget")) {
+    // A forget copied again, by hand (SMD-4411): one the hook never queued — its config unreadable at that run, or the
+    // hook not run — which the first brain now refuses as FORGOTTEN, so a repeat through the connector copies nothing.
+    // Queued as the hook queues one: the drop on every brain's queue with it, queued for each brain with a write key,
+    // held for one without that has been copied to — or all of that on the one brain --brain names — then drained here.
+    // A forget is not undone, and nothing here can tell a forgotten id from a wrong one (a brain answers whether a name
+    // is forgotten only by forgetting it): so --from, the brain it was forgotten on, is required and is sent nothing
+    // unless its queue carries a copy, and without --yes the command only says what it would do (review pass 2: a wrong
+    // id pasted forgot a kept thought on every brain, exit 0).
+    const usage = "--copy-forget <the thought's id, as the brain you forgot it on answered it> --from <that brain> [--client-key <the thought's own client_key>] [--brain <name>] [--yes]";
+    const id = flag(args, "--copy-forget").toLowerCase();
+    if (!UUID_ONLY_RE.test(id)) { console.error(`session-capture: ${usage}${id ? " — the id given is not a uuid" : ""}`); return 2; }
+    const altRaw = flag(args, "--client-key");
+    const alt = altRaw?.toLowerCase();
+    if (alt !== undefined && !UUID_ONLY_RE.test(alt)) { console.error(`session-capture: --client-key takes the thought's own client_key (a uuid), as the forget's reply named it${alt ? `, not "${altRaw}"` : "; none was given"}`); return 2; }
+    const brainName = flag(args, "--brain");
+    if (brainName === "") { console.error("session-capture: --brain <name> (a brain the config names)"); return 2; }
+    const fromName = flag(args, "--from");
+    if (!fromName) { console.error(`session-capture: --from <the brain you forgot it on> is required: that brain is sent no forget unless its queue still carries a copy of the thought — ${usage}`); return 2; }
+    if (brainName !== undefined && brainName === fromName) { console.error(`session-capture: --brain names the brain the thought was forgotten on (--from); name the brain to copy the forget to`); return 2; }
+    let brains, targets, source;
+    // A brain the forget can reach: one with a write key, or one without that has been copied to, where it is held.
+    const reachable = (b) => Boolean(b.cfg.writeKey) || existsSync(join(b.root, "writes"));
+    try {
+      brains = loadBrains();
+      const named = (n) => { const b = brains.find((x) => x.name === n); if (!b) throw new Error(`no brain named "${n}" in ${CONFIG_PATH} (its brains: ${brains.map((x) => x.name).join(", ")})`); return b; };
+      source = named(fromName);
+      if (brainName !== undefined) {
+        const b = named(brainName);
+        if (!reachable(b)) throw new Error(`brain "${brainName}" has no write_key and has never been copied to, so nothing goes to it — forget the thought there through its own connector`);
+        targets = [b];
+      } else {
+        targets = brains;
+        if (!brains.some((b) => b !== source && reachable(b))) throw new Error(`no brain in ${CONFIG_PATH} other than ${fromName} (--from) has a write_key or has been copied to, so there is nowhere to copy the forget — is --from the brain you forgot it on? Else forget the thought on each brain through its own connector`);
+      }
+    } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
+    const op = { tool: "forget_thought", args: { id, confirm: id, detach_citations: true }, ...(alt && alt !== id ? { alt } : {}), from: "--copy-forget", session: null, at: new Date().toISOString() };
+    // Without --yes: what it would do, and nothing done.
+    if (!has(args, "--yes")) {
+      console.log(`would forget, for good, the thought named ${id}${op.alt ? `, then by its client_key ${op.alt}` : ""}:`);
+      // A forget of the name already in a brain's queue (the hook's, kept while the brain was away) (review pass 3).
+      const queuedHere = (b) => { useStateRoot(b.root); return pendingWrites().some((f) => { try { const o = JSON.parse(readFileSync(join(WRITES_PENDING(), f), "utf8")); return o?.tool === "forget_thought" && o.args?.id === id; } catch { return false; } }); };
+      const drop = "its queued copies of it dropped";
+      for (const b of brainName === undefined ? brains : targets) {
+        const already = queuedHere(b) ? "; a forget of it is already queued here, which lands at the next drain" : "";
+        if (b === source) { console.log(`  [${b.name}] where it was forgotten: ${drop}; ${b.cfg.writeKey ? "sent the forget" : "held the forget (no write_key now)"} only if a copy that may have landed is still queued there${already}`); continue; }
+        console.log(`  [${b.name}] ${b.cfg.writeKey ? `${drop}, then the forget sent` : reachable(b) ? `${drop}, then the forget held: this brain has no write_key now` : "nothing: it has no write_key and has never been copied to"}${already}`);
+      }
+      if (brainName === undefined) console.log("  and the queues of brains no longer in the config, on this machine: their queued copies of it dropped");
+      // What this machine's logs record of the name: a forget the hook made or lost, or nothing — the one check there is
+      // against a wrong id, since a brain answers whether a name is forgotten only by forgetting it (review pass 3).
+      const seen = [];
+      for (const root of new Set([STATE_BASE, ...brains.map((b) => b.root)])) {
+        let text = "";
+        try { text = readFileSync(join(root, "log"), "utf8"); } catch { continue; }
+        const line = text.split("\n").filter((l) => l.includes(`forget_thought of ${id}`)).at(-1);
+        if (line) seen.push(`  ${line.slice(0, 220)}`);
+      }
+      console.log(seen.length ? `This machine's logs record a forget of ${id}, the latest of each:\n${seen.join("\n")}` : `No line in this machine's logs records a forget of ${id}: the hook never saw one — check the id before you go on.`);
+      console.log(`A forget is not undone. Check that ${id} is the id ${fromName} answered in its own reply ("Forgot ${id}…")${op.alt ? `, and ${op.alt} the client_key that reply named` : ""}, then run this again with --yes.`);
+      return 0;
+    }
+    // --brain names one brain: no other loses its copies or is held the forget (review pass 1).
+    const { queued, held, failed } = queueForget(op, brains, { source, targets, all: brainName === undefined, sourceAlways: false });
+    let code = failed.length ? 1 : 0;
+    for (const b of failed) console.log(`[${b.name}] ${opLabel(op)} was not queued there: its queue could not be written (the log at ${join(b.root, "log")} says why)`);
+    for (const h of held) { console.log(`[${h.brain.name}] held ${opLabel(op)}: this brain has no write_key now; once one is set, it lands, in order, at its next drain`); code = 1; }
+    if (!queued.length && !held.length && !failed.length) { console.log(`nothing was queued or held: ${fromName}'s queue carries no copy of the thought, and no other brain was reached`); return 1; }
+    for (const q of queued) {
+      useStateRoot(q.brain.root);
+      const outcomes = await drainWrites(q.brain.cfg);
+      for (const o of outcomes) console.log(`[${q.brain.name}] ${o.line}`);
+      if (outcomes.some((o) => !o.done)) code = 1;
+      const mine = outcomes.find((o) => o.name === q.name);
+      // A name that found nothing there: a wrong id, a thought that brain knows by its own id alone, or one forgotten
+      // there already, whose copy keeps no key (review pass 1: exit 0 read as success while the text stayed). Not said
+      // when a forget of the same name landed in this drain, ahead of it — the hook's, held for the brain (review pass 2).
+      const landedBefore = outcomes.some((o) => o !== mine && o.done && !o.notFound && o.forgetOf === id);
+      if (mine?.notFound && !landedBefore) {
+        // The step that leaves no text first; "forgotten already" last, where a reader stopping early does no harm (review pass 3).
+        console.log(`[${q.brain.name}] nothing was forgotten on ${q.brain.name}: no thought there has ${op.alt ? `${id} or ${op.alt}` : id} as its id or client_key.${op.alt ? "" : ` If the forget's reply named a client_key ("its client_key <uuid>"), run this again with --client-key <that uuid>: a thought that began on ${q.brain.name} is known there by it alone.`} Or, by its own id there: --copy-forget <its id on ${q.brain.name}> --from ${fromName} --brain ${q.brain.name}. Check the id. Only if it was forgotten there already (a forgotten copy keeps no key, so a repeat finds nothing) is nothing left to do`);
+        code = 1;
+      }
+      // Still queued: left to a drain already running, or kept, or behind a copy kept.
+      if (pendingWrites().includes(q.name)) {
+        console.log(outcomes.length
+          ? `[${q.brain.name}] ${opLabel(op)} stays queued: it lands, in order, at this brain's next drain (--drain-writes --brain ${q.brain.name})`
+          : `[${q.brain.name}] ${opLabel(op)} is queued behind a drain already running, which sends it in order: its outcome is in ${LOG_PATH()}`);
+        code = 1;
+      }
+    }
+    return code;
+  }
   if (has(args, "--drain-writes")) {
     // A brain's queue of copied writes, by hand or as the hook's child (SMD-3314).
     const brainName = flag(args, "--brain");
@@ -3939,7 +4186,7 @@ export async function main(argv) {
 
   // The hook itself: JSON on stdin. A terminal is not a hook — say so instead
   // of waiting on it for ever (ninth review pass).
-  if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload> [--post <payload>…]."); return 2; }
+  if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload> [--post <payload>…], --copy-forget <id>."); return 2; }
   let hook;
   try { hook = JSON.parse(await readStdin()); } catch (e) { console.error(`session-capture: stdin is not the hook's JSON (${e.message})`); return 1; }
   // A hook takes two flags. Any other — `--event` or `--trigger`, which are
@@ -3969,7 +4216,14 @@ export async function main(argv) {
   // for as long as the config is missing, and post them all, stale, when it
   // appears (fifth review pass).
   let brains;
-  try { brains = loadBrains(); } catch (e) { log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`); return 1; }
+  try { brains = loadBrains(); } catch (e) {
+    log(`error: ${e.message}`); console.error(`session-capture: ${e.message}`);
+    // A forget this run would have copied is lost with it: named, with the command that copies it once the config
+    // loads (SMD-4411 review pass 1: the log said the errno alone).
+    const lost = lostForget(hook);
+    if (lost) { log(`fan-out: ${lost}`); console.error(`session-capture: ${lost}`); }
+    return 1;
+  }
   const sync = process.env.OB1_SESSION_CAPTURE_SYNC === "1";
   // The claims hook (SMD-3602): renew what is due, nothing captured or copied.
   // Exit 0 once the config loads: a renewal's fate is the log's. On an event
