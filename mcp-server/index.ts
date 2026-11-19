@@ -74,7 +74,7 @@ knowTools(plugins.flatMap((p) => p.operations.map((op) => op.tool)));
 /** The tool calls running, counted for the stop (SMD-2250), as server-portable's index.ts counted its own: a call whose client left still runs to its end. */
 const toolCalls = createCallCount();
 /** The stop's word: set when it cuts what is still in flight, so a request it ends then is `cut`, not `abandoned`. */
-const stop = { cut: false };
+const stop = { cut: false, over: false };
 const edge = edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN });
 // The token exchange (SMD-2286): on a configured stack with the `mcp` client's secret; without the secret a token is
 // no caller (refused as before), said once at the start rather than on every OAuth client's request.
@@ -106,7 +106,7 @@ if (import.meta.main) {
     close: async () => false,
     // The listen streams are not waited on: the stop closes them itself, last, each with its closing frame. Given
     // only where the server holds any, so a server that holds none stops as it always has.
-    ...(listenStreams.hold ? { held: () => listenStreams.open, closeHeld: () => listenStreams.close() } : {}),
+    ...(listenStreams.hold ? { held: () => listenStreams.open, closeHeld: () => listenStreams.close(), afterDrain: () => { stop.over = true; } } : {}),
     // The telemetry still batched goes under a bound of its own, said on its own; cut short, what each signal still
     // held is said by count (as the REST core's, SMD-2902).
     mark: markTelemetry,

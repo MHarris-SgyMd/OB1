@@ -69,8 +69,12 @@ export interface McpDeps {
   plugins?: () => readonly LoadedPlugin[];
   /** The tool calls running, counted for the stop (SMD-2250), as index.ts counts its own: a call whose client left still runs to its end. */
   toolCalls?: CallCount & { track<T>(run: () => T | Promise<T>): Promise<T> };
-  /** Set by the entry's stop when it cuts what is still in flight: a request it ends then is `cut`, said by the stop's line, not `abandoned`. */
-  stop?: { cut: boolean };
+  /**
+   * Set by the entry's stop. `cut`: when it cuts what is still in flight, so a request it ends then is `cut`, said
+   * by the stop's line, not `abandoned`. `over`: when its drain has ended, on a server that keeps its connections
+   * open after that to close its listen streams last (SMD-4347): a request that arrives then is not served.
+   */
+  stop?: { cut: boolean; over?: boolean };
   /**
    * The token exchange (exchange.ts, SMD-2286): read at the first request that
    * needs it; null or absent where this server trades no token (a stack not
@@ -390,7 +394,7 @@ type Era = "legacy" | "modern";
  * a 200 carrying -32603, and which bound, in words that hold nothing of the caller's.
  */
 function listenLimitResponse(id: RefusalTarget["id"], full: "server" | "name"): Response {
-  const message = full === "server" ? "Subscription limit reached: this server holds no more listen streams" : "Subscription limit reached: this key holds as many listen streams as one key may";
+  const message = full === "server" ? "Subscription limit reached: this server holds no more listen streams" : "Subscription limit reached: this caller holds as many listen streams as one caller may";
   return Response.json({ jsonrpc: "2.0", id: id ?? null, error: { code: -32603, message } }, { status: 200, headers: corsHeaders });
 }
 
@@ -574,6 +578,13 @@ export function createMcpApp(deps: McpDeps): Hono {
   app.use("*", async (c, next) => {
     const probe = (c.req.method === "GET" || c.req.method === "HEAD") && HEALTH_PATH.test(c.req.path)
       && !c.req.path.startsWith("/.well-known/") && presentedKeys(c.req.raw).length === 0;
+    // Arrived after the stop's drain ended, on a connection opened before the signal: the stop waits on nothing
+    // more, and its handler is about to be closed. Not served and not answered: its line `cut`, and its connection
+    // goes with the process, as one that arrived a moment later would find it.
+    if (deps.stop?.over === true) {
+      if (!probe) beginRequest("mcp", c.req.raw).end({ outcome: "cut" });
+      return new Promise<Response>(() => {});
+    }
     if (probe) return next();
     const trace = beginRequest("mcp", c.req.raw);
     try {
@@ -935,6 +946,8 @@ export function createMcpApp(deps: McpDeps): Hono {
     const signal = c.req.raw.signal;
     let label = "?";
     let settled = false;
+    /** Whether the stop has cut this request, on a server whose connections outlast the cut (one that holds listen streams). */
+    const cutHere = () => listen !== null && deps.stop?.cut === true;
     const abandoned = () => {
       if (settled) return;
       settled = true;
@@ -1004,6 +1017,12 @@ export function createMcpApp(deps: McpDeps): Hono {
       const track = deps.toolCalls ? <T>(run: () => Promise<T>) => deps.toolCalls!.track(run) : <T>(run: () => Promise<T>) => run();
       const build = (era: Era) => buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err), era, listen !== null);
       const request = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined });
+      // Cut by the stop before it reached a transport (its key still being looked up at the bound): not begun now,
+      // where the handler may be closed already and would answer it 500.
+      if (cutHere()) {
+        abandoned();
+        return new Promise<Response>(() => {});
+      }
       // Which revision family the request speaks, by the SDK's own rule (SMD-4345). A well-formed 2025-era
       // request (no envelope, no 2026-07-28 header) stays on the 2025-era transport, as every request did. One
       // carrying the 2026-07-28 envelope goes to the SDK's handler. So does whatever the rule cannot place: a
@@ -1022,13 +1041,23 @@ export function createMcpApp(deps: McpDeps): Hono {
         // A listen stream this server would hold needs a place first: past the server's bound or the caller's own
         // it is refused here, as the SDK refuses one past its bound (a 200, -32603), its line `refused` with a
         // code, where the SDK's refusal is a 200 whose line reads `ok`.
-        if (listen && parts.rpc === "subscriptions/listen") {
+        //
+        // Which request is one: its `Mcp-Method` header says so. The handler holds a stream only for a request
+        // whose header names the method (one whose header and body disagree it refuses, 400: a row of the suite
+        // holds it to that), and it reads the body with a decoder of its own: a body that begins with two
+        // byte-order marks it reads, and this route's parse does not. Asked by the body as this route read it,
+        // such a listen was held with no place, under neither bound, and held the stop to its bound (found in
+        // review). A place taken for a request the handler then refuses is given straight back.
+        if (listen && request.headers.get("mcp-method") === "subscriptions/listen") {
           const asked = placeFor(listen, standing.name);
           if ("full" in asked) {
+            const target = refusalTarget(rawBody);
             settled = true;
-            trace.status = 200;
+            trace.rpc ??= "subscriptions/listen";
+            // A notification by that name opens no stream and is owed no answer: refused bare, as this route's other refusals are.
+            trace.status = target.expectsReply ? 200 : 202;
             finish("refused", "LISTEN_LIMIT");
-            return listenLimitResponse(refusalTarget(rawBody).id, asked.full);
+            return target.expectsReply ? listenLimitResponse(target.id, asked.full) : notificationRefusedResponse();
           }
           place = asked;
         }
@@ -1060,33 +1089,41 @@ export function createMcpApp(deps: McpDeps): Hono {
       if (place) {
         const release = place.release;
         // What the handler answered in one piece is no stream to hold: it refused the listen in its own words.
-        if (response.status !== 200 || !/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) release();
+        if (!/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) release();
         else {
           // A listen stream, held open from here. Its request is answered once the stream is: the line is written
           // now, `ok`, its `ms` the time to open it, so the log shows the stream as it opens and the request's
           // duration is a request's. Its end writes nothing: a client that closes it has not abandoned a call, and
           // one open after ten minutes has not stalled. The SDK keeps it alive, a comment every 15 s.
-          settled = true;
-          finish("ok");
-          signal.addEventListener("abort", release, { once: true });
-          return withSseKeepalive(response, { held: true, signal, label, onEnd: release, onCancel: release });
+          try {
+            settled = true;
+            trace.rpc ??= "subscriptions/listen";
+            finish("ok");
+            // The request's own listener is taken off: left on, it kept this request alive, its body with it, for
+            // as long as the stream was held (measured: 30 streams opened with 3 MiB bodies, 90 MiB kept).
+            signal.removeEventListener("abort", abandoned);
+            signal.addEventListener("abort", release, { once: true });
+            if (signal.aborted) release();
+            // This app's own interval and bound are given like any answer's: `held` is what sets them aside.
+            return withSseKeepalive(response, { held: true, signal, label, ...keepalive, onEnd: release, onCancel: release });
+          } catch (err) {
+            // A throw with the stream open and handed to no one (a log sink that throws): the place given back, and the stream ended.
+            release();
+            void response.body?.cancel().catch(() => {});
+            throw err;
+          }
         }
       }
       // The line is written at the stream's end, with the bytes the transport wrote; a stall settles the request too.
       return withSseKeepalive(response, {
         signal, label, startedAt: trace.started, ...keepalive,
-        onEnd: (bytes) => {
-          // Ended after the stop's cut: the stop ended it, not its work. A server that holds listen streams closes
-          // them through the SDK's handler, which ends every call in flight with them, each an answer of nothing
-          // that ends as a whole one would. Said as cut, and left open for the stop to drop with its connection,
-          // as a cut call's answer always was (measured without this: a 200, an empty stream, and no warning).
-          if (listen && deps.stop?.cut === true && !settled) {
-            abandoned();
-            return new Promise<void>(() => {});
-          }
-          settled = true;
-          finish(undefined, undefined, bytes);
-        },
+        // After the stop's cut nothing more of an answer goes out, and it does not end: its connection's close is
+        // its end, as a cut call's always was. A server that holds listen streams keeps its connections open past
+        // the cut, through the flush, and closes the streams through the SDK's handler, which ends each call in
+        // flight with them as an answer of nothing that ends whole (measured without this: a 200, an empty
+        // stream, no warning; and a call that ended by its own work in that time answered in full, its line `cut`).
+        cut: cutHere,
+        onEnd: (bytes) => { settled = true; finish(undefined, undefined, bytes); },
         onStall: () => { settled = true; finish("stalled"); },
         onCancel: abandoned,
       });

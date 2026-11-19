@@ -883,8 +883,8 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
   const listenSpans = () => exported.flatMap((t) => (JSON.parse(t) as { resourceSpans: { scopeSpans: { spans: { name: string }[] }[] }[] }).resourceSpans).flatMap((r) => r.scopeSpans).flatMap((x) => x.spans).filter((x) => /subscriptions\/listen/.test(x.name)).length;
   const envOf = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("OTEL_"))), PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" };
   /** The entry in a process of its own: as it is, or as it will be once it holds listen streams (test-listen-on.ts). */
-  const start = async (holding: boolean) => {
-    const entry = Bun.spawn(holding ? ["bun", "--preload", "./test-listen-on.ts", "index.ts"] : ["bun", "index.ts"], { cwd: import.meta.dir, env: holding ? { ...envOf, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collector.port}` } : envOf, stdout: "pipe", stderr: "pipe" });
+  const start = async (holding: boolean, collectorPort: number | null = holding ? collector.port! : null) => {
+    const entry = Bun.spawn(holding ? ["bun", "--preload", "./test-listen-on.ts", "index.ts"] : ["bun", "index.ts"], { cwd: import.meta.dir, env: collectorPort !== null ? { ...envOf, OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${collectorPort}` } : envOf, stdout: "pipe", stderr: "pipe" });
     const { port, stdout } = await childPort(entry, 20_000);
     const errs = watchStream(entry.stderr);
     let up = false;
@@ -893,7 +893,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
       if (!up) await Bun.sleep(50);
     }
     // The SDK loads after the server answers: its start line, before the requests whose spans are read.
-    if (holding) up = (await errs.until(/ go to \S+ over OTLP\/HTTP/, 10_000)) && up;
+    if (collectorPort !== null) up = (await errs.until(/ go to \S+ over OTLP\/HTTP/, 10_000)) && up;
     const url = `http://127.0.0.1:${port}/mcp`;
     /** A 2026-07-28 request to it, as requestFor builds one. */
     const send = async (method: string, params: unknown, key = "write-raw") => {
@@ -914,7 +914,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
       const lines = out.split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l) as Record<string, unknown>);
       return { code, ms, out, err, lines };
     };
-    return { up, send, stop, url };
+    return { up, send, stop, url, port };
   };
   /** A stream read to its end, with when it ended; "(still open)" if it had not by the deadline. */
   const toEnd = (r: Response, ms = 8_000) => {
@@ -926,6 +926,8 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
   const capabilityOf = async (e: Awaited<ReturnType<typeof start>>) =>
     ((firstMessage(await (await e.send("server/discover", {}, "read-raw")).text())?.result ?? {}) as { capabilities?: { tools?: { listChanged?: unknown } } }).capabilities?.tools?.listChanged;
 
+  // A collector that never answers: a stop's flush then holds the process for its whole bound, about a second here.
+  const silent = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Promise<Response>(() => {}) });
   try {
     // The entry as it is: it says it holds no stream, and its stop says nothing of one.
     answer = () => ok({});
@@ -933,9 +935,22 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const plainSays = await capabilityOf(plain);
     const plainStopped = await plain.stop();
     assert(plain.up && plainSays === false && plainStopped.code === 0 && !/held open/.test(plainStopped.out), `the entry as it is holds no listen stream, and stops as before (listChanged ${plainSays}; exit ${plainStopped.code}; ${plainStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
+    // …and its cut is the one it had: the connections go at the bound. A call of each revision whose work ends 300 ms
+    // after it is not answered then, though a silent collector holds the process a second longer. (Given the new
+    // steps of a stop that closes streams, this entry answered such a call in full after saying it closed it.)
+    answer = (n) => (n === "thoughtStats" ? Bun.sleep(1_500).then(() => ok(counted)) : ok({}));
+    const plainCutting = await start(false, silent.port!);
+    const plainAnswers = [true, false].map((modern) => fetch(plainCutting.url, { method: "POST", headers: requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern }).headers, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "thought_stats", arguments: {}, ...(modern ? { _meta: ENVELOPE } : {}) } }) })
+      .then((r) => r.text().then((t) => (/Total thoughts/.test(t) ? "answered in full" : `ended with ${t.length} bytes`), () => "dropped"), () => "dropped"));
+    await Bun.sleep(200);
+    const plainCut = await plainCutting.stop();
+    const plainGot = await Promise.all(plainAnswers);
+    answer = () => ok({});
+    assert(plainCutting.up && plainCut.code === 1 && plainGot.every((x) => x === "dropped") && plainCut.lines.filter((l) => l.outcome === "cut").length === 2 && /2 requests still in flight.*closed unfinished/.test(plainCut.out) && !/held open/.test(plainCut.out),
+      `…and it cuts as before: two calls whose work ends after the bound are dropped at it, not answered in the second its flush then takes (${plainGot.join(", ")}; exit ${plainCut.code} in ${Math.round(plainCut.ms)} ms; ${plainCut.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
 
-    // The entry holding streams, with one open and nothing else in flight: no wait, the stream's closing frame, exit 0.
-    const alone = await start(true);
+    // The entry holding streams, with one open and nothing else in flight: no wait, the stream's closing frame, exit 0. No collector here; the next two stops have one.
+    const alone = await start(true, null);
     const aloneSays = await capabilityOf(alone);
     const stream = await alone.send("subscriptions/listen", listenParams);
     const streamEnd = toEnd(stream);
@@ -950,8 +965,6 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
       `…its client reads the stream's closing frame before the connection goes (${JSON.stringify(streamText.slice(-160))})`);
     assert(listenLines.length === 1 && listenLines[0].outcome === "ok" && listenLines[0].status === 200 && listenLines[0].agent === "laptop" && !stopped.lines.some((l) => l.outcome === "cut" || l.outcome === "abandoned" || l.outcome === "stalled") && !/abandoned|cut off/.test(stopped.err),
       `…and the log has one line for the stream, \`ok\`, and nothing cut, abandoned or stalled (${JSON.stringify(listenLines)}; ${stopped.err.split("\n").filter((l) => /abandoned|cut off/.test(l)).join(" | ").slice(0, 200)})`);
-    const spansAlone = listenSpans();
-    assert(spansAlone === 1 && /; telemetry sent; 1 stream held open closed; exit 0/.test(stopped.out), `…and with a collector: the stream's span is sent with the stop's flush, the stream closed after it (${spansAlone} span(s); ${stopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
 
     // A stream open and a call that ends inside the bound: the call is waited on and answered in full, and the stream closed after it.
     answer = (n) => (n === "thoughtStats" ? Bun.sleep(600).then(() => ok(counted)) : ok({}));
@@ -972,8 +985,8 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
       && /1 request in flight.*; 1 stream held open, closed last/.test(bothStopped.out) && bothStopped.lines.some((l) => l.tool === "thought_stats" && l.outcome === "ok"),
       `a stop with a stream open and a call running: the call is waited on and answered in full, then the stream is closed with its frame, exit 0 (exit ${bothStopped.code} in ${Math.round(bothStopped.ms)} ms; call ${answered.status}, total ${total}; the stream ended ${Math.round(heldStream.endedAt() - callEndedAt)} ms after the call; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
     const spansBoth = listenSpans();
-    assert(spansBoth === 2 && /; telemetry sent; 1 stream held open closed; exit 0/.test(bothStopped.out), `…its span sent too (${spansBoth} span(s) in all; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
-    assert(late === "refused", `…and a connection attempted after the signal is refused, not served and not answered by a handler that is closing (${late})`);
+    assert(spansBoth === 1 && /; telemetry sent; 1 stream held open closed; exit 0/.test(bothStopped.out), `…and with a collector, the stream's span is sent by the stop's flush (${spansBoth} span(s) in all; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
+    assert(both.up && late === "refused", `…and a connection attempted after the signal is refused, not served and not answered by a handler that is closing (${late})`);
 
     // Streams open and a call cut at the bound: the call's line is `cut`, every stream still gets its closing frame, exit 1.
     // Twenty-four of them, under the one name's bound of 32: the frames of many must all have left before the connections are cut.
@@ -995,13 +1008,60 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
       && /2 requests still in flight.*closed unfinished/.test(cutStopped.out) && /24 streams held open closed; exit 1/.test(cutStopped.out) && /cut off by the server's stop/.test(cutStopped.err),
       `a stop with 24 streams open and two calls that never end, one of each revision: the calls cut at the bound and counted alone, each line \`cut\`; each stream's line \`ok\` and its closing frame read all the same; exit 1 (exit ${cutStopped.code} in ${Math.round(cutStopped.ms)} ms; ${JSON.stringify(cutCall.map((l) => l.outcome))}; ${cutListen.filter((l) => l.outcome === "ok").length} lines ok; ${framed} of 24 frames read; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")}; ${cutStopped.err.split("\n").filter(Boolean).join(" | ").slice(0, 240)})`);
     const spansCut = listenSpans();
-    assert(spansCut === 26 && /; telemetry sent; 24 streams held open closed; exit 1/.test(cutStopped.out), `…their spans sent too, the flush before the streams are closed (${spansCut} span(s) in all; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
+    assert(spansCut === 25 && /; telemetry sent; 24 streams held open closed; exit 1/.test(cutStopped.out), `…their spans sent too, the flush before the streams are closed (${spansCut} span(s) in all; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     assert(hung.every((x) => x.endsWith("dropped")) && cutStopped.err.split("\n").filter((l) => /cut off by the server's stop/.test(l)).length === 2,
       `…and each cut call's own answer is dropped with its connection, not ended as a whole answer of nothing; one warning for each (${hung.join(", ")}; ${cutStopped.err.split("\n").filter((l) => /cut off/.test(l)).length} warning(s))`);
+
+    // A connection opened before the signal and used after the drain has ended. The collector here never answers, so
+    // the flush holds the process, its connections open, for more than a second: time for the request to arrive.
+    // It is not served, by the transport of either revision: no answer, the core not asked, a line `cut`, nothing
+    // from a handler already closed; and the stream beside it still gets its closing frame, the exit still 0.
+    const net = await import("node:net");
+    let lateAsked = 0;
+    answer = (n) => { if (n === "thoughtStats") lateAsked++; return ok(counted); };
+    const lateEntry = await start(true, silent.port!);
+    const lateStream = toEnd(await lateEntry.send("subscriptions/listen", listenParams));
+    /** A bare connection, opened now; its request written when told, and what came back by its close. */
+    const early = (modern: boolean) => new Promise<{ send: () => void; got: Promise<string> }>((opened) => {
+      let got = "";
+      let done: (text: string) => void = () => {};
+      const gotAll = new Promise<string>((resolve) => { done = resolve; });
+      const socket = net.connect(lateEntry.port, "127.0.0.1", () => opened({
+        send: () => {
+          const made = requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern });
+          void made.text().then((body) => socket.write(`POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n${[...made.headers].map(([k, v]) => `${k}: ${v}`).join("\r\n")}\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`));
+        },
+        got: gotAll,
+      }));
+      socket.on("data", (d) => { got += d.toString(); });
+      socket.on("close", () => done(got));
+      socket.on("error", () => done(got));
+    });
+    try {
+      const earlyModern = await early(true);
+      const earlyLegacy = await early(false);
+      await Bun.sleep(200);
+      const lateAt = performance.now();
+      const lateStopping = lateEntry.stop();
+      await Bun.sleep(250);
+      earlyModern.send();
+      earlyLegacy.send();
+      const lateStopped = await lateStopping;
+      const lateGot = [await earlyModern.got, await earlyLegacy.got];
+      const lateText = await lateStream.text;
+      const lateCut = lateStopped.lines.filter((l) => l.outcome === "cut");
+      assert(lateEntry.up && lateStopped.code === 0 && lateStopped.ms > 600 && lateStream.endedAt() - lateAt > 600 && /telemetry not all sent within \d+ ms; 1 stream held open closed; exit 0/.test(lateStopped.out) && lateText.includes('"resultType":"complete"'),
+        `a stop whose flush a silent collector holds for a second: the stream is closed after the flush, not before it, its frame read, exit 0 (exit ${lateStopped.code} in ${Math.round(lateStopped.ms)} ms, the stream ended at ${Math.round(lateStream.endedAt() - lateAt)} ms; ${lateStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
+      assert(lateGot.every((x) => x === "") && lateAsked === 0 && lateCut.length === 2 && lateCut.every((l) => l.status === 0) && !lateStopped.lines.some((l) => l.status === 500 || l.outcome === "error" || l.outcome === "unrun") && !/has been closed|route failed/.test(lateStopped.err),
+        `…and a request that arrives then, on a connection opened before the signal, in either revision: not served and not answered, the core not asked, its line \`cut\`, and no 500 from a handler already closed (${JSON.stringify(lateGot.map((x) => x.slice(0, 40)))}; asked ${lateAsked}; ${JSON.stringify(lateStopped.lines.filter((l) => l.rpc !== "subscriptions/listen").map((l) => [l.outcome, l.status]))}; ${lateStopped.err.split("\n").filter((l) => /closed|failed/.test(l)).join(" | ").slice(0, 200)})`);
+    } finally {
+      answer = () => ok({});
+    }
   } finally {
     answer = () => ok({});
     restServer.stop(true);
     collector.stop(true);
+    silent.stop(true);
   }
 }
 
@@ -1173,7 +1233,7 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   const note = await rpc("notifications/cancelled", { requestId: 1 }, "write-raw", { modern: true, notification: true });
   assert(note.status === 202 && note.body === null && last().rpc === "notifications/cancelled", `a notification: 202 and no body (${note.status})`);
 
-  // subscriptions/listen: acknowledged honouring nothing, then ended. No stream is held open (SMD-4347 decides whether one ever is).
+  // subscriptions/listen: acknowledged honouring nothing, then ended. No stream is held open: the entry holds none until SMD-4347's PR 2b, and [9c] has an app that does.
   // Read with a deadline: a server that honoured the subscription would hold this stream open for good, and the row must fail then, not wait.
   const listening = await app.fetch(requestFor("subscriptions/listen", { notifications: { toolsListChanged: true } }, "read-raw", { modern: true }));
   const listened = await Promise.race([listening.text(), Bun.sleep(3_000).then(() => { void listening.body?.cancel().catch(() => {}); return "(still open after 3 s)"; })]);
@@ -1430,9 +1490,16 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   await a2.read(100);
   const overName = await ask("write-raw");
   const overNameBody = await refusalOf(overName);
-  assert(overName.status === 200 && overNameBody.error?.code === -32603 && /this key holds as many/.test(overNameBody.error?.message ?? "") && overNameBody.id !== undefined && overNameBody.id !== null && streams.open === 2
-    && last().rpc === "subscriptions/listen" && last().outcome === "refused" && last().code === "LISTEN_LIMIT" && last().agent === "laptop",
+  assert(overName.status === 200 && overNameBody.error?.code === -32603 && /this caller holds as many/.test(overNameBody.error?.message ?? "") && overNameBody.id !== undefined && overNameBody.id !== null && streams.open === 2
+    && last().rpc === "subscriptions/listen" && last().outcome === "refused" && last().code === "LISTEN_LIMIT" && last().agent === "laptop" && last().status === 200 && overName.headers.get("access-control-allow-origin") === "*",
     `a third stream under a name that may hold two: refused, a 200 carrying -32603 and the request's id, its line \`refused\` LISTEN_LIMIT (${overName.status} ${JSON.stringify(overNameBody)}; open ${streams.open}; ${JSON.stringify(last())})`);
+  // A refusal is the end of its request: its client going afterwards writes nothing more.
+  const refusedThenGone = new AbortController();
+  await refusalOf(await ask("write-raw", undefined, { signal: refusedThenGone.signal }));
+  const linesAtRefusal = lines.length;
+  refusedThenGone.abort();
+  await Bun.sleep(30);
+  assert(lines.length === linesAtRefusal && !said.some((l) => /abandoned/.test(l)), `…and a client that goes after its refusal has abandoned nothing: no line, no warning (${lines.length - linesAtRefusal} line(s); ${JSON.stringify(said)})`);
   // Another name has its own share, up to the server's bound; past that, any name is refused.
   const b1 = reading(await ask("read-raw"));
   await b1.read(100);
@@ -1450,6 +1517,21 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   const emptied = await until(() => streams.open === 0);
   assert(emptied, `every stream closed, none counted (open ${streams.open})`);
 
+  // A name's count is its streams still open: with one of its two closed it may open one more, and not two.
+  const n1 = reading(await ask("write-raw"));
+  const n2 = reading(await ask("write-raw"));
+  await n1.read(50);
+  await n2.read(50);
+  await n1.close();
+  await until(() => streams.open === 1);
+  const n3 = reading(await ask("write-raw"));
+  await n3.read(50);
+  const n4Body = await refusalOf(await ask("write-raw"));
+  assert(n3.status === 200 && streams.open === 2 && n4Body.error?.code === -32603 && /this caller holds as many/.test(n4Body.error?.message ?? ""), `a name with one of its two streams closed may open one more, and is refused a second (open ${streams.open}; ${JSON.stringify(n4Body)})`);
+  await n2.close();
+  await n3.close();
+  await until(() => streams.open === 0);
+
   // A listen that asks for nothing this server sends is acknowledged and ended by the SDK, and holds no place after.
   const nothing = reading(await ask("write-raw", { notifications: {} }));
   const nothingRead = await nothing.read(1_000);
@@ -1460,10 +1542,122 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   await refusedBySdk.text();
   assert(!/^text\/event-stream/.test(refusedBySdk.headers.get("content-type") ?? "") && streams.open === 0, `a listen the SDK refuses in one piece: no stream, no place held (${refusedBySdk.status} ${refusedBySdk.headers.get("content-type")}; open ${streams.open})`);
   // One it refuses outright (its method header and its body disagree) is a 4xx: its line reads by its status, never the `ok` of a stream opened.
+  // The route knows a listen by that header alone, and this is what lets it: the handler serves none the header does not name.
   const mismatched = await ask("write-raw", undefined, { headers: { "mcp-method": "tools/list" } });
   await mismatched.text();
   assert(mismatched.status >= 400 && mismatched.status < 500 && streams.open === 0 && last().rpc === "subscriptions/listen" && last().status === mismatched.status && last().outcome !== "ok",
     `a listen the SDK refuses with a 4xx: no place held, and its line says the refusal (${mismatched.status}; open ${streams.open}; ${JSON.stringify(last())})`);
+  // A listen the handler reads and this route's parse does not: a byte-order mark before its body (over HTTP, two;
+  // a string body keeps its one). Known by its method header, it holds a place like any other, under both bounds.
+  const markedAsk = async () => {
+    const plain = requestFor("subscriptions/listen", { notifications: { toolsListChanged: true } }, "write-raw", { modern: true });
+    return holding.fetch(new Request(plain.url, { method: "POST", headers: plain.headers, body: String.fromCharCode(0xfeff) + (await plain.text()) }));
+  };
+  const marked = reading(await markedAsk());
+  const markedOpened = await marked.read(100);
+  const markedLine = last();
+  const beside = reading(await ask("write-raw"));
+  await beside.read(100);
+  const markedOver = await markedAsk();
+  const markedOverBody = await refusalOf(markedOver);
+  assert(marked.status === 200 && !markedOpened.ended && framesOf(markedOpened.text)[0]?.method === "notifications/subscriptions/acknowledged" && markedLine.rpc === "subscriptions/listen" && markedLine.outcome === "ok"
+    && streams.open === 2 && markedOverBody.error?.code === -32603 && last().outcome === "refused" && last().code === "LISTEN_LIMIT" && last().rpc === "subscriptions/listen",
+    `a listen whose body this route cannot read and the handler can (a byte-order mark): held, counted, its line naming it; and a third such under the name refused (${marked.status}, ended ${markedOpened.ended}; ${JSON.stringify({ rpc: markedLine.rpc, outcome: markedLine.outcome })}; open ${streams.open}; ${JSON.stringify(markedOverBody)}; ${JSON.stringify(last())})`);
+  // A notification by that name, at the bound: no stream and no answer owed, so refused bare, as this route's other refusals are.
+  const notedOver = await ask("write-raw", undefined, { notification: true });
+  const notedOverText = await notedOver.text();
+  assert(notedOver.status === 202 && notedOverText === "" && last().outcome === "refused" && last().code === "LISTEN_LIMIT" && last().status === 202 && streams.open === 2,
+    `a notification by that name from a name at its bound: refused bare, 202 and no body (${notedOver.status} ${JSON.stringify(notedOverText)}; ${JSON.stringify(last())})`);
+  await marked.close();
+  await beside.close();
+  await until(() => streams.open === 0);
+  const noted = await ask("write-raw", undefined, { notification: true });
+  await noted.text();
+  assert(noted.status === 202 && streams.open === 0 && last().outcome === "ok", `…and under it, the handler's own 202, and no place kept (${noted.status}; open ${streams.open}; ${JSON.stringify(last())})`);
+
+  // A throw on the way: each gives the place back. The caller's server cannot be built (the handler's 500, thrown
+  // here); the handler is closed (its fetch throws); and the log's own sink throws once the stream is open.
+  {
+    let unreadable = true;
+    const faultyStreams = createListenStreams(true, 3, 2);
+    // The plugins are read once and kept, so the throw has to be the first reading.
+    const faulty = createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: () => {}, listen: faultyStreams, plugins: () => { if (unreadable) throw new Error("plugins unreadable"); return []; } });
+    const askFaulty = async () => faulty.fetch(requestFor("subscriptions/listen", { notifications: { toolsListChanged: true } }, "write-raw", { modern: true }));
+    const unbuilt: number[] = [];
+    for (let i = 0; i < 3; i++) unbuilt.push(await askFaulty().then(async (r) => { await r.text(); return r.status; }));
+    const unbuiltOpen = faultyStreams.open;
+    const unbuiltLine = last();
+    unreadable = false;
+    const built = reading(await askFaulty());
+    const builtOpened = await built.read(100);
+    assert(unbuilt.join() === "500,500,500" && unbuiltOpen === 0 && unbuiltLine.outcome === "error" && built.status === 200 && !builtOpened.ended && faultyStreams.open === 1,
+      `a listen whose server cannot be built, three times under a name that may hold two: a 500 each, its line \`error\`, and no place kept, so the next is held (${unbuilt.join()}; open ${unbuiltOpen}, then ${faultyStreams.open}; ${JSON.stringify(unbuiltLine)})`);
+    await faultyStreams.close();
+    const closedRead = await built.read(500);
+    const afterClose: number[] = [];
+    for (let i = 0; i < 3; i++) afterClose.push(await askFaulty().then(async (r) => { await r.text(); return r.status; }));
+    assert(closedRead.ended && closedRead.text.includes('"resultType":"complete"') && (await until(() => faultyStreams.open === 0)) && afterClose.every((x) => x >= 500),
+      `the app's close ends its stream with the closing frame, and a listen after it is a 500 that keeps no place (ended ${closedRead.ended}; ${afterClose.join()}; open ${faultyStreams.open})`);
+
+    const collecting = useRequestLog(() => { throw new Error("the sink threw"); });
+    const unsaid: number[] = [];
+    try {
+      for (let i = 0; i < 3; i++) {
+        const r = await ask("write-raw");
+        void r.body?.cancel().catch(() => {});
+        unsaid.push(r.status);
+      }
+    } finally {
+      useRequestLog(collecting);
+    }
+    const unsaidOpen = streams.open;
+    const afterSink = reading(await ask("write-raw"));
+    const afterSinkOpened = await afterSink.read(100);
+    assert(unsaid.join() === "500,500,500" && unsaidOpen === 0 && afterSink.status === 200 && !afterSinkOpened.ended && streams.open === 1,
+      `a throw once the stream is open and handed to no one (the log's sink): a 500, and the place given back, so the name is not shut out (${unsaid.join()}; open ${unsaidOpen}, then ${streams.open})`);
+    await afterSink.close();
+    await until(() => streams.open === 0);
+  }
+
+  // A held stream keeps nothing of its request: a body of two megabytes is let go once the stream is open. Over a
+  // real connection, each client a bare socket, so nothing on this side keeps the body either.
+  {
+    const { heapStats } = await import("bun:jsc");
+    const net = await import("node:net");
+    const roomyStreams = createListenStreams(true, 64, 64);
+    const roomy = createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: () => {}, listen: roomyStreams });
+    const served = Bun.serve({ port: 0, hostname: "127.0.0.1", idleTimeout: 255, fetch: (req) => roomy.fetch(req) });
+    const asHeaders = Object.entries(Object.fromEntries(requestFor("subscriptions/listen", {}, "write-raw", { modern: true }).headers)).map(([k, v]) => `${k}: ${v}`).join("\r\n");
+    const settledHeap = async () => { for (let i = 0; i < 6; i++) { Bun.gc(true); await Bun.sleep(30); } return heapStats().heapSize / 1048576; };
+    const sockets: { destroy: () => void }[] = [];
+    const openWith = (pad: number) => new Promise<boolean>((resolve) => {
+      const socket = net.connect(served.port!, "127.0.0.1", () => {
+        let body: string | null = JSON.stringify({ jsonrpc: "2.0", id: rpcId++, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, pad: "x".repeat(pad), _meta: ENVELOPE } });
+        socket.write(`POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n${asHeaders}\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n`);
+        socket.write(body);
+        body = null;
+      });
+      sockets.push(socket);
+      let seen = "";
+      socket.on("data", (d) => { if (seen.length < 600) { seen += d.toString(); if (/acknowledged/.test(seen)) resolve(true); else if (/"error"/.test(seen)) resolve(false); } });
+      socket.on("error", () => resolve(false));
+      setTimeout(() => resolve(false), 5_000);
+    });
+    try {
+      for (let i = 0; i < 4; i++) await openWith(0);
+      const heapBefore = await settledHeap();
+      let opened = 0;
+      for (let i = 0; i < 12; i++) if (await openWith(2 * 1024 * 1024)) opened++;
+      const heapHeld = await settledHeap();
+      assert(opened === 12 && roomyStreams.open === 16 && heapHeld - heapBefore < 8,
+        `twelve streams opened with a body of two megabytes each, and held: the heap has not kept the bodies (${opened} opened, ${roomyStreams.open} held; ${Math.round(heapBefore)} MiB before, ${Math.round(heapHeld)} MiB with them held, 24 MiB sent)`);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await until(() => roomyStreams.open === 0);
+      served.stop(true);
+    }
+  }
+
   // A 2025-era request of that name never reaches the handler, and takes no place.
   const legacyListen = await rpc("subscriptions/listen", { notifications: { toolsListChanged: true } }, "write-raw", { app: holding });
   assert(streams.open === 0 && legacyListen.body?.error !== undefined, `a 2025-era request by that name: the transport's own refusal, and no place taken (open ${streams.open}; ${JSON.stringify(legacyListen.body?.error)})`);
@@ -1473,6 +1667,56 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   const called = await rpc("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern: true, app: holding });
   answer = () => ok({});
   assert(called.status === 200 && called.body?.result !== undefined && last().rpc === "tools/call" && last().tool === "thought_stats" && last().outcome === "ok", `a tool call on an app that holds streams: served and said as ever (${called.status}; ${JSON.stringify(last())})`);
+
+  // The stop, as an app that holds streams sees it. Its connections outlast the cut, so the route is what cuts:
+  // after `cut`, nothing more of an answer goes out and it does not end; after `over`, nothing that arrives is served.
+  {
+    const stats = { total: 3, oldest: "2026-10-01T00:00:00Z", newest: "2026-10-02T00:00:00Z", types: { idea: 3 }, topics: { rest: 2 }, people: {}, aggregated: 3 };
+    const stopping = { cut: false, over: false };
+    const stoppable = createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: (l) => said.push(l), listen: createListenStreams(true, 3, 2), stop: stopping });
+    const callOn = (app: typeof stoppable, modern: boolean) => app.fetch(requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern }));
+    const unanswered = async (asked: Response | Promise<Response>) => Promise.race([Promise.resolve(asked).then((r) => `answered ${r.status}`), Bun.sleep(150).then(() => "unanswered")]);
+    for (const modern of [true, false]) {
+      // A call whose own work ends 110 ms after the cut, the connections still open: its result is not delivered late under a line that says `cut`.
+      answer = (n) => (n === "thoughtStats" ? Bun.sleep(150).then(() => ok(stats)) : ok({}));
+      stopping.cut = false;
+      const linesAt = lines.length;
+      const saidAt = said.length;
+      const asking = callOn(stoppable, modern);
+      await Bun.sleep(40);
+      stopping.cut = true;
+      const cutRead = await reading(await asking).read(400);
+      const cutLines = lines.slice(linesAt);
+      const cutWarned = said.slice(saidAt).filter((l) => /cut off by the server's stop/.test(l));
+      assert(!cutRead.ended && !/Total thoughts/.test(cutRead.text) && !cutRead.text.includes('"result"') && cutLines.length === 1 && cutLines[0].outcome === "cut" && cutLines[0].tool === "thought_stats" && cutWarned.length === 1,
+        `a ${modern ? "2026-07-28" : "2025-era"} call whose work ends after the stop's cut: nothing of its result goes out and its answer does not end; one line, \`cut\`, one warning (ended ${cutRead.ended}; ${JSON.stringify(cutRead.text.slice(0, 80))}; ${JSON.stringify(cutLines.map((l) => l.outcome))}; ${cutWarned.length} warning(s))`);
+    }
+    // A request the cut found before it reached a transport: not begun.
+    let asked = 0;
+    answer = (n) => { if (n === "thoughtStats") asked++; return ok(stats); };
+    const linesAtCut = lines.length;
+    const begunLate = await unanswered(callOn(stoppable, true));
+    assert(begunLate === "unanswered" && asked === 0 && lines.length === linesAtCut + 1 && last().outcome === "cut", `a request the cut finds not yet at its transport is not begun: no answer, the core not asked, its line \`cut\` (${begunLate}; asked ${asked}; ${JSON.stringify(last())})`);
+    // After the drain's end, whatever arrives: not served, a keyed request's line `cut` with the status of one never answered, a liveness probe's none.
+    stopping.over = true;
+    const linesAtOver = lines.length;
+    const lateCall = await unanswered(callOn(stoppable, false));
+    const lateList = await unanswered(stoppable.fetch(requestFor("tools/list", {}, "write-raw", { modern: true })));
+    const lateLines = lines.slice(linesAtOver);
+    const lateProbe = await unanswered(stoppable.fetch(new Request("http://mcp/health")));
+    assert(lateCall === "unanswered" && lateList === "unanswered" && lateProbe === "unanswered" && asked === 0 && lateLines.length === 2 && lateLines.every((l) => l.outcome === "cut" && l.status === 0) && lines.length === linesAtOver + 2,
+      `a request that arrives after the stop's drain has ended is not served and not answered: its line \`cut\`, its status 0; a probe the same, with no line (${lateCall}, ${lateList}, ${lateProbe}; asked ${asked}; ${JSON.stringify(lateLines.map((l) => [l.outcome, l.status]))})`);
+    // An app that holds none is as it was: its connections go at the cut, so a call that ends after it is whatever it was, and the route cuts nothing.
+    const plainStop = { cut: false, over: false };
+    const plainApp = createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: (l) => said.push(l), stop: plainStop });
+    answer = (n) => (n === "thoughtStats" ? Bun.sleep(100).then(() => ok(stats)) : ok({}));
+    const plainAsking = callOn(plainApp, true);
+    await Bun.sleep(30);
+    plainStop.cut = true;
+    const plainRead = await reading(await plainAsking).read(500);
+    assert(plainRead.ended && /Total thoughts: 3/.test(plainRead.text), `an app that holds no stream cuts nothing itself: a call that ends after the flag is answered as it was (ended ${plainRead.ended}; ${plainRead.text.length} bytes)`);
+    answer = () => ok({});
+  }
 
   console.warn = warnBefore;
   useRequestLog(before);

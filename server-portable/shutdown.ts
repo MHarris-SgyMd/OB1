@@ -47,7 +47,11 @@ export const DEFAULT_STOP_GRACE_S = 10;
 /** What the drain leaves of the grace period, for the pool's close, the telemetry's flush (at most a second of it, FLUSH_MARGIN_MS before the kill, SMD-2902) and the exit. */
 export const STOP_MARGIN_MS = 2_000;
 
-/** The shortest drain a grace period buys, however short it is: at 1 or 2 s the margin shrinks, and 0.5 s plus the 250 ms close still fits. */
+/**
+ * The shortest drain a grace period buys, however short it is: at 1 or 2 s the margin shrinks, and 0.5 s plus the
+ * 250 ms close still fits; so do the two bounds of a stop that closes held streams after it (HELD_CLOSE_MS, 0.95 s
+ * in all at a grace of 1 s, with every bound run out).
+ */
 export const MIN_DRAIN_MS = 500;
 
 /** The longest grace period read: an hour. Past 2^31 ms a timer fires at once, which would cut every call. */
@@ -100,8 +104,14 @@ export const CLOSE_AFTER_CUT_MS = 250;
  */
 export const HELD_POLL_MS = 20;
 
-/** The most the stop gives the held streams to be closed, and the connections to end after them, each. */
-export const HELD_CLOSE_MS = 250;
+/** How often the stop looks for the closed streams' answers to have ended: a turn or two of the event loop, as a rule. */
+export const HELD_LEFT_POLL_MS = 2;
+
+/**
+ * The most the stop gives the held streams to be closed, and then their answers to end, each. Both together come out
+ * of the flush's bound, so a stop that closes streams ends no later than one that holds none.
+ */
+export const HELD_CLOSE_MS = 100;
 
 /**
  * The most the stop gives its telemetry flush (SMD-2902): a collector that
@@ -197,10 +207,17 @@ export interface DrainOptions {
   /**
    * Closes those streams, each with its own last word. Called last, after the flush: a client counts its wait for
    * the server's return from the end of its stream, so the later the stream ends, the more of that wait is the
-   * restart's own. Awaited, to HELD_CLOSE_MS. Where it is given, the connections the bound cut are closed after
-   * it, not at the bound: closing them there would drop every held stream with no last word.
+   * restart's own. Awaited, to HELD_CLOSE_MS. Where it is given, no connection is closed at the bound, where it
+   * would drop every held stream with no last word: every connection is closed after the streams are.
    */
   closeHeld?: () => Promise<void>;
+  /**
+   * Told as the drain ends, finished or cut, in the turn that decides it. A server that closes streams last keeps
+   * its connections open through the flush, and Bun serves a request that arrives on one of them (a connection
+   * opened before the signal, not yet used): what arrives after this is not to be served, or it would run with the
+   * stop no longer waiting on it, and be answered by a handler already closed (found in review). Given with `closeHeld`.
+   */
+  afterDrain?: () => void;
   /** Told just before what is still in flight is closed — at the bound, or on a second signal — so the lines it leaves say the stop cut it. */
   onCut?: () => void;
   /**
@@ -250,13 +267,7 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     const calls = opts.calls;
     const running = () => (calls ? `, ${toolCalls(calls.running)} running` : "");
     // The streams held open on purpose are in the runtime's count and not in what the drain waits for.
-    const held = () => {
-      try {
-        return Math.max(0, Math.floor(opts.held?.() ?? 0));
-      } catch {
-        return 0;
-      }
-    };
+    const held = () => opts.held?.() ?? 0;
     const inFlight = () => Math.max(0, (server?.pendingRequests ?? 0) - held());
     const heldAtStart = held();
     log(`${signal}: no longer accepting; ${requests(inFlight())} in flight${running()}, waited on for up to ${drainBoundMs / 1000} s (SMD-2250)${heldAtStart > 0 ? `; ${heldStreams(heldAtStart)}, closed last (SMD-4347)` : ""}`);
@@ -267,17 +278,19 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     // A stop() that rejects has stopped accepting all the same; read as drained, not as an unhandled rejection that skips the close and the line.
     const stopping: Promise<true> = server ? server.stop().then(() => true as const, () => true as const) : Promise.resolve(true as const);
     // With streams held, stop() does not resolve until they end, and they end last: what is waited on is the rest, looked for.
-    const rest: Promise<true> = opts.held && server
+    // The requests and the calls are looked at together, so the drain's end is decided in one turn, with nothing in flight in it.
+    const looked = opts.held && server;
+    const rest: Promise<true> = looked
       ? new Promise<true>((resolve) => {
         const look = () => {
-          if (inFlight() === 0) resolve(true);
+          if (inFlight() === 0 && (calls?.running ?? 0) === 0) resolve(true);
           else poll = setTimeout(look, HELD_POLL_MS);
         };
         look();
       })
       : stopping;
     let drained = await Promise.race([
-      Promise.all([rest, calls?.idle()]).then(() => true),
+      (looked ? rest : Promise.all([rest, calls?.idle()])).then(() => true),
       new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), drainBoundMs); cutShort = () => { again = true; resolve(false); }; }),
     ]);
     clearTimeout(timer);
@@ -298,13 +311,19 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
       // With streams to close last, the connections are closed after them (below): here it would drop each stream with no last word.
       if (!opts.closeHeld) server.stop(true).catch(() => {});
     }
+    // No await since the drain's end was decided: what is told here is true of every request that arrives after it.
+    try {
+      opts.afterDrain?.();
+    } catch {}
     // A drain that ended late gets what is left of the drain's bound plus the
     // after-cut close, so the exit-0 path cannot outlast the cut path (review pass 3).
     const closeMs = drained ? Math.round(Math.min(closeBoundMs, Math.max(closeAfterCutMs, drainBoundMs + closeAfterCutMs - (performance.now() - t0)))) : closeAfterCutMs;
     // The flush's own bound (SMD-2902): its budget, inside what the grace period
     // leaves before the kill, and never less than the close's — the bound it had;
     // after a second signal, the close's alone.
-    const flushMs = again ? closeMs : Math.round(Math.max(closeMs, Math.min(flushBudgetMs, graceMs - FLUSH_MARGIN_MS - (performance.now() - t0))));
+    // Where streams are closed after it, their two bounds come out of it.
+    const heldMs = opts.closeHeld ? 2 * HELD_CLOSE_MS : 0;
+    const flushMs = again ? closeMs : Math.round(Math.max(closeMs, Math.min(flushBudgetMs, graceMs - FLUSH_MARGIN_MS - heldMs - (performance.now() - t0))));
     try {
       opts.endOpen?.();
     } catch {}
@@ -361,22 +380,25 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     const sent = await flushed;
     clearTimeout(flushTimer);
     // The streams held open, closed now, and the process not gone before what closing wrote has left. Measured on
-    // the MCP server's entry with nothing waited on after the close: a stream's last word was lost, the exit
-    // reaching the process first. So the stop waits for the answers themselves to have ended: the server's own end
-    // where the drain finished, which comes once every answer has; and where the bound cut a request, so that end
-    // never comes, the runtime's count fallen by as many as were closed, and then the connections are cut.
+    // the MCP server's entry: with the exit straight after the close, a stream's last word was lost; and with the
+    // connections closed straight after it, lost again where the drain had finished (a reset in its place), though
+    // not after a cut. So the stop waits for the streams' answers to have ended, which the runtime's count says by
+    // falling by as many as were closed; then every connection is closed, the cut requests' and any opened and
+    // never used, which the runtime's own end would wait on. A second signal ends either wait.
     let heldSaid = "";
     if (opts.closeHeld) {
       const closing = held();
       const before = server?.pendingRequests ?? 0;
-      await Promise.race([opts.closeHeld().catch(() => {}), pause(HELD_CLOSE_MS)]);
-      if (drained || !server) await Promise.race([stopping, pause(HELD_CLOSE_MS)]);
-      else {
+      let hurried = false;
+      const hurry = new Promise<void>((resolve) => { cutShort = () => { hurried = true; resolve(); }; });
+      await Promise.race([opts.closeHeld().catch(() => {}), pause(HELD_CLOSE_MS), hurry]);
+      if (server) {
         const until = performance.now() + HELD_CLOSE_MS;
-        while (server.pendingRequests > before - closing && performance.now() < until) await pause(HELD_POLL_MS);
+        while (!hurried && server.pendingRequests > before - closing && performance.now() < until) await Promise.race([pause(HELD_LEFT_POLL_MS), hurry]);
         server.stop(true).catch(() => {});
       }
-      if (closing > 0) heldSaid = `; ${heldStreams(closing)} closed`;
+      const left = Math.min(closing, held());
+      if (closing > 0) heldSaid = left === 0 ? `; ${heldStreams(closing)} closed` : `; ${left === closing ? "" : `${left} of `}${heldStreams(closing)} not closed`;
     }
     const code = drained ? 0 : 1;
     log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${closed}${sent}${heldSaid}; exit ${code}`);
