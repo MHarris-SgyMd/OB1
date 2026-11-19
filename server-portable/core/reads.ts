@@ -8,7 +8,7 @@ import { thoughtTitle, thoughtUrl } from "../thoughts.ts";
 import { mayLeaveBox, type EgressSubject } from "../egress.ts";
 import { providerDown, shownBase } from "../embed.ts";
 import { heardFrom } from "../provider-health.ts";
-import { ListCursorRefused, RELATIONS_FETCHED, storeKind, UUID_RE, type AuditChange, type EffectivePriority, type PriorityTerm, type PriorityWeights, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type WorkerStatusRow } from "../store.ts";
+import { fromItemTerm, ListCursorRefused, RELATIONS_FETCHED, storeKind, UUID_RE, type AuditChange, type EffectivePriority, type PriorityTerm, type PriorityWeights, type ListPosition, type ListSort, type LoggedSearchPage, type SupersessionProposal, type ThoughtHybridMatch, type ThoughtIdPage, type ThoughtKeywordMatch, type ThoughtListItem, type ThoughtStats, type ThoughtStore, type Unreviewed, type UnreviewedMark, type WorkerStatusRow } from "../store.ts";
 import { keysInOrder, MOVED_READ, movedAmong, typesOf, type Moved, type MovedHit, type MovedType } from "../stated-status.ts";
 import { readJob, startJob, type JobHandle, type PublicJob, type StartJobOptions } from "../jobs.ts";
 import { brainInfo as readBrain, taskStates, type BrainInfo, type ReadOptions, type ServerFacts, type TaskStatusResult } from "../brain-info.ts";
@@ -25,6 +25,7 @@ import { fetchedThreads, type FetchedThread } from "./threads.ts";
 import { relationsLabel, relationsOf, relationsResult } from "./relations.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 import { weightsRefused } from "./weights.ts";
+import { itemKey, marksOn, type Markable, type MarkItem } from "./marks.ts";
 
 // ── The one search operation ─────────────────────────────────────────────────
 
@@ -557,17 +558,26 @@ const knownPriority = (p: Pick<EffectivePriority, "level" | "inheritedFrom" | "t
  * it, stated (`level`), read from an open item opened from it (`fromItem`, migration 125) or inherited
  * (`inheritedFrom`); its due time, the urgency or overdue term it adds, the open
  * items it unblocks; whether it is settled (a finished ticket's own level stands, its urgency and unblocks dropped)
- * or waiting on a not_before; and every term, named, as the agenda shows them.
+ * or waiting on a not_before; every term, named, as the agenda shows them; and `unreviewed` (SMD-3671 PR 3), sleep's
+ * pending stale finding on the item: a mark that never moves a weight, an order or a rank (UnreviewedMark). A level
+ * read from an open item or inherited carries its source's mark on `fromItem` and `inheritedFrom` (review pass 1):
+ * the statement under review is the source's, and the item itself is not said stale for it.
  */
 export type PriorityOn = {
   kind: "thought" | "ticket"; key: string; self: boolean; effective: number; level: number | null;
-  inheritedFrom: { kind: string; key: string; level: number; hops: number } | null;
-  fromItem: { key: string; level: number } | null;
+  inheritedFrom: { kind: string; key: string; level: number; hops: number; unreviewed: UnreviewedMark } | null;
+  fromItem: { key: string; level: number; unreviewed: UnreviewedMark } | null;
   dueAt: string | null; urgency: number; overdue: boolean; unblocks: number; settled: boolean; notBefore: string | null; waiting: boolean;
   terms: PriorityTerm[];
+  unreviewed: UnreviewedMark;
 };
-/** A result's priorities: the first PRIORITY_SHOWN, how many more, and how many tickets it names that were not read. */
-export type PriorityHit = { priority: PriorityOn[]; priorityMore: number; priorityNotRead: number };
+/**
+ * A result's priorities: the first PRIORITY_SHOWN, how many more, and how many tickets it names that were not read;
+ * `unreviewedUnchecked`, present when any, the distinct items among its marks (its items' and their sources') past
+ * the unreviewed read's reach, each `{kind, key}` (SMD-3671 PR 3, review pass 3: which, not how many, so a cut list
+ * still tells them from a failed read's). A null mark not among them is a read that failed.
+ */
+export type PriorityHit = { priority: PriorityOn[]; priorityMore: number; priorityNotRead: number; unreviewedUnchecked?: MarkItem[] };
 /** How many of a result's prioritised items it names in full (itself first, then the most pressing). */
 const PRIORITY_SHOWN = 10;
 /** One read's reach: 122 reads at most 1000 items at once. The rows' own thoughts first, then the tickets they name. */
@@ -590,7 +600,26 @@ type PriorityRow = { id: string; content: string; metadata?: Record<string, unkn
  * on a failure, so a ticket only a row it drops names can neither cost it nor fail it (review pass 1). `have` holds
  * answers already read, not asked again: the label of a ranked page reuses the window's. Nothing to ask, no call.
  */
-export async function readPriorities(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority>; weights?: Partial<PriorityWeights> } = {}): Promise<PriorityRead> {
+export async function readPriorities(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[],
+  opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority>; weights?: Partial<PriorityWeights>; ask?: ReturnType<typeof priorityAsk> } = {}): Promise<PriorityRead> {
+  // The ask, when the caller already made it (priorityRead's marks read the same keys, review pass 3), is not made again.
+  const { ids, tickets, keyed } = opts.ask ?? priorityAsk(rows, opts);
+  const by = new Map(opts.have ?? []);
+  if (ids.length + tickets.length === 0) return { by, keyed };
+  // 122 answers each item as asked, normalised: a thought by its id, lower-case, as the store's ids are; a ticket upper-case.
+  // A call's own weights (SMD-4193) when it passed any; else the store's call is as it was, the defaults.
+  const items = [...ids.map((key) => ({ kind: "thought", key })), ...tickets.map((key) => ({ kind: "ticket", key }))];
+  const read = await (opts.weights === undefined ? store.effectivePriority(items) : store.effectivePriority(items, { weights: opts.weights }));
+  for (const p of read) by.set(`${p.item.kind}:${p.item.key}`, p);
+  return { by, keyed };
+}
+
+/**
+ * What a page's priority read asks (readPriorities): the rows' own thoughts `have` does not answer, then the tickets
+ * each names, to the reach; per row the tickets asked for it and those it names that were not. Pure: the unreviewed
+ * marks' first read asks the same keys beside it (SMD-3671 PR 3 review pass 1).
+ */
+function priorityAsk(rows: readonly PriorityRow[], opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority> } = {}): { ids: string[]; tickets: string[]; keyed: PriorityRead["keyed"] } {
   const have = opts.have ?? new Map<string, EffectivePriority>();
   const ids = [...new Set(rows.map((r) => r.id))].filter((id) => !have.has(`thought:${id}`));
   const tickets: string[] = [];
@@ -614,14 +643,7 @@ export async function readPriorities(store: Pick<ThoughtStore, "effectivePriorit
     }
     keyed.set(r.id, { keys: asked, notRead: cut });
   }
-  const by = new Map(have);
-  if (ids.length + tickets.length === 0) return { by, keyed };
-  // 122 answers each item as asked, normalised: a thought by its id, lower-case, as the store's ids are; a ticket upper-case.
-  // A call's own weights (SMD-4193) when it passed any; else the store's call is as it was, the defaults.
-  const items = [...ids.map((key) => ({ kind: "thought", key })), ...tickets.map((key) => ({ kind: "ticket", key }))];
-  const read = await (opts.weights === undefined ? store.effectivePriority(items) : store.effectivePriority(items, { weights: opts.weights }));
-  for (const p of read) by.set(`${p.item.kind}:${p.item.key}`, p);
-  return { by, keyed };
+  return { ids, tickets, keyed };
 }
 
 /** The ticket a thought's answer reads as (122 names it in its first term's `as`), else null. */
@@ -629,17 +651,14 @@ const readAs = (p: EffectivePriority): string | null => {
   const as = p.terms[0]?.detail.as as { kind?: unknown; key?: unknown } | undefined;
   return as?.kind === "ticket" && typeof as.key === "string" ? as.key : null;
 };
-/** The open item a thought read its level from (125's `from_items` term): its id and the level counted on it, else null. */
-const fromItemOf = (p: EffectivePriority): PriorityOn["fromItem"] => {
-  const t = p.terms.find((x) => x.term === "from_items");
-  return t && typeof t.detail.item === "string" ? { key: t.detail.item, level: t.value } : null;
-};
 const priorityOn = (p: EffectivePriority, self: boolean): PriorityOn => {
   const as = self ? readAs(p) : null;
   return {
     kind: as !== null || p.item.kind === "ticket" ? "ticket" : "thought", key: as ?? p.item.key, self, effective: p.effective, level: p.level,
-    inheritedFrom: p.inheritedFrom, fromItem: fromItemOf(p), dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled,
+    inheritedFrom: p.inheritedFrom ? { ...p.inheritedFrom, unreviewed: null } : null, fromItem: fromItemTerm(p.terms), dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled,
     notBefore: p.notBefore, waiting: p.waiting, terms: p.terms,
+    // Not read until priorityRead reads the findings, the sources' marks too.
+    unreviewed: null,
   };
 };
 
@@ -673,26 +692,177 @@ export function priorityLabels(read: PriorityRead, rows: readonly { id: string }
  * The priority label (SMD-3668 PR 2) for a page: one read, best-effort, as claimedOf — a brain before 122, a server
  * role without its grants, or a read that fails gives null, which the replies say. A ranked page passes its window's
  * answers (`have`), so only its tickets are asked; an empty page asks nothing (review pass 1). `weights`: the ranked
- * search's own (SMD-4193), so its tickets read as its window did.
+ * search's own (SMD-4193), so its tickets read as its window did. Then the labelled items' unreviewed marks
+ * (priorityRead). Every caller but plan_context takes the labels alone.
  */
-export async function priorityOf(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[], have?: ReadonlyMap<string, EffectivePriority>, weights?: Partial<PriorityWeights>): Promise<Record<string, PriorityHit> | null> {
+export async function priorityOf(store: Pick<ThoughtStore, "effectivePriority" | "staleUnreviewedOn">, rows: readonly PriorityRow[], have?: ReadonlyMap<string, EffectivePriority>, weights?: Partial<PriorityWeights>): Promise<Record<string, PriorityHit> | null> {
+  return (await priorityRead(store, rows, have, weights)).labels;
+}
+
+/**
+ * The priority label and its unreviewed marks and their sources' (SMD-3671 PR 3), whose failure leaves every mark null
+ * and the priorities as read: a first read of the keys the priority read asks, beside it (review pass 1: after it, the
+ * marks cost every read a round trip), and a second, only when 122's answer names an item the first did not ask — a
+ * level's source, or a ticket a row reads as — and the first read something. `unread` says why the marks were not all
+ * read, if they were not (review pass 3: a return, where a callback dropped a failure's reason): plan_context's note.
+ */
+export async function priorityRead(store: Pick<ThoughtStore, "effectivePriority" | "staleUnreviewedOn">, rows: readonly PriorityRow[], have?: ReadonlyMap<string, EffectivePriority>, weights?: Partial<PriorityWeights>,
+  marks: MarkOpts = {}): Promise<{ labels: Record<string, PriorityHit> | null; unread: UnreviewedRead["failed"] }> {
+  // Every row's own thought (a ranked page's, which `have` answers, included) and the tickets the priority read asks.
+  const ask = priorityAsk(rows, { have });
+  const first = unreviewedOf(store, [...new Set(rows.map((r) => r.id))].map((key) => ({ kind: "thought", key }))
+    .concat(ask.tickets.map((key) => ({ kind: "ticket", key }))), { timeoutMs: marks.leftMs?.() });
+  let labels: Record<string, PriorityHit>;
   try {
-    return priorityLabels(await readPriorities(store, rows, { have, ...(weights === undefined ? {} : { weights }) }), rows);
+    labels = priorityLabels(await readPriorities(store, rows, { have, ask, ...(weights === undefined ? {} : { weights }) }), rows);
   } catch (e) {
-    const err = e as { errno?: unknown; code?: unknown; message?: unknown };
-    console.error(`priority: the effective priority read failed (${String(err.errno ?? err.code ?? "no code")}): ${String(err.message ?? e).slice(0, 200)}; results carry priority: null`);
-    return null;
+    // The first read's own failure goes unsaid (review pass 2): the priorities' is the reply's, and logged here. Under a
+    // deadline (plan_context's, in its own transaction) it is settled before the reply goes, its wait bounded (review
+    // pass 4); elsewhere it is left to finish, so a failed read never waits on an unbounded one (review pass 5). It
+    // never rejects, nor logs.
+    console.error(`priority: the effective priority read failed (${sqlState(e) || "no code"}): ${String((e as { message?: unknown }).message ?? e).slice(0, 200)}; results carry priority: null`);
+    if (marks.leftMs) await first;
+    return { labels: null, unread: null };
+  }
+  const reads = [await first];
+  // A first read that read nothing asks no second (review pass 2): its marks, and the sources', are not read.
+  if (!reads[0].failed) {
+    const missing = Object.values(labels).flatMap((h) => h.priority.flatMap(marksOn)).map((m) => m.item).filter((i) => !reads[0].asked.has(itemKey(i)));
+    if (missing.length) reads.push(await unreviewedOf(store, missing, { timeoutMs: marks.leftMs?.() }));
+  }
+  reads.forEach(sayFault);
+  return { labels: Object.fromEntries(Object.entries(labels).map(([id, h]) => [id, withMarks(h, reads)])), unread: reads.find((r) => r.failed)?.failed ?? null };
+}
+
+// ── The unreviewed mark (SMD-3671 PR 3) ─────────────────────────────────────
+
+/**
+ * How a reply's marks are read (review pass 2): `leftMs`, what is left of its deadline when each read starts —
+ * plan_context's knowledge, so a level's sources cannot eat the board's reserve; none elsewhere.
+ */
+export type MarkOpts = { leftMs?: () => number };
+/** The unreviewed read's reach: one statement asks at most this many items, as 122's read does. */
+export const UNREVIEWED_READ = 1000;
+/**
+ * One unreviewed read: the items it asked (by `kind:key`), those past its reach (`cut`), the pending stale finding of
+ * each asked item that has one, and why it read nothing, if it did not: out of the reply's time, or failed — then
+ * `fault`, its log line, which the caller says (sayFault) unless another failure already speaks for the reply.
+ */
+type UnreviewedRead = { asked: Set<string>; cut: Set<string>; by: Map<string, Unreviewed>; failed: "deadline" | "failed" | null; fault: string | null };
+/** A store error's SQLSTATE, or "" (one reading for the marks' reads and plan_context's board, review pass 2). */
+export const sqlState = (e: unknown) => String((e as { errno?: unknown; code?: unknown })?.errno ?? (e as { code?: unknown })?.code ?? "");
+/** A failed read's log line, said once. */
+const sayFault = (r: UnreviewedRead) => { if (r.fault) console.error(r.fault); };
+
+/**
+ * Sleep's pending stale findings on these items (SMD-3671 PR 3, the maintainer's decisions of 2026-11-18): one indexed
+ * read of priority_findings for the distinct items, the first UNREVIEWED_READ alone, and none when there are none; under
+ * `timeoutMs` when given (plan_context's deadline, none left none asked). Best-effort, as claimedOf and priorityOf: a
+ * brain before 142, a role without SELECT on the table, or a read that fails reads nothing and says why in `failed`
+ * and `fault` (none for the deadline, as the board's agenda logs none); it never throws, nor logs itself. A mark, not
+ * a weight: no order, rank or filter reads it. It lags sleep's scan, which writes and moots findings at most every six
+ * hours, and with sleep off there are none to read.
+ */
+export async function unreviewedOf(store: Pick<ThoughtStore, "staleUnreviewedOn">, items: readonly MarkItem[], opts: { timeoutMs?: number } = {}): Promise<UnreviewedRead> {
+  const asked = new Set<string>(), cut = new Set<string>(), ask: MarkItem[] = [];
+  for (const i of items) {
+    const k = itemKey(i);
+    if (asked.has(k)) continue;
+    if (ask.length >= UNREVIEWED_READ) { cut.add(k); continue; }
+    asked.add(k);
+    ask.push({ kind: i.kind, key: i.key });
+  }
+  const none = (failed: UnreviewedRead["failed"], fault: string | null = null): UnreviewedRead => ({ asked, cut, by: new Map(), failed, fault });
+  if (ask.length === 0) return none(null);
+  if (opts.timeoutMs !== undefined && opts.timeoutMs <= 0) return none("deadline");
+  try {
+    const found = await (opts.timeoutMs === undefined ? store.staleUnreviewedOn(ask) : store.staleUnreviewedOn(ask, { timeoutMs: opts.timeoutMs }));
+    return { asked, cut, by: new Map(found.map((f) => [itemKey(f.item), f.unreviewed])), failed: null, fault: null };
+  } catch (e) {
+    const code = sqlState(e);
+    if (opts.timeoutMs !== undefined && code === "57014") return none("deadline");
+    return none("failed", `unreviewed: the priority findings read failed (${code || "no code"}): ${String((e as { message?: unknown }).message ?? e).slice(0, 200)}; priorities carry unreviewed: null`);
   }
 }
 
+/**
+ * An item's mark from its reads: its finding, false for none; null when the read that asked it failed (`cut` false) or
+ * none reached it (`cut` true) — unless the read that left it past its reach failed too (review pass 4): then no second
+ * read ran for it, and it is that failure's, not unchecked.
+ */
+export function markOf(reads: readonly UnreviewedRead[], item: MarkItem): { mark: UnreviewedMark; cut: boolean } {
+  const k = itemKey(item);
+  const r = reads.find((x) => x.asked.has(k));
+  if (r) return { mark: r.failed ? null : (r.by.get(k) ?? false), cut: false };
+  return { mark: null, cut: reads.some((x) => x.cut.has(k) && !x.failed) };
+}
+
+/** A priority, an agenda item or a board ticket with its mark and its level's sources' marks. */
+function marked<T extends Markable>(p: T, mark: (i: MarkItem) => UnreviewedMark): T & { unreviewed: UnreviewedMark } {
+  return {
+    ...p, unreviewed: mark(p),
+    ...(p.fromItem ? { fromItem: { ...p.fromItem, unreviewed: mark({ kind: "item", key: p.fromItem.key }) } } : {}),
+    ...(p.inheritedFrom ? { inheritedFrom: { ...p.inheritedFrom, unreviewed: mark(p.inheritedFrom) } } : {}),
+  };
+}
+
+/** A mark function over some reads that keeps the distinct items no read reached, in the order met (review passes 2 and 3). */
+function marker(mark: (i: MarkItem) => { mark: UnreviewedMark; cut: boolean }) {
+  const cut = new Map<string, MarkItem>();
+  return {
+    mark: (i: MarkItem) => {
+      const m = mark(i);
+      if (m.cut) cut.set(itemKey(i), { kind: i.kind, key: i.key });
+      return m.mark;
+    },
+    unchecked: () => (cut.size ? { unreviewedUnchecked: [...cut.values()] } : {}),
+  };
+}
+
+/** A result's priorities with their marks and their sources', and the distinct items no read reached. */
+function withMarks(h: PriorityHit, reads: readonly UnreviewedRead[]): PriorityHit {
+  const m = marker((i) => markOf(reads, i));
+  const priority = h.priority.map((p) => marked(p, m.mark));
+  return { ...h, priority, ...m.unchecked() };
+}
+
+/**
+ * Marks for a list of items and their level's sources, attached (the agenda's and plan_context's board, review passes
+ * 1 and 2): the sources come in the agenda's own answer, so one read asks them with the items; those `known` holds —
+ * the marks a reply already read, plan_context's knowledge hits' — are not asked again; under `timeoutMs` when given.
+ * `failed` says why that read read nothing, if it did not; its log line is said here.
+ */
+export async function markItems<T extends Markable>(store: Pick<ThoughtStore, "staleUnreviewedOn">, items: readonly T[],
+  opts: { timeoutMs?: number; known?: ReadonlyMap<string, Unreviewed | false> } = {}): Promise<{ items: (T & { unreviewed: UnreviewedMark; unreviewedUnchecked?: MarkItem[] })[]; failed: UnreviewedRead["failed"] }> {
+  const known = opts.known ?? new Map<string, Unreviewed | false>();
+  const read = await unreviewedOf(store, items.flatMap(marksOn).map((m) => m.item).filter((i) => !known.has(itemKey(i))), { timeoutMs: opts.timeoutMs });
+  sayFault(read);
+  // Past the read's reach, an item's marks are not checked, said apart from a failed read (review pass 3), as search's are.
+  return {
+    items: items.map((i) => {
+      const m = marker((x) => { const had = known.get(itemKey(x)); return had !== undefined ? { mark: had, cut: false } : markOf([read], x); });
+      return { ...marked(i, m.mark), ...m.unchecked() };
+    }),
+    failed: read.failed,
+  };
+}
+
+/** The marks a page's results carry that were read (a finding or none), by `kind:key`, the sources' included: what a later read in the same reply need not ask again. */
+export function knownMarks(hits: readonly { priority?: readonly PriorityOn[] | null }[]): Map<string, Unreviewed | false> {
+  const out = new Map<string, Unreviewed | false>();
+  for (const m of hits.flatMap((h) => h.priority ?? []).flatMap(marksOn)) if (m.mark !== null && m.mark !== undefined) out.set(itemKey(m.item), m.mark);
+  return out;
+}
+
 /** A result's priority fields where every read carries them: null when the read failed, else the items and counts. */
-export const priorityLabel = (all: Record<string, PriorityHit> | null, id: string): { priority: PriorityOn[] | null; priorityMore: number; priorityNotRead: number } =>
+export const priorityLabel = (all: Record<string, PriorityHit> | null, id: string): { priority: PriorityOn[] | null; priorityMore: number; priorityNotRead: number; unreviewedUnchecked?: MarkItem[] } =>
   all === null ? { priority: null, priorityMore: 0, priorityNotRead: 0 } : (all[id] ?? { priority: [], priorityMore: 0, priorityNotRead: 0 });
 /** The compat shapes' priority fields (search, fetch), as claimedResult: only where an item is prioritised, or `priority: null` when the read failed. */
-export const priorityResult = (all: Record<string, PriorityHit> | null, id: string): { priority?: PriorityOn[] | null; priorityMore?: number; priorityNotRead?: number } => {
+export const priorityResult = (all: Record<string, PriorityHit> | null, id: string): { priority?: PriorityOn[] | null; priorityMore?: number; priorityNotRead?: number; unreviewedUnchecked?: MarkItem[] } => {
   if (all === null) return { priority: null };
   const p = all[id];
-  return p?.priority.length ? { priority: p.priority, ...(p.priorityMore > 0 ? { priorityMore: p.priorityMore } : {}), ...(p.priorityNotRead > 0 ? { priorityNotRead: p.priorityNotRead } : {}) } : {};
+  return p?.priority.length ? { priority: p.priority, ...(p.priorityMore > 0 ? { priorityMore: p.priorityMore } : {}), ...(p.priorityNotRead > 0 ? { priorityNotRead: p.priorityNotRead } : {}),
+    ...(p.unreviewedUnchecked?.length ? { unreviewedUnchecked: p.unreviewedUnchecked } : {}) } : {};
 };
 
 /**
@@ -724,16 +894,24 @@ export function rankByPriority<T extends { id: string }>(rows: readonly T[], pri
  * made (a ranked search's). Shared with plan_context's knowledge section (SMD-2684), so its hits read as these do.
  */
 export async function labelHits(ctx: Ctx, principal: Principal, data: readonly ThoughtHybridMatch[], labels?: Promise<Record<string, PriorityHit> | null> | null): Promise<SearchHit[]> {
+  return (await labelHitsRead(ctx, principal, data, labels)).hits;
+}
+/** labelHits, and why the marks were not all read, if they were not, under `marks`' deadline (plan_context's knowledge, review pass 3). */
+export async function labelHitsRead(ctx: Ctx, principal: Principal, data: readonly ThoughtHybridMatch[], labels?: Promise<Record<string, PriorityHit> | null> | null,
+  marks?: MarkOpts): Promise<{ hits: SearchHit[]; unread: UnreviewedRead["failed"] }> {
   const store = await ctx.store();
   const claims = claimedOf(store, principal, data), relating = relationsOf(store, data);
-  const prios = labels ?? priorityOf(store, data);
+  const prios = labels ? labels.then((l) => ({ labels: l, unread: null })) : priorityRead(store, data, undefined, undefined, marks);
   const superseded = await store.supersededAmong(data.map((t) => t.id));
   const [moved, claimed, related, prioritised] = await Promise.all([movedOf(store, data, superseded), claims, relating, prios]);
-  return data.map((t) => ({
-    id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
-    matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-    supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id),
-  }));
+  return {
+    hits: data.map((t) => ({
+      id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
+      matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
+      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised.labels, t.id),
+    })),
+    unread: prioritised.unread,
+  };
 }
 
 export async function searchThoughts(ctx: Ctx, principal: Principal, input: Input<"search_thoughts">): Promise<Outcome<SearchThoughtsResult>> {
