@@ -44,9 +44,11 @@
  * Otherwise its standing text goes to server-portable/metadata.ts's
  * extractMetadata, the capture's own call (the prompt, the model, the
  * temperature, the people gate), and the answer is written through the
- * 11-argument update_thought: the patch tagsOverExisting builds (the old
- * tags a new answer leaves out nulled, a stale failure marker cleared; a null
- * for a key the row does not hold left out, so it moves nothing), the
+ * 11-argument update_thought: the patch tagsOverExisting builds, with
+ * every tag key the row holds and the answer leaves out nulled (the answer is
+ * the thought's tags: old people, a type_raw, outlived it otherwise; review
+ * pass 1) and a stale failure marker cleared — a null for a key the row does
+ * not hold left out, so it moves nothing — the
  * row's stamp as p_if_unchanged_since, the worker as the actor, and
  * `p_lineage = {"metadata": metadataRecipe(…)}`. Migration 148 makes that
  * write record the tags row — at the text, under the recipe, the mark
@@ -62,16 +64,20 @@
  *     topics or a marker in it — the gate a capture's call meets, kind
  *     `retag`): nothing is sent, the claim is failed naming the policy's
  *     rule, and --retry-failed revisits it once the policy changes;
- *   - the provider does not answer (a 5xx, a 429, a connection refused): the
- *     claim workers' rule (db/claim-loop.ts) — paused and called again, and
- *     past the pauses recorded failed and the worker stopped, its other
- *     leases back to the pool; a timeout is the thought's, recorded failed;
- *     a 401, 402, 403 or 404 is the request's, every worker stopped, exit 2,
- *     nothing marked failed;
- *   - an answer that is not tags (not JSON, no content, a 400): the claim is
+ *   - the provider does not answer (a 5xx, a 429, a 408, a connection
+ *     refused): the claim workers' rule (db/claim-loop.ts) — paused and called
+ *     again, and past the pauses recorded failed and the worker stopped, its
+ *     other leases back to the pool; a timeout is the thought's, recorded
+ *     failed; a 401, 402, 403, 404 or any other 4xx not below is the
+ *     request's, every worker stopped, exit 2, nothing marked failed;
+ *   - an answer that is not tags (not JSON, no content), or a 400, 413 or
+ *     422, which are this thought's (its length, a filter): the claim is
  *     failed and nothing is written — the tags the thought had stand. A
  *     capture would have written placeholder tags here; a re-tag never writes
- *     a tag set no model produced over one that one did.
+ *     a tag set no model produced over one that one did;
+ *   - a thought whose metadata is SQL NULL or no JSON object (a raw
+ *     writer's) takes no patch through update_thought: it is failed before
+ *     any call, nothing sent (review pass 1).
  *
  * ── The cost, and the key ───────────────────────────────────────────────────
  * One chat call per thought in the backlog, the capture's call. On Daemonic
@@ -118,7 +124,7 @@ import type { SQL } from "bun";
 import { ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server-portable/egress.ts";
-import { extractMetadata, metadataRefused, METADATA_PROMPT_VERSION, tagsOverExisting } from "../server-portable/metadata.ts";
+import { extractMetadata, metadataRefused, METADATA_PROMPT_VERSION, TAG_KEYS, tagsOverExisting } from "../server-portable/metadata.ts";
 import { metadataRecipe } from "../server-portable/lineage.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { asPass } from "../server-portable/model-call.ts";
@@ -141,6 +147,9 @@ export const RETAG_CONFIG_KEY = "retag_key";
 
 /** The egress refusal's marker (metadata.ts's metadataRefused): an answer carrying it is the gate's refusal, not the provider's. */
 const REFUSED_MARK = String(metadataRefused().metadata_extraction_failed);
+
+/** The statuses that are this thought's, not the request's: its length or a content filter (400), its size (413), its content (422). */
+const THOUGHT_STATUSES: ReadonlySet<string> = new Set(["400", "413", "422"]);
 
 /**
  * What one re-tag run is asked to do — the CLI's flags, typed. A number left
@@ -172,6 +181,8 @@ export interface RetagOptions {
   writer?: Writer;
   signal?: AbortSignal;
   onPass?: (stop: PassStop) => void;
+  /** The pauses before a failing provider is an outage (TRANSIENT_PAUSES_MS): a suite's own, to run them without the wall clock. */
+  pausesMs?: readonly number[];
 }
 
 type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number | null; limit: number };
@@ -448,10 +459,14 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   if (stoppedEarly()) return 130;
   // The pool, every run, until rebuild_derived feeds it (SMD-2298 PR 2): the backlog not pooled, and a re-tagged one due again.
   const [{ added }] = (await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(${backlogIds()})) AS added`) as { added: number }[];
-  // One row per requeue, counted here: a count(*) over the calls may not make them.
+  // requeue_thought_work's reset, guarded: the UPDATE checks `succeeded` again on the row it locks (READ COMMITTED's
+  // recheck), so a thought another run requeued and claimed since this statement began keeps its lease (review pass 1:
+  // requeue_thought_work resets whatever the state, a live lease included).
   const requeued = ((await sql`
-    SELECT requeue_thought_work(${JOB}, c.thought_id) FROM thought_work_claims c
-     WHERE c.work_type = ${JOB} AND c.status = 'succeeded' AND c.thought_id IN (${backlogIds()})`) as unknown[]).length;
+    UPDATE thought_work_claims c
+       SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL, finished_at = NULL, enqueued_at = now(), worker_id = NULL
+     WHERE c.work_type = ${JOB} AND c.status = 'succeeded' AND c.thought_id IN (${backlogIds()})
+    RETURNING 1`) as unknown[]).length;
   out(`  pool: ${Number(added)} thought(s) added, ${requeued} re-tagged before and put back`);
   const before = await counts();
   printCounts(before, "before");
@@ -481,18 +496,27 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     }
   };
   const started = Date.now();
-  const lastReport = { at: 0 };
+  const lastReport = { at: 0, line: "" };
   function progress(force = false): void {
     const now = Date.now();
     if (!force && now - lastReport.at < 3000) return;
-    lastReport.at = now;
     const of = LIMIT ? Math.min(LIMIT, total) : total;
-    out(`  ${retagged + current + failed}/${of}  ${retagged} re-tagged${failed ? `, ${failed} failed` : ""}`);
+    const line = `  ${retagged + current + failed}/${of}  ${retagged} re-tagged${failed ? `, ${failed} failed` : ""}`;
+    // The closing line once: not again when the last report already said it.
+    if (force && line === lastReport.line) return;
+    lastReport.at = now;
+    lastReport.line = line;
+    out(line);
   }
 
   /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read. */
   async function retagRow(row: Row): Promise<Outcome> {
     if (!row.due) return { outcome: "current" };
+    // update_thought merges no patch into SQL NULL (NULL || patch) and grows a non-object into an array (review pass 1):
+    // nothing is sent for a thought whose tags could not be written.
+    if (row.metadata === null || typeof row.metadata !== "object" || Array.isArray(row.metadata)) {
+      return { outcome: "failed", error: `its metadata is ${row.metadata === null ? "SQL NULL" : "no JSON object"} (a raw writer's): update_thought writes no tags there, so nothing was sent` };
+    }
     const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), ...(row.metadata ? { metadata: row.metadata } : {}), content: row.content };
     // The gate the call meets, asked first so a refusal names its rule: nothing is sent for this thought.
     const gate = mayLeaveBox(subject, cfg.chat, cfg.egress);
@@ -505,8 +529,8 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       if (mark === REFUSED_MARK) return { outcome: "failed", refused: true, error: "the egress gate refused the call; --retry-failed revisits it" };
       if (mark === "provider_timeout") throw new ProviderError(`the tags' call timed out after ${cfg.timeoutMs / 1000} s (--timeout, else OB1_LLM_TIMEOUT)`, "timeout");
       const status = /^provider_(\d{3})$/.exec(mark);
-      // A 400 is this thought's (its length, a filter); any other status the claim workers' rule reads.
-      if (status && status[1] !== "400") throw new ProviderError(`the tags' call answered ${status[1]}`, "http", Number(status[1]));
+      // A 400, 413 or 422 is this thought's (its length, a filter); any other status the claim workers' rule reads.
+      if (status && !THOUGHT_STATUSES.has(status[1])) throw new ProviderError(`the tags' call answered ${status[1]}`, "http", Number(status[1]));
       return { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
     }
     if (hardStopped) return { outcome: "abandoned" };
@@ -515,7 +539,11 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     // tagsOverExisting's nulls clear what the row holds: one for a key the row does not hold, or holds as null, is
     // left out, or every re-tag of a thought that never failed would add `metadata_extraction_failed: null` — an
     // event for a re-tag that came out the same, which 148 settles with none (sync-linear.ts's compare does the same).
-    const patch = Object.fromEntries(Object.entries(tagsOverExisting(answer)).filter(([k, v]) => v !== null || (row.metadata?.[k] ?? null) !== null));
+    // The answer is the thought's tags: a tag key the row holds and the answer leaves out is cleared too, as
+    // tagsOverExisting does only after a fallback (review pass 1: old people and a type_raw outlived a settled re-tag).
+    const over = tagsOverExisting(answer);
+    for (const k of TAG_KEYS) if (!(k in over)) over[k] = null;
+    const patch = Object.fromEntries(Object.entries(over).filter(([k, v]) => v !== null || (row.metadata?.[k] ?? null) !== null));
     const [r] = (await sql`
       SELECT update_thought(
         ${row.id}::uuid, NULL::text, ${patch}::jsonb, NULL::vector, NULL::jsonb,
@@ -538,9 +566,13 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       stopping: () => stopping, hardStopped: () => hardStopped,
       // A one-shot run's rules (classifyError): paused for, the thought's, or the request's.
       read: (e) => {
+        // A 408 is the provider's moment, as providerDown reads it, not the request's (classifyError's 4xx): paused
+        // for, like a 429 (review pass 1: it stopped the run, exit 2).
+        if (e instanceof ProviderError && e.kind === "http" && e.status === 408) return { act: "pause", suspect: true };
         const kind = classifyError(e);
         return { act: kind === "transient" ? "pause" : kind, suspect: true };
       },
+      ...(opts.pausesMs ? { pausesMs: opts.pausesMs } : {}),
       probe: () => probeChat(cfg.chat, cfg.metadataModel, Math.min(cfg.timeoutMs, 60_000), halt.signal),
       fatal: (_e, why) => {
         configError = why;
@@ -591,7 +623,9 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
           return "next";
         }
         if (outcome.outcome === "changed") {
-          // Pending again with no holder (the requeue): nothing to release.
+          // Pending again with no holder (the requeue): nothing to release. Out of --limit's count, so a claim of it
+          // again counts (review pass 1: --limit 1 met STALE_READ, re-tagged nothing and exited 0).
+          if (LIMIT > 0) taken.delete(b.thought_id);
           changedMeanwhile++;
           err(`  ${b.thought_id}: edited while it was being re-tagged; it is pending again and will be re-tagged from its new text`);
           return "next";

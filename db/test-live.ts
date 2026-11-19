@@ -68,7 +68,7 @@ import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe } from "../server-portable/lineage.ts";
 import { METADATA_PROMPT_VERSION, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { run as runRetag, type RetagOptions } from "./retag.ts";
-import { retagKey } from "./config.mjs";
+import { parseRetagKey, retagKey } from "./config.mjs";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { identityHash, readForgottenIdentities } from "./ingest-structure.ts";
@@ -23667,6 +23667,8 @@ if (want("29")) {
     // first, once, so the worker's write meets STALE_READ.
     const ANSWER = { people: ["Ada"], action_items: [], dates_mentioned: [], topics: ["ledger"], type: "task" };
     const bodies: string[] = [];
+    /** Thoughts answered otherwise, by a marker in their text (review pass 1): a status, or prose; a 408 answers once. */
+    const SPECIAL = new Map<string, number | "prose" | "slow">();
     let raced = false;
     let raceId = "";
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
@@ -23675,6 +23677,17 @@ if (want("29")) {
       if (!raced && raceId && body.includes("[29] race")) {
         raced = true;
         await sql`UPDATE thoughts SET content = '[29] race, edited meanwhile', content_fingerprint = content_fingerprint_of('[29] race, edited meanwhile') WHERE id = ${raceId}::uuid`;
+      }
+      const special = [...SPECIAL.entries()].find(([marker]) => body.includes(marker));
+      if (special) {
+        const [marker, answer] = special;
+        if (answer === 408) SPECIAL.delete(marker);
+        if (typeof answer === "number") return new Response("stub: not this time", { status: answer });
+        if (answer === "slow") {
+          await Bun.sleep(1500);
+          return Response.json({ choices: [{ message: { content: JSON.stringify(ANSWER) } }] });
+        }
+        return Response.json({ choices: [{ message: { content: "Here are the tags you asked for, in prose." } }] });
       }
       return Response.json({ choices: [{ message: { content: JSON.stringify(ANSWER) } }] });
     } });
@@ -23771,7 +23784,7 @@ if (want("29")) {
       const byId = new Map((await claims()).map((c) => [c.id, c]));
       const [aMeta, eMeta, bMeta, fMeta] = [await meta(A), await meta(E), await meta(B), await meta(F)];
       const bAfter = await stampOf(B);
-      assert(gatedRun.code === 1 && gatedRun.out.includes("pool: 2 thought(s) added") && /\n {2}6 re-tagged \(/.test(gatedRun.out) && gatedRun.out.includes("1 failed (1 refused by the egress policy, nothing sent), 1 changed while re-tagged and re-queued")
+      assert(gatedRun.code === 1 && gatedRun.out.includes("pool: 2 thought(s) added") && /\n {2}6 re-tagged \(/.test(gatedRun.out) && gatedRun.out.includes("1 failed (1 refused by the egress policy, nothing sent), 1 changed while re-tagged and re-queued") && /6 re-tagged \(5 with the tags changed, 1 the same/.test(gatedRun.out)
           && byId.get(R)?.status === "failed" && /^the egress policy refused it: OB1_EGRESS_DENY marker:secret-29 matches this retag/.test(byId.get(R)?.last_error ?? "") && !bodies.some((b) => b.includes("secret-29")) && (await tagsRow(R)) === undefined,
         `under OB1_EGRESS_DENY=marker:secret-29 the run re-tags the rest and fails R naming the term, nothing of it sent, exit 1 (${gatedRun.code}: ${line(gatedRun.out, "re-tagged (")}; R ${byId.get(R)?.status}: ${byId.get(R)?.last_error?.slice(0, 90)})`);
       assert(JSON.stringify(aMeta.topics) === '["ledger"]' && aMeta.type === "task" && JSON.stringify(aMeta.people) === '["Ada"]' && settled(await tagsRow(A)) && settled(await tagsRow(M)) && settled(await tagsRow(S)),
@@ -23803,6 +23816,90 @@ if (want("29")) {
       assert(retry.code === 0 && retry.out.includes("--retry-failed: 1 failed row(s) returned to the pool") && retry.out.includes("pool: 0 thought(s) added, 1 re-tagged before and put back") && bodies.length - mark === 2 && bodies.slice(mark).some((b) => b.includes("secret-29"))
           && settled(await tagsRow(R)) && settled(await tagsRow(A)) && (await claims()).every((c) => c.status === "succeeded"),
         `--retry-failed returns R, re-tagged once the policy lets its text go; A, re-tagged before and marked again, is put back and settled at its newest text; exit 0 (${retry.code}: ${bodies.length - mark} call(s))`);
+
+      // Review pass 1. The provider's answers: a 408 is paused for, then answered; a 413 and an answer in prose are the
+      // thought's, failed with nothing written. A thought whose metadata is SQL NULL is failed before any call. Old tags
+      // the answer leaves out are cleared. A pooled thought no longer due is released with no call.
+      const P408 = await plant("[29] P408 tagged, its first call answered 408", { topics: ["t"], type: "idea" });
+      const P413 = await plant("[29] P413 tagged, too large for the provider", { topics: ["t"], type: "idea" });
+      const PJSON = await plant("[29] PJSON tagged, answered in prose", { topics: ["t"], type: "idea" });
+      const O = await plant("[29] O, tagged long ago", { people: ["OldPerson"], type: "meeting", type_raw: "meeting notes", topics: ["old"] });
+      const N = await tagged("[29] N, a raw writer nulled its metadata");
+      await sql`UPDATE derivations SET stale_since = now(), stale_reason = 'live: marked' WHERE artifact_kind = 'metadata' AND artifact_id = ${N}::uuid`;
+      await sql`UPDATE thoughts SET metadata = NULL WHERE id = ${N}::uuid`;
+      const P400 = await plant("[29] P400 tagged, refused by its content", { topics: ["t"], type: "idea" });
+      const TONLY = await plant("[29] TONLY, a type and no topics", { type: "idea" });
+      const PONLY = await plant("[29] PONLY, topics and no type", { topics: ["x"] });
+      const C2 = await tagged("[29] C2, current but pooled by hand");
+      await sql`SELECT enqueue_thoughts(${JOB}, ARRAY[${C2}::uuid])`;
+      for (const [marker, answer] of [["[29] P408", 408], ["[29] P413", 413], ["[29] PJSON", "prose"], ["[29] P400", 400]] as const) SPECIAL.set(marker, answer);
+      const before1 = new Map([P413, PJSON].map((id) => [id, ""]));
+      for (const id of before1.keys()) before1.set(id, JSON.stringify(await meta(id)));
+      const mark1 = bodies.length;
+      const answers = await retag({ pausesMs: [10] });
+      const st = new Map((await claims()).map((c) => [c.id, c]));
+      const sent1 = bodies.slice(mark1);
+      const oMeta = await meta(O);
+      assert(answers.code === 1 && st.get(P408)?.status === "succeeded" && settled(await tagsRow(P408)) && sent1.filter((b) => b.includes("[29] P408")).length === 2
+          && st.get(P413)?.status === "failed" && /provider_413/.test(st.get(P413)?.last_error ?? "") && st.get(PJSON)?.status === "failed" && /no tags/.test(st.get(PJSON)?.last_error ?? "")
+          && JSON.stringify(await meta(P413)) === before1.get(P413) && JSON.stringify(await meta(PJSON)) === before1.get(PJSON) && (await tagsRow(P413)) === undefined && (await tagsRow(PJSON)) === undefined,
+        `a 408 is paused for and the thought re-tagged; a 413 and an answer in prose fail their thought, nothing written, exit 1 (${answers.code}: P408 ${st.get(P408)?.status} in ${sent1.filter((b) => b.includes("[29] P408")).length} call(s); P413 ${st.get(P413)?.last_error?.slice(0, 60)}; PJSON ${st.get(PJSON)?.last_error?.slice(0, 60)})`);
+      assert(st.get(N)?.status === "failed" && /SQL NULL/.test(st.get(N)?.last_error ?? "") && !sent1.some((b) => b.includes("[29] N,")) && (await tagsRow(N))?.marked === true
+          && oMeta.people !== undefined && JSON.stringify(oMeta.people) === '["Ada"]' && oMeta.type === "task" && oMeta.type_raw === null && JSON.stringify(oMeta.topics) === '["ledger"]' && settled(await tagsRow(O))
+          && st.get(C2)?.status === "succeeded" && !sent1.some((b) => b.includes("[29] C2")) && /1 already current/.test(answers.out)
+          && st.get(P400)?.status === "failed" && /provider_400/.test(st.get(P400)?.last_error ?? "") && (await tagsRow(P400)) === undefined
+          && settled(await tagsRow(TONLY)) && settled(await tagsRow(PONLY)),
+        `a thought whose metadata is SQL NULL is failed with no call, its row still marked; old tags the answer leaves out (type_raw) are cleared; a pooled thought no longer due is released with no call; a 400 fails its thought, nothing written; a type alone or topics alone with no row is in the backlog (N ${st.get(N)?.last_error?.slice(0, 50)}; O ${JSON.stringify(oMeta)}; ${line(answers.out, "already current")})`);
+
+      // The edit's audit event names the worker: the actor `retag` (no worker key here), the door db/retag.ts.
+      const [oEvent] = (await sql`SELECT actor_name, origin FROM thought_audit WHERE thought_id = ${O}::uuid ORDER BY seq DESC LIMIT 1`) as { actor_name: string | null; origin: string | null }[];
+      assert(oEvent?.actor_name === "retag" && oEvent.origin === "db/retag.ts", `a re-tag that moved the tags is one audit event naming the worker (${JSON.stringify(oEvent)})`);
+
+      // The egress gate reads the thought's metadata, not its text alone: a deny term on a topic keeps the thought's text home.
+      const H = await plant("[29] H, a thought on a held subject", { topics: ["hush"], type: "idea" });
+      const hushFrom = bodies.length;
+      const hushRun = await retag({ pausesMs: [10] }, { ...gated, OB1_EGRESS_DENY: "topic:hush" });
+      const hClaim = (await claims()).find((c) => c.id === H);
+      assert(hushRun.code === 1 && hClaim?.status === "failed" && /topic:hush/.test(hClaim.last_error ?? "") && !bodies.slice(hushFrom).some((b) => b.includes("[29] H,")),
+        `under OB1_EGRESS_DENY=topic:hush a thought with that topic fails naming the term, nothing of it sent (${hushRun.code}: ${hClaim?.last_error?.slice(0, 80)})`);
+
+      // A call past --timeout is the thought's: failed, the run going on, exit 1.
+      const PS = await plant("[29] PSLOW tagged, the model slow", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] PSLOW", "slow");
+      const slowRun = await retag({ timeout: 1, pausesMs: [10] });
+      SPECIAL.delete("[29] PSLOW");
+      const psClaim = (await claims()).find((c) => c.id === PS);
+      assert(slowRun.code === 1 && psClaim?.status === "failed" && /timed out after 1 s/.test(psClaim.last_error ?? "") && (await tagsRow(PS)) === undefined,
+        `a call past --timeout 1 fails its thought, nothing written (${slowRun.code}: ${psClaim?.last_error?.slice(0, 80)})`);
+
+      // The CLI's --dry-run writes nothing (the door, not run() alone).
+      const claimsBefore = JSON.stringify(await claims());
+      const keyBefore = await configured();
+      const cliDry = await cli("--dry-run");
+      assert(cliDry.code === 0 && cliDry.out.includes("Nothing was written.") && JSON.stringify(await claims()) === claimsBefore && (await configured()) === keyBefore,
+        `bun db/retag.ts --dry-run writes nothing: no claim moved, the key as it was (${cliDry.code})`);
+
+      // A 401 is the request's: the run stops, exit 2, nothing marked failed, the thought pending for the next run.
+      const P401 = await plant("[29] P401 tagged, the key refused", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] P401", 401);
+      const refusedRun = await retag({ pausesMs: [10] });
+      const p401 = (await claims()).find((c) => c.id === P401);
+      SPECIAL.delete("[29] P401");
+      assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
+        `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
+
+      // --switch-key: a run under another key goes ahead and records it.
+      const OTHER = retagKey("stub-meta", METADATA_PROMPT_VERSION + 1);
+      const switched = await retag({ job: OTHER, switchKey: true, pausesMs: [10] });
+      const statusOther = await retag({ status: true });
+      const badJob = await retag({ dryRun: true, job: "extract:x@p1" });
+      const shownJob = await retag({ status: true, job: "retag:x@p7" });
+      assert(switched.code !== 2 && (await configured()) === OTHER && switched.out.includes(`ob1_config.retag_key = ${OTHER}`)
+          && statusOther.code === 0 && statusOther.out.includes(`ob1_config.retag_key is ${OTHER}; this run uses ${JOB}`)
+          && badJob.code === 2 && /--job names a re-tag pool/.test(badJob.err) && shownJob.code === 0 && shownJob.out.includes("job:    retag:x@p7")
+          && retagKey("qwen3:8b", 1) === "retag:qwen3:8b@p1" && JSON.stringify(parseRetagKey("retag:qwen3:8b@p1")) === '{"model":"qwen3:8b","promptVersion":1}'
+          && parseRetagKey("retag:m@p01") === null && parseRetagKey("extract:m@p1") === null,
+        `--switch-key: a run under another key goes ahead and records it; --status under another recorded key says so, exit 0; --job of another shape refused, exit 2, and one of this shape used; the key builds and parses back, p01 and another prefix refused (${switched.code}: ${await configured()}; ${statusOther.code}; ${badJob.code})`);
     } finally {
       stub.stop(true);
       await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'retag:%'`;

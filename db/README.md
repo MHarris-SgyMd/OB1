@@ -6112,7 +6112,7 @@ bun retag.ts --url … --dry-run          # what a run would do; writes nothing
 bun retag.ts --url … --limit 25         # a trial
 bun retag.ts --url … --retry-failed     # failed rows back into the pool first
 bun retag.ts --url … --switch-key       # a model or prompt version other than ob1_config.retag_key's
-#   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60)   --timeout SECONDS (OB1_LLM_TIMEOUT's)   --job <retag:model@pN>
+#   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (OB1_LLM_TIMEOUT's)   --job <retag:model@pN>
 #   exits 0 clean · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal
 ```
 
@@ -6137,8 +6137,10 @@ and its answer is written through the 11-argument `update_thought` with
 `p_lineage = {"metadata": metadataRecipe(…)}` — under 148 that records the
 tags row at the text, the mark cleared, even when the tags came out the same
 (no event then). The run is refused before 148. A thought the policy refuses
-is failed naming the rule, nothing sent; an answer that is not tags is failed
-and nothing written; a provider error is read by `claim-loop.ts`'s rule; an
+is failed naming the rule, nothing sent; an answer that is not tags, or a 400,
+413 or 422, is failed and nothing written, as is a thought whose metadata is
+SQL NULL or no JSON object, before any call; a tag key the row holds and the
+answer leaves out is cleared; a provider error is read by `claim-loop.ts`'s rule; an
 edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
 key other than the recorded one needs `--switch-key`; `--status` and
 `--dry-run` write nothing. Not yet: `rebuild_derived`'s requeue (PR 2),
