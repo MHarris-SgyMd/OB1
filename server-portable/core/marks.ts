@@ -26,3 +26,12 @@ export const marksOn = (p: Markable): { item: MarkItem; mark: UnreviewedMark | u
 /** The distinct items, by `kind:key`, whose marks among these were not checked (null). */
 export const unreadItems = (ps: readonly Markable[]): Set<string> =>
   new Set(ps.flatMap(marksOn).filter((m) => m.mark === null).map((m) => itemKey(m.item)));
+
+/**
+ * Whether these marks show a read that failed (review passes 3 and 5): a null mark on an item not among those past the
+ * read's reach. One rule for the words and for plan_context's note, so the value and the text agree.
+ */
+export const showsFailure = (marks: readonly Markable[], unchecked: readonly MarkItem[] = []): boolean => {
+  const past = new Set(unchecked.map(itemKey));
+  return [...unreadItems(marks)].some((k) => !past.has(k));
+};

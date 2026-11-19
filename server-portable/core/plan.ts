@@ -23,7 +23,7 @@ import { TOOLS, unlocks, visibleToolNames, type ToolScope } from "../tools.ts";
 import type { Ctx } from "./context.ts";
 import { loadPlugins } from "./plugins.ts";
 import { knownMarks, labelHitsRead, markItems, runSearch, sqlState, ticketsNamedBy, type MarkOpts, type QueryVectorFailed, type SearchHit } from "./reads.ts";
-import { itemKey, marksOn } from "./marks.ts";
+import { itemKey, marksOn, showsFailure } from "./marks.ts";
 import type { Unreviewed } from "../store.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -421,7 +421,7 @@ export async function planContext(ctx: Ctx, principal: Principal, input: Input<"
   if (r.refusal) return refuse(r.refusal);
   const { rows, hits } = r;
   const gaps = knowledgeGaps(hits, r.vectorFailed, embeddingIdOf(ctx));
-  const notes: PlanNote[] = r.marksUnread ? [{ note: "unreviewed_not_read", section: "knowledge", reason: r.marksUnread }] : [];
+  const notes: PlanNote[] = [];
 
   // Board: the named tickets, in one agenda call, with what is left of the deadline.
   const named = boardKeysOf(hits);
@@ -436,6 +436,11 @@ export async function planContext(ctx: Ctx, principal: Principal, input: Input<"
     knowledge: { hits, preferCurrent: true, ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}) },
     board, specs: SPECS, procedures: PROCEDURES, tools: toolsFor(ctx, principal), gaps, notes, deadlineMs,
   });
+  // The knowledge's note only where its failure left a mark a kept hit shows null (review pass 5): on a page whose
+  // hits show no such mark it says nothing, in the value as in the text, which reads the same rule (showsFailure).
+  if (r.marksUnread && value.knowledge.hits.some((h) => showsFailure(h.priority ?? [], h.unreviewedUnchecked))) {
+    value.notes.unshift({ note: "unreviewed_not_read", section: "knowledge", reason: r.marksUnread });
+  }
   // A board not read says why in the row's filter, so its empty items are not read as a board that named nothing.
   await ctx.logPlanContext(principal, {
     query: request, matchCount: input.limit, arm: r.vectorFailed ? "literal" : "current",

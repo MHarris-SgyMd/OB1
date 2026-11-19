@@ -44,7 +44,7 @@ import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
-import { itemKey, marksOn, unreadItems, type Markable, type MarkItem } from "./core/marks.ts";
+import { marksOn, showsFailure, type Markable, type MarkItem } from "./core/marks.ts";
 import type { Captured, Deleted, EvidenceAppended, EvidenceCode, ForgetCode, Forgotten, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
@@ -217,8 +217,7 @@ const priorityField = (priority: readonly PriorityOn[] | null | undefined) =>
   Array.isArray(priority) ? priority.map((p) => ({
     kind: p.kind, ...(p.self && p.kind === "thought" ? {} : { key: p.key }), ...(p.self ? { self: true } : {}), effective: p.effective,
     ...(p.level !== null ? { level: p.level } : {}),
-    ...(p.inheritedFrom ? { inheritedFrom: { kind: p.inheritedFrom.kind, key: p.inheritedFrom.key, level: p.inheritedFrom.level, hops: p.inheritedFrom.hops, ...unreviewedField(p.inheritedFrom.unreviewed) } } : {}),
-    ...(p.fromItem ? { fromItem: { key: p.fromItem.key, level: p.fromItem.level, ...unreviewedField(p.fromItem.unreviewed) } } : {}),
+    ...sourceFields(p, true),
     ...(p.dueAt !== null ? { dueAt: p.dueAt } : {}), ...(p.urgency !== 0 ? { urgency: p.urgency } : {}), ...(p.overdue ? { overdue: true } : {}),
     ...(p.unblocks !== 0 ? { unblocks: p.unblocks } : {}), ...(p.settled ? { settled: true } : {}),
     ...(p.waiting ? { waiting: true, ...(p.notBefore !== null ? { notBefore: p.notBefore } : {}) } : {}),
@@ -231,6 +230,16 @@ const priorityField = (priority: readonly PriorityOn[] | null | undefined) =>
  */
 const unreviewedField = (u: UnreviewedMark | undefined) =>
   u ? { unreviewed: { findingId: u.findingId, statedAt: u.statedAt, days: u.days, level: u.level, windowDays: u.windowDays } } : {};
+/**
+ * A level's sources in the compact value, each with its mark where present (review pass 5: one shape for a priority's
+ * and a board ticket's). `all` keeps every source with its level (a priority's, which says where its level came from);
+ * otherwise only a marked source, by its item alone (a board line's, whose level is in its terms).
+ */
+const sourceFields = (s: { inheritedFrom?: { kind: string; key: string; level: number; hops: number; unreviewed?: UnreviewedMark } | null; fromItem?: { key: string; level: number; unreviewed?: UnreviewedMark } | null }, all: boolean) => ({
+  ...(s.inheritedFrom && (all || s.inheritedFrom.unreviewed)
+    ? { inheritedFrom: { kind: s.inheritedFrom.kind, key: s.inheritedFrom.key, ...(all ? { level: s.inheritedFrom.level, hops: s.inheritedFrom.hops } : {}), ...unreviewedField(s.inheritedFrom.unreviewed) } } : {}),
+  ...(s.fromItem && (all || s.fromItem.unreviewed) ? { fromItem: { key: s.fromItem.key, ...(all ? { level: s.fromItem.level } : {}), ...unreviewedField(s.fromItem.unreviewed) } } : {}),
+});
 const priorityFields = (h: { priority?: readonly PriorityOn[] | null; priorityMore?: number; priorityNotRead?: number; unreviewedUnchecked?: readonly MarkItem[] }) =>
   ({ priority: priorityField(h.priority), priorityMore: h.priorityMore ?? 0, priorityNotRead: h.priorityNotRead ?? 0, ...uncheckedField(h.unreviewedUnchecked) });
 /** The items past the unreviewed read's reach, `{kind, key}` each, only where any (SMD-3671 PR 3 review pass 3). */
@@ -241,7 +250,9 @@ const priorityCompat = (priority: readonly PriorityOn[] | null | undefined, more
   : priority?.length ? { priority: priorityField(priority), ...(more ? { priorityMore: more } : {}), ...(notRead ? { priorityNotRead: notRead } : {}), ...uncheckedField(unchecked) }
   : {};
 /** A page's marks not read once (SMD-3671 PR 3 review pass 1): the value's `unreviewedRead: false`, where a read failed. */
-const unreviewedReadField = (hits: readonly MarkedResult[]) => (markFacts(hitGroups(hits)).failed ? { unreviewedRead: false } : {});
+const unreviewedReadField = (f: MarkFacts) => (f.failed ? { unreviewedRead: false } : {});
+/** A reply's marks' facts, worked out once and handed to its text and its value (review pass 5); none for a refusal. */
+const factsOfReply = <T,>(o: Outcome<T>, hits: (v: T) => readonly MarkedResult[]): MarkFacts => (o.ok ? markFacts(hitGroups(hits(o.value))) : { marked: false, failed: false });
 /**
  * A result's judged relations as a typed field (SMD-2726; SMD-3306 PR 7a-2b): each relation's id, word, side, the
  * judge's confidence, when it was last judged and whether it is stale, and the other thought's id, trust, time and
@@ -255,7 +266,7 @@ const relationsFields = (h: { relations?: readonly RelationShown[] | null; relat
   ({ relations: relationsField(h.relations), relationsMore: h.relationsMore ?? 0 });
 
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust, its moved tickets and its claims; the window prefer_current read. */
-const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
+const safeSearch = (f: MarkFacts): Safe<SearchThoughtsResult> => (v) => ({
   preferCurrent: v.preferCurrent,
   // The marker word alone, as a capture's (SMD-2891): the words are in the text.
   ...(v.vectorFailed ? { vectorFailed: v.vectorFailed.reason } : {}),
@@ -266,7 +277,7 @@ const safeSearch: Safe<SearchThoughtsResult> = (v) => ({
   // refuses the inputs this one always sends, as it does prefer_current's, so it never answers without the field.)
   priority: v.priority ?? null,
   hits: v.hits.map(safeHit),
-  ...unreviewedReadField(v.hits),
+  ...unreviewedReadField(f),
 });
 /** A search_thoughts hit's safe fields (and a plan_context knowledge hit's, SMD-2684): ids, times, scores, trust and its labels. */
 function safeHit(h: SearchHit) {
@@ -280,17 +291,17 @@ function safeHit(h: SearchHit) {
   };
 }
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count, trust and claims. */
-const safeKeyword: Safe<KeywordResult> = (v) => ({
+const safeKeyword = (f: MarkFacts): Safe<KeywordResult> => (v) => ({
   offset: v.offset, total: v.total,
   hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h), ...relationsFields(h), ...priorityFields(h) })),
-  ...unreviewedReadField(v.hits),
+  ...unreviewedReadField(f),
 });
 /** list_thoughts: per thought its id, date, the newer thought that supersedes it, its trust and its claims; the page's sort and the next page's cursor (SMD-2995). */
-const safeList: Safe<ListThoughtsResult> = (v) => ({
+const safeList = (f: MarkFacts): Safe<ListThoughtsResult> => (v) => ({
   thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t), ...relationsFields(t), ...priorityFields(t) })),
   sort: v.sort,
   cursor: v.cursor,
-  ...unreviewedReadField(v.thoughts),
+  ...unreviewedReadField(f),
 });
 /**
  * list_supersession_proposals: per proposal its ids, verdict, numbers, dates and the pass that judged it — the sides and the
@@ -818,6 +829,7 @@ function hitBlocks(data: readonly SearchHit[], literal: string | null): string[]
 }
 
 export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPreferCurrent: boolean): Reply {
+  const marks = factsOfReply(o, (v) => v.hits);
   return render(o, (v) => {
     const { query, hits: data, facts, vectorFailed } = v;
     // The provider did not answer for the query (SMD-2891): first, what the
@@ -879,7 +891,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     // SMD-3599: claims not read are said, not left to read as none held (review pass 1).
     if (data.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     if (data.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
-    notes.push(...unreviewedNotes(markFacts(hitGroups(data))));
+    notes.push(...unreviewedNotes(marks));
     if (data.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     if (anyStale(data)) notes.push(STALE_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
@@ -900,10 +912,11 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     }
 
     return `Found ${data.length} thought(s):${notes.length ? ` ${notes.join(" ")}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), safeSearch);
+  }, (r) => searchRefusal(r, askedPreferCurrent ? currentSearchHint : undefined), safeSearch(marks));
 }
 
 export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
+  const marks = factsOfReply(o, (v) => v.hits);
   return render(o, ({ query, offset, total, hits: data }) => {
     if (data.length === 0) {
       // Two different nothings, and the difference is actionable: an empty
@@ -962,11 +975,12 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(markFacts(hitGroups(data))).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
-  }, (r) => searchRefusal(r), safeKeyword);
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(marks).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
+  }, (r) => searchRefusal(r), safeKeyword(marks));
 }
 
 export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
+  const marks = factsOfReply(o, (v) => v.thoughts);
   return render(o, ({ thoughts: data, sort, cursor }) => {
     if (!data.length) return "No thoughts found.";
     const onPage = new Map(data.map((t, i) => [t.id, `item ${i + 1}`]));
@@ -1007,12 +1021,12 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(markFacts(hitGroups(data))).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(marks).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
       : "Refused: `after` is not a list_thoughts cursor — pass the `cursor` a previous page ended with, as it was given, or leave it out for the first page."
-    : unknownRefusal(r), safeList);
+    : unknownRefusal(r), safeList(marks));
 }
 
 // ── Judged relations (SMD-2726; SMD-3306 PR 7a-2b) ───────────────────────────
@@ -2831,10 +2845,7 @@ const itemGroups = (items: readonly AgendaItem[]): MarkGroup[] => items.map((i) 
  */
 const markFacts = (groups: readonly MarkGroup[]): MarkFacts => ({
   marked: groups.some((g) => g.marks.flatMap(marksOn).some((m) => !!m.mark)),
-  failed: groups.some((g) => {
-    const past = new Set((g.unchecked ?? []).map(itemKey));
-    return [...unreadItems(g.marks)].some((k) => !past.has(k));
-  }),
+  failed: groups.some((g) => showsFailure(g.marks, g.unchecked)),
 });
 /** Items not checked, past the read's reach, in the words search's line and the agenda's use. */
 const uncheckedWords = (n: number) => `unreviewed not checked on ${n} item${n === 1 ? "" : "s"}: past the read's reach`;
@@ -3062,8 +3073,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
                                               // SMD-3671 PR 3: only a mark present; marks not read are the gap's.
                                               ...unreviewedField(i.unreviewed), ...uncheckedField(i.unreviewedUnchecked),
                                               // A level's source's mark, present alone, as the compact value carries the item's (review pass 3).
-                                              ...(i.inheritedFrom?.unreviewed ? { inheritedFrom: { kind: i.inheritedFrom.kind, key: i.inheritedFrom.key, ...unreviewedField(i.inheritedFrom.unreviewed) } } : {}),
-                                              ...(i.fromItem?.unreviewed ? { fromItem: { key: i.fromItem.key, ...unreviewedField(i.fromItem.unreviewed) } } : {}) })),
+                                              ...sourceFields(i, false) })),
         moreOpen: v.board.moreOpen ?? [], othersMore: v.board.othersMore ?? 0, waitingMore: v.board.waitingMore ?? 0,
         // An unknown status type is the board's free text (068 keeps it as written): guard() holds it to a token, as every string here.
         // Compact (SMD-4191): the settled by key; an unknown status type with its word, which guard() holds to a token.

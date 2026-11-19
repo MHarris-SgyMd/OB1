@@ -8608,15 +8608,26 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   assert(failedDeepAsks.length === 1 && failedDeepAsks[0].length === UNREVIEWED_READ && Object.values(failedDeep ?? {}).every((h) => !h.unreviewedUnchecked)
       && failedDeep?.r1000.priority[0].unreviewed === null && failedDeepReply.split("Whether these priorities are unreviewed could not be read").length === 2 && !failedDeepReply.includes("past the read's reach"),
     `a failed first read with items past its reach: one read, no second, every null the failure's — none named unchecked — and the failure said (${failedDeepAsks.length} reads, ${JSON.stringify(failedDeep?.r1000.unreviewedUnchecked)})`);
-  // Review pass 4: a failed priority read settles the findings read it started before it answers, still unlogged.
+  // Review passes 4 and 5: a failed priority read under a deadline (plan_context's, its findings read bounded) settles
+  // the findings read it started before it answers; with none (every other read) it answers at once, never waiting on
+  // an unbounded read, which finishes on its own. Unlogged either way.
   let findingsSettled = false;
   const slowFindings = { effectivePriority: async () => { throw Object.assign(new Error("function effective_priority(jsonb) does not exist"), { errno: "42883" }); },
     staleUnreviewedOn: async () => { await Bun.sleep(40); findingsSettled = true; return []; } };
-  console.error = () => {};
-  let abandoned;
-  try { abandoned = await priorityRead(slowFindings as never, [{ id: "f1", content: "the bill" }]); } finally { console.error = realError; }
-  assert(abandoned.labels === null && findingsSettled,
-    `a failed priority read waits for the findings read it started before it answers, so no read is left holding its connection (${findingsSettled})`);
+  const settleLog: string[] = [];
+  console.error = (...x: unknown[]) => { settleLog.push(x.join(" ")); };
+  let abandoned, unbounded, unboundedSettled = true;
+  try {
+    abandoned = await priorityRead(slowFindings as never, [{ id: "f1", content: "the bill" }], undefined, undefined, { leftMs: () => 5000 });
+    const boundedSettled = findingsSettled;
+    findingsSettled = false;
+    unbounded = await priorityRead(slowFindings as never, [{ id: "f1", content: "the bill" }]);
+    unboundedSettled = findingsSettled;
+    await Bun.sleep(80);
+    findingsSettled = boundedSettled;
+  } finally { console.error = realError; }
+  assert(abandoned.labels === null && findingsSettled && unbounded.labels === null && !unboundedSettled && settleLog.every((l) => l.startsWith("priority:")),
+    `a failed priority read under a deadline waits for the findings read it started; with none it answers at once, the findings read finishing on its own; neither logs it (${findingsSettled} ${unboundedSettled})`);
 
   // The agenda: each listed item marked after the agenda decided its list, the list and its order the store's.
   const item = (key: string, rank: number, effective: number) => ({ rank, kind: "ticket", key, source: "linear", title: key, project: null, status: "Todo", statusType: "unstarted", owner: null, effective, level: Math.floor(effective),
@@ -8762,6 +8773,16 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
     assert(gotLeft === 8000 - 2000 && JSON.stringify(pcv?.notes) === '[{"note":"unreviewed_not_read","section":"knowledge","reason":"deadline"}]'
         && pcText.includes("\nWhether the hits' priorities are unreviewed was not all read (out of the knowledge's time)") && !pcText.includes("Whether these priorities are unreviewed could not be read"),
       `plan_context's knowledge reads its marks under its share of the deadline (what is left of the 8000 ms before the board's reserve); out of it, the read's answer a note in notes, said in the knowledge's section, never the grant's hint (${gotLeft} ${JSON.stringify(pcv?.notes)})`);
+    // Review pass 5: the knowledge's note only where its failure left a mark a kept hit shows null: hits with no
+    // priority carry none, in the value or the text, whether the read failed or ran out of time.
+    for (const reason of ["failed", "deadline"] as const) {
+      const bare = { ...outHit, priority: [] };
+      const quietSearch = async () => ({ rows: [hitRow], hits: [bare], marksUnread: reason });
+      const quiet = await planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, now: () => pt, search: quietSearch as never });
+      const quietText = quiet.ok ? text(say.renderPlanContext(quiet)) : "";
+      assert(quiet.ok && quiet.value.notes.length === 0 && !quietText.includes("unreviewed") && !(quiet.ok && JSON.stringify(say.renderPlanContext(quiet).structuredContent).includes("unreviewed_not_read")),
+        `a knowledge read that ${reason === "failed" ? "failed" : "ran out of time"} on hits with no priority leaves no note: none in the value, none in the text (${JSON.stringify(quiet.ok ? quiet.value.notes : null)})`);
+    }
     // The budget: a hit's priorities cut to HIT_LABELS.priority keep a count of those not checked they still show.
     const cutAll = sourced!.f1.priority[0];
     const longHit = { ...outHit, priority: [{ ...cutAll, unreviewed: false }, { ...cutAll, key: "SMD-A", kind: "ticket", self: false, unreviewed: false }, { ...cutAll, key: "SMD-B", kind: "ticket", self: false, unreviewed: null, fromItem: null },

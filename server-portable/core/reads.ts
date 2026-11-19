@@ -716,10 +716,12 @@ export async function priorityRead(store: Pick<ThoughtStore, "effectivePriority"
   try {
     labels = priorityLabels(await readPriorities(store, rows, { have, ask, ...(weights === undefined ? {} : { weights }) }), rows);
   } catch (e) {
-    // The first read's own failure goes unsaid (review pass 2): the priorities' is the reply's, and logged here. It is
-    // settled before the reply goes (review pass 4): abandoned, it held its pool connection, plan_context's in a transaction.
+    // The first read's own failure goes unsaid (review pass 2): the priorities' is the reply's, and logged here. Under a
+    // deadline (plan_context's, in its own transaction) it is settled before the reply goes, its wait bounded (review
+    // pass 4); elsewhere it is left to finish, so a failed read never waits on an unbounded one (review pass 5). It
+    // never rejects, nor logs.
     console.error(`priority: the effective priority read failed (${sqlState(e) || "no code"}): ${String((e as { message?: unknown }).message ?? e).slice(0, 200)}; results carry priority: null`);
-    await first;
+    if (marks.leftMs) await first;
     return { labels: null, unread: null };
   }
   const reads = [await first];
