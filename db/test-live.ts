@@ -27,8 +27,8 @@
  *   DATABASE_URL=... bun test-live.ts          # against a LOCAL one you already have
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  *
- * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
- * (SHARDS below). Brain Checks runs the four side by side, one matrix cell each,
+ * OB1_LIVE_SHARD=sleep|long|extract|sweep|claims|rest runs one shard of the
+ * sections (SHARDS below). Brain Checks runs the six side by side, one matrix cell each,
  * every one on a database of its own (SMD-3048, SMD-3169), and so does
  * db/ci-parity.sh, from one checkout, each on a Postgres of its own under a
  * with-postgres.sh (SMD-3688): [2] edits a copy of the migrations, not the
@@ -154,16 +154,30 @@ if (!URL_) {
  * ~220 s, and with [9f] ~190 s on main's CI long's live step passed 600 s
  * under ci-parity's load, so it runs in sweep (~376 s here with it, against
  * long's ~450 and the rest's ~600 on CI), the sleep scaffold being the
- * module's, not [38r]'s.
+ * module's, not [38r]'s. By then the rest was the run's longest cell by
+ * ~110 s, a live step of 571 s at the median of main's 15 runs to 42ab662a
+ * (max 604), and db/ci-parity.sh stopped it at its 600 s limit in seven runs
+ * of twenty on the maintainer's laptop with nothing failed (SMD-4366). Of its
+ * 545 s of sections [10] was 238 and [16] 200, by the medians of main's runs
+ * 44529853317, 44538524681 and 44557642841, each mostly real clocks: in [10]
+ * 211 s is waits of 2 s or more before a row, in [16] 161 s, and across the
+ * three runners [10] moved 0.4 s and [16] 2.5. Neither fits beside another
+ * cell's sections, so [10] runs in a sixth cell, claims, with [38b] (~100 s)
+ * from long, by then the next longest (a 460 s live step): on those runs'
+ * section times the rest ~308 s, claims ~338, long ~347, against sweep's
+ * ~365, sleep's ~296 and extract's ~313, a live step some 10-27 s more for
+ * the module's load. The rest keeps [16] and the most room, since a section
+ * no shard lists is its own.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["5d", "10g", "37b", "38"],
-  long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
+  long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
   sweep: ["38s", "50", "51", "38p"],
+  claims: ["10", "38b"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
