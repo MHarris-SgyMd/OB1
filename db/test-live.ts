@@ -22936,7 +22936,7 @@ if (want("26")) {
         },
       });
       try {
-        // A key for the stub: an endpoint not declared local that carries none is skipped (review pass 8).
+        // A key for the stub (the runs below carry one; a keyless run is its own case, review passes 8 and 9).
         const t3Env = (extra: Record<string, string>) => ({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_API_KEY: "zq3-test-key", ...extra });
         const ALLOW = { OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "topic:health,marker:zq3-private" };
         // The sent rows of every prompt, by their content.
@@ -23028,7 +23028,9 @@ if (want("26")) {
         const failed = await lint(t3Env(ALLOW), "--report", join(scratch, "t3x.md"));
         const failedText = read(join(scratch, "t3x.md"));
         const failedCalls = prompts.length - from;
-        const keyless = await lint({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...ALLOW }, "--tier", "3", "--report", join(scratch, "t3kl.md"));
+        // Keyless: a public address not declared local is skipped before any read; a keyless model server on this
+        // machine, kept under the gate (not declared local), runs (review pass 9).
+        const keyless = await lint({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: "https://api.zq3-lint-test.invalid/v1", ...ALLOW }, "--tier", "3", "--report", join(scratch, "t3kl.md"));
         const publicLocal = await lint(t3Env({ ...ALLOW, OB1_LLM_BASE_URL: "https://api.zq3-lint-test.invalid/v1", OB1_LLM_LOCAL: "1" }), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3pl.md"));
         const queried = await lint(t3Env({ ...ALLOW, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1?api_key=zq3querykey` }), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3q.md"));
         mode = "null";
@@ -23042,6 +23044,7 @@ if (want("26")) {
         const half = await lint(t3Env(ALLOW), "--tier", "3", "--report", join(scratch, "t3hf.md"));
         mode = "answer";
         const userinfo = await lint({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://zq3user:zq3pass@127.0.0.1:${stub.port}/v1`, ...ALLOW }, "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3ui.md"));
+        const keylessHere = await lint({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...ALLOW }, "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3kh.md"));
         const { tier3Prompt } = await import("./lint-sweep.ts");
         const wide = tier3Prompt([{ id: "x", created: "2026-01-01", content: "zq3 wide", metadata: { type: "t".repeat(5000), topics: Array(9).fill("p".repeat(5000)), tags: [{ deep: "q".repeat(5000) }] } }], "2026-01-01");
         const wideRow = (JSON.parse(wide.split("THOUGHTS:\n")[1].split("\n\nAudit")[0]) as { type: string; topics: string[]; tags: string[] }[])[0];
@@ -23053,7 +23056,8 @@ if (want("26")) {
                && failed.code === 1 && failedCalls === 1 && /## Tier 1 — thoughts/.test(failedText) && /## Tier 2 — the entity graph/.test(failedText)
                && /\*Stopped: batch 1 of 2's call: 127\.0\.0\.1:\d+ answered 400 \(often response_format or reasoning_effort, which this call sends, not supported by this model or endpoint\)\.\*/.test(failedText) && !/bad request|forged/.test(failedText + failed.stderr) && !/### Contradictions/.test(failedText)
                && /; then stopped$/m.test(failed.stdout) && /^tier3: failed$/m.test(failedText)
-               && keyless.code === 0 && /\[tier 3\] skipped: the chat endpoint 127\.0\.0\.1:\d+ is not declared local and carries no key/.test(keyless.stdout) && /^tier3: skipped$/m.test(read(join(scratch, "t3kl.md")))
+               && keyless.code === 0 && /\[tier 3\] skipped: the chat endpoint api\.zq3-lint-test\.invalid is at a public address, not declared local, and carries no key/.test(keyless.stdout) && /^tier3: skipped$/m.test(read(join(scratch, "t3kl.md")))
+               && keylessHere.code === 0 && /20 sent in 1 call\(s\)/.test(keylessHere.stdout) && /^tier3: ran$/m.test(read(join(scratch, "t3kh.md")))
                && /api\.zq3-lint-test\.invalid is declared local \(OB1_LLM_LOCAL\) but is no loopback or private address/.test(publicLocal.stderr)
                && queried.code === 1 && !/zq3querykey/.test(queried.stdout + queried.stderr + read(join(scratch, "t3q.md")))
                && nullBody.code === 0 && /20 sent in 1 call\(s\): 0 finding\(s\), 1 answer\(s\) unreadable/.test(nullBody.stdout)
@@ -23061,7 +23065,7 @@ if (want("26")) {
                && /did not answer within OB1_LLM_TIMEOUT \(1 s\): raise it, or turn OB1_METADATA_REASONING off/.test(slow.stderr) && /20 sent in 1 call\(s\), then stopped\./.test(read(join(scratch, "t3sl.md"))) && /\*\*20\*\* in \*\*1\*\* call\(s\), a failed one's included/.test(failedText)
                && !/^# zq3 forged/m.test(failedText) && !/\r/.test(failedText) && !/<img|\]\(javascript/.test(failedText) && !failed.stderr.includes(String.fromCharCode(27))
                && /lint-sweep: Tier 3 stopped — batch 1 of 2's call: .*The report was written with tiers 1 and 2\./.test(failed.stderr),
-          `…an answer that is no JSON object, or no text, loses its batch, counted, every answer unreadable said and in the frontmatter (one of two not), a key in the base URL's userinfo a key, never printed; a stop on the stdout line and the frontmatter; a keyless endpoint not declared local skipped; a public host declared local warned of; a type, topics and tags each cut to 100 characters; a refused call (400, not retried) stops the tier: every tier's report written, the batch it dialled counted as sent, the provider's words printed nowhere (an allowlist: the host and the status) nor a key in the base URL's query, a body of null counted unreadable, exit 1 (exit ${prose.code}, ${numeric.code}, ${failed.code}, ${queried.code}, ${nullBody.code}; ${wide.length}; ${nullBody.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()} | ${nullBody.stderr.trim().split("\n").pop()} | ${failedText.split("\n").find((l) => l.startsWith("*Stopped"))} | ${/zq3querykey/.test(queried.stdout + queried.stderr + read(join(scratch, "t3q.md")))}; ${failed.stderr.trim().split("\n").pop()})`);
+          `…an answer that is no JSON object, or no text, loses its batch, counted, every answer unreadable said and in the frontmatter (one of two not), a key in the base URL's userinfo a key, never printed; a stop on the stdout line and the frontmatter; a keyless endpoint at a public address not declared local skipped, a keyless one on this machine run; a public host declared local warned of; a type, topics and tags each cut to 100 characters; a refused call (400, not retried) stops the tier: every tier's report written, the batch it dialled counted as sent, the provider's words printed nowhere (an allowlist: the host and the status) nor a key in the base URL's query, a body of null counted unreadable, exit 1 (exit ${prose.code}, ${numeric.code}, ${failed.code}, ${queried.code}, ${nullBody.code}; ${wide.length}; ${nullBody.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()} | ${nullBody.stderr.trim().split("\n").pop()} | ${failedText.split("\n").find((l) => l.startsWith("*Stopped"))} | ${/zq3querykey/.test(queried.stdout + queried.stderr + read(join(scratch, "t3q.md")))}; ${failed.stderr.trim().split("\n").pop()})`);
 
         // A session deletes one thought and marks another restricted while the first call is out: the second batch,
         // read again before its call, sends neither.
@@ -23252,7 +23256,7 @@ if (want("26")) {
           const supplement = String.fromCodePoint(0xe0101, 0xe01ef);
           const { privateHost } = await import("./lint-sweep.ts");
           const hosts = ["http://127.0.0.1:11434/v1", "http://localhost:1/v1", "http://ollama:11434/v1", "http://10.1.2.3/v1", "http://172.20.0.5/v1", "http://192.168.1.9/v1", "http://[::1]:8/v1", "http://box.local/v1",
-            "https://openrouter.ai/api/v1", "http://172.32.0.1/v1", "http://8.8.8.8/v1", "https://api.example.com/v1"].map(privateHost).map((b) => (b ? 1 : 0)).join("");
+            "http://100.100.1.2/v1", "https://openrouter.ai/api/v1", "http://172.32.0.1/v1", "http://8.8.8.8/v1", "https://api.example.com/v1", "http://100.128.0.1/v1"].map(privateHost).map((b) => (b ? 1 : 0)).join("");
           const accountWords = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t2", "t3"], issue: "t2 says the staging AWS account is owned by the platform team; t3.large" }] }), digits)?.findings[0]?.issue;
           const nonRefs = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "see /t3, t1.5, T2, t01 and ?d=t2" }] }), b5)?.findings[0];
           // Review pass 8: a 503 every time stops after the pauses run out (one retry for one pause), exit 1.
@@ -23330,7 +23334,7 @@ if (want("26")) {
                  && flakyCode === 0 && flakyCalls === 2 && retryDropped
                  && window > 10 && !/stopped at/.test(atWindow) && new RegExp(`of ${window - 1} read .*\\(the read stopped at ${window - 1}\\)`).test(belowWindow)
                  && shapesRead.join(",") === shapesWant.join(",") && accountWords === "t2 says the staging AWS account is owned by the platform team; t3.large"
-                 && hosts === "111111110000" && lateKey === "(withheld: the model's words read as a secret)" && splitKey === "(withheld: the model's words read as a secret)" && sanitizePreview(`a${supplement}b`) === "ab" && sensitivityText(`a${supplement}b`) === "ab"
+                 && hosts === "11111111100000" && lateKey === "(withheld: the model's words read as a secret)" && splitKey === "(withheld: the model's words read as a secret)" && sanitizePreview(`a${supplement}b`) === "ab" && sensitivityText(`a${supplement}b`) === "ab"
                  && /until the sample filled or the window ended\): /.test(recheckText)
                  && nonRefs?.issue === "see /t3, t1.5, T2, t01 and ?d=t2" && nonRefs.ids.length === 1
                  && readTier3Answer(`${good.slice(0, 30)}`, b5) === null

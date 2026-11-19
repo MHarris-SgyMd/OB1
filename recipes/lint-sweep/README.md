@@ -67,9 +67,10 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   endpoint only when it has no base of its own; a chat endpoint at
   `OB1_CHAT_BASE_URL` takes `OB1_CHAT_API_KEY` alone. A leftover
   `OPENROUTER_API_KEY` goes as the bearer key to whatever `OB1_LLM_BASE_URL`
-  names, so remove it unless that is OpenRouter. An endpoint not declared local
-  that carries no key at all is skipped before any read: a hosted provider
-  would refuse each call only after its text had left. A job that ran Tier 3 needs the policy to let its thoughts leave,
+  names, so remove it unless that is OpenRouter. An endpoint at a public address,
+  not declared local, that carries no key at all is skipped before any read,
+  since a hosted provider would refuse each call only after its text had left;
+  a keyless model server on this machine or its private network still runs. A job that ran Tier 3 needs the policy to let its thoughts leave,
   or runs tiers 1 and 2 alone (`--max-llm-calls 0`). A read-only role the old README granted
   `entities` and `edges` needs SELECT on `ob1_entities` and `ob1_entity_edges`
   in their place: the run locks every table its tiers read first, so a missing

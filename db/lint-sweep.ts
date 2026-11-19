@@ -101,9 +101,11 @@
  * topics and tags) and, apart, its whole text: it goes only when both pass, so
  * a writer's marker anywhere in the thought is the thought's — and a refused
  * one is left out; the call names every thought it carries, and
- * providerCallPrepared gates each again. A chat endpoint not declared local
- * that carries no key (nor userinfo) skips the tier, before any read: a hosted
- * provider would refuse each call only after its text had left; a host
+ * providerCallPrepared gates each again. A chat endpoint at a public address
+ * (privateHost), not declared local, that carries no key (nor userinfo) skips
+ * the tier, before any read: a hosted provider would refuse each call only
+ * after its text had left (a keyless model server on this machine or its
+ * private network, kept under the gate, still runs, review pass 9); a host
  * declared local that is no loopback or private address is warned of
  * (privateHost), since the declaration turns the gate off. The report's
  * frontmatter carries `tier3:` (ran, skipped, failed, unreadable) for a job.
@@ -706,7 +708,7 @@ const skipped3 = (o: Tier3Options, reason: string, counts: Partial<Tier3> = {}, 
 
 /**
  * Whether a base URL names this machine or a private network: connect.ts's loopback hosts (its rule is the one), the
- * rest of 127/8, RFC 1918 and link-local IPv4, IPv6 unique-local and link-local, `*.local`, `*.internal`, and a
+ * rest of 127/8, RFC 1918, shared (100.64/10, a tailnet's) and link-local IPv4, IPv6 unique-local and link-local, `*.local`, `*.internal`, and a
  * single-label name (a compose service, `ollama`). A warning's test, never the gate's: OB1_LLM_LOCAL stays a
  * declaration (embed.ts reads nothing off the address).
  */
@@ -724,7 +726,7 @@ export function privateHost(base: string): boolean {
   const v4 = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
   if (!v4) return false;
   const [a, b] = [Number(v4[1]), Number(v4[2])];
-  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
 }
 
 /** Retry a call while its failure is transient (429, 5xx, a connection's), after each of `pauses`. */
@@ -996,11 +998,12 @@ export async function run(opts: SweepOptions): Promise<number> {
       // even with an actor, sends nothing and resolves no key; then the key (its registry write lands in this brain),
       // and the policy again for an unkeyed run, whose thoughts carry no actor.
       // The policy first, the more basic refusal; then a hosted endpoint with no credential, which would refuse each call
-      // only after its text had left (review pass 8).
+      // only after its text had left (review pass 8). A public address alone: OB1_LLM_LOCAL is never inferred, so a
+      // keyless Ollama on this machine kept under the gate is not declared local and must still run (review pass 9).
       const keyed = o3.maxCalls === 0 ? "--max-llm-calls 0"
         : egressRefusal(o3.cfg.chat, o3.cfg.egress)
-          ?? (!o3.cfg.chat.local && !o3.cfg.chat.key && !o3.cfg.chat.userinfo
-            ? `the chat endpoint ${hostOf(o3.cfg.chat.base)} is not declared local and carries no key (OB1_CHAT_API_KEY for OB1_CHAT_BASE_URL; OB1_LLM_API_KEY, or OPENROUTER_API_KEY, for OB1_LLM_BASE_URL): a hosted provider would refuse each call after its text had left`
+          ?? (!o3.cfg.chat.local && !o3.cfg.chat.key && !o3.cfg.chat.userinfo && !privateHost(o3.cfg.chat.base)
+            ? `the chat endpoint ${hostOf(o3.cfg.chat.base)} is at a public address, not declared local, and carries no key (OB1_CHAT_API_KEY for OB1_CHAT_BASE_URL; OB1_LLM_API_KEY, or OPENROUTER_API_KEY, for OB1_LLM_BASE_URL): a hosted provider would refuse each call after its text had left`
             : null);
       if (keyed) t3 = skipped3(o3, keyed);
       else {

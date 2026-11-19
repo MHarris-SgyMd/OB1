@@ -6016,8 +6016,8 @@ weekly-digest's hold-back (`db/sensitivity.ts`): a `restricted` thought, or a
 column, or the patterns over what is sent and the whole text, never leaves.
 `OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` is an unchecked declaration that turns the
 gate off for that endpoint, for a model on this machine or its private network
-alone (the run warns at another host); an endpoint not declared local that
-carries no key is skipped before any read. The report's frontmatter carries
+alone (the run warns at another host); an endpoint at a public address, not
+declared local, that carries no key is skipped before any read. The report's frontmatter carries
 `tier3:` (`ran`, `skipped`, `failed`, `unreadable`) for a job to read.
 Under the default deny with no allow term and no local endpoint, the tier is
 skipped before any read; release it with `OB1_EGRESS_ALLOW=actor:<the worker
