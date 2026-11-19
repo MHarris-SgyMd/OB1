@@ -1,17 +1,4 @@
----
-type: added
-bump: minor
-tickets: [SMD-4369]
-migrations: []
----
-
-## Changelog
-
-The H2O-Lightning-4B decision tier (`jev/h2o/serve.py`, the tier decide mode calls) can read two-way: `H2O_ATTENTION=two-way`, on a revision trained for it (H2O's are from v1.3), reads each question with the model's full-attention layers attending in both directions, the mode H2O recommends. At start it checks itself against the answers H2O recorded for three probes and does not serve if they differ. Nothing else changes until the setting is given: the tier still reads one-way, at `v1.2.3`, with the same `rules` value in `/info`. A two-way read shares no prefix, so each question of a request reads its record again, and a prompt (the record, the question and its options) over `H2O_TWO_WAY_MAX_TOKENS` (8000) is refused with a 422. In both modes, a lone surrogate character in a proposition or an option is now refused with a 422 for that pair, as one in the record always was; the one-way tier answered a 500 for it, which a caller retries without end (SMD-4369).
-
-## Record
-
-The decision tier reads H2O-Lightning-4B two-way on this Mac, through its own adapter, checked at start against H2O's recorded answers; the pin stays at v1.2.3 until it is measured on our question (SMD-4369)
+# 542. The decision tier reads H2O-Lightning-4B two-way on this Mac, through its own adapter, checked at start against H2O's recorded answers; the pin stays at v1.2.3 until it is measured on our question (SMD-4369)
 
 **Why.** The tier loads `h2oai/h2o-lightning-4b` at `v1.2.3` (2026-10-09). H2O has published through `v1.4.2` (2026-10-29), with new weights at v1.3, v1.3.1 and v1.4.0. From v1.3 the weights answer under two attention patterns, and the gains H2O reports are in the new one: two-way, where the answer slot sees the record, the question and the options in both directions. H2O serves two-way through its own build of vLLM on CUDA, which this Mac does not run. Read one-way, the way this adapter read, v1.4.2 scores no higher than v1.2.3 on H2O's public set by the cards' own counts (202 of 231 against 205; two-way 206). So an upgrade is worth measuring only two-way, and the maintainer chose to get two-way on this Mac (2026-11-17).
 
@@ -116,4 +103,3 @@ The decision tier reads H2O-Lightning-4B two-way on this Mac, through its own ad
 - The refusal of a revision not trained for two-way named `H2O_ATTENTION`, which the arm's caller never set. It names the revision, and the arm adds the setting to change. (caught: cold-read)
 - The "Held" line still said sixteen made-up rows. (caught: cold-read)
 - **Declined:** recording each row's length in the first read so the file is fetched once. Each fetch is a pass over the file, and the smaller chunk that makes more of them is what pass 2 asked for, to hold less beside the model.
-

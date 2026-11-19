@@ -45,8 +45,8 @@ import { hostname, tmpdir } from "node:os";
 import { CONTRIB_DIR, CONTRIB_SCHEMA_FILES, SCHEMAS_DIR, TID_PROBE, REMOTE_DB_FLAG, applyFunctionSettings, applyMigrations, buffersOf, communitySchemaFiles, createAssert, trackSections, cuttableRelay, heldGate, pollUntil, sampleStatementOf, dropSchema, explainPrepared, extractBody, loadChunkRows, neverAnswers, plantLegacyRow, probePacedOutage, runMigrator, runScript, seededRandom, updatedAtTriggerState, watchStream } from "./test-support.ts";
 import { LOOPBACK_HOSTS, openSql } from "./connect.ts";
 import { heartbeatFor, leaseRefusal, liveGate, MAX_BATCH, setFront } from "./lease.ts";
-import { OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
-import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, readHeartbeats, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED } from "../server-portable/brain-info.ts";
+import { ALONE_OUTAGES, OUTAGE_MS, PROBE_PROMPT, START_REFUSALS, SUSPECT_WINDOW, TRANSIENT_PAUSES_MS, workerIdentity, type StartResult } from "./worker-bootstrap.ts";
+import { FINDING_OUTCOMES_SQL, findingOutcome, findingRows, findingsLine, findingsValue, heartbeatState, readDatabaseFacts, readHeartbeats, SLEEP_REFUSALS, threadCensus, threadsFact, threadsLine, threadsRow, UNBOUNDED, type ReembedBackoff, type ReembedThoughtWait } from "../server-portable/brain-info.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { MENDER_ACTOR } from "../server-portable/core/mend.ts";
 import { actorPayload } from "../server-portable/store.ts";
@@ -149,6 +149,12 @@ if (!URL_) {
  * extract's floor. SMD-3318's [50], the backup's ~13-25 s with its lock and
  * signal waits, went to sweep (~141 s of live step on main's runs to
  * 27ea5b19) rather than the rest, by then the run's longest cell (~562 s).
+ * SMD-4254's [38p], a thought crashing re-embed's provider under the
+ * scheduler, went to long beside [38r] at first; its review passes took it to
+ * ~220 s, and with [9f] ~190 s on main's CI long's live step passed 600 s
+ * under ci-parity's load, so it runs in sweep (~376 s here with it, against
+ * long's ~450 and the rest's ~600 on CI), the sleep scaffold being the
+ * module's, not [38r]'s.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -157,7 +163,7 @@ const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["5d", "10g", "37b", "38"],
   long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
   extract: ["10f", "10h"],
-  sweep: ["38s", "50", "51"],
+  sweep: ["38s", "50", "51", "38p"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -4235,6 +4241,9 @@ if (want("9f")) {
   let afford402Next = 0;
   /** Every row's call that arrived, whatever its answer (SMD-4352). */
   let rowCalls = 0;
+  /** While above zero, the next row's call is held quickMs, not slowMs, whatever its text (SMD-4401): one worker done while the other's call is in flight. */
+  let quickNext = 0;
+  let quickMs = 1500;
   let modelGone404 = false;
   /** A second embedding call in flight answers 429, as a provider's concurrency limit does (the probe exempt). */
   let limitConcurrent = false;
@@ -4364,7 +4373,10 @@ if (want("9f")) {
         if (input.includes("slow hemlock")) await Bun.sleep(1000);
         return Response.json({ error: { message: "stub: refused this text" } }, { status: 500 });
       }
-      if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
+      if (!probe && quickNext > 0) {
+        quickNext--;
+        await Bun.sleep(quickMs);
+      } else if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
       v[axisFor(input)] = 1;
@@ -4979,61 +4991,97 @@ if (want("9f")) {
         `a one-shot run with its probe skipped, the first row's call refused 401, halts: that row failed, the batch's other three left pending and said so, not failed row by row (SMD-4352; exit ${haltCode}; ${JSON.stringify(haltClaims)}; halt said ${haltSaid} time(s), pending said ${haltPending})`);
       await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(haltIds, "TEXT")}::uuid[])`;
 
-      // The record moved while a worker waits at the admit gate, and moved back before the gate lets it through
-      // (SMD-4352): the follower has seen the move and ends, so the worker claims nothing once through, though the
-      // record it would read names its model again. The gate here is deaf to the drain's end — it opens when the row
-      // says, not when its signal aborts, which is where a gate that rejects then ends the worker without this rule.
-      // It holds the second ask of a drain, the second worker's: both ask before either claims.
-      let deafArmed = false;
-      let deafAsks = 0;
-      const deafBefore = new Set<AbortSignal>();
-      const deafCounts = new Map<AbortSignal, number>();
-      let deafHeld: AbortSignal | null = null;
-      let deafOpen: (() => void) | null = null;
-      const deafAdmit: NonNullable<ReembedOptions["admit"]> = (signal) => {
-        deafAsks++;
-        if (!deafArmed) {
-          deafBefore.add(signal);
-          return Promise.resolve();
-        }
-        if (deafBefore.has(signal) || deafHeld !== null) return Promise.resolve();
-        const asked = (deafCounts.get(signal) ?? 0) + 1;
-        deafCounts.set(signal, asked);
-        if (asked !== 2) return Promise.resolve();
-        deafHeld = signal;
-        return new Promise<void>((resolve) => { deafOpen = resolve; });
-      };
-      const moved = liveFollower({ workers: 2, admit: deafAdmit });
+      // The record moved, seen by one worker while the other's call is in flight, and moved back before that call
+      // ends (SMD-4352, SMD-4401): the follower has seen the move and ends, so the second worker, through the gate
+      // after the thought it holds, claims nothing more, though the record it would read names its model again. The
+      // rule is its check before each claim (SMD-4413; the loop's, after the gate, before): the gate here is the
+      // scheduler's own, open throughout, and the row only reads the signal it is asked with, which aborts when the
+      // drain ends. The first
+      // call to arrive takes 1.5 s and the rest 4 s, and the record is moved while both are in flight: one worker
+      // reads it while the other's call is in flight, whatever the order the five are claimed in. Should the move
+      // land late, the quick worker has a third call in flight when the other reads it, and the row holds the same:
+      // no call is made after the move is seen.
+      const movedGate = liveGate();
+      // The follower's own stop signal, which its polls ask with — the first ask is one — and the drain's, which its workers ask with.
+      let movedPoll: AbortSignal | null = null;
+      let movedSignal: AbortSignal | null = null;
+      const movedAdmit: NonNullable<ReembedOptions["admit"]> = Object.assign((signal: AbortSignal) => {
+        if (movedPoll === null) movedPoll = signal;
+        else if (signal !== movedPoll) movedSignal = signal;
+        return movedGate.admit(signal);
+      }, { closedSince: movedGate.admit.closedSince });
+      // A 30 s call timeout: the section's 2 s would end the 4 s call as a deadline, and its probe, cut short by the drain's end, would stop the worker before the gate.
+      const moved = liveFollower({ workers: 2, admit: movedAdmit, env: { ...env, OB1_LLM_TIMEOUT: "30" } });
       await moved.idle();
-      // A poll's own ask first, so the follower's stop signal is one the gate knew before it was armed.
-      await pollUntil(async () => deafAsks >= 1, 15_000);
+      await pollUntil(async () => movedPoll !== null, 15_000);
       let movedIds: string[] = [];
-      let movedHeld = false;
+      let movedInFlight = false;
       let movedSeen = false;
-      let movedBefore = -1;
-      let movedPending = -1;
+      let movedCallsThen = -1;
       let movedEnd: string | null = null;
+      const movedCalls = rowCalls;
       const movedAtModel = async () => Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE id = ANY(${sql.array(movedIds, "TEXT")}::uuid[]) AND embedding IS NOT NULL AND embedding_model = 'stub-embed'`)[0].n);
-      slowMs = 1000;
-      deafArmed = true;
+      slowMs = 4000;
+      quickNext = 1;
       try {
         movedIds = ((await sql`INSERT INTO thoughts (content) SELECT 'a thought of five the moved record leaves, number ' || g FROM generate_series(1, 5) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
-        movedHeld = await pollUntil(async () => deafHeld !== null, 15_000);
+        movedInFlight = await pollUntil(async () => rowCalls >= movedCalls + 2, 15_000);
         await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
-        // The other worker's read of the record ends the drain, which the held ask's signal says.
-        movedSeen = await pollUntil(async () => (deafHeld as AbortSignal | null)?.aborted === true, 15_000);
-        movedBefore = await movedAtModel();
-        movedPending = Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND status = 'pending' AND thought_id = ANY(${sql.array(movedIds, "TEXT")}::uuid[])`)[0].n);
+        // The quick worker's read of the record ends the drain, which the drain's signal says.
+        movedSeen = await pollUntil(async () => (movedSignal as AbortSignal | null)?.aborted === true, 15_000);
+        movedCallsThen = rowCalls - movedCalls;
       } finally {
         await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
-        (deafOpen as (() => void) | null)?.();
         movedEnd = await moved.ended();
+        quickNext = 0;
         slowMs = 0;
       }
       const movedAfter = await movedAtModel();
-      assert(movedHeld && movedSeen && movedPending >= 1 && movedAfter === movedBefore && movedEnd === "exit 2" && moved.lines.some((l) => /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(l)),
-        `a worker let through the admit gate after the follower saw the record move claims nothing, the record moved back or not: no thought re-embedded after the gate opened, the follower ended 2 (SMD-4352; held ${movedHeld}, move seen ${movedSeen}; ${movedBefore} re-embedded before the gate opened, ${movedAfter} after, ${movedPending} pending then; ${movedEnd})`);
+      const movedPending = Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND status = 'pending' AND thought_id = ANY(${sql.array(movedIds, "TEXT")}::uuid[])`)[0].n);
+      assert(movedInFlight && movedSeen && movedCallsThen <= 3 && rowCalls - movedCalls === movedCallsThen && movedAfter === movedCallsThen && movedPending >= 2 && movedEnd === "exit 2"
+          && moved.lines.some((l) => /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(l)),
+        `a worker through the admit gate after the follower saw the record move claims nothing, the record moved back or not: the thought it holds lands and no call is made after the move was seen, the follower ended 2 (SMD-4352, SMD-4401; in flight ${movedInFlight}, move seen ${movedSeen} at ${movedCallsThen} call(s); ${rowCalls - movedCalls} call(s) in all, ${movedAfter} re-embedded, ${movedPending} pending; ${movedEnd})`);
       await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(movedIds, "TEXT")}::uuid[])`;
+
+      // …and with no gate the same (SMD-4413: the loop asked the rule after the admit gate alone, so an ungated
+      // follower's second worker read its own model recorded and drained the pool). No gate, so no signal says when
+      // the quick worker has read the record moved: the row waits for its thought to land and a second more, then
+      // moves the record back. A move that landed after the quick call ended, or a move back that came before the
+      // quick worker's read, would leave no worker having seen the move and the follower running: the row would say
+      // so, not pass. So the calls are 3 s and 6 s here, twice the gated row's, which reads a signal and waits on
+      // neither: some 2.7 s for the move to land, and 1.7 s each side of the move back.
+      const bare = liveFollower({ workers: 2, env: { ...env, OB1_LLM_TIMEOUT: "30" } });
+      await bare.idle();
+      let bareIds: string[] = [];
+      let bareInFlight = false;
+      let bareLanded = false;
+      let bareCallsThen = -1;
+      let bareEnd: string | null = null;
+      const bareCalls = rowCalls;
+      const bareAtModel = async () => Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE id = ANY(${sql.array(bareIds, "TEXT")}::uuid[]) AND embedding IS NOT NULL AND embedding_model = 'stub-embed'`)[0].n);
+      slowMs = 6000;
+      quickMs = 3000;
+      quickNext = 1;
+      try {
+        bareIds = ((await sql`INSERT INTO thoughts (content) SELECT 'a thought of five the ungated follower leaves, number ' || g FROM generate_series(1, 5) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
+        bareInFlight = await pollUntil(async () => rowCalls >= bareCalls + 2, 15_000);
+        await sql`UPDATE ob1_config SET value = 'another-model' WHERE key = 'embedding_model'`;
+        bareLanded = await pollUntil(async () => (await bareAtModel()) >= 1, 15_000);
+        await Bun.sleep(1000);
+        bareCallsThen = rowCalls - bareCalls;
+      } finally {
+        await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
+        bareEnd = await bare.ended();
+        quickNext = 0;
+        quickMs = 1500;
+        slowMs = 0;
+      }
+      const bareAfter = await bareAtModel();
+      const barePending = Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims WHERE work_type = ${OWN_KEY} AND status = 'pending' AND thought_id = ANY(${sql.array(bareIds, "TEXT")}::uuid[])`)[0].n);
+      assert(bareInFlight && bareLanded && bareCallsThen === 2 && rowCalls - bareCalls === 2 && bareAfter === 2 && barePending === 3 && bareEnd === "exit 2"
+          && bare.lines.some((l) => /ob1_config now records another-model: this follower is configured for stub-embed and never switches the model — it stops/.test(l)),
+        `…and with no admit gate the same: the second worker's thought lands and it claims nothing more, the record moved back, the follower ended 2 (SMD-4413; in flight ${bareInFlight}, the quick thought landed ${bareLanded}, ${bareCallsThen} call(s) a second after; ${rowCalls - bareCalls} call(s) in all, ${bareAfter} re-embedded, ${barePending} pending; ${bareEnd ?? "still running after 15 s"})`);
+      await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(bareIds, "TEXT")}::uuid[])`;
     })();
 
     // The model missing mid-pass (a 404 naming it, as while Ollama pulls it) is waited for, as an outage is — not the request refused.
@@ -25555,6 +25603,30 @@ async function sleepScaffold(sql: SQL) {
     /** Every embedding, probes too: the embedding provider down (503), or refusing the key (401). */
     embedDown: false,
     embedKeyRefused: false,
+    /**
+     * An embedding whose input holds this text crashes the embedding provider ([38p], SMD-4254): it and every embedding
+     * after, probes too, answer 500 — a code no rule names, so the thought in hand is a suspect — until
+     * `embedCrashProbes` probes have found it down (Infinity: it never comes back); the next probe answers, and the
+     * provider is back. `embedCrashes` counts the crashes.
+     */
+    embedCrashOn: null as string | null,
+    embedCrashProbes: 2,
+    embedCrashLeft: null as number | null,
+    embedCrashes: 0,
+    /**
+     * A crash on the clock instead (review pass 1 of SMD-4254): above 0, each crash keeps the provider down this many ms,
+     * every embedding and probe answered 500 until `embedCrashUntil`, however many probes come — a model server's
+     * restart, which a probe schedule does not shorten.
+     */
+    embedCrashMs: 0,
+    embedCrashUntil: 0,
+    /**
+     * A crash that hangs the provider instead (review pass 2 of SMD-4254): above 0, each crash holds every embedding
+     * and probe, the crashing call included, until `embedHangUntil`, this many ms on — each answered as usual then,
+     * unless its client gave up first (OB1_LLM_TIMEOUT).
+     */
+    embedHangMs: 0,
+    embedHangUntil: 0,
     /** Embeddings but the probe's: each held this long, its hold ending with its client's abort. */
     embedSlowMs: 0,
     /** The subject sweep's questions ([38s], SMD-3306 PR 6b-2): each held this long, its hold ending with its client's abort, as slowJudge's. */
@@ -25588,6 +25660,33 @@ async function sleepScaffold(sql: SQL) {
       if (typeof body.input === "string") {
         if (body.input !== "reembed.ts provider probe") embedCalls.push({ input: body.input, at: Date.now() });
         else sw.embedProbes++;
+        const isProbe = body.input === "reembed.ts provider probe";
+        // A provider a thought hung (review pass 2): held to the hang's end, or to the client's giving up.
+        const hold = (until: number) => Promise.race([Bun.sleep(Math.max(0, until - Date.now())), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
+        if (Date.now() < sw.embedHangUntil) {
+          await hold(sw.embedHangUntil);
+          if (req.signal.aborted) return new Response("", { status: 503 });
+        }
+        // The provider a thought crashed ([38p], SMD-4254): down until its probes have found it so embedCrashProbes times.
+        if (sw.embedCrashLeft !== null) {
+          if (isProbe && sw.embedCrashLeft <= 0) sw.embedCrashLeft = null;
+          else {
+            if (isProbe) sw.embedCrashLeft--;
+            return Response.json({ error: { message: "stub: the embedding runner crashed" } }, { status: 500 });
+          }
+        }
+        if (Date.now() < sw.embedCrashUntil) return Response.json({ error: { message: "stub: the embedding runner crashed" } }, { status: 500 });
+        if (!isProbe && sw.embedCrashOn !== null && body.input.includes(sw.embedCrashOn)) {
+          sw.embedCrashes++;
+          if (sw.embedHangMs > 0) {
+            sw.embedHangUntil = Date.now() + sw.embedHangMs;
+            await hold(sw.embedHangUntil);
+            return Response.json({ error: { message: "stub: the embedding runner hung" } }, { status: 500 });
+          }
+          if (sw.embedCrashMs > 0) sw.embedCrashUntil = Date.now() + sw.embedCrashMs;
+          else sw.embedCrashLeft = sw.embedCrashProbes;
+          return Response.json({ error: { message: "stub: the embedding runner crashed" } }, { status: 500 });
+        }
         if (sw.embedDown) return Response.json({ error: { message: "stub: embeddings overloaded" } }, { status: 503 });
         if (sw.embedKeyRefused) return Response.json({ error: { message: "stub: invalid api key" } }, { status: 401 });
         if (sw.embedSlowMs && body.input !== "reembed.ts provider probe") await Promise.race([Bun.sleep(sw.embedSlowMs), new Promise<void>((r) => req.signal.addEventListener("abort", () => r(), { once: true }))]);
@@ -27834,8 +27933,10 @@ if (want("38r")) {
       waitingCode = await waiting.stop();
       await sql.unsafe(`DROP TRIGGER IF EXISTS zz_sleep_beats ON ob1_config; DROP FUNCTION IF EXISTS zz_sleep_beats(); DROP TABLE IF EXISTS zz_sleep_beats`);
     }
-    assert(sawWait && waitFailed === 0 && wentOn && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && outageOutcome !== "failed" && heldPending && waitingCode === 0,
-      `the embedding provider gone mid-pass: the row reads re-embed waiting mid-pass, never failed, then set down for the period, extraction going on meanwhile, nothing recorded failed (waited ${sawWait}; ${waitFailed} wait write(s) read failed; went on ${wentOn}; row ${JSON.stringify(downWord)}, outcome ${outageOutcome} — an outage is the provider's state, not failed; none failed ${heldPending}; exit ${waitingCode})`);
+    // A 503 makes no suspect: no thought's doing, so set down at the poll that sees the wait, never left waiting (SMD-4254).
+    const leftWaiting = lines.some((l) => /re-embed waits for its provider after an outage that made the thought in hand a suspect/.test(l));
+    assert(sawWait && waitFailed === 0 && wentOn && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && outageOutcome !== "failed" && heldPending && waitingCode === 0 && !leftWaiting,
+      `the embedding provider gone mid-pass: the row reads re-embed waiting mid-pass, never failed, then set down for the period — a 503, no thought's doing, so not left waiting — extraction going on meanwhile, nothing recorded failed (waited ${sawWait}; ${waitFailed} wait write(s) read failed; went on ${wentOn}; row ${JSON.stringify(downWord)}, outcome ${outageOutcome} — an outage is the provider's state, not failed; none failed ${heldPending}; left waiting ${leftWaiting}; exit ${waitingCode})`);
     await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(waitOld, "TEXT")}::uuid[])`;
 
     // A model switch at the check: re-embed set aside, said by the dry run, the log and the row; extraction runs on.
@@ -28486,6 +28587,529 @@ if (want("38r")) {
   }
 }
 
+// A thought whose embedding crashes the provider, under the scheduler (SMD-4254): re-embed waits out an outage that
+// made the thought in hand a suspect and isolates its suspects, where it was set down for the period at the first poll
+// that saw the wait, the suspects forgotten — the thought, handed back at the pool's front, crashed the provider at
+// every period's first claim, and nothing behind it was re-embedded. The wait has a bound, past which it is set down
+// still, and the period's isolation a cap (review pass 1), counted from its first wait's start with the retries between
+// its waits, and a set-down at a limit backs off by time, the outage's suspects moved behind the pool (review passes 2
+// and 3); each wait is probed on a fixed interval, nothing carried between them. Its body a function's, as [26]'s: the
+// module body is at TS2563's limit for control-flow analysis.
+if (want("38p")) await (async () => {
+  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated");
+  const sql = new SQL({ url: URL_, max: 4 });
+  const { EX, EMBED_JOB, sw, env, capture, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
+  // Every wait probes once a second (the scheduler's fixed probe, reembedThoughtProbeMs, at 1 s, and OUTAGE_MS for the
+  // rest): with embedCrashProbes 2 the provider is back at a wait's second or third probe, 2-3 s on, which the
+  // scheduler's 250 ms poll sees many times over — a set-down at the first sight would leave the thought pending and
+  // the backlog behind it.
+  const restoreOutage = shortenOutage(1000, 1000);
+  try {
+    /** A thought with no vector, written by the sync key, which pauses nothing: re-embed's backlog. */
+    const vectorless = async (content: string) =>
+      ((await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "live" }, actor: { name: "sync-sleep", via: "test-live" } }}::jsonb, NULL::vector) AS r`)[0].r as { id: string }).id;
+    const atEmbed = async (id: string) => (await sql`SELECT embedding_model FROM thoughts WHERE id = ${id}::uuid AND embedding IS NOT NULL`)[0]?.embedding_model === "stub-embed";
+    const allAtEmbed = async (ids: string[]) => (await Promise.all(ids.map(atEmbed))).filter(Boolean).length;
+    const reClaim = async (id: string) =>
+      (await sql`SELECT status, last_error FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EMBED_JOB}`)[0] as { status: string; last_error: string | null } | undefined;
+    /** Whether extraction has taken a note: its claim succeeded. */
+    const exSucceeded = async (id: string) =>
+      ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status === "succeeded";
+    /** Pooled, the crashing thought first: re-embed's first claim crashes the provider, the backlog behind it. */
+    const poolFirst = async (first: string, rest: string[]) => {
+      await sql`SELECT enqueue_thoughts(${EMBED_JOB}, ${sql.array([first, ...rest], "TEXT")}::uuid[])`;
+      await sql`UPDATE thought_work_claims SET enqueued_at = now() - interval '1 hour' WHERE thought_id = ${first}::uuid AND work_type = ${EMBED_JOB}`;
+    };
+    const follow = (o: Partial<Parameters<typeof runSleep>[0]> = {}) => {
+      lines.length = 0;
+      const ac = new AbortController();
+      const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, reembedThoughtProbeMs: 1000, ...o, signal: ac.signal });
+      return () => { ac.abort(); return bounded(run, ac); };
+    };
+    const LEFT = /re-embed waits for its provider after an outage that made the thought in hand a suspect — left running up to ([\d.]+) s from the wait's start and ([\d.]+) s of isolation this period, its waits and the retries between them/;
+    const DOWN = /re-embed set down for this period — its provider is not answering/;
+    const PAST_BOUND = /re-embed's provider has not answered in ([\d.]+) s from the wait's start, after an outage that made the thought in hand a suspect — set down as at any outage/;
+    const PAST_CAP = /re-embed has spent ([\d.]+) s this period isolating outages that made the thought in hand a suspect, its waits and the retries between them — set down as at any outage/;
+    /** A limit's line: the back-off it begins, in seconds (review pass 3: by time). */
+    const BACKS_OFF = /; backing off: such an outage met in the next (\d+) s sets re-embed down at once$/;
+    /** A limit's line after a suspect of its isolation was recorded failed alone: no back-off (review pass 3). */
+    const NO_BACKOFF = /; not backing off: a suspect was recorded failed alone in this isolation$/;
+    /** Such an outage met while the back-off runs: set down at once, and the seconds left of it. */
+    const BACKED_OFF = /re-embed's provider stopped answering after an outage that made the thought in hand a suspect, while re-embed backs off from a try's wait on such an outage that ended at a limit — set down at once, backing off: (\d+) s more, then the first such outage is waited out once more/;
+    /** The outage's suspects moved behind the pool at a limit's set-down or a backed-off one (review pass 3). */
+    const MOVED = /^ {2}(\d+) suspect\(s\) of the outage moved behind re-embed's pool — the next period re-embeds the backlog before claiming them again$/;
+
+    // The provider back in seconds: the thought failed at its third outage alone, its fourth crash, the backlog behind
+    // it re-embedded, all in the one period — re-embed drained, never set down.
+    sw.embedCrashOn = "hemlock";
+    sw.embedCrashProbes = 2;
+    sw.embedCrashes = 0;
+    const poison = await vectorless("A hemlock note whose embedding crashes the provider.");
+    const behind: string[] = [];
+    for (let i = 1; i <= 5; i++) behind.push(await vectorless(`A note pooled behind the crashing one, number ${i}.`));
+    await poolFirst(poison, behind);
+    let isolated = false, poisonClaim: Awaited<ReturnType<typeof reClaim>>, reembedded = 0, poisonCode = -9;
+    const poisonStop = follow();
+    try {
+      isolated = await pollUntil(async () => (await reClaim(poison))?.status === "failed" && (await allAtEmbed(behind)) === behind.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 60_000);
+      poisonClaim = await reClaim(poison);
+      reembedded = await allAtEmbed(behind);
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedCrashLeft = null;
+      poisonCode = await poisonStop();
+    }
+    const leftSaid = lines.filter((l) => LEFT.test(l)).length;
+    const downSaid = lines.some((l) => DOWN.test(l));
+    assert(isolated && poisonClaim?.status === "failed" && new RegExp(`alone in flight at ${ALONE_OUTAGES} outages`).test(poisonClaim.last_error ?? "") && reembedded === behind.length
+        && sw.embedCrashes === ALONE_OUTAGES + 1 && leftSaid >= 1 && lines.some((l) => LEFT.exec(l)?.[1] === "120" && LEFT.exec(l)?.[2] === "240") && !downSaid && poisonCode === 0,
+      `a thought whose embedding crashes the provider, back in seconds: re-embed waits each outage out under the scheduler, left running (said ${leftSaid} time(s), the shipped 120 s bound and 240 s cap), the thought recorded failed at its third outage alone and the backlog behind it re-embedded in the same period, never set down (isolated ${isolated}; ${JSON.stringify(poisonClaim)}; ${reembedded} of ${behind.length} re-embedded; ${sw.embedCrashes} crash(es); set down ${downSaid}; exit ${poisonCode}${isolated ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
+
+    // A crash the carried schedule broke (review pass 1, both lanes: 75 s, 80 s, then the bound, every period, for a
+    // provider back 36-75 s after each crash). The shipped numbers at a tenth, scaled together: OUTAGE_MS 0.5 s doubling
+    // to 30 s, the fixed probe 0.5 s, the bound 12 s, the cap 24 s, the provider back 4 s after each crash (40 s at full
+    // scale). Each wait probed every 0.5 s from its own start ends about 4-4.5 s on, the four about 18 s in all: the
+    // thought failed in the one period, the backlog behind it re-embedded, never set down. The schedule carried across
+    // the waits ran them 7.5 s, 8 s, then 16 s — past the bound, as 75 s, 80 s, then 160 s past 120 s.
+    {
+      const restoreScaled = shortenOutage(500, 30_000);
+      sw.embedCrashOn = "oleander";
+      sw.embedCrashMs = 4000;
+      sw.embedCrashes = 0;
+      const crashing = await vectorless("An oleander note whose embedding keeps the provider down 4 s a crash.");
+      const crashBehind: string[] = [];
+      for (let i = 1; i <= 3; i++) crashBehind.push(await vectorless(`A note pooled behind the one crashing for 4 s, number ${i}.`));
+      await poolFirst(crashing, crashBehind);
+      let scaledDone = false, scaledClaim: Awaited<ReturnType<typeof reClaim>>, scaledEmbedded = 0, scaledCode = -9;
+      const scaledStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 12_000, reembedThoughtPeriodMs: 24_000 });
+      try {
+        scaledDone = await pollUntil(async () => (await reClaim(crashing))?.status === "failed" && (await allAtEmbed(crashBehind)) === crashBehind.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 60_000);
+        scaledClaim = await reClaim(crashing);
+        scaledEmbedded = await allAtEmbed(crashBehind);
+      } finally {
+        sw.embedCrashOn = null;
+        sw.embedCrashMs = 0;
+        sw.embedCrashUntil = 0;
+        scaledCode = await scaledStop();
+        restoreScaled();
+      }
+      const waitsSaid = lines.map((l) => /the embedding provider answers again after (\d+) s/.exec(l)?.[1]).filter((s) => s !== undefined);
+      const scaledDown = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+      assert(scaledDone && scaledClaim?.status === "failed" && new RegExp(`alone in flight at ${ALONE_OUTAGES} outages`).test(scaledClaim.last_error ?? "") && scaledEmbedded === crashBehind.length
+          && sw.embedCrashes === ALONE_OUTAGES + 1 && lines.some((l) => LEFT.exec(l)?.[1] === "12" && LEFT.exec(l)?.[2] === "24") && !scaledDown && scaledCode === 0,
+        `a provider back 4 s after each crash at a tenth of the shipped numbers (40 s at full scale): each wait probed every 0.5 s from its own start, the thought failed at its third outage alone in the one period, the backlog re-embedded, never set down (failed ${scaledDone}; ${JSON.stringify(scaledClaim)}; ${scaledEmbedded} of ${crashBehind.length} re-embedded; ${sw.embedCrashes} crash(es); waits ${waitsSaid.join(", ")} s; set down ${scaledDown}; exit ${scaledCode}${scaledDone ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
+    }
+
+    // Each wait its own bound, said once a wait (review pass 1, the cold lane's row: the bound's start kept across an
+    // isolation's waits, and the said flag dropped, each survived the rows above). Four waits of about 2-3 s, about 10 s
+    // in all, under a 6 s bound: the thought failed, never set down, the left-running line said at most once a crash.
+    sw.embedCrashOn = "foxglove";
+    sw.embedCrashProbes = 2;
+    sw.embedCrashes = 0;
+    const fox = await vectorless("A foxglove note whose embedding crashes the provider.");
+    const foxBehind = await vectorless("A note pooled behind the poisonous one.");
+    await poolFirst(fox, [foxBehind]);
+    let foxDone = false, foxCode = -9;
+    const foxStop = follow({ reembedThoughtWaitMs: 6000 });
+    try {
+      foxDone = await pollUntil(async () => (await reClaim(fox))?.status === "failed" && (await atEmbed(foxBehind)), 60_000);
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedCrashLeft = null;
+      foxCode = await foxStop();
+    }
+    const foxLeft = lines.filter((l) => LEFT.test(l)).length;
+    const foxDown = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+    assert(foxDone && !foxDown && foxLeft >= 1 && foxLeft <= sw.embedCrashes && foxCode === 0,
+      `each wait of an isolation its own bound, said once a wait: four short waits past a 6 s bound in all, the thought failed and never set down (failed ${foxDone}; set down ${foxDown}; said ${foxLeft} time(s) for ${sw.embedCrashes} crash(es); exit ${foxCode}${foxDone ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
+
+    // The isolation's end (review pass 3, the cold lane: the count left running past a drain not isolated, and re-embed
+    // not saying its drains isolate, lived every row above). A crash its first probe finds over, the thought failed alone
+    // in a few seconds, then a slow backlog behind it, ten thoughts of 1.5 s each, under a 12 s cap: the backlog is no
+    // isolation, so it drains, never set down. A count that ran on past the isolation's end trips the cap in the backlog,
+    // a healthy call aborted. The backlog's text holds no crash word.
+    sw.embedCrashOn = "wolfsbane";
+    sw.embedCrashProbes = 1;
+    sw.embedCrashes = 0;
+    const rue = await vectorless("A wolfsbane note whose embedding crashes the provider.");
+    const rueBehind: string[] = [];
+    for (let i = 1; i <= 10; i++) rueBehind.push(await vectorless(`A slow note pooled behind the poisonous one, number ${i}.`));
+    await poolFirst(rue, rueBehind);
+    let rueDone = false, rueClaim: Awaited<ReturnType<typeof reClaim>>, rueEmbedded = 0, rueCode = -9;
+    sw.embedSlowMs = 1500;
+    const rueStop = follow({ reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 12_000 });
+    try {
+      rueDone = await pollUntil(async () => (await reClaim(rue))?.status === "failed" && lines.some((l) => /re-embed drained — extracting/.test(l) || DOWN.test(l)), 60_000);
+      rueClaim = await reClaim(rue);
+      rueEmbedded = await allAtEmbed(rueBehind);
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedCrashLeft = null;
+      sw.embedSlowMs = 0;
+      rueCode = await rueStop();
+    }
+    const rueDown = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+    assert(rueDone && rueClaim?.status === "failed" && rueEmbedded === rueBehind.length && !rueDown && rueCode === 0,
+      `the isolation's count ends at the first drain not isolated: a thought failed alone in seconds, then a slow backlog longer than the cap re-embedded behind it, never set down (failed ${rueDone}; ${JSON.stringify(rueClaim)}; ${rueEmbedded} of ${rueBehind.length} re-embedded; set down ${rueDown}; ${sw.embedCrashes} crash(es); exit ${rueCode}${!rueDown ? "" : `; its lines: ${lines.filter((l) => DOWN.test(l) || PAST_CAP.test(l) || PAST_BOUND.test(l) || LEFT.test(l)).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
+
+    // A live write's pause mid-isolation (review pass 3, the cold lane's demo: the cap's count ran on while the gate was
+    // closed, so the resume set re-embed down, "aborted" with nothing in hand, the thought pending after one crash and the
+    // back-off begun). The crash 1.5 s, a 0.5 s probe, a 6 s bound and a 12 s cap — the isolation under 8 s unpaused;
+    // at the first left-running line, live writes every second for 14 s, the pause about 15 s with the 1 s capture. Not
+    // counted: the thought failed, never set down. Counted, the cap is past at the resume (an 8 s pause left the 12 s
+    // cap unreached in a mutant run that counted it).
+    {
+      sw.embedCrashOn = "henbane";
+      sw.embedCrashMs = 1500;
+      sw.embedCrashes = 0;
+      const hen = await vectorless("A henbane note whose embedding crashes the provider for 1.5 s.");
+      const henBehind = await vectorless("A note pooled behind the one a pause interrupts.");
+      await poolFirst(hen, [henBehind]);
+      let henLeft = false, henEnd = false, henClaim: Awaited<ReturnType<typeof reClaim>>, henCode = -9, henBeat: unknown = null;
+      const henStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 12_000 });
+      try {
+        henLeft = await pollUntil(async () => lines.some((l) => LEFT.test(l)), 30_000);
+        for (let i = 0; i < 14; i++) {
+          await liveWrite(sql, `henbane pause ${i}`);
+          await Bun.sleep(1000);
+        }
+        henEnd = await pollUntil(async () => (await reClaim(hen))?.status === "failed" || lines.some((l) => DOWN.test(l)), 30_000);
+        henClaim = await reClaim(hen);
+        henBeat = ((await beat()) as { reembedBackoff?: unknown } | null)?.reembedBackoff ?? null;
+      } finally {
+        sw.embedCrashOn = null;
+        sw.embedCrashMs = 0;
+        sw.embedCrashUntil = 0;
+        henCode = await henStop();
+      }
+      const henDown = lines.some((l) => DOWN.test(l) || PAST_CAP.test(l) || PAST_BOUND.test(l));
+      const henPaused = lines.findIndex((l) => /^ {2}paused: a live write/.test(l)) > lines.findIndex((l) => LEFT.test(l)) && lines.some((l) => /^ {2}resumed: no live write/.test(l));
+      assert(henLeft && henPaused && henEnd && henClaim?.status === "failed" && !henDown && henBeat === null && henCode === 0,
+        `a live write's pause mid-isolation counts toward neither the cap nor the bound: the thought failed, never set down, no back-off (left ${henLeft}; paused mid-isolation ${henPaused}; ended ${henEnd}; ${JSON.stringify(henClaim)}; set down ${henDown}; back-off ${JSON.stringify(henBeat)}; ${sw.embedCrashes} crash(es); exit ${henCode}; its lines: ${lines.filter((l) => /paused|resumed|re-embed (waits|has spent|set down|'s provider)|alone in flight/.test(l)).map((l) => l.trim().slice(0, 200)).join(" | ")})`);
+    }
+
+    // The outage a thought failed alone leaves (review pass 3, the cold lane's demo: that one, the fourth wait, passing
+    // the cap re-armed the back-off the failure had just reset). The crash 4 s, a 0.5 s probe, a 6 s bound and a 15.5 s
+    // cap: the thought failed at about 13 s, the fourth wait running to about 17.5 s — set down at the cap there, said as
+    // beginning no back-off, the row with none.
+    {
+      const restoreScaled = shortenOutage(500, 30_000);
+      sw.embedCrashOn = "yew";
+      sw.embedCrashMs = 4000;
+      sw.embedCrashes = 0;
+      const yew = await vectorless("A yew note whose embedding keeps the provider down 4 s a crash.");
+      const yewBehind = await vectorless("A note pooled behind the one down four seconds.");
+      await poolFirst(yew, [yewBehind]);
+      let yewEnd = false, yewClaim: Awaited<ReturnType<typeof reClaim>>, yewCode = -9, yewBeat: unknown = null;
+      /** The left wait's back-off on the row once the thought is failed: the fourth wait's, 0 (review pass 4, the cold lane). */
+      const yewMarkS: number[] = [];
+      const yewStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 15_500 });
+      try {
+        yewEnd = await pollUntil(async () => {
+          const m = ((await beat()) as { reembedWait?: { backoffS: number } } | null)?.reembedWait;
+          if (m && (await reClaim(yew))?.status === "failed") yewMarkS.push(m.backoffS);
+          return (await reClaim(yew))?.status === "failed" && lines.some((l) => DOWN.test(l) || /re-embed drained/.test(l));
+        }, 45_000);
+        yewClaim = await reClaim(yew);
+        yewBeat = ((await beat()) as { reembedBackoff?: unknown } | null)?.reembedBackoff ?? null;
+      } finally {
+        sw.embedCrashOn = null;
+        sw.embedCrashMs = 0;
+        sw.embedCrashUntil = 0;
+        yewCode = await yewStop();
+        restoreScaled();
+      }
+      const yewLimits = lines.filter((l) => PAST_CAP.test(l) || PAST_BOUND.test(l)).map((l) => l.trim().slice(0, 300));
+      assert(yewEnd && yewClaim?.status === "failed" && yewLimits.length === 1 && NO_BACKOFF.test(yewLimits[0]) && yewBeat === null && yewMarkS.length > 0 && yewMarkS.every((x) => x === 0) && yewCode === 0,
+        `the outage a thought failed alone leaves, passing the cap, begins no back-off: said so, the row with none (ended ${yewEnd}; ${JSON.stringify(yewClaim)}; limit lines ${yewLimits.join(" | ")}; back-off ${JSON.stringify(yewBeat)}; the left wait's back-off after the failure ${JSON.stringify(yewMarkS)}; ${sw.embedCrashes} crash(es); exit ${yewCode})`);
+    }
+
+    // A thought that brings the provider down for good: left waiting to the bound (3 s here), then set down as at any
+    // outage, said; extraction runs on, and the thought stays pending, not failed — the provider's state.
+    sw.embedCrashOn = "nightshade";
+    sw.embedCrashProbes = Infinity;
+    sw.embedCrashes = 0;
+    const stuck = await vectorless("A nightshade note whose embedding brings the provider down for good.");
+    const stuckBehind = await vectorless("A note pooled behind the one that brings the provider down.");
+    await poolFirst(stuck, [stuckBehind]);
+    const meanwhile = await capture("A note extraction takes once re-embed is set down.", "sync-sleep", 0, 31);
+    const BOUND_MS = 3000;
+    let leftAt = 0, downAt = 0, extracted = false, stuckClaim: Awaited<ReturnType<typeof reClaim>>, downWord: unknown, boundCode = -9;
+    const boundStop = follow({ reembedThoughtWaitMs: BOUND_MS });
+    try {
+      for (const until = Date.now() + 30_000; Date.now() < until && downAt === 0;) {
+        if (leftAt === 0 && lines.some((l) => LEFT.test(l))) leftAt = Date.now();
+        if (lines.some((l) => DOWN.test(l))) downAt = Date.now();
+        await Bun.sleep(25);
+      }
+      extracted = await pollUntil(() => exSucceeded(meanwhile), 20_000);
+      stuckClaim = await reClaim(stuck);
+      downWord = ((await beat()) as { aside?: unknown } | null)?.aside;
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedCrashLeft = null;
+      boundCode = await boundStop();
+    }
+    const heldMs = leftAt > 0 && downAt > 0 ? downAt - leftAt : -1;
+    assert(leftAt > 0 && heldMs >= BOUND_MS - 500 && heldMs < BOUND_MS + 5000 && lines.some((l) => PAST_BOUND.exec(l)?.[1] === "3") && !lines.some((l) => PAST_CAP.test(l))
+        && extracted && stuckClaim?.status === "pending" && JSON.stringify(downWord) === JSON.stringify({ reembed: { kind: "outage" } }) && sw.embedCrashes === 1 && boundCode === 0,
+      `a thought that brings the provider down for good: re-embed left waiting to the bound, then set down for the period as at any outage, said, extraction running on, the thought pending, not failed (left waiting ${heldMs} ms against a ${BOUND_MS} ms bound; extracted ${extracted}; ${JSON.stringify(stuckClaim)}; row ${JSON.stringify(downWord)}; ${sw.embedCrashes} crash(es); exit ${boundCode}${downAt > 0 ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
+
+    // A crash that hangs the provider (review pass 2, both lanes: a cap on the waits alone left the retries between them
+    // uncounted, two OB1_LLM_TIMEOUTs a round with a provider that hangs — about 16 min a period at the defaults). Each
+    // crash holds every call 7 s, OB1_LLM_TIMEOUT 3 s, a probe every 0.5 s: the batch's call times out at 3 s and the
+    // probe after it at 6 s, the first wait then about 1 s; each retry alone the same, about 6 s of every 7 between the
+    // waits. The cap of 9 s, counted from the first wait's start, passes in the third crash's call, between waits: set
+    // down there, said as the cap's, the call in hand aborted and the thought set back, the hold from the first
+    // left-running line under the cap and a poll (with the call left to its timeout, about 2 s more), extraction running
+    // on. Counted over the waits alone, about 1 s each, it never passed: the thought was failed at its fourth crash.
+    sw.embedCrashOn = "aconite";
+    sw.embedHangMs = 7000;
+    sw.embedCrashes = 0;
+    const hung = await vectorless("An aconite note whose embedding hangs the provider.");
+    const hungBehind = await vectorless("A note pooled behind the one that hangs the provider.");
+    await poolFirst(hung, [hungBehind]);
+    const hungMeanwhile = await capture("A note extraction takes once re-embed is set down in a hang.", "sync-sleep", 0, 35);
+    const HUNG_CAP_MS = 9000;
+    let hungLeftAt = 0, hungDownAt = 0, hungExtracted = false, hungClaim: Awaited<ReturnType<typeof reClaim>>, hungCrashes = -1, hungCode = -9;
+    const hungStop = follow({ env: { ...env, OB1_LLM_TIMEOUT: "3" }, reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: HUNG_CAP_MS });
+    try {
+      for (const until = Date.now() + 45_000; Date.now() < until && hungDownAt === 0;) {
+        if (hungLeftAt === 0 && lines.some((l) => LEFT.test(l))) hungLeftAt = Date.now();
+        if (lines.some((l) => DOWN.test(l))) {
+          hungDownAt = Date.now();
+          hungCrashes = sw.embedCrashes;
+        }
+        await Bun.sleep(25);
+      }
+      hungExtracted = await pollUntil(() => exSucceeded(hungMeanwhile), 20_000);
+      hungClaim = await reClaim(hung);
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedHangMs = 0;
+      sw.embedHangUntil = 0;
+      hungCode = await hungStop();
+    }
+    const hungHeld = hungLeftAt > 0 && hungDownAt > 0 ? hungDownAt - hungLeftAt : -1;
+    assert(hungHeld >= HUNG_CAP_MS - 1000 && hungHeld < HUNG_CAP_MS + 1000 && hungCrashes === 3
+        && lines.some((l) => PAST_CAP.exec(l)?.[1] === "9" && /, a retry's call or probe in hand aborted, its thought set back in the queue;/.test(l)) && !lines.some((l) => PAST_BOUND.test(l))
+        && hungExtracted && hungClaim?.status === "pending" && hungCode === 0,
+      `a crash that hangs the provider: the cap counts the isolation from its first wait, the retries' timeouts between the waits included, and sets re-embed down between waits, the call in hand aborted — held under the cap and a poll, extraction running on, the thought pending (held ${hungHeld} ms against a ${HUNG_CAP_MS} ms cap; ${hungCrashes} crash(es) by the set-down; extracted ${hungExtracted}; ${JSON.stringify(hungClaim)}; exit ${hungCode}; its lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 200)).join(" | ")})`);
+
+    // The period's cap (review pass 1: each wait has its own bound, so a provider erring and back within it kept
+    // re-embed waiting, and the claim passes behind it, the whole period). The provider down 4 s a crash: each wait
+    // about 4 s, under a 6 s bound, and a cap of 6.5 s the second passes, about 2.5 s in — set down at the cap, said as
+    // the cap's, extraction running on, the thought pending and moved behind the pool. The row carries the left wait
+    // meanwhile, its earlierS the first wait's seconds in the second (the cold lane's), and not once set down. One
+    // worker, so the note pooled behind is no suspect of the first outage and stays pending.
+    // Then the back-off, by time (review pass 3, the maintainer's decision: counted in periods, ~30 s apart on a busy
+    // brain, a crash of 80 s or more still held the claim passes 40-63% of the time, each period backed off claiming the
+    // thought first and crashing the provider again), at a 12 s back-off first (4 min at full scale). Period 2, inside
+    // it: the note pooled behind, ahead of the thought since period 1's move, is re-embedded, then the thought's outage
+    // sets re-embed down at once, said with the time left, the thought moved behind again. The window out, period 3
+    // waits again, a try, the cap begun again, and its limit backs off 24 s, the window doubled. Periods 4, 5 and 6, all
+    // inside it, are set down at once — counted by periods, the third would have waited. The crash shortened to 0.3 s
+    // inside the window, the next period, 7, the first try after the window, fails the thought alone, which ends the
+    // back-off; a second crashing thought behind, its crash 4 s again once the first is failed,
+    // sets re-embed down at the cap backing off 12 s, not 48. Period 8, the crash gone, re-embeds the second and drains,
+    // which ends the back-off too: the row's mark gone.
+    sw.embedCrashOn = "belladonna";
+    sw.embedCrashMs = 4000;
+    sw.embedCrashes = 0;
+    const capped = await vectorless("A belladonna note whose embedding keeps the provider down 4 s a crash.");
+    const cappedBehind = await vectorless("A note pooled behind the one the cap sets down.");
+    await poolFirst(capped, [cappedBehind]);
+    const capMeanwhile = await capture("A note extraction takes once re-embed is set down at the cap.", "sync-sleep", 0, 33);
+    type WaitMark = ReembedThoughtWait;
+    type BackoffMark = ReembedBackoff;
+    const BACKOFF_MS = 12_000;
+    let capDown = false, capExtracted = false, capClaim: Awaited<ReturnType<typeof reClaim>>, capWord: unknown, capMark: WaitMark | null = null, markAfter: unknown = null;
+    let capFirst: string[] = [], capCode = -9, maxEarlier = -1, crashesAtDown = -1, backoffAfter: BackoffMark | null = null, behindAfterOne = true, behindInTwo = false;
+    /** Each later period's lines once it has said what the case waits for, and whether it said it; and the first one failed alone, and in which period. */
+    const later: { n: number; said: boolean; lines: string[] }[] = [];
+    let firstFailed = false, firstFailedIn = -1, markGone = false, skippedInTwo = false, skippedInThree: boolean | undefined;
+    /** Where each period's "working:" line is. */
+    const periodsAt = () => lines.flatMap((l, i) => (/^ {2}working:/.test(l) ? [i] : []));
+    /** Period n's lines (1 the first), as far as they go. */
+    const periodOf = (n: number): string[] => { const at = periodsAt(); return at.length >= n ? lines.slice(at[n - 1], at[n] ?? lines.length) : []; };
+    /** Until the last crash on the clock is over. */
+    const afterCrash = () => Bun.sleep(Math.max(0, sw.embedCrashUntil - Date.now()));
+    /**
+     * The next period begun by a capture, once this one ends and the last crash is over — else its start finds the
+     * provider down, a wait at the start, set down at once whatever the back-off — and the case's word from it awaited.
+     */
+    const thenPeriod = async (n: number, says: (ls: string[]) => boolean): Promise<boolean> => {
+      await afterCrash();
+      const said = (await nextPeriod(`A note that begins period ${n} of the back-off`)) && await pollUntil(async () => says(periodOf(n)), 30_000);
+      later.push({ n, said, lines: periodOf(n) });
+      return said;
+    };
+    /** The back-off's end read off the row and waited out, on the database's clock: the next period meets no back-off. */
+    const windowOut = async (): Promise<void> => {
+      const mark = ((await beat()) as { reembedBackoff?: BackoffMark } | null)?.reembedBackoff;
+      if (!mark) return;
+      const [{ s: leftS }] = (await sql`SELECT EXTRACT(EPOCH FROM (${mark.until}::timestamptz - now()))::float8 AS s`) as { s: number }[];
+      await Bun.sleep(Math.max(0, leftS * 1000) + 300);
+    };
+    const backedOff = (ls: string[]) => ls.some((l) => { const left = BACKED_OFF.exec(l)?.[1]; return left !== undefined && Number(left) > 0 && Number(left) <= BACKOFF_MS * 2 / 1000; })
+      && ls.some((l) => MOVED.test(l)) && ls.some((l) => DOWN.test(l)) && !ls.some((l) => LEFT.test(l));
+    const cappedBacking = (next: string) => (ls: string[]) => ls.some((l) => LEFT.test(l)) && ls.some((l) => PAST_CAP.test(l) && BACKS_OFF.exec(l)?.[1] === next) && ls.some((l) => DOWN.test(l));
+    const capStop = follow({ workers: 1, reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 6500, reembedThoughtBackoffMs: BACKOFF_MS });
+    try {
+      for (const until = Date.now() + 30_000; Date.now() < until && !capDown;) {
+        const mark = ((await beat()) as { reembedWait?: WaitMark } | null)?.reembedWait;
+        if (mark && capMark === null) capMark = mark;
+        if (mark) maxEarlier = Math.max(maxEarlier, mark.earlierS);
+        capDown = lines.some((l) => DOWN.test(l));
+        if (capDown && crashesAtDown < 0) crashesAtDown = sw.embedCrashes;
+        await Bun.sleep(50);
+      }
+      capExtracted = await pollUntil(() => exSucceeded(capMeanwhile), 20_000);
+      capClaim = await reClaim(capped);
+      const capBeat = (await beat()) as { aside?: unknown; reembedWait?: unknown; reembedBackoff?: BackoffMark } | null;
+      capWord = capBeat?.aside;
+      markAfter = capBeat?.reembedWait ?? null;
+      backoffAfter = capBeat?.reembedBackoff ?? null;
+      behindAfterOne = !(await atEmbed(cappedBehind));
+      capFirst = lines.slice();
+      // Period 2 backs off, the note behind re-embedded first; 3, the window out, waits again and ends at the cap,
+      // backing off 24 s; 4, 5 and 6 back off, the crash 1.5 s (the back-off reads none of it); then 0.3 s.
+      if (await thenPeriod(2, backedOff)) {
+        behindInTwo = await atEmbed(cappedBehind);
+        skippedInTwo = await pollUntil(async () => ((await beat()) as { reembedBackoff?: BackoffMark } | null)?.reembedBackoff?.skipped === true, 5000);
+        await windowOut();
+        if (await thenPeriod(3, cappedBacking("24"))) {
+          skippedInThree = ((await beat()) as { reembedBackoff?: BackoffMark } | null)?.reembedBackoff?.skipped;
+          sw.embedCrashMs = 1500;
+          if (await thenPeriod(4, backedOff) && await thenPeriod(5, backedOff)) {
+            if (await thenPeriod(6, backedOff)) {
+              await afterCrash();
+              sw.embedCrashMs = 300;
+              // Period 7, the window out: the first try fails the thought alone; a second crashing thought behind, its
+              // crash 4 s again once the first is failed, whose isolation passes the cap: backing off 12 s, begun again.
+              // Its capture, a sync write, begins period 7 itself, so it is made once the window is out: made before,
+              // its period met the back-off.
+              await afterCrash();
+              await windowOut();
+              const ended6 = await pollUntil(async () => periodOf(6).some((l) => /— the period ends/.test(l)), 60_000);
+              const second = await vectorless("A second belladonna note, pooled behind the first.");
+              await sql`SELECT enqueue_thoughts(${EMBED_JOB}, ${sql.array([second], "TEXT")}::uuid[])`;
+              const seventh = ended6 && (await pollUntil(async () => periodsAt().length >= 7, 10_000) || await nextPeriod("A note that begins period 7 of the back-off"));
+              firstFailed = seventh && await pollUntil(async () => (await reClaim(capped))?.status === "failed", 30_000);
+              sw.embedCrashMs = 4000;
+              firstFailedIn = periodsAt().length;
+              if (firstFailed) {
+                const seven = await pollUntil(async () => cappedBacking("12")(periodOf(7)), 30_000);
+                later.push({ n: 7, said: seven, lines: periodOf(7) });
+                // Period 8, the crash gone: backed off, but no outage — the second re-embedded, re-embed drained, the back-off ended.
+                if (seven) {
+                  sw.embedCrashOn = null;
+                  sw.embedCrashMs = 0;
+                  sw.embedCrashUntil = 0;
+                  if (await thenPeriod(8, (ls) => ls.some((l) => /re-embed drained — extracting/.test(l)))) {
+                    markGone = await pollUntil(async () => ((await beat()) as { reembedBackoff?: unknown } | null)?.reembedBackoff === undefined, 10_000);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedCrashMs = 0;
+      sw.embedCrashUntil = 0;
+      capCode = await capStop();
+    }
+    assert(capDown && capFirst.some((l) => PAST_CAP.exec(l)?.[1] === "6.5" && BACKS_OFF.exec(l)?.[1] === "12") && !capFirst.some((l) => PAST_BOUND.test(l)) && capFirst.some((l) => LEFT.exec(l)?.[2] === "6.5")
+        && capFirst.some((l) => MOVED.exec(l)?.[1] === "1") && capMark !== null && capMark.boundS === 6 && capMark.periodS === 7 && capMark.backoffS === 12 && markAfter === null
+        && backoffAfter !== null && backoffAfter.nextS === 24 && !backoffAfter.skipped && behindAfterOne
+        && capExtracted && capClaim?.status === "pending" && JSON.stringify(capWord) === JSON.stringify({ reembed: { kind: "outage" } }) && capCode === 0,
+      `waits each under the bound that together pass the period's cap: re-embed set down at the cap, said as the cap's, backing off 12 s, the thought moved behind the pool, the row carrying the left wait until then and the back-off after, extraction running on, the thought pending (set down ${capDown}; cap said ${capFirst.some((l) => PAST_CAP.test(l))}; bound said ${capFirst.some((l) => PAST_BOUND.test(l))}; moved ${capFirst.some((l) => MOVED.test(l))}; mark ${JSON.stringify(capMark)}, after ${JSON.stringify(markAfter)}; back-off ${JSON.stringify(backoffAfter)}; the note behind pending ${behindAfterOne}; extracted ${capExtracted}; ${JSON.stringify(capClaim)}; row ${JSON.stringify(capWord)}; exit ${capCode}; its lines: ${capFirst.slice(-16).map((l) => l.trim().slice(0, 200)).join(" | ")})`);
+    // The cap counts the wait in hand with the period's earlier isolation: set down in the second wait, at its second
+    // crash, and the row's mark for that wait names the first one's seconds (review pass 2, cold lane: an ended-only sum
+    // and earlierS 0 lived).
+    assert(crashesAtDown === 2 && maxEarlier >= 3,
+      `the cap trips inside the second wait, the wait in hand counted, and the row's earlierS names the first wait (crashes at the set-down ${crashesAtDown}; largest earlierS seen ${maxEarlier})`);
+    const saidAt = (n: number) => later.find((p) => p.n === n)?.said === true;
+    /** A period's lines the back-off reads, in short: left waiting, a limit and the back-off it begins, a period backed off and the time left, a move, a drain. */
+    const told = (ls: string[]) => ls.flatMap((l) => (LEFT.test(l) ? ["left waiting"] : PAST_CAP.test(l) ? [`cap, ${NO_BACKOFF.test(l) ? "no back-off" : `backing off ${BACKS_OFF.exec(l)?.[1]} s`}`] : PAST_BOUND.test(l) ? [`bound, backing off ${BACKS_OFF.exec(l)?.[1]} s`] : BACKED_OFF.test(l) ? [`backed off, ${BACKED_OFF.exec(l)?.[1]} s more`] : MOVED.test(l) ? [`${MOVED.exec(l)?.[1]} moved behind`] : /re-embed drained/.test(l) ? ["drained"] : [])).join(", ");
+    assert(saidAt(2) && behindInTwo && skippedInTwo && skippedInThree === false,
+      `inside the back-off, the thought's outage sets re-embed down at once, said with the time left, and the note pooled behind it — ahead of it since the limit's move — is re-embedded in that period, the thought moved behind again, the row's back-off marked skipped in it and not in the try after (${later.filter((p) => p.n === 2).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}; re-embedded in it ${behindInTwo}; skipped in period 2 ${skippedInTwo}, in period 3 ${skippedInThree}${saidAt(2) ? "" : `; its last lines: ${lines.slice(-20).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    assert(saidAt(3) && saidAt(4) && saidAt(5) && saidAt(6),
+      `the window out, a try waits again, the cap begun again, and its limit backs off 24 s, the window doubled; the three periods inside it set down at once (${later.filter((p) => p.n >= 3 && p.n <= 6).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}${saidAt(6) ? "" : `; its last lines: ${lines.slice(-20).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    assert(firstFailed && firstFailedIn === 7 && saidAt(7) && saidAt(8) && markGone,
+      `the shortened crash failed at the first try after the window, which ends the back-off — the second thought's cap in the same period backs off 12 s, not 48 — and a drain ends it too, the row's mark gone (first failed ${firstFailed} in period ${firstFailedIn}; ${later.filter((p) => p.n >= 7).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}; mark gone ${markGone}${firstFailed && firstFailedIn === 7 ? "" : `; periods 7 on: ${[7, 8, 9].map((n) => periodOf(n).map((l) => l.trim().slice(0, 220)).join(" / ")).join(" || ")}`})`);
+
+    // A pause before a try's limit (review pass 4, the cold lane: the back-off begun on re-embed's clock, which a pause
+    // holds back — `limited(now)` for `limited(wall)` — lived every row above): the back-off runs on the scheduler's clock
+    // from the limit, its whole window ahead on the row whatever pause came before. A provider down for good, a 6 s
+    // bound, a 30 s back-off; live writes for 8 s mid-wait, the pause about 9 s. Begun on re-embed's clock, the row's
+    // `until` is about 9 s nearer, and the next period within it waits again, a try.
+    // Then the provider back and a period begun just past `until` on the database's clock: a try, left waiting again, its
+    // bound's limit backing off 60 s, the window doubled. Read on re-embed's clock (`skipping(now)` for `skipping(wall)`),
+    // which the pause holds about 9 s behind, that period met the back-off still running and was set down at once —
+    // every row above lived it, no pause in their runs.
+    {
+      sw.embedCrashOn = "mandrake";
+      sw.embedCrashProbes = Infinity;
+      sw.embedCrashes = 0;
+      const man = await vectorless("A mandrake note whose embedding brings the provider down for good.");
+      await poolFirst(man, []);
+      let manLeft = false, manLimit = false, manPaused = false, manAhead = -1, manCode = -9, manLine = "", manWaitAge = -1;
+      let manTry = false, manTryLines: string[] = [];
+      const manStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 6000, reembedThoughtBackoffMs: 30_000 });
+      try {
+        manLeft = await pollUntil(async () => lines.some((l) => LEFT.test(l)), 30_000);
+        for (let i = 0; i < 8; i++) {
+          await liveWrite(sql, `mandrake pause ${i}`);
+          await Bun.sleep(1000);
+        }
+        // At the resume the left wait's start on the row moves past the pause: its age is the wait's own time on
+        // re-embed's clock, about 1 s before the pause, not the pause's ~9 s besides.
+        if (await pollUntil(async () => lines.some((l) => /^ {2}resumed: no live write/.test(l)), 30_000)) {
+          const w = ((await beat()) as { reembedWait?: { since: string } } | null)?.reembedWait;
+          const [{ now: atResume }] = (await sql`SELECT now() AS now`) as { now: Date }[];
+          manWaitAge = w ? (new Date(atResume).getTime() - Date.parse(w.since)) / 1000 : -1;
+        }
+        manLimit = await pollUntil(async () => lines.some((l) => PAST_BOUND.test(l)), 30_000);
+        manLine = lines.find((l) => PAST_BOUND.test(l)) ?? "";
+        manPaused = lines.some((l) => /^ {2}resumed: no live write/.test(l));
+        const b = ((await beat()) as { reembedBackoff?: { until: string } } | null)?.reembedBackoff;
+        const [{ now }] = (await sql`SELECT now() AS now`) as { now: Date }[];
+        manAhead = b ? (Date.parse(b.until) - new Date(now).getTime()) / 1000 : -1;
+        if (manLimit) {
+          // The provider back; the window out on the row's `until`, the next period begun at once (review pass 4).
+          sw.embedCrashLeft = null;
+          await windowOut();
+          const at = periodsAt().length;
+          if (await nextPeriod("A note that begins the period after the mandrake back-off")) {
+            manTry = await pollUntil(async () => periodOf(at + 1).some((l) => PAST_BOUND.test(l) || BACKED_OFF.test(l)), 30_000);
+            manTryLines = periodOf(at + 1);
+          }
+        }
+      } finally {
+        sw.embedCrashOn = null;
+        sw.embedCrashLeft = null;
+        manCode = await manStop();
+      }
+      assert(manLeft && manPaused && manLimit && BACKS_OFF.exec(manLine)?.[1] === "30" && manAhead >= 27 && manAhead <= 31 && manWaitAge >= 0 && manWaitAge < 5 && manCode === 0,
+        `a pause before a try's limit: the back-off runs its whole window from the limit on the scheduler's clock, not on re-embed's, which the pause held back (left ${manLeft}; paused ${manPaused}; limit ${manLimit}: ${manLine.trim().slice(0, 160)}; the row's until ${manAhead.toFixed(1)} s ahead; the left wait's start ${manWaitAge.toFixed(1)} s old at the resume; exit ${manCode})`);
+      assert(manTry && manTryLines.some((l) => LEFT.test(l)) && manTryLines.some((l) => BACKS_OFF.exec(l)?.[1] === "60" && PAST_BOUND.test(l)) && !manTryLines.some((l) => BACKED_OFF.test(l)),
+        `a period begun just past the back-off's end, after a pause: a try, left waiting, its limit backing off 60 s — the back-off read on the scheduler's clock, not on re-embed's, which the pause holds behind (${told(manTryLines) || "nothing said"}${manTry ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    }
+  } finally {
+    sw.embedCrashOn = null;
+    sw.embedCrashLeft = null;
+    sw.embedCrashMs = 0;
+    sw.embedCrashUntil = 0;
+    sw.embedHangMs = 0;
+    sw.embedHangUntil = 0;
+    restoreOutage();
+    await done();
+  }
+})();
+
 if (want("38b")) {
   console.log("\n[38b] db/sleep.ts: a thought longer than every run between pauses, the brain live 2.45 s into each working period, pausing it (SMD-3379 PR 1c-3b) — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every run between pauses is joined past after three stalled stops and named on the row (SMD-2694); a capture made during a period goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same period; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the pauses' aborts and order the held word (SMD-3060)");
   const sql = new SQL({ url: URL_, max: 4 });
@@ -28506,8 +29130,8 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] leaves recorded, in a full run and the long
-  // cell alike, is another model's, which every pass's start would refuse:
+  // The extraction key [38r] and [38p] leave recorded, in a full run and the
+  // long cell alike, is another model's, which every pass's start would refuse:
   // set aside, and put back at the end.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;

@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-4352]
-migrations: []
----
-
-## Changelog
-
-The suite holds ten more of the claim workers' rules, five of consolidation's, two of extraction's and three of re-embed's, each found by a mutant that no row caught (SMD-4352, PRs 1 to 3). No behaviour changes: the rows are tests.
-
-## Record
-
-Ten rows for the three engines' own lines in the claim workers' loop and error handling, each failed by the mutant that lived, the ticket's PRs 1 to 3 (SMD-4352)
+# 541. Ten rows for the three engines' own lines in the claim workers' loop and error handling, each failed by the mutant that lived, the ticket's PRs 1 to 3 (SMD-4352)
 
 **Problem.** SMD-4308 moved the claim workers' loop and error handling into `db/claim-loop.ts`, each engine passing where it differs. A mutant of each thing passed was run against test-live, and nine lived through every shard that runs the engines: rows main lacked before the move. Five are consolidation's.
 
@@ -55,13 +42,13 @@ The second is the first row to reach the extractor's lapse line at all: every ot
 |---|---|---|
 | A one-shot run halted by its first row | The gate skips the probe, so the first row stands in for it, and its call is refused 401. The run halts: that row is recorded failed, and the other three of the worker's batch stay pending. | The halt's term out of the stop condition: all four are failed, row by row. |
 | One of two workers' calls refused as the request's | A follower with two workers and five thoughts. The first call to arrive answers a 402 the account cannot afford, 300 ms late, and every other call takes 800 ms, so the other worker's call is in flight when the refusal lands. The follower ends 2 with no call made after the two, at most one thought re-embedded and the rest pending. | The refusal's term out: the other worker drains the pool, six calls in all. |
-| A worker let through the admit gate after the record moved | The second worker waits at a gate that does not answer its signal. The first worker reads the record moved and ends the drain. The record is moved back, and the gate opens. The worker claims nothing. | `afterGate` never true: the worker reads the record, finds its own model, and re-embeds what is left. |
+| A worker through the admit gate after the record moved | Since SMD-4401, under the scheduler's own gate, open throughout. One worker reads the record moved while the other's call is in flight, and ends the drain. The record is moved back. The other worker's thought lands, and it claims nothing more. | `afterGate` never true: the worker reads the record, finds its own model, and re-embeds what is left. |
 
 Four things the rows found out.
 
 - **A refusal answered at once never meets a call in flight.** The second row's first draft answered its 402 at once. The refusal then landed between the other worker's claim and its call: one call in all, the thought handed back unsent, in every run. The row said the other worker finished the thought it held, and no run showed it. The 402 is 300 ms late now, and the row counts the calls: two (caught: cold-read).
 - **The halt had no row at all, and a ticket already said so.** Nothing in test-live ran a one-shot pass with its probe skipped and its first call refused. SMD-4143 asks for that case: this row is its first, a 401. Its other configuration-shaped failures, the transient first failure that lets the run go on, and its two mutants are still that ticket's. The row was written before the ticket was found (caught: cold-read).
-- **`afterGate` is reached only past a gate that does not reject when its signal aborts.** One that rejects ends the waiting worker before the rule is read. Past such a gate, the follower's read of the record before each claim catches a record still moved. So the rule decides one case: the record moved and moved back while the worker waited.
+- **`afterGate` decides one case: the record moved and moved back.** The follower's read of the record before each claim catches a record still moved. This PR's row reached the case past a gate that held the worker and resolved after its signal aborted, which `Admit`'s contract forbids, and its record said the rule was reached only so. Both were wrong: the loop reads the rule after every pass of a gate, an open one's too. SMD-4401 corrected the row and this entry.
 - **test-live.ts's module body is at the size TypeScript's flow analysis stops at.** The three rows, added at the section's own level, drew TS2563. They sit in a function of their own.
 
 **Verify, PR 3.** test-live's long shard, in parity: 373 assertions, 373 passed, four more than main. Each of the three mutants, run against the long shard, fails the row written for it (caught: mutant).

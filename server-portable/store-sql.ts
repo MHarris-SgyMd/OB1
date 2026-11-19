@@ -1023,6 +1023,37 @@ export class SqlStore implements ThoughtStore {
     }
   }
 
+  async thoughtsKeyed(key: string): Promise<string[]> {
+    if (!UUID_RE.test(key)) return [];
+    const k = key.toLowerCase();
+    // The standing thought keeping the key (112's unique index), then every thought a delete event's previous metadata
+    // kept it for, not standing again, newest first — never the thought whose id it is. The deleted arm scans the
+    // delete events (no index on the path): only a forget asks, and only by a name (review pass 1 measured 0.5 s at a
+    // million deletes).
+    const rows = await this.sql`
+      SELECT id FROM (
+        SELECT t.id::text AS id, 0 AS arm, now() AS at FROM thoughts t
+         WHERE t.metadata->>'client_key' = ${k}::text AND t.id::text <> ${k}::text
+        UNION ALL
+        SELECT a.thought_id::text, 1, max(a.created_at) FROM thought_audit a
+         WHERE a.action = 'delete' AND a.diff->'previous_metadata'->>'client_key' = ${k}::text AND a.thought_id::text <> ${k}::text
+           AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = a.thought_id)
+         GROUP BY a.thought_id) x
+      ORDER BY arm, at DESC`;
+    return (rows as { id: string }[]).map((r) => String(r.id).toLowerCase());
+  }
+
+  async clientKeyOf(id: string): Promise<string | null> {
+    if (!UUID_RE.test(id)) return null;
+    const rows = await this.sql`
+      SELECT COALESCE(
+        (SELECT t.metadata->>'client_key' FROM thoughts t WHERE t.id = ${id}::uuid),
+        (SELECT a.diff->'previous_metadata'->>'client_key' FROM thought_audit a
+          WHERE a.thought_id = ${id}::uuid AND a.action = 'delete' ORDER BY a.created_at DESC LIMIT 1)) AS k`;
+    const k = (rows[0] as { k: string | null } | undefined)?.k;
+    return typeof k === "string" && UUID_RE.test(k) ? k.toLowerCase() : null;
+  }
+
   async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
     // 086: one statement, as the note and the restamp are made; the function
     // decides who may, and names the actor in the event it appends.

@@ -598,6 +598,14 @@ export interface ReembedOptions {
    */
   stamper?: PassStamper | null;
   /**
+   * The sleep scheduler's alone (SMD-4254): a follower's wait on an outage that made a thought a suspect
+   * (ProviderOutage's byThought) probes the provider every this many ms from the wait's start, no doubling and nothing
+   * carried from the last wait (waitOutProvider's fixedProbeMs) — the scheduler leaves such a wait running within a
+   * bound a wait and a cap a period, which the doubling schedule carried across an isolation's waits passed. A positive
+   * number of ms, which db/sleep.ts checks; left out — a follower run by hand — every outage keeps its schedule.
+   */
+  thoughtProbeMs?: number;
+  /**
    * A follower's start alone, as extract-entities.ts's (SMD-2752): the
    * banner, the egress gate, the tables, the recorded model and the
    * provider's probe — then 0, before the pass's first write (the record, a
@@ -2096,7 +2104,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * an error, or "vanished" when the thought was deleted after it was claimed.
    */
   /** `setBack`: its call in hand aborted by the pass's caller (abortInHand), the worker sets it back in the queue (SMD-3379 PR 1b-2). */
-  type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; error: string } | { outcome: "vanished" } | { outcome: "abandoned" } | { outcome: "setBack" };
+  /** `blamed`: a suspect retried alone, its failure the isolation's finding (blamedFailure), said once its release lands (SMD-4254 review pass 3). */
+  type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; error: string; blamed?: true } | { outcome: "vanished" } | { outcome: "abandoned" } | { outcome: "setBack" };
 
   async function processRow(row: Row, workerId: string): Promise<Outcome> {
     const call = inCall.get(workerId);
@@ -2251,13 +2260,15 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       stopping: () => stopping || haltedByProvider || configError !== null,
       hardStopped: () => hardStopped, isolated: () => isolated, pollNow: () => { pollNow = true; },
       count: { lost: () => { lost++; }, vanished: () => { vanished++; }, beats: (k) => { beats += k; } },
-      // The record's model moved while this worker waited at the gate.
-      afterGate: () => switchedTo !== null,
       // A follower reads the record before each batch, not only at its poll: a --switch-model run by hand beside
       // it had the whole drain — a sleep's backlog — written at the old model after the switch (SMD-2679 PR 4b,
       // review pass 4). The batches in hand still land; the follower ends, 2, once the drain returns.
       beforeClaim: async () => {
         if (!FOLLOW) return false;
+        // The follower has seen the record move, on another worker's read: this one claims nothing more, though the
+        // record has moved back since and its own read would pass it. With a gate or with none (SMD-4401, SMD-4413:
+        // the loop asked this after the admit gate alone, so an ungated follower's second worker drained the pool).
+        if (switchedTo !== null) return true;
         const [r] = (await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
         if (!r || r.value === embedConfig.embeddingModel) return false;
         switchedTo = r.value;
@@ -2326,7 +2337,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                   blamed = outage.blame(b.thought_id, why, p?.state === "up");
                   if (blamed === "answered") return "answered";
                   if (blamed === "alone") {
-                    outage.begin(why);
+                    // No suspect made, but the thought's doing: the sleep scheduler waits it out as one (SMD-4254).
+                    outage.begin(why, undefined, true);
                     drainEnds.abort();
                     outageSubject ??= rowSubject;
                     return "alone";
@@ -2338,12 +2350,22 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 outageSubject ??= rowSubject;
                 const alone = blamed === "outage" && outage.aloneAt(b.thought_id) > 0 ? ` — alone in flight, the probe after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES} before it is recorded failed)` : "";
                 err(`  ${workerId}: the embedding provider is not answering (${cutMarked(why, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
-                if (suspect) await backFirst(b.thought_id);
+                if (suspect) {
+                  await backFirst(b.thought_id);
+                  // Said to a caller's stamper: the sleep scheduler moves it behind the pool if it sets re-embed down
+                  // at a limit or backed off (SMD-4254 review pass 3).
+                  stamper?.suspectBack?.(b.thought_id);
+                }
                 return "outage";
               };
-              /** A suspect's blame, recorded as its failure (SMD-2641 PR 2): answered, or at its third outage alone. */
+              /**
+               * A suspect's blame, recorded as its failure (SMD-2641 PR 2): answered, or at its third outage alone.
+               * `blamed`: said to a caller's stamper, whose back-off ends on it, once its release lands — said before,
+               * a lost lease would end the back-off with nothing recorded (SMD-4254 review passes 2 and 3).
+               */
               const blamedFailure = (sent: "answered" | "alone"): Outcome => ({
                 outcome: "failed",
+                blamed: true,
                 error: sent === "answered"
                   ? `provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`
                   : `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the probe after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`,
@@ -2503,6 +2525,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         if (outcome.outcome === "failed") {
           failed++;
           err(`  ${b.thought_id}: ${outcome.error}`);
+          // A suspect retried alone recorded failed, its own (SMD-4254 review passes 2 and 3).
+          if (outcome.blamed) stamper?.blamedAlone?.();
         } else {
           done++;
           if (outcome.caveat) err(`  ${b.thought_id}: ${outcome.caveat}`);
@@ -2567,6 +2591,9 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     if (ADMIT) gate = AbortSignal.any([onStop.signal, drainEnds.signal]);
     // The last outage's suspects, while any is left to retry (SMD-2641 PR 2): one worker, one thought a claim.
     isolated = !!FOLLOW && outage.isolating();
+    // Said to a caller's stamper: the sleep scheduler reads a drain not isolated as the isolation's end, which its
+    // cap counts (SMD-4254 review pass 2).
+    stamper?.isolating?.(isolated);
     if (isolated) err(`  retrying the last outage's ${outage.suspected} suspect thought(s) one at a time${WORKERS > 1 ? `, one worker, before the drain goes back to ${WORKERS}` : ""}; one that errs again alone is blamed only on a probe made at once`);
     const ends = await Promise.allSettled(Array.from({ length: isolated ? 1 : WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
@@ -2619,6 +2646,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       wake: onStop.signal,
       writer: { out, err },
       stamper,
+      // The sleep scheduler's fixed probe on a thought's outage (SMD-4254); a follower by hand keeps the schedule.
+      ...(opts.thoughtProbeMs === undefined ? {} : { fixedProbeMs: opts.thoughtProbeMs }),
     });
     const back = await (stamper ? stamper.during(waited) : waited);
     if (back === "answered") {

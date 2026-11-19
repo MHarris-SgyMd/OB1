@@ -80,7 +80,7 @@ const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest|notBefore)$/;
-const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Ids?$/;
+const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey|clientKey)$|Ids?$/;
 /** A sha256 in hex, as forget_thought's evidence names the record a thought was ingested as (139): no sentence fits. */
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -1920,13 +1920,13 @@ export function renderDelete(o: Outcome<Deleted>): Reply {
     mutationRefusalText, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
 }
 
-/** forget_thought's refusals (139, 144; SMD-1723 PR 2). CITED is delete_thought's, its way through the forget's. */
+/** forget_thought's refusals (139, 144; SMD-1723 PR 2 and 3). CITED is delete_thought's, its way through the forget's. */
 function forgetRefusal(r: Refusal): string {
   switch (r.code) {
     case "REFUSED_CONFIRM":
       return `Refused: \`confirm\` must be the \`id\` again, exactly as passed (${r.id}). Forgetting cannot be undone: read the thought first (fetch takes the id), then repeat the call with confirm set to the same id.`;
     case "NOT_FOUND":
-      return `No thought with id ${r.id} was ever in the brain's log, so there is nothing to forget. A client_key names only a thought still standing: a thought deleted earlier is forgotten by its id.`;
+      return `No thought with id ${r.id} was ever in the brain's log, nor deleted keeping it as its client_key — or one was, and was forgotten since, which leaves it no key — so there is nothing to forget.`;
     case "FORGOTTEN":
       return `Refused: ${r.id ?? "this thought"} was forgotten already${r.forgottenAt ? ` on ${r.forgottenAt}` : ""}, and nothing of it is left to remove.`;
     case "REPLAYING":
@@ -1942,16 +1942,19 @@ const removedText = (removed: Record<string, number>): string => {
 };
 
 /**
- * forget_thought's reply (139, 144; SMD-1723 PR 2): what each store gave up, then what the forget could not do
- * mechanically and a person reviews — the thoughts derived from it, the pages, the twins that keep the text, and the
- * copies outside the brain. The values are the database's: ids, counts, and the ingested record's hashed identity.
+ * forget_thought's reply (139, 144; SMD-1723 PR 2 and 3): what each store gave up, the other thoughts under the name
+ * it could not forget and those it forgot with it, then what the forget could not do mechanically and a person
+ * reviews — the thoughts derived from it, the pages, the twins that keep the text, and the copies outside the brain.
+ * The values are the database's: ids, counts, and the ingested record's hashed identity.
  */
 export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
   return render(o, (v) => {
     const lines = [
-      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
+      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : v.clientKey ? `, its client_key ${v.clientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
       `Removed or redacted, by store: ${removedText(v.removed)}${v.orphanEntities ? `; ${v.orphanEntities} entit${v.orphanEntities === 1 ? "y" : "ies"} left with no mention` : ""}.`,
     ];
+    if (v.notForgotten?.length) lines.push(`Not forgotten — the same thought under that name, still holding its text here: ${v.notForgotten.map((m) => `${m.id} (${m.code}${m.errno ? ` ${m.errno}` : ""})`).join(", ")}. Call forget_thought with the same id again${v.notForgotten.some((m) => m.code === "REPLAYING") ? " once the replay is done" : ""}${v.notForgotten.some((m) => m.code === "CITED") ? ", with detach_citations true for one CITED (another thought cites it)" : ""}: what is forgotten is not repeated.`);
+    if (v.alsoForgotten?.length) lines.push(`Also forgotten here, the same thought under that name (a copy deleted before, or one keeping it as its client_key): ${v.alsoForgotten.join(", ")}.`);
     if (v.source) lines.push(`The record it was ingested as (${snipText(v.source.system, 40)}) is left out of every sync, until an operator reinstates it.`);
     if (v.irreproducible.length) lines.push(`Derived from it, for you to review — their prose may have absorbed its text: ${v.irreproducible.join(", ")}.`);
     if (v.pages.length) lines.push(`Pages to review — an earlier render may hold its text: ${v.pages.join(", ")}.`);
@@ -1959,7 +1962,9 @@ export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
     if (v.outside.length) lines.push(`Outside the brain's reach: ${v.outside.join("; ")}.`);
     return lines.join("\n");
   }, forgetRefusal, (v) => ({
-    id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
+    id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), ...(v.clientKey ? { clientKey: v.clientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
+    ...(v.alsoForgotten?.length ? { alsoForgottenIds: v.alsoForgotten } : {}),
+    ...(v.notForgotten?.length ? { notForgotten: v.notForgotten.map((m) => ({ id: m.id, code: m.code })) } : {}),
     // REST's arrays renamed, the guard holding a key ending in Ids to uuids.
     removed: v.removed, irreproducibleIds: v.irreproducible, pageIds: v.pages, twinIds: v.twins, itemIds: v.itemIds, proposalIds: v.proposalIds,
     ...(v.source ? { source: { system: v.source.system, identitySha256: v.source.identitySha256 } } : {}),
