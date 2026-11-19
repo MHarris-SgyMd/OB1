@@ -4235,8 +4235,9 @@ if (want("9f")) {
   let afford402Next = 0;
   /** Every row's call that arrived, whatever its answer (SMD-4352). */
   let rowCalls = 0;
-  /** While above zero, the next row's call is held 1.5 s, not slowMs, whatever its text (SMD-4401): one worker done while the other's call is in flight. */
+  /** While above zero, the next row's call is held quickMs, not slowMs, whatever its text (SMD-4401): one worker done while the other's call is in flight. */
   let quickNext = 0;
+  let quickMs = 1500;
   let modelGone404 = false;
   /** A second embedding call in flight answers 429, as a provider's concurrency limit does (the probe exempt). */
   let limitConcurrent = false;
@@ -4368,7 +4369,7 @@ if (want("9f")) {
       }
       if (!probe && quickNext > 0) {
         quickNext--;
-        await Bun.sleep(1500);
+        await Bun.sleep(quickMs);
       } else if (slowMs > 0 && !probe) await Bun.sleep(slowMs);
       await Bun.sleep(10);
       const v = new Array(DIM).fill(0);
@@ -5039,8 +5040,10 @@ if (want("9f")) {
       // …and with no gate the same (SMD-4413: the loop asked the rule after the admit gate alone, so an ungated
       // follower's second worker read its own model recorded and drained the pool). No gate, so no signal says when
       // the quick worker has read the record moved: the row waits for its thought to land and a second more, then
-      // moves the record back, the other's call 4 s long. A move back that came before that read would leave no
-      // worker having seen the move, and the follower running: the row would say so, not pass.
+      // moves the record back. A move that landed after the quick call ended, or a move back that came before the
+      // quick worker's read, would leave no worker having seen the move and the follower running: the row would say
+      // so, not pass. So the calls are 3 s and 6 s here, twice the gated row's, which reads a signal and waits on
+      // neither: some 2.7 s for the move to land, and 1.7 s each side of the move back.
       const bare = liveFollower({ workers: 2, env: { ...env, OB1_LLM_TIMEOUT: "30" } });
       await bare.idle();
       let bareIds: string[] = [];
@@ -5050,7 +5053,8 @@ if (want("9f")) {
       let bareEnd: string | null = null;
       const bareCalls = rowCalls;
       const bareAtModel = async () => Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE id = ANY(${sql.array(bareIds, "TEXT")}::uuid[]) AND embedding IS NOT NULL AND embedding_model = 'stub-embed'`)[0].n);
-      slowMs = 4000;
+      slowMs = 6000;
+      quickMs = 3000;
       quickNext = 1;
       try {
         bareIds = ((await sql`INSERT INTO thoughts (content) SELECT 'a thought of five the ungated follower leaves, number ' || g FROM generate_series(1, 5) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
@@ -5063,6 +5067,7 @@ if (want("9f")) {
         await sql`UPDATE ob1_config SET value = 'stub-embed' WHERE key = 'embedding_model'`;
         bareEnd = await bare.ended();
         quickNext = 0;
+        quickMs = 1500;
         slowMs = 0;
       }
       const bareAfter = await bareAtModel();
