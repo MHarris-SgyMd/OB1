@@ -819,7 +819,7 @@ export class ProviderOutage {
    * clears them, so an earlier one's are no longer "right after" — but not one that begins while isolating.
    */
   private suspects = new Map<string, number>();
-  /** Whether the outage in progress is a thought's doing, as far as the follower can tell (`byThought`, SMD-4254). */
+  /** byThought's mark: set as a suspect's error, its outage alone or `begin`'s `blamed` begins or joins the outage; cleared as a new one begins (SMD-4254). */
   private ofThought = false;
 
   /** `now` is the clock; the suite's own, to run the window without the wall clock. */

@@ -175,7 +175,7 @@ function jobOf(worker: StampingWorker, key: string): string | undefined {
 /**
  * End the follower's row with `restart`: its own last word kept when it wrote
  * one since `since`, else a row of its own here. The waits (re-embed's left wait, `reembedWait`, SMD-4254, among them), the pause,
- * re-embed's back-off (`reembedBackoff`, the scheduler's life's, SMD-4254 review pass 2) and
+ * re-embed's back-off (`reembedBackoff`, which lasts the scheduler's life, SMD-4254) and
  * board-sync's rate-limit hold go — an ended row waits on nothing, and is
  * paused or held by nothing (SMD-3379 PR 1c, SMD-4133) — its held passes stay as its last word, and a follower that did not exit
  * 0 failed. One statement, the row read and written under its own lock.

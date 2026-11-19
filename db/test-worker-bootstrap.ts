@@ -886,14 +886,13 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
       const sleeps: number[][] = [];
       const waits: number[] = [];
       const said: string[] = [];
-      const crashedWait = async (crash: () => unknown, fixedProbeMs?: number) => {
+      const crashedWait = async (crash: () => unknown) => {
         crash();
         downUntil = clock + 50_000;
         const from = clock, slept: number[] = [];
         lines.length = 0;
         const back = await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: iso,
-          probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "500 crashed" }), sleep: async (ms) => { slept.push(ms); clock += ms; },
-          ...(fixedProbeMs === undefined ? {} : { fixedProbeMs }) });
+          probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "500 crashed" }), sleep: async (ms) => { slept.push(ms); clock += ms; }, fixedProbeMs: 5_000 });
         waits.push(clock - from);
         sleeps.push(slept);
         said.push(lines[0] ?? "");
@@ -901,9 +900,9 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
         return back;
       };
       const backs = await onTheClock(async () => [
-        await crashedWait(() => iso.begin("500 crashed", "P"), 5_000),
-        await crashedWait(() => iso.blame("P", "500 crashed", false), 5_000),
-        await crashedWait(() => iso.blame("P", "500 crashed", false), 5_000),
+        await crashedWait(() => iso.begin("500 crashed", "P")),
+        await crashedWait(() => iso.blame("P", "500 crashed", false)),
+        await crashedWait(() => iso.blame("P", "500 crashed", false)),
       ]);
       ok(backs.every((b) => b === "answered") && waits.every((w) => w === 50_000) && sleeps.every((s) => s.length === 10 && s.every((ms) => ms === 5_000))
           && said.every((l) => /the follower calls e at b every 5 s, an outage that made a thought a suspect$/.test(l)),
@@ -930,11 +929,11 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
       const mix = new ProviderOutage(() => clock, SUSPECT_WINDOW_MS, true);
       const mixLines = await onTheClock(async () => {
         const got: string[] = [];
-        for (const [begin, fixed] of [[() => mix.begin("503 busy"), true], [() => mix.begin("500 crashed", "Q"), true], [() => mix.begin("503 busy"), true]] as const) {
+        for (const begin of [() => mix.begin("503 busy"), () => mix.begin("500 crashed", "Q"), () => mix.begin("503 busy")]) {
           begin();
           downUntil = clock + 30_000;
           lines.length = 0;
-          await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: mix, ...(fixed ? { fixedProbeMs: 5_000 } : {}),
+          await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: mix, fixedProbeMs: 5_000,
             probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "down" }), sleep: async (ms) => { clock += ms; } });
           got.push(lines[0] ?? "");
           clock += 500;
@@ -989,8 +988,8 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
 
 // ---------------------------------------------------------------------------
 // The sleep scheduler's re-embed on an outage that made a thought a suspect (SMD-4254, review pass 2): the shipped
-// numbers, which test-live runs scaled, and the back-off, by time since review pass 3 (the maintainer's decision of
-// 2026-11-18), on a clock the row passes.
+// numbers, which test-live runs scaled, and the back-off by time (the maintainer's decision of 2026-11-18), on a clock
+// the row passes.
 // ---------------------------------------------------------------------------
 {
   ok(REEMBED_THOUGHT_WAIT_MS === 120_000 && REEMBED_THOUGHT_PERIOD_MS === 240_000 && REEMBED_THOUGHT_PROBE_MS === 5_000 && REEMBED_THOUGHT_BACKOFF_MS === 240_000 && REEMBED_THOUGHT_BACKOFF_MAX_MS === 3_600_000,
@@ -998,8 +997,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   // A crash that ends between about 80 and 120 s, on a busy brain: a period every 30 s, each try held to the 240 s cap
   // and set down there. Backed off by time, the tries fall at 0, 480, 1200 and 2400 s — 4, 8, then 16 min after each
   // try's limit — whatever the periods between, and the next window 32 min doubled to 64, held at the hour's ceiling
-  // (review pass 4); backed off by periods (review pass 2), at 0, 300, 630, 1020 s (each try's limit, then 1, 2, 4
-  // periods of 30 s), the claim passes held most of the hour.
+  // (review pass 4).
   const b = new ThoughtWaitBackoff();
   const tries: number[] = [];
   for (let t = 0; t < 3600;) {

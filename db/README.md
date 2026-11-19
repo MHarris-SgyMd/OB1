@@ -5382,13 +5382,13 @@ a provider that hangs, two `OB1_LLM_TIMEOUT`s, 120 s each at the default, so a
 try holds the claim passes about 6 minutes with a provider that hangs for good —
 the two and the bound — and about 8 with one that hangs for about 240-360 s, the
 two and the cap). A live write's pause counts toward
-neither limit: their clock stops while the period's gate is closed (review pass
-3). And it backs off, by time (review pass 3, the maintainer's decision): a
+neither limit: their clock stops while the period's gate is closed. And it
+backs off, by time (the maintainer's decision): a
 set-down at a limit — a try — makes such an outage met in the next 4 minutes set
 re-embed down at once, as before SMD-4254, said ("backing off" and the seconds
 left); the first one met after that is waited out once more, and a try that ends
 at a limit again backs off 8 minutes, then 16, 32, and then an hour at each
-(the ceiling, review pass 4: the hourly rescan's scale; doubling on, the next
+(the ceiling, the hourly rescan's scale; doubling on, the next
 try after ten limits was about 68 hours away), until re-embed drains or a
 suspect retried alone is recorded failed — for the scheduler's life, a restart
 trying at once. A limit in an isolation where a suspect was recorded failed
@@ -5404,7 +5404,7 @@ captures: a new note waits about one crash length (a median 120-228 s measured);
 on an idle brain the move pays at the next rescan. A period is capture-driven on
 a busy brain (a live or sync capture begins one, about 30 s apart under a steady
 inflow) and the hourly rescan on an idle one, so the back-off counts time, not
-periods: counted in periods (review pass 2), the periods after a skipped one met
+periods: counted in periods, the periods after a skipped one met
 the provider still down from the crash it caused, and a crash of 80 s or more
 held the claim passes 40-63% of the time. The tries, by the crash:
 
@@ -5422,13 +5422,13 @@ held the claim passes 40-63% of the time. The tries, by the crash:
 
 The back-off spares the claim passes, not the provider: a crashing thought that
 outlasts the limits crashes it again every crash length, each period claiming it
-once the provider is back — on this branch as on main, about 24 times an hour
+once the provider is back — as before SMD-4254, about 24 times an hour
 at 150 s a crash and 40 at 90 s. Measured at the shipped settings with a steady
-sync capture every 30 s for 60 minutes (review pass 4), the claim passes were
+sync capture every 30 s for 60 minutes, the claim passes were
 held 27.4% of the time with a crash of 150 s (48, 33, 17, 33, 17 and 17% by
 10-minute slice) and 38.4% with one of 90 s (57, 42, 49, 17, 49 and 17%),
-against 16.7% throughout on main, 5 s a period otherwise; the share falls as
-the back-off doubles. Meanwhile the backlog is re-embedded (none on main). On
+against 16.7% throughout before SMD-4254, 5 s a period otherwise; the share falls
+as the back-off doubles. Meanwhile the backlog is re-embedded (none before SMD-4254). On
 an idle brain, with no capture to begin a period, a try comes only with the
 hourly rescan: 5.5-10.7% held. A crash shortened meanwhile is failed at the
 first try after the back-off in hand ends.
@@ -5746,16 +5746,16 @@ limits a wait and the period's isolation past which it sets re-embed down.
 Preflight's fix then says re-embed is left waiting and how long it may wait yet,
 in seconds — min(`boundS` − waited, `periodS` − `earlierS` − waited) and a poll
 — where it said the next poll sets it down, and once `earlierS` is above 0 the
-log line that names a crashing thought, unless `backoffS` is 0 (review pass 4:
-that thought found); the wait's end, a period's end and an ended row
-(db/supervise.ts's too) drop it. `reembedWait.backoffS` (review pass 3) is the
+log line that names a crashing thought, unless `backoffS` is 0 (that thought
+found); the wait's end, a period's end and an ended row
+(db/supervise.ts's too) drop it. `reembedWait.backoffS` is the
 back-off a set-down at either limit begins, 0 once a suspect of the isolation
 was recorded failed alone, and a pause moves `since` past it. Beside
 it, `reembedBackoff` while the scheduler backs off from such waits, or has since
-its last reset (review pass 2; by time since review pass 3): `until`, when it
+its last reset: `until`, when it
 ends, on the database's clock — such an outage met before it sets re-embed down
 at once, and past it a try is due; `nextS`, the back-off the next try ending at
-a limit begins, at most 3600 (review pass 4); `skipped`, whether the period in
+a limit begins, at most 3600; `skipped`, whether the period in
 hand was set down at once so. It lasts the scheduler's life, so an ended row
 drops it; preflight says it with an outage's set-down and with a wait left
 running.

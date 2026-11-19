@@ -5113,10 +5113,10 @@ else {
           // …and, coming back every period, a thought that crashes the provider, as its log names it (SMD-4254).
           && /if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages \(2 min a wait, 4 min of isolation a period, the retries between the waits counted; a crashing thought takes four waits, so one whose crash lasts about 80 s or more is never failed, and the scheduler then sets re-embed down at once at such an outage for 4 min, then 8, 16, … up to an hour between tries, its suspects moved behind the pool so the backlog is re-embedded meanwhile\), which its log names at each period's start: the same thought id "goes back to the pool unrecorded"; the other passes run on, and the next period with work tries it again\.$/.test(fix(lastDown.out, "sleep")),
         `idle, a set-down speaks of the last period, an outage naming the embedding provider, and a thought crashing it as the cause of one that comes back every period (${row(lastDown.out, "sleep")} | ${fix(lastDown.out, "sleep")})`);
-      // Backing off (SMD-4254 review pass 2, the maintainer's decision; by time since review pass 3): the row's back-off
-      // said with the set-down, by state (review pass 3, run-it: "this period waits once more" on an idle row, and on a
-      // period set down at its start) — "this period" only of a live row the back-off set down at once, else the next
-      // period that meets one; the time left; past its end, a try due; and the back-off the next try's limit begins.
+      // Backing off (SMD-4254 review pass 2, the maintainer's decision): the row's back-off said with the set-down, by
+      // state (review pass 3, run-it: "this period waits once more" on an idle row, and on a period set down at its
+      // start) — "this period" only of a live row the back-off set down at once, else the next period that meets one;
+      // the time left; past its end, a try due; and the back-off the next try's limit begins.
       const AFTER = "its suspects moved behind the pool; the first one met after that is waited out once more, and if that wait ends at a limit too re-embed backs off 480 s.";
       for (const [label, running, backoff, words] of [
         ["live, this period set down at once in the window", true, { until: await at(-100), nextS: 480, skipped: true }, new RegExp(`the next period with work runs it again — backing off: a try's wait on an outage that made a thought a suspect ended at a limit, so this period met such an outage and set re-embed down at once, as a period that meets one in the next (\\d+) s will, ${rx(AFTER)}$`)],
@@ -5127,7 +5127,7 @@ else {
         await beat("heartbeat:sleep", v({ every_s: 60, running, outcome: "ok", aside: { reembed: { kind: "outage" } }, reembedBackoff: backoff, slept: { from: await at(130), to: running ? null : await at(60) } }), 10);
         const backoffFix = fix((await run(LOG_ON)).out, "sleep");
         const m = words.exec(backoffFix);
-        const leftS = m?.[1] === "" ? 0 : Number(m?.[1]);
+        const leftS = Number(m?.[1]);
         assert(backoffFix.includes(`Re-embed was set down for ${running ? "this" : "its last"} period — its provider did not answer`) && m !== null && (m[1] === "" || (leftS >= 95 && leftS <= 100)) && (running && backoff.skipped || !/this period/.test(backoffFix.slice(backoffFix.indexOf("backing off")))),
           `re-embed's back-off said with an outage's set-down: ${label} (${backoffFix})`);
       }

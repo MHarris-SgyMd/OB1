@@ -146,9 +146,9 @@
  * the next REEMBED_THOUGHT_BACKOFF_MS (4 min) set re-embed down at once, as
  * before SMD-4254, said ("backing off"); the first one met after that is
  * waited out once more, a try, and a try ending at a limit backs off 8 min,
- * then 16, 32, then an hour at each (REEMBED_THOUGHT_BACKOFF_MAX_MS, review
- * pass 4), until re-embed drains or a suspect retried alone is recorded
- * failed — the crashing thought found — for the scheduler's life. So a crash
+ * then 16, 32, then an hour at each (REEMBED_THOUGHT_BACKOFF_MAX_MS), until
+ * re-embed drains or a suspect retried alone is recorded failed — the
+ * crashing thought found — for the scheduler's life. So a crash
  * that ends between about 80 and 120 s is tried at 0, 8, 20, 40, … min, each
  * try held to the cap; one longer than the bound that ends, at 0, 6, 16, 34,
  * … min, each held to the bound, plus the wait for the provider to come back;
@@ -157,16 +157,16 @@
  * OB1_LLM_TIMEOUTs and the bound) when it hangs for good, about 8 (the two
  * and the cap) for a hang of about 240-360 s. The back-off spares the claim
  * passes, not the provider: a crasher outlasting the limits crashes it every
- * crash length, as on main. At a limit's set-down and a backed-off one the
+ * crash length, as before SMD-4254. At a limit's set-down and a backed-off one the
  * outage's suspects, handed back at the pool's front, are moved behind the
  * backlog pooled then, so the next periods re-embed it before claiming them
  * again; thoughts captured after land behind them, so under a steady inflow
  * each period still claims the crashing thought before its new captures, a
  * new note waiting about one crash length, and on an idle brain the move pays
- * at the next rescan. An endpoint
- * simply down that a call first meets mid-pass with a 5xx, a refused or reset
- * connection or a timeout makes a suspect too, and costs up to the bound
- * once; the next period's start finds it down and sets re-embed down at once.
+ * at the next rescan. An endpoint simply down that a call first meets
+ * mid-pass with a 5xx, a refused or reset connection or a timeout makes a
+ * suspect too, and costs up to the bound once; the next period's start finds
+ * it down and sets re-embed down at once.
  * An outage with no suspect — a 429, a 503, the model loading — and a wait at
  * its start set it down at once, as before. A statement past its timeout
  * holds it until a restart, as it holds any pass (Budget).
@@ -588,8 +588,8 @@ export const REEMBED_THOUGHT_WAIT_MS = 120_000;
  * period at the defaults). A crashing thought costs four waits (its batch's outage, two alone, then the outage it leaves
  * once recorded failed): under this cap it is failed in one period if the provider is back under about 80 s after each
  * crash (three waits, the retries between them a call each), the backlog behind it re-embedded too under about 60 s
- * (four). Longer crashes are set down at the cap, the thought retried at a later period, as before SMD-4254, and
- * re-embed backs off (ThoughtWaitBackoff). A live write's pause does not count: the clock stops while the period's gate
+ * (four). Longer crashes are set down at the cap, as before SMD-4254, and re-embed backs off (ThoughtWaitBackoff)
+ * before it tries the thought again. A live write's pause does not count: the clock stops while the period's gate
  * is closed (review pass 3), as the wait's bound's does.
  */
 export const REEMBED_THOUGHT_PERIOD_MS = 240_000;
@@ -1657,7 +1657,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   let reembedDown: ReembedDown | null = null;
   /** Re-embed's back-off from waiting out outages that made a thought a suspect, for the scheduler's life (SMD-4254, review pass 2), by time on the scheduler's clock (review pass 3): ThoughtWaitBackoff. */
-  const reembedBackoff = new ThoughtWaitBackoff(opts.reembedThoughtBackoffMs ?? REEMBED_THOUGHT_BACKOFF_MS, opts.reembedThoughtBackoffMaxMs ?? REEMBED_THOUGHT_BACKOFF_MAX_MS);
+  const reembedBackoff = new ThoughtWaitBackoff(opts.reembedThoughtBackoffMs, opts.reembedThoughtBackoffMaxMs);
   /** Whether the period in hand set re-embed down at once, backed off: the row's `skipped`, so preflight says "this period" only of one that was (review pass 3). */
   let reembedSkipped = false;
   /**
@@ -1668,9 +1668,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   let dbClock: { db: number; at: number } | null = null;
   const onDbClock = (at: number): string => new Date(dbClock === null ? at : dbClock.db + (at - dbClock.at)).toISOString();
   /** The back-off's mark on the row (brain-info.ts's ReembedBackoff): its end on the database's clock, the back-off the next try's limit begins, and whether this period was set down at once. */
+  /** A span on the row in whole seconds, at least 1: the back-off's and the left wait's marks. */
+  const rowS = (ms: number): number => Math.max(1, Math.round(ms / 1000));
   const backoffMark = (): ReembedBackoff | null => {
     const st = reembedBackoff.state();
-    return st === null ? null : { until: onDbClock(st.until), nextS: Math.max(1, Math.round(st.nextMs / 1000)), skipped: reembedSkipped };
+    return st === null ? null : { until: onDbClock(st.until), nextS: rowS(st.nextMs), skipped: reembedSkipped };
   };
   /** Re-embed set down or aside at any point of this period: its pool left, so a one-shot run exits 1 (review pass 3: one taken up mid-sleep exited 0). */
   let reembedLeft = false;
@@ -2127,9 +2129,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * beside it. Not while the back-off sets such an outage down at once: the poll does not leave it waiting.
    */
   const waitMark = (): ReembedThoughtWait | null => {
-    if (reembedThoughtWait === null || !waitingMidPass.has("reembed") || reembedBackoff.skipping(Date.now())) return null;
     const now = Date.now();
-    return { since: onDbClock(now - (reembedClock(now) - reembedThoughtWait.since)), earlierS: Math.round(reembedThoughtWait.earlier / 1000), boundS: Math.max(1, Math.round(REEMBED_THOUGHT_WAIT / 1000)), periodS: Math.max(1, Math.round(REEMBED_THOUGHT_PERIOD / 1000)), backoffS: reembedBlamed ? 0 : Math.max(1, Math.round(reembedBackoff.windowMs / 1000)) };
+    if (reembedThoughtWait === null || !waitingMidPass.has("reembed") || reembedBackoff.skipping(now)) return null;
+    return { since: onDbClock(now - (reembedClock(now) - reembedThoughtWait.since)), earlierS: Math.round(reembedThoughtWait.earlier / 1000), boundS: rowS(REEMBED_THOUGHT_WAIT), periodS: rowS(REEMBED_THOUGHT_PERIOD), backoffS: reembedBlamed ? 0 : rowS(reembedBackoff.windowMs) };
   };
   const sayWaiting = async (outcome?: "ok" | "failed"): Promise<void> => {
     stamper.waiting?.(PASSES.filter((p) => waitingAtStart.has(p)));
@@ -2879,9 +2881,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // Re-embed's isolations on outages that made a thought a suspect are capped a period: the count begins again
     // (SMD-4254, review pass 2), its clock running (a stop mid-pause left it stopped: review pass 3). The back-off is
     // not: it runs on the scheduler's clock across periods; this period has set nothing down at once yet.
+    endIsolation();
     reembedIsolated = 0;
-    reembedIsolation = null;
-    reembedBlamed = false;
     reembedSuspects.clear();
     runReembedClock();
     if (reembedSkipped) {
@@ -3127,9 +3128,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
      * Dated now, as setBackAborted's set-back is (lease.ts' setBack): behind every row pooled before it, ahead of every
      * thought captured after — so under a steady inflow each period still claims it before that period's new captures,
      * a new note waiting about one crash length (review pass 4: a median 120-228 s measured), and on an idle brain the
-     * move pays at the next rescan. Pending rows
-     * alone — one re-embedded, recorded failed or claimed meanwhile is not the pool's to move. A courtesy, as
-     * stoppedLast is: one that fails is said, and the period goes on. The rows moved.
+     * move pays at the next rescan. Pending rows alone — one re-embedded, recorded failed or claimed meanwhile is not
+     * the pool's to move. A courtesy, as stoppedLast is: one that fails is said, and the period goes on. The rows moved.
      */
     const suspectsBehind = async (): Promise<number> => {
       if (reembedSuspects.size === 0) return 0;
@@ -3450,10 +3450,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         if (rp === null) return stopped();
         const waits = waitingAtStart.has("reembed") || waitingMidPass.has("reembed");
         const thoughtWait = waitingMidPass.has("reembed") && !waitingAtStart.has("reembed") ? reembedThoughtWait : null;
-        const now = reembedClock();
         const wall = Date.now();
-        const waitedMs = thoughtWait === null ? 0 : now - thoughtWait.since;
-        const pastBound = waitedMs >= REEMBED_THOUGHT_WAIT;
+        const now = reembedClock(wall);
+        const pastBound = thoughtWait !== null && now - thoughtWait.since >= REEMBED_THOUGHT_WAIT;
         const pastPeriod = reembedIsolation !== null && isolatedMs(now) >= REEMBED_THOUGHT_PERIOD;
         const backingOff = thoughtWait !== null && reembedBackoff.skipping(wall);
         const leftWaiting = thoughtWait !== null && !pastBound && !pastPeriod && !backingOff;

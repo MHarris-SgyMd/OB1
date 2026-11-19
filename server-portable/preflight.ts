@@ -33,7 +33,7 @@ import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -413,12 +413,11 @@ const reembedDownRemedy = (kind: ReembedDown, stopped = false, ownTimeout = fals
 /**
  * The sleep scheduler's back-off from waiting out outages that made a thought
  * a suspect, in words (heartbeat:sleep's `reembedBackoff`, SMD-4254 review
- * pass 2, db/sleep.ts's ThoughtWaitBackoff): by time since review pass 3 —
- * the time left until such an outage is waited out again, said by the row's
- * state (review pass 3, run-it: "this period waits once more" read on an idle
- * row, and on a period set down at its start): "this period" only of a live
- * row whose period was set down at once by it, else the next period that
- * meets one; past its end, a try is due; and the back-off a try's limit begins.
+ * pass 2, db/sleep.ts's ThoughtWaitBackoff): the time left until such an
+ * outage is waited out again, said by the row's state (review pass 3) —
+ * "this period" only of a live row whose period was set down at once by it,
+ * else the next period that meets one; past its end, a try is due; and the
+ * back-off a try's limit begins.
  */
 const reembedBackoffWords = (h: Pick<WorkerHeartbeat, "at" | "ageS" | "running">, b: ReembedBackoff): string => {
   const left = Math.max(0, Math.ceil(-secondsSince(h, b.until)));
@@ -5616,23 +5615,21 @@ if (configFailed) {
               // Re-embed's wait ends at the scheduler's next poll, set down for the period (review pass 1) — but one
               // mid-pass on an outage that made a thought a suspect is left running, within a bound a wait and a cap a
               // period, which the row carries (`reembedWait`, SMD-4254).
-              const left = h.reembedWait;
               // In seconds and the time left, not ago()'s minutes, which read 210 s as "4 min" (review pass 2); the
               // cap counts the period's isolation, the retries between the waits included, `earlierS` its part before
               // this wait; and once the period has isolated before, the log line that names a crashing thought.
-              const leftWords = (w: NonNullable<typeof left>) => {
+              const leftWords = (w: ReembedThoughtWait) => {
                 const waited = Math.max(0, Math.round(secondsSince(h, w.since)));
                 const remains = Math.max(0, Math.min(w.boundS - waited, w.periodS - w.earlierS - waited));
-                const backoff = h.reembedBackoff;
                 // The back-off its limit begins, which the row carries (review pass 3): none once a suspect of this
                 // isolation was recorded failed alone; a try after an earlier back-off said so. The log hint only
                 // while no suspect is failed: once one is, the crashing thought is found (review pass 4).
                 return `re-embed is left waiting: an outage made the thought in hand a suspect — a thought's embedding may have crashed the provider — so the scheduler waits it out and, once it answers, retries the suspects one at a time; it sets re-embed down for the period, extraction going on, in ${remains} s and a poll at most — ${w.boundS} s from this wait's start (${waited} s ago), or ${w.periodS} s of isolation this period, its waits and the retries between them (${w.earlierS} s before this wait) — `
-                  + (w.backoffS > 0 ? `and then backs off ${w.backoffS} s, a period that meets such an outage meanwhile setting it down at once, its suspects moved behind the pool${backoff ? " (a try: an earlier back-off has run out)" : ""}` : "and does not back off: a suspect was recorded failed alone in this isolation")
+                  + (w.backoffS > 0 ? `and then backs off ${w.backoffS} s, a period that meets such an outage meanwhile setting it down at once, its suspects moved behind the pool${h.reembedBackoff ? " (a try: an earlier back-off has run out)" : ""}` : "and does not back off: a suspect was recorded failed alone in this isolation")
                   + (w.earlierS > 0 && w.backoffS > 0 ? `; a thought that crashes the provider at each retry is named in the scheduler's log: the same thought id "goes back to the pool unrecorded" at each outage` : "");
               };
-              const reembedWords = (mid: boolean) => mid && left
-                ? leftWords(left)
+              const reembedWords = (mid: boolean) => mid && h.reembedWait
+                ? leftWords(h.reembedWait)
                 : "re-embed is set down for the period at the scheduler's next poll, extraction going on, and the next period with work tries it again";
               const waitTail = (passes: readonly string[], one: string, many: string, after: string, mid = false) => {
                 const others = passes.filter((p) => p !== "reembed").length;

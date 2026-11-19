@@ -357,7 +357,7 @@ export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; co
 export type ReembedThoughtWait = { since: string; earlierS: number; boundS: number; periodS: number; backoffS: number };
 /**
  * The sleep scheduler's back-off from leaving re-embed waiting on such outages (WorkerHeartbeat's reembedBackoff,
- * SMD-4254 review pass 2), by time since review pass 3, as db/sleep.ts's ThoughtWaitBackoff writes it: `until`, when
+ * SMD-4254 review pass 2), by time, as db/sleep.ts's ThoughtWaitBackoff writes it: `until`, when
  * it ends — such an outage met before it sets re-embed down at once, the first met after it is waited out once more
  * (a UTC instant on the database's clock; past, a try is due); `nextS`, the back-off the next try that ends at a limit
  * begins; `skipped`, whether the period in hand set re-embed down at once so.
@@ -944,9 +944,6 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
         && mid.every((p) => (SLEEP_PASSES as readonly unknown[]).includes(p)) && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
       ? (mid as SleepPass[])
       : undefined;
-    // Re-embed left waiting on an outage that made a thought a suspect (SMD-4254): the sleep's, on a live row naming
-    // re-embed mid-pass alone, left off when not of the shape (read below, once `live` is).
-    const rw = worker === "sleep" && waitingMidPass?.includes("reembed") ? (v!.reembedWait as Record<string, unknown> | undefined) : undefined;
     const refused = typeof v!.refused === "string" && (SLEEP_REFUSALS as readonly string[]).includes(v!.refused) ? (v!.refused as SleepRefusal) : undefined;
     // Its model calls by pass (SMD-3379 PR 2b-2a), left off whole when any part is not of the shape.
     const models = parseModels(v!.models);
@@ -966,7 +963,10 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // Paused by a live call, on a live row alone, and its held passes, kept on an ended one (SMD-3379 PR 1c); each left off when not of the shape.
     const p = worker === "sleep" && live ? (v!.paused as Record<string, unknown> | undefined) : undefined;
     const paused = p !== null && typeof p === "object" && typeof p.since === "string" && UTC_INSTANT.test(p.since) ? { since: p.since } : undefined;
-    const reembedWait = live && rw !== null && typeof rw === "object" && typeof rw.since === "string" && UTC_INSTANT.test(rw.since)
+    // Re-embed left waiting on an outage that made a thought a suspect (SMD-4254): the sleep's, on a live row naming
+    // re-embed mid-pass alone, left off when not of the shape.
+    const rw = worker === "sleep" && live && waitingMidPass?.includes("reembed") ? (v!.reembedWait as Record<string, unknown> | undefined) : undefined;
+    const reembedWait = rw !== null && typeof rw === "object" && typeof rw.since === "string" && UTC_INSTANT.test(rw.since)
         && count(rw.earlierS, 86_400) && count(rw.boundS, 86_400) && (rw.boundS as number) > 0 && count(rw.periodS, 86_400) && (rw.periodS as number) > 0 && count(rw.backoffS)
       ? { since: rw.since, earlierS: rw.earlierS as number, boundS: rw.boundS as number, periodS: rw.periodS as number, backoffS: rw.backoffS as number }
       : undefined;

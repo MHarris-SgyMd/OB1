@@ -156,17 +156,17 @@ export interface PassStamper {
    * that made a thought a suspect (`reembedWait` in the value, left out while
    * re-embed waits on none, and on an ended row; SMD-4254): the wait's start,
    * on the database's clock, the period's isolation counted before it, and
-   * the bound and the cap past which the scheduler sets re-embed down —
-   * preflight's fix says so, where it said the next poll sets it down. Only
-   * the scheduler sets it.
+   * the bound and the cap past which the scheduler sets re-embed down, and
+   * the back-off a limit then begins — preflight's fix says so. Only the
+   * scheduler sets it.
    */
   reembedWait?(w: ReembedThoughtWait | null): void;
   /**
    * The sleep scheduler's back-off from leaving re-embed waiting on such
    * outages (`reembedBackoff` in the value, left out while it has none, and
-   * on an ended row: it lasts the scheduler's life; SMD-4254 review pass 2):
-   * by time since review pass 3 — until when such an outage sets re-embed
-   * down at once, the back-off the next try ending at a limit begins, and
+   * on an ended row: it lasts the scheduler's life; SMD-4254): by time —
+   * until when such an outage sets re-embed down at once, the back-off the
+   * next try ending at a limit begins, and
    * whether this period set it down so. Only the scheduler sets it.
    */
   reembedBackoff?(b: ReembedBackoff | null): void;
@@ -193,8 +193,8 @@ export interface PassStamper {
    * (SMD-4254 review pass 3): re-embed's says it, and the sleep scheduler's
    * per-pass stamper moves the period's such thoughts behind the pool when it
    * sets re-embed down at a limit or backed off, so the next periods
-   * re-embed the backlog before claiming them again. A follower's own
-   * stamper has none.
+   * re-embed the backlog pooled by then before claiming them again. A
+   * follower's own stamper has none.
    */
   suspectBack?(id: string): void;
   /**

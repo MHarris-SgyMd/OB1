@@ -2358,18 +2358,16 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
               };
               /**
                * A suspect's blame, recorded as its failure (SMD-2641 PR 2): answered, or at its third outage alone.
-               * Said to a caller's stamper once its release lands: the sleep scheduler's back-off ends on it (SMD-4254
-               * review pass 2; review pass 3: said before the release, a lost lease ended it with nothing recorded).
+               * `blamed`: said to a caller's stamper, whose back-off ends on it, once its release lands — said before,
+               * a lost lease would end the back-off with nothing recorded (SMD-4254 review passes 2 and 3).
                */
-              const blamedFailure = (sent: "answered" | "alone"): Outcome => {
-                return {
-                  outcome: "failed",
-                  blamed: true,
-                  error: sent === "answered"
-                    ? `provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`
-                    : `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the probe after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`,
-                };
-              };
+              const blamedFailure = (sent: "answered" | "alone"): Outcome => ({
+                outcome: "failed",
+                blamed: true,
+                error: sent === "answered"
+                  ? `provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`
+                  : `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the probe after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`,
+              });
               /**
                * The request refused itself: every row would fail the same way. Stop every worker, mark nothing, and
                * say what to fix (extract-entities.ts's configError). A refusal the probe found says the probe's words
@@ -2592,7 +2590,7 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     // The last outage's suspects, while any is left to retry (SMD-2641 PR 2): one worker, one thought a claim.
     isolated = !!FOLLOW && outage.isolating();
     // Said to a caller's stamper: the sleep scheduler reads a drain not isolated as the isolation's end, which its
-    // cap counts and which resets its back-off (SMD-4254 review pass 2).
+    // cap counts (SMD-4254 review pass 2).
     stamper?.isolating?.(isolated);
     if (isolated) err(`  retrying the last outage's ${outage.suspected} suspect thought(s) one at a time${WORKERS > 1 ? `, one worker, before the drain goes back to ${WORKERS}` : ""}; one that errs again alone is blamed only on a probe made at once`);
     const ends = await Promise.allSettled(Array.from({ length: isolated ? 1 : WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
