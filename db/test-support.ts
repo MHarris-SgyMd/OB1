@@ -1007,6 +1007,8 @@ export function createAssert(): {
   let skipped = 0;
   let docFailed = 0;
   return {
+    // db/ci-parity.sh's reached() counts a stopped suite's rows by these marks,
+    // and leaves out docCheck's by its "(doc) " (SMD-4366): reword them there too.
     assert(cond: unknown, label: string): void {
       if (cond) {
         console.log(`  ✓  ${label}`);

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # ci-parity.sh — run what .github/workflows/brain-checks.yml runs, the way CI does:
 # the data-layer job's database-backed suites in CI's order against ONE shared
-# Postgres; beside them, all from the start, test-live.ts's five shards, each on
+# Postgres; beside them, all from the start, test-live.ts's six shards, each on
 # a Postgres of its own as CI's db-live cells are (SMD-3688), test-upgrade and
 # test-preflight on another as CI's are, test-schema's two widths in a lane of
 # their own (SMD-3715), and in another the suites and self-checks that need no
 # database and every directory's typecheck (SMD-1932, SMD-1870, SMD-2903,
 # SMD-3638).
 # Each row says how long it took, and one still running at its time limit, 600 s
-# unless OB1_PARITY_ROW_LIMIT says otherwise, is stopped and fails (SMD-3647).
+# unless OB1_PARITY_ROW_LIMIT says otherwise, is stopped and fails (SMD-3647);
+# a suite's row then says the section it was in and what it had passed
+# (SMD-4366).
 #
 # This exists because running the suites individually cannot catch a whole class
 # of bug. `with-postgres.sh` starts a fresh container per invocation, so state one
@@ -56,8 +58,12 @@ row() {
 }
 
 # Every row has a time limit (SMD-3647): ROW_LIMIT seconds, CI's 600 for its
-# pair legs, about twice the slowest honest row here under the lanes' load
-# (test-live's sleep shard, ~290 s); OB1_PARITY_ROW_LIMIT sets another.
+# pair legs, over half as long again as the slowest honest row here under the
+# lanes' load (test-live's sweep shard, ~380 s); OB1_PARITY_ROW_LIMIT sets
+# another. A test-live shard that nears it is cut or its sections moved, in
+# test-live.ts's SHARDS, rather than the limit raised, which would hide the
+# next growth: the rest ran 515-578 s and was stopped in seven runs of twenty
+# before claims took [10] from it (SMD-4366).
 # Scratch files go in PARITY_TMP, macOS's TMPDIR without its closing slash.
 ROW_LIMIT=${OB1_PARITY_ROW_LIMIT:-600}
 case "$ROW_LIMIT" in
@@ -122,6 +128,40 @@ at_row() {
 }
 # cut_off RC: what a failing row's verdict adds when limit stopped it.
 cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT"; return 0; }
+# marked MARK OUT: how many assertion rows OUT printed under MARK, a ✓ or a ✗
+# after the line's indent, as db/test-support.ts's createAssert prints them
+# and the self-checks do; not a "(doc)" row, which createAssert counts apart.
+marked() { printf '%s\n' "$2" | grep -E "^[[:space:]]*$1[[:space:]]" | grep -cvE "^[[:space:]]*$1[[:space:]]+\(doc\)[[:space:]]"; }
+# reached RC OUT: how far a suite got when limit stopped it (SMD-4366), after
+# cut_off's words. A stopped suite prints no tally, so its row said only that
+# it stopped: a shard 30 assertions from its end and one hung at its first
+# read alike. This adds the section it was in, by the last header it printed
+# ("[16] …", a bracketed id beginning a line, as scripts/suite-sections.ts
+# reads one; a long name cut at 40 characters), and the assertions it had
+# passed and failed by then, by the rows it printed. Every row counts, so two
+# that failed under one label are two: test-live's rest has labels that
+# repeat, one seven times, and createAssert prints a failed row on stderr
+# alone, so there is no second copy to drop as excerpt drops one. A suite
+# that printed no ✓ row says what failed alone, never "0 passed": test-cli,
+# test-connect, test-slot-relay and others here print nothing for an
+# assertion that held, so none printed is not none passed. A suite that
+# printed no header says its counts alone, one that printed no row its
+# section alone, and one that printed neither adds nothing. A raw line that
+# begins as a header does, a dumped "[0,1,0]" or a child's "[stub]
+# listening", printed after the section's own would be named in its place:
+# test-live prints none today, and suite-sections.ts would read it as a
+# section too.
+reached() {
+  [ "$1" -eq 124 ] || return 0
+  local at passed failed said=''
+  at=$(printf '%s\n' "$2" | grep -E '^\[[^][:space:]][^]]*\]([[:space:]]|$)' | tail -1)
+  at=${at%%]*}
+  [ "${#at}" -le 40 ] || at="$(printf '%s' "$at" | cut -c1-40)…"
+  passed=$(marked ✓ "$2") failed=$(marked ✗ "$2")
+  if [ "$passed" -gt 0 ]; then said=", $passed passed and $failed failed by then"
+  elif [ "$failed" -gt 0 ]; then said=", $failed failed by then"; fi
+  printf '%s%s' "${at:+ in $at]}" "$said"
+}
 
 # keep_output NAME OUT: a failing row's whole output, kept in a file of its own
 # in PARITY_TMP, outside the lanes' directory the exit removes, its path
@@ -208,7 +248,7 @@ suite() {
   local took="$((SECONDS - t0)) s"
   res=$(printf '%s' "$out" | grep -oE '[0-9]+ assertions: [0-9]+ passed, [0-9]+ failed' | tail -1)
   if [ "$rc" -ne 0 ] || printf '%s' "$res" | grep -qE ', [1-9][0-9]* failed$'; then
-    row bad "$name" "${res:+$res, }exit $rc$(cut_off "$rc") · $took"
+    row bad "$name" "${res:+$res, }exit $rc$(cut_off "$rc")$(reached "$rc" "$out") · $took"
     excerpt "$out" "$([ "$rc" -eq 124 ] && echo stopped || { [ -z "$res" ] && echo no-tally; })"
     keep_output "$name" "$out"
     FAILED=1
@@ -254,9 +294,11 @@ typecheck() {
 
 # The schema lane (SMD-3715): the schema on PGlite, at the default width and
 # at 768, each as CI's db-schema job runs it. They were the database-free
-# lane's longest rows, and that lane set a run's length; apart, this lane and
-# that one each end inside the longest test-live shard. The widths stay one
-# after the other: a lane more is more load on every lane's timing rows, and
+# lane's longest rows, and that lane set a run's length; apart, this lane
+# ends inside the longest test-live shard, as that one did until SMD-4366 cut
+# the rest shard in two: the database-free lane, ~470 s of rows against ~380 s
+# for the longest shard, sets a run's length again (SMD-4440). The widths stay
+# one after the other: a lane more is more load on every lane's timing rows, and
 # the run would end no sooner. Like the database-free lane's below, its FAILED
 # is its own. schema_rows NOWFILE: at_row's file.
 schema_rows() {
@@ -379,7 +421,10 @@ free_rows() {
 # SMD-3195, SMD-3468), and the rest runs in a job of its own, preflight-rest,
 # on a runner of its own (SMD-3691); here one after the other on one, each
 # shard dropping the schema before its first database section, which costs
-# nothing while the lane's length stays inside the longest test-live shard's.
+# nothing while the lane's length stays inside the run's longest lane's: the
+# database-free lane's since SMD-4366 (463-497 s over ten runs against this
+# lane's 323-465, which passed the longest test-live shard's ~380 s in three
+# of them; SMD-4440).
 # The script runs itself again under a with-postgres.sh of its own with
 # --pair, and that run does only this — so a run needs podman or docker even
 # when DATABASE_URL is given, and without one this lane fails with
@@ -395,11 +440,11 @@ pair_rows() {
   return "$FAILED"
 }
 
-# The live lanes (SMD-3688): test-live.ts's five shards side by side, each on a
+# The live lanes (SMD-3688): test-live.ts's six shards side by side, each on a
 # Postgres of its own, as CI's db-live matrix runs them (SMD-3048, SMD-3169).
 # The script runs itself again under a with-postgres.sh per shard with --live,
 # and that run does only its shard's row. One Postgres per shard, not one with
-# five databases: roles and backends are the cluster's, and the suite makes
+# six databases: roles and backends are the cluster's, and the suite makes
 # roles and counts connections. [2] edits a copy of the migrations, never the
 # tracked tree (SMD-3639), so no shard reads another's edit. Like the pair
 # lane, the live lanes need podman or docker even when DATABASE_URL is given:
@@ -419,8 +464,10 @@ live_rows() {
     OB1_LIVE_SHARD=extract run db test-live.ts
   elif [ "$1" = sweep ]; then
     OB1_LIVE_SHARD=sweep run db test-live.ts
+  elif [ "$1" = claims ]; then
+    OB1_LIVE_SHARD=claims run db test-live.ts
   else
-    echo "ci-parity.sh --live takes rest, sleep, long, extract or sweep, not '$1'" >&2; return 2
+    echo "ci-parity.sh --live takes rest, sleep, long, extract, sweep or claims, not '$1'" >&2; return 2
   fi
   # The lane ran its own shard's row, or it fails: check 35 and the sed below
   # read lines, and a row bash never reaches (dead code, after an exit, in a
@@ -536,7 +583,7 @@ main() {
   trap drop_lanes EXIT
   for dir in server-portable rest-client mcp-server db evals jev deploy/auth integrations scripts compat/supabase-sql dashboard; do install "$dir"; done
 
-  # Every other lane starts now, beside this one (SMD-3688): the five test-live
+  # Every other lane starts now, beside this one (SMD-3688): the six test-live
   # shards (live_rows), test-upgrade and test-preflight (pair_rows), test-schema
   # (schema_rows) and the database-free rows (free_rows). Until SMD-3639 the
   # rest shard's [2] appended a line to the tracked db/migrations/002 for a
