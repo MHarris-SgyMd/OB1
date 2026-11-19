@@ -39,7 +39,8 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   checkout, or under the default name in a place the checkout's `.gitignore`
   covers (its root, `db/` and `recipes/lint-sweep/`). It is written 0600 through
   a file of the run's own renamed into place, so a failed run leaves an earlier
-  report as it was, and only once every read succeeded.
+  report as it was, and only once tiers 1 and 2's reads succeeded (a Tier 3
+  that fails still writes it, with what came before).
 - **Upgrading a cron job.** The old script read `.env` and `.env.local` from its
   own directory, wherever it ran from; Bun reads them from the working
   directory. So `cd` into the directory holding the file (for the recipe's,
@@ -92,7 +93,8 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   with a source, type, topic or marker the thoughts to send carry, or run a
   local model (`OB1_LLM_LOCAL=1`; `OB1_CHAT_LOCAL=1` for a chat endpoint of its
   own). Once a thought could leave, a worker key the server would refuse (not
-  in `MCP_ACCESS_KEYS`, or revoked) refuses the run, exit 2. A skipped tier
+  in `MCP_ACCESS_KEYS`, `MCP_ACCESS_KEYS` unset, revoked, or a forwarder's)
+  refuses the run, exit 2. A skipped tier
   exits 0: the `[tier 3] skipped:` line and the report say why, with what was
   read and held back. Under `OB1_EGRESS_POLICY=allow` a deny term (`topic:health`) holds its
   thoughts back. Before the gate, a thought `restricted`, or `personal` unless
@@ -191,9 +193,9 @@ leads both samples.
   weekly-digest's sensitivity hold-back. Its `low_signal` kind is gone (it read
   `importance`), and so is its `source_type`, which it read but never sent. A
   thought is named by its id; the model sees a ref, mapped back, and a finding
-  naming no thought of its batch is dropped and counted. An answer that is no
-  JSON object loses its batch's findings, counted, where the recipe stopped the
-  run. Today's date goes with each batch, for what is stale.
+  naming no thought of its batch is dropped and counted. An answer that is not
+  one JSON document loses its batch's findings, counted, where the recipe
+  stopped the run. Today's date goes with each batch, for what is stale.
 
 ## The views
 

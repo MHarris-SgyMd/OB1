@@ -13,12 +13,12 @@
     "tools": ["Bun 1.4+"],
     "env": {
       "required": [],
-      "optional": ["DATABASE_URL"]
+      "optional": ["DATABASE_URL", "OB1_LLM_BASE_URL", "OB1_CHAT_BASE_URL", "OB1_LLM_API_KEY", "OB1_CHAT_API_KEY", "OB1_METADATA_MODEL", "OB1_METADATA_REASONING", "OB1_LLM_TIMEOUT", "OB1_LLM_LOCAL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY", "OB1_WORKER_KEY", "MCP_ACCESS_KEYS"]
     }
   },
   "tags": ["quality", "audit", "maintenance", "orphans", "retired"],
   "difficulty": "intermediate",
   "estimated_time": "10 minutes",
   "created": "2026-04-17",
-  "updated": "2026-11-17"
+  "updated": "2026-11-19"
 }

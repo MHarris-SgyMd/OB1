@@ -5865,7 +5865,7 @@ bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, anoth
 bun lint-sweep.ts --url … --max-llm-calls 0                  # tiers 1 and 2 alone: no model call
 #   --tier 1|2|3|all (all)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
 #   Tier 3: --sample-size N (100, 10–1000)   --max-llm-calls N (5, ≤ 100; 0: off)   --days N (365, ≤ 36500)   --model ID (OB1_METADATA_MODEL's)   --include-personal
-#   exits 0 report written · 1 a read or the write failed (no report), or Tier 3 stopped by a failed call (the report written) · 2 usage, the URL, the worker key, or the connection reached another database (PGDATABASE)
+#   exits 0 report written · 1 a read of tiers 1 or 2 or the write failed (no report), or Tier 3 failed — its read, a batch's second read, or a call (the report written) · 2 usage, the URL, the worker key, or the connection reached another database (PGDATABASE)
 ```
 
 Tiers 1 and 2 of `recipes/lint-sweep` (SMD-2144), on the core's tables, read in
@@ -5887,7 +5887,7 @@ locks the tables the tiers read (ACCESS SHARE, as pg_dump does), under
 wait, the counts' included, is bounded by the same value (`lock_timeout`). Keep
 a sweep apart from an upgrade: an `ALTER` of those tables waits for it, and
 their traffic behind the `ALTER`. The markdown report is written 0600 through a
-file of the run's own renamed into place, once every read succeeded.
+file of the run's own renamed into place, once tiers 1 and 2's reads succeeded.
 
 Tier 3 (SMD-3318 PR 2b) is a model's reading of the newest dated thoughts of the
 last `--days`, 20 a call: contradictions, stale facts, superseded decisions,
@@ -5901,7 +5901,7 @@ fallback), each put to the egress gate on its own units
 (`OB1_WORKER_KEY`'s name as the actor, its source, type and topics, and as the
 marker what is sent of it and its whole text, both to pass; decided
 2026-11-17), a refused one left out, and the call naming every thought it
-carries (`providerCall` gates each). The sample is read through one cursor in
+carries (`providerCallPrepared` gates each). The sample is read through one cursor in
 `created_at` order until as many as the calls can send are found (at most
 10,000 rows), and each batch is read and judged again just before its call; a
 Tier 3 that fails leaves the report written with the other tiers, exit 1.
@@ -5916,8 +5916,8 @@ column, or the patterns over what is sent and the whole text, never leaves.
 Under the default deny with no allow term and no local endpoint, the tier is
 skipped before any read; release it with `OB1_EGRESS_ALLOW=actor:<the worker
 key's name>` (never the key itself; or a source, type, topic or marker), or declare a local model
-(`OB1_LLM_LOCAL=1`, or `OB1_CHAT_LOCAL=1` for a chat endpoint of its own). An answer that is no JSON object loses its batch's
-findings, counted; a call that fails after the transient retries stops the
+(`OB1_LLM_LOCAL=1`, or `OB1_CHAT_LOCAL=1` for a chat endpoint of its own). An answer that is not one JSON document with a category's key
+loses its batch's findings, counted; a call that fails after the transient retries stops the
 tier, and the report is written with what came before (exit 1). The recipe's
 `low_signal` read `importance`, which the core retired. test-live [26] holds every count against a
 planted table (undated and infinite rows, non-array metadata, and each

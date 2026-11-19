@@ -55,7 +55,8 @@
  * with no actor, while a key the server would refuse (not in MCP_ACCESS_KEYS,
  * revoked, or MCP_ACCESS_KEYS unset) refuses the run, exit 2. A role with SELECT on `thoughts`,
  * `thought_entities`, `ob1_entities` and `ob1_entity_edges` is enough. The
- * report is written only once every read succeeded, to a new file of the
+ * report is written only once tiers 1 and 2's reads succeeded (a Tier 3
+ * that fails writes it too, with what came before), to a new file of the
  * run's own (O_EXCL, 0600) renamed over the path: never through a symlink
  * there, never keeping an older file's mode, and a failed write leaves an
  * earlier report as it was; a Tier 3 that fails (its read under a savepoint,
@@ -67,7 +68,7 @@
  * search_path finds them.
  *
  * ── Size and time ───────────────────────────────────────────────────────────
- * Each tier reads its sample once, through the created_at index, stopping
+ * Tiers 1 and 2 each read their sample once, through the created_at index, stopping
  * after its rows. The exact counts read whole tables: `thoughts` once (a
  * scan), and the entity graph's anti-join through 016's edge indexes —
  * measured on a scratch brain at about half a second warm and 5 s cold for a
@@ -99,8 +100,8 @@
  * topics, and as the marker what the prompt carries of it (its text, type,
  * topics and tags) and, apart, its whole text: it goes only when both pass, so
  * a writer's marker anywhere in the thought is the thought's — and a refused
- * one is left out; the call names every thought it carries, and providerCall
- * gates each again. A policy that would refuse every thought skips the tier
+ * one is left out; the call names every thought it carries, and
+ * providerCallPrepared gates each again. A policy that would refuse every thought skips the tier
  * before any read, and before the worker key is resolved, which happens only
  * once the connection is known to have reached the URL's database. Before that,
  * the hold-back weekly-digest uses (db/sensitivity.ts, decided the same day):
@@ -413,11 +414,11 @@ export interface Tier3 {
   changed: number;
   /** Sent to the model: every thought of every call dialled, a failed call's included. */
   sent: number;
-  /** Calls dialled. */
+  /** Batches whose call was dialled, once each however many attempts the transient retries took. */
   calls: number;
   /** Calls that answered (a failed call dialled, but did not). */
   answered: number;
-  /** Answers that were not a JSON object: their batch's findings are lost. */
+  /** Answers that were not one JSON document with a category's key (answerObject): their batch's findings are lost. */
   unreadable: number;
   /** Of those, answers the provider cut at the answer's budget (finish_reason `length`). */
   cut: number;
@@ -498,7 +499,10 @@ function providerReason(e: unknown, cfg: EmbedConfig): string {
   const host = hostOf(cfg.chat.base.replace(/[?#].*$/, ""));
   if (e instanceof ProviderError) {
     if (e.kind === "http") {
-      const hint = e.status === 401 || e.status === 403 ? " (the key: OB1_LLM_API_KEY, or OB1_CHAT_API_KEY)" : e.status === 404 ? " (is the model, --model or OB1_METADATA_MODEL, served there?)" : "";
+      const hint = e.status === 400 ? " (often response_format or reasoning_effort, which this call sends, not supported by this model or endpoint)"
+        : e.status === 401 || e.status === 403 ? " (the key: OB1_LLM_API_KEY, OB1_CHAT_API_KEY or OPENROUTER_API_KEY; a 403 can be the provider's refusal of the text)"
+        : e.status === 402 ? " (the account's credit or spend limit)"
+        : e.status === 404 ? " (the model, --model or OB1_METADATA_MODEL, or the base URL's path)" : "";
       return `${host} answered ${e.status ?? "with an error"}${hint}`;
     }
     if (e.kind === "timeout") {
@@ -516,13 +520,13 @@ function providerReason(e: unknown, cfg: EmbedConfig): string {
  * the request asks for JSON (`response_format: json_object`) and the answer is read as one JSON document, an object
  * with a category's key. Two wrappings a model or its template adds are taken off first: a code fence around the whole
  * answer, and reasoning ending in `</think>` before it (a template may open the tag in the prompt), tried only when the
- * whole text does not parse, so a `</think>` in an issue's words is never cut at. Anything else (prose around the
+ * whole text does not parse, each such tag tried from the first, so one quoted in an issue's words is never the cut. Anything else (prose around the
  * object, a draft before it, two objects, an object wrapped in another, an unclosed reasoning block) is no answer: the
  * batch is counted unreadable, not read by a guess (review passes 4 to 6 found every guess wrong somewhere).
  */
 function answerObject(raw: string): Record<string, unknown> | null {
   const read = (text: string) => {
-    const unfenced = text.trim().replace(/^```(?:json)?[ \t]*\n([\s\S]*?)\n?```$/i, "$1").trim();
+    const unfenced = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
     try {
       const o = objectOr(JSON.parse(unfenced));
       return o && CATEGORIES.some((c) => c in o) ? o : null;
@@ -532,8 +536,12 @@ function answerObject(raw: string): Record<string, unknown> | null {
   };
   const whole = read(raw);
   if (whole) return whole;
-  const thought = raw.lastIndexOf("</think>");
-  return thought >= 0 ? read(raw.slice(thought + "</think>".length)) : null;
+  // Each `</think>`, first to last: one quoted inside the answer's words is not where the reasoning ended (review pass 7).
+  for (let at = raw.indexOf("</think>"); at >= 0; at = raw.indexOf("</think>", at + 1)) {
+    const after = read(raw.slice(at + "</think>".length));
+    if (after) return after;
+  }
+  return null;
 }
 
 /**
@@ -541,7 +549,7 @@ function answerObject(raw: string): Record<string, unknown> | null {
  * thought's id and kept as its label (`t3`). A ref naming no thought of the batch is dropped, and a finding left with
  * none is dropped and counted. The model's words go as they are (made safe and cut): a ref in them is its batch's, the
  * report's table maps it (rewriting refs in free text took `t3.large` for a thought, review pass 6). Words the patterns
- * rate restricted, read as the model wrote them, before any cut, are withheld. Null when there is no object, or the
+ * rate restricted, read as the model wrote them or as the report would print them, before any cut, are withheld. Null when there is no object, or the
  * answer is no text.
  */
 export function readTier3Answer(raw: unknown, batch: readonly Tier3Row[], batchNo = 1): { findings: Tier3Finding[]; dropped: number } | null {
@@ -567,7 +575,10 @@ export function readTier3Answer(raw: unknown, batch: readonly Tier3Row[], batchN
         dropped++;
         continue;
       }
-      const secret = sensitivityOf([o.issue, o.suggested_action].map((v) => (typeof v === "string" ? v : "")).join("\n")).tier === "restricted";
+      // As written (a key past the 300-character cut) and as the report would print them, uncut (a key split by a
+      // backtick, a bracket or a control character the report drops, review pass 7): either reading a secret withholds.
+      const words = [o.issue, o.suggested_action].map((v) => (typeof v === "string" ? v : "")).join("\n");
+      const secret = sensitivityOf(words).tier === "restricted" || sensitivityOf(sanitizePreview(words)).tier === "restricted";
       findings.push({
         category, batch: batchNo, refs: rows.map((r) => `t${r.n}`), ids: rows.map((r) => r.row.id), dates: rows.map((r) => r.row.created),
         issue: secret ? "(withheld: the model's words read as a secret)" : clip(o.issue), action: secret ? "" : clip(o.suggested_action),
@@ -620,6 +631,9 @@ interface Tier3Sample { rows: Tier3Row[]; read: number; readCapped: boolean; hel
 /** How many thoughts Tier 3 can send: --sample-size, or the calls' room if less. */
 const tier3Target = (o: Tier3Options) => Math.min(o.sampleSize, o.maxCalls * TIER3_BATCH);
 
+/** An empty sample record, which tier3Sample fills as it reads: a read that fails keeps what it counted. */
+const newSample = (): Tier3Sample => ({ rows: [], read: 0, readCapped: false, heldSensitive: 0, heldEgress: 0, hasColumn: false });
+
 /**
  * Tier 3's sample, read in the sweep's snapshot: the newest dated thoughts of the window whose text, trimmed, is 20
  * characters or more, through one cursor ordered by created_at alone (the index's order, ties included: no page sorts a
@@ -630,9 +644,6 @@ const tier3Target = (o: Tier3Options) => Math.min(o.sampleSize, o.maxCalls * TIE
  * lock either, which fails the run first: the check stands behind that). The counts stop at the row that filled the
  * sample, or at the cap; a read that fails keeps them in `out`.
  */
-/** An empty sample record, which tier3Sample fills as it reads: a read that fails keeps what it counted. */
-const newSample = (): Tier3Sample => ({ rows: [], read: 0, readCapped: false, heldSensitive: 0, heldEgress: 0, hasColumn: false });
-
 async function tier3Sample(tx: SQL, o: Tier3Options, out: Tier3Sample): Promise<Tier3Sample> {
   out.hasColumn = await sensitivityColumn(tx, true,
     "public.thoughts has a sensitivity_tier column this role may not read: refusing rather than send the rows it marks to a model (grant SELECT on it)");

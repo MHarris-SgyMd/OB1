@@ -165,7 +165,8 @@ const PERSONAL = PATTERNS.personal.map(([source, flags, label]) => [new RegExp(s
 /**
  * Characters that show nothing and hide inside a word: the soft hyphen, the combining grapheme joiner, the Hangul
  * fillers, the Arabic letter mark, the Mongolian vowel separator, zero-width and bidirectional controls, variation
- * selectors, the BOM, and the tag characters (U+E0000–E007F, outside the BMP: the class is read with the `u` flag).
+ * selectors and their supplement (U+E0100–E01EF), the BOM, and the tag characters (U+E0000–E007F; outside the BMP,
+ * the class is read with the `u` flag).
  */
 const HIDDEN_RANGES: readonly (readonly [number, number])[] = [
   [0xad, 0xad], [0x34f, 0x34f], [0x61c, 0x61c], [0x115f, 0x1160], [0x180e, 0x180e], [0x200b, 0x200f], [0x202a, 0x202e],
@@ -213,7 +214,7 @@ export const TIER_OF_RANK: readonly Tier[] = ["standard", "personal", "restricte
 
 /** The rows whose whole text one statement reads for the patterns: a window of long documents is read a batch at a time, never whole. */
 export const PATTERN_BATCH = 100;
-/** The stored bytes one statement of that read takes, where a caller knows them (a row past it alone): a batch of long documents is not held at once. */
+/** The bytes one statement of that read takes, where a caller gives them (lint-sweep: octet_length; a row past it alone): a batch of long documents is not held at once. */
 export const PATTERN_BYTES = 16 * 1024 * 1024;
 
 /** The tiers held back: `restricted` always, `personal` unless the caller includes it. */
@@ -253,7 +254,7 @@ export function tierExcluded(hasColumn: boolean, param: string): string {
  * The ids the patterns hold back among `rows`: each row's `sent` (what its prompt would carry) and its whole text, read
  * again, PATTERN_BATCH at a time, so a secret past the part sent is seen. A row that second read does not return
  * (deleted, or out of sight) is held back too. `onText`, given, sees each row's whole text as it is read (lint-sweep's
- * Tier 3 puts it to the egress gate's marker). A row's `bytes`, given (its stored size), ends a batch at PATTERN_BYTES.
+ * Tier 3 puts it to the egress gate's marker). A row's `bytes`, given (its size in bytes), ends a batch at PATTERN_BYTES.
  */
 export async function heldByPatterns(sql: SQL, rows: readonly { id: string; sent: string; bytes?: number }[], tiers: readonly string[], onText?: (id: string, text: string) => void): Promise<Set<string>> {
   const held = new Set<string>();

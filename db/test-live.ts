@@ -23027,7 +23027,7 @@ if (want("26")) {
                && numeric.code === 0 && /20 sent in 1 call\(s\): 0 finding\(s\), 1 answer\(s\) not JSON/.test(numeric.stdout)
                && wide.length < 2000 && wideRow.type.length === 100 && wideRow.topics.length === 5 && wideRow.topics.every((t) => t.length === 100) && wideRow.tags[0].length === 100
                && failed.code === 1 && failedCalls === 1 && /## Tier 1 — thoughts/.test(failedText) && /## Tier 2 — the entity graph/.test(failedText)
-               && /\*Stopped: batch 1 of 2's call: 127\.0\.0\.1:\d+ answered 400\.\*/.test(failedText) && !/bad request|forged/.test(failedText + failed.stderr) && !/### Contradictions/.test(failedText)
+               && /\*Stopped: batch 1 of 2's call: 127\.0\.0\.1:\d+ answered 400 \(often response_format or reasoning_effort, which this call sends, not supported by this model or endpoint\)\.\*/.test(failedText) && !/bad request|forged/.test(failedText + failed.stderr) && !/### Contradictions/.test(failedText)
                && queried.code === 1 && !/zq3querykey/.test(queried.stdout + queried.stderr + read(join(scratch, "t3q.md")))
                && nullBody.code === 0 && /20 sent in 1 call\(s\): 0 finding\(s\), 1 answer\(s\) not JSON/.test(nullBody.stdout)
                && slow.code === 1 && /OB1_METADATA_REASONING is on: a call of 20 thoughts can take minutes .*OB1_LLM_TIMEOUT is 1 s/.test(slow.stdout)
@@ -23130,7 +23130,7 @@ if (want("26")) {
         // In process (the late thought typed zq3-private, the newest sendable, is the one the allow term lets leave):
         // the read stops at its cap exactly; a read that fails (here its fetch, as a statement bound would)
         // fails Tier 3 alone, the report written with tiers 1 and 2; and the patterns' whole-text read ends a batch at
-        // 16 MB stored.
+        // 16 MB.
         const { run: lintRun } = await import("./lint-sweep.ts");
         const { resolveEmbedConfig } = await import("../server-portable/embed.ts");
         const { heldByPatterns } = await import("./sensitivity.ts");
@@ -23190,9 +23190,13 @@ if (want("26")) {
           const shapes = [good, "```json\n" + good + "\n```", `<think>a {b} "contradictions": [</think>${good}`, `reasoning {x} here</think>${good}`,
             JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "zq3 a", detail: { stale_facts: [{ refs: ["t2"], issue: "inner" }] } }] }),
             JSON.stringify({ summary: "x", contradictions: [{ refs: ["t1"], issue: "zq3 a" }] }), JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "the </think> tag" }] }),
-            `${good}\nNote: {x}`, `Here: ${good}`, `Draft: ${good}\n${JSON.stringify({ contradictions: [] })}`, JSON.stringify({ result: JSON.parse(good) }), `<think>${good}`];
+            `${good}\nNote: {x}`, `Here: ${good}`, `Draft: ${good}\n${JSON.stringify({ contradictions: [] })}`, JSON.stringify({ result: JSON.parse(good) }), `<think>${good}`,
+            // Review pass 7: a </think> quoted in the words after a reasoning block; the core's fence rule (CRLF, one line).
+            `<think>r</think>\n${JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "a </think> b" }] })}`, "```json\r\n" + good + "\r\n```", "```json" + good + "```"];
           const shapesRead = shapes.map((raw) => { const r = readTier3Answer(raw, b5); return r === null ? "none" : r.findings.map((f) => f.issue).join("|"); });
-          const shapesWant = ["zq3 a", "zq3 a", "zq3 a", "zq3 a", "zq3 a", "zq3 a", "the /think tag", "none", "none", "none", "none", "none"];
+          const shapesWant = ["zq3 a", "zq3 a", "zq3 a", "zq3 a", "zq3 a", "zq3 a", "the /think tag", "none", "none", "none", "none", "none", "a /think b", "zq3 a", "zq3 a"];
+          // A key split by a character the report drops (a backtick): withheld, read as the report would print it.
+          const splitKey = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "t3 holds ghp_`ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789`" }] }), b5)?.findings[0]?.issue;
           // The real model's case (review pass 6): words that read as safe stay so whatever the ids look like.
           const digits = b5.map((r, i) => ({ ...r, id: `${String(20481930 + i)}-0000-0000-0000-000000000000` }));
           // A key starting near the 300-character cut: the words are judged whole, before the cut, so it is withheld.
@@ -23258,7 +23262,7 @@ if (want("26")) {
                  && flakyCode === 0 && flakyCalls === 2 && retryDropped
                  && window > 10 && !/stopped at/.test(atWindow) && new RegExp(`of ${window - 1} read .*\\(the read stopped at ${window - 1}\\)`).test(belowWindow)
                  && shapesRead.join(",") === shapesWant.join(",") && accountWords === "t2 says the staging AWS account is owned by the platform team; t3.large"
-                 && lateKey === "(withheld: the model's words read as a secret)" && sanitizePreview(`a${supplement}b`) === "ab" && sensitivityText(`a${supplement}b`) === "ab"
+                 && lateKey === "(withheld: the model's words read as a secret)" && splitKey === "(withheld: the model's words read as a secret)" && sanitizePreview(`a${supplement}b`) === "ab" && sensitivityText(`a${supplement}b`) === "ab"
                  && /until the sample filled or the window ended\): /.test(recheckText)
                  && nonRefs?.issue === "see /t3, t1.5, T2, t01 and ?d=t2" && nonRefs.ids.length === 1
                  && readTier3Answer(`${good.slice(0, 30)}`, b5) === null
