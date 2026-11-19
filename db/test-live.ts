@@ -22671,7 +22671,7 @@ if (want("26")) {
              && existsSync(report) && modeOf(report) === "600",
         `bun db/lint-sweep.ts, DATABASE_URL alone: exit 0, Tier 1's seven counts and Tier 2's three the planted table's, the report 0600 (exit ${both.code}: ${both.stdout.split("\n").filter((l) => /^\[tier/.test(l)).join(" | ") || both.stderr.split("\n")[0]})`);
       const overLines = text.split("\n").filter((l) => /^  - [0-9a-f-]{36} → 11 tags$/.test(l));
-      assert(/^---\ntitle: Lint Sweep — \d{4}-\d\d-\d\d\ndatabase: \S+\ntier: all\nstarted_at: \d{4}-\d\d-\d\dT[\d:.]+Z\nfinished_at: \d{4}-\d\d-\d\dT[\d:.]+Z\n---\n/.test(text)
+      assert(/^---\ntitle: Lint Sweep — \d{4}-\d\d-\d\d\ndatabase: \S+\ntier: all\ntier3: skipped\nstarted_at: \d{4}-\d\d-\d\dT[\d:.]+Z\nfinished_at: \d{4}-\d\d-\d\dT[\d:.]+Z\n---\n/.test(text)
              && /^- \*\*Tier 1\*\* — .*\*\*2000 newest dated thoughts\*\*/m.test(text) && /^- \*\*Tier 2\*\* — .*\*\*500 newest dated thoughts\*\*/m.test(text) && /\*\*Safety:\*\* every finding/.test(text)
              && /Total thoughts \(exact\): \*\*2105\*\*/.test(text) && /No content_fingerprint \(exact\): \*\*2016\*\*/.test(text) && /No created_at, or an infinite one \(exact\): \*\*5\*\*/.test(text)
              && /Orphans by tag \(no topics, tags or people; newest 2000\): \*\*1325\*\* — pages/.test(text) && /Over-tagged \(more than 10 tags; newest 2000\): \*\*16\*\*/.test(text)
@@ -22875,7 +22875,7 @@ if (want("26")) {
         ('zq3 unread', '{}', now() - interval '46 minutes'),
         ('zq3 unread: no date at all, long enough', '{}', NULL)`);
       const idOf = new Map(((await sql`SELECT id::text AS id, content FROM thoughts`) as { id: string; content: string }[]).map((r) => [r.content, r.id]));
-      let mode: "answer" | "prose" | "number" | "refuse" | "refs" | "flaky" | "cut" | "null" | "slow" = "answer";
+      let mode: "answer" | "prose" | "number" | "refuse" | "refs" | "flaky" | "cut" | "null" | "slow" | "down" | "half" = "answer";
       // Each request's body, for its budget and reasoning fields.
       const bodies: Record<string, unknown>[] = [];
       // Run once, as the first call arrives: what a session does to the brain while a sweep's calls are out.
@@ -22898,7 +22898,14 @@ if (want("26")) {
           if (mode === "number") return Response.json({ choices: [{ message: { content: 7 } }] });
           if (mode === "null") return new Response("null", { headers: { "content-type": "application/json" } });
           if (mode === "slow") await Bun.sleep(2500);
+          // Prose once, then the answer: some answers unreadable, not every one.
+          if (mode === "half") {
+            mode = "answer";
+            return Response.json({ choices: [{ message: { content: "I could not find any issues worth naming." } }] });
+          }
           if (mode === "cut") return Response.json({ choices: [{ message: { content: '{"contradictions": [{"refs": ["t1", "t2"], "issue": "cut sh' }, finish_reason: "length" }] });
+          // Transient every time: the retries run out (review pass 8, mutant).
+          if (mode === "down") return new Response("busy", { status: 503 });
           // Transient once: a 503, then the answer.
           if (mode === "flaky") {
             mode = "answer";
@@ -22922,7 +22929,8 @@ if (want("26")) {
         },
       });
       try {
-        const t3Env = (extra: Record<string, string>) => ({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...extra });
+        // A key for the stub: an endpoint not declared local that carries none is skipped (review pass 8).
+        const t3Env = (extra: Record<string, string>) => ({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_API_KEY: "zq3-test-key", ...extra });
         const ALLOW = { OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "topic:health,marker:zq3-private" };
         // The sent rows of every prompt, by their content.
         const sentRows = (from: number) => prompts.slice(from).flatMap((p) => JSON.parse(p.split("THOUGHTS:\n")[1].split("\n\nAudit")[0]) as { ref: string; content: string }[]);
@@ -23013,28 +23021,40 @@ if (want("26")) {
         const failed = await lint(t3Env(ALLOW), "--report", join(scratch, "t3x.md"));
         const failedText = read(join(scratch, "t3x.md"));
         const failedCalls = prompts.length - from;
+        const keyless = await lint({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...ALLOW }, "--tier", "3", "--report", join(scratch, "t3kl.md"));
+        const publicLocal = await lint(t3Env({ ...ALLOW, OB1_LLM_BASE_URL: "https://api.zq3-lint-test.invalid/v1", OB1_LLM_LOCAL: "1" }), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3pl.md"));
         const queried = await lint(t3Env({ ...ALLOW, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1?api_key=zq3querykey` }), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3q.md"));
         mode = "null";
         const nullBody = await lint(t3Env(ALLOW), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3nb.md"));
         // A deadline met: the stop says the value and the remedies, reasoning on said up front.
         mode = "slow";
         const slow = await lint(t3Env({ ...ALLOW, OB1_LLM_TIMEOUT: "1", OB1_METADATA_REASONING: "on" }), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3sl.md"));
+        // Review pass 8, mutants: one answer of two unreadable is no "every answer" warning; a key in the base URL's
+        // userinfo is a key (the run goes ahead), never printed.
+        mode = "half";
+        const half = await lint(t3Env(ALLOW), "--tier", "3", "--report", join(scratch, "t3hf.md"));
         mode = "answer";
+        const userinfo = await lint({ DATABASE_URL: URL_!, OB1_LLM_BASE_URL: `http://zq3user:zq3pass@127.0.0.1:${stub.port}/v1`, ...ALLOW }, "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3ui.md"));
         const { tier3Prompt } = await import("./lint-sweep.ts");
         const wide = tier3Prompt([{ id: "x", created: "2026-01-01", content: "zq3 wide", metadata: { type: "t".repeat(5000), topics: Array(9).fill("p".repeat(5000)), tags: [{ deep: "q".repeat(5000) }] } }], "2026-01-01");
         const wideRow = (JSON.parse(wide.split("THOUGHTS:\n")[1].split("\n\nAudit")[0]) as { type: string; topics: string[]; tags: string[] }[])[0];
-        assert(prose.code === 0 && /30 sent in 2 call\(s\): 0 finding\(s\), 2 answer\(s\) not JSON/.test(prose.stdout) && /\*\*2\*\* answer\(s\) not JSON, their findings lost/.test(read(join(scratch, "t3u.md")))
-               && numeric.code === 0 && /20 sent in 1 call\(s\): 0 finding\(s\), 1 answer\(s\) not JSON/.test(numeric.stdout)
+        assert(prose.code === 0 && /30 sent in 2 call\(s\): 0 finding\(s\), 2 answer\(s\) unreadable/.test(prose.stdout) && !/cut at the answer's budget/.test(prose.stdout) && /every Tier 3 answer was unreadable \(2\)/.test(prose.stderr) && /^tier3: unreadable$/m.test(read(join(scratch, "t3u.md"))) && /\*\*2\*\* answer\(s\) unreadable \(not one JSON document with a category's key\), their findings lost/.test(read(join(scratch, "t3u.md")))
+               && numeric.code === 0 && /20 sent in 1 call\(s\): 0 finding\(s\), 1 answer\(s\) unreadable/.test(numeric.stdout)
+               && half.code === 0 && /30 sent in 2 call\(s\): \d+ finding\(s\), 1 answer\(s\) unreadable/.test(half.stdout) && !/every Tier 3 answer/.test(half.stderr) && /^tier3: ran$/m.test(read(join(scratch, "t3hf.md")))
+               && userinfo.code === 0 && /20 sent in 1 call\(s\)/.test(userinfo.stdout) && !/zq3pass/.test(userinfo.stdout + userinfo.stderr + read(join(scratch, "t3ui.md")))
                && wide.length < 2000 && wideRow.type.length === 100 && wideRow.topics.length === 5 && wideRow.topics.every((t) => t.length === 100) && wideRow.tags[0].length === 100
                && failed.code === 1 && failedCalls === 1 && /## Tier 1 — thoughts/.test(failedText) && /## Tier 2 — the entity graph/.test(failedText)
                && /\*Stopped: batch 1 of 2's call: 127\.0\.0\.1:\d+ answered 400 \(often response_format or reasoning_effort, which this call sends, not supported by this model or endpoint\)\.\*/.test(failedText) && !/bad request|forged/.test(failedText + failed.stderr) && !/### Contradictions/.test(failedText)
+               && /; then stopped$/m.test(failed.stdout) && /^tier3: failed$/m.test(failedText)
+               && keyless.code === 0 && /\[tier 3\] skipped: the chat endpoint 127\.0\.0\.1:\d+ is not declared local and carries no key/.test(keyless.stdout) && /^tier3: skipped$/m.test(read(join(scratch, "t3kl.md")))
+               && /api\.zq3-lint-test\.invalid is declared local \(OB1_LLM_LOCAL\) but is no loopback or private address/.test(publicLocal.stderr)
                && queried.code === 1 && !/zq3querykey/.test(queried.stdout + queried.stderr + read(join(scratch, "t3q.md")))
-               && nullBody.code === 0 && /20 sent in 1 call\(s\): 0 finding\(s\), 1 answer\(s\) not JSON/.test(nullBody.stdout)
+               && nullBody.code === 0 && /20 sent in 1 call\(s\): 0 finding\(s\), 1 answer\(s\) unreadable/.test(nullBody.stdout)
                && slow.code === 1 && /OB1_METADATA_REASONING is on: a call of 20 thoughts can take minutes .*OB1_LLM_TIMEOUT is 1 s/.test(slow.stdout)
                && /did not answer within OB1_LLM_TIMEOUT \(1 s\): raise it, or turn OB1_METADATA_REASONING off/.test(slow.stderr) && /20 sent in 1 call\(s\), then stopped\./.test(read(join(scratch, "t3sl.md"))) && /\*\*20\*\* in \*\*1\*\* call\(s\), a failed one's included/.test(failedText)
                && !/^# zq3 forged/m.test(failedText) && !/\r/.test(failedText) && !/<img|\]\(javascript/.test(failedText) && !failed.stderr.includes(String.fromCharCode(27))
                && /lint-sweep: Tier 3 stopped — batch 1 of 2's call: .*The report was written with tiers 1 and 2\./.test(failed.stderr),
-          `…an answer that is no JSON object, or no text, loses its batch, counted; a type, topics and tags each cut to 100 characters; a refused call (400, not retried) stops the tier: every tier's report written, the batch it dialled counted as sent, the provider's words printed nowhere (an allowlist: the host and the status) nor a key in the base URL's query, a body of null counted unreadable, exit 1 (exit ${prose.code}, ${numeric.code}, ${failed.code}, ${queried.code}, ${nullBody.code}; ${wide.length}; ${nullBody.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()} | ${nullBody.stderr.trim().split("\n").pop()} | ${failedText.split("\n").find((l) => l.startsWith("*Stopped"))} | ${/zq3querykey/.test(queried.stdout + queried.stderr + read(join(scratch, "t3q.md")))}; ${failed.stderr.trim().split("\n").pop()})`);
+          `…an answer that is no JSON object, or no text, loses its batch, counted, every answer unreadable said and in the frontmatter (one of two not), a key in the base URL's userinfo a key, never printed; a stop on the stdout line and the frontmatter; a keyless endpoint not declared local skipped; a public host declared local warned of; a type, topics and tags each cut to 100 characters; a refused call (400, not retried) stops the tier: every tier's report written, the batch it dialled counted as sent, the provider's words printed nowhere (an allowlist: the host and the status) nor a key in the base URL's query, a body of null counted unreadable, exit 1 (exit ${prose.code}, ${numeric.code}, ${failed.code}, ${queried.code}, ${nullBody.code}; ${wide.length}; ${nullBody.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()} | ${nullBody.stderr.trim().split("\n").pop()} | ${failedText.split("\n").find((l) => l.startsWith("*Stopped"))} | ${/zq3querykey/.test(queried.stdout + queried.stderr + read(join(scratch, "t3q.md")))}; ${failed.stderr.trim().split("\n").pop()})`);
 
         // A session deletes one thought and marks another restricted while the first call is out: the second batch,
         // read again before its call, sends neither.
@@ -23050,6 +23070,17 @@ if (want("26")) {
                && /3 gone or held back before their call, 27 sent in 2 call\(s\)/.test(moved.stdout) && /when read again just before their call: \*\*3\*\*/.test(read(join(scratch, "t3mv.md"))),
           `…a thought deleted, one marked restricted and one cut under 20 characters while the first call is out are not in the second: each batch is read again before its call, under the sample's filters (exit ${moved.code}; ${moved.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()})`);
 
+        // A thought the egress gate refuses only by the second read (a deny topic set while the first call is out) is
+        // left out of its call, not sent to the seam's gate to refuse the whole call (review pass 8, mutant).
+        onCall = async () => { await sql`UPDATE thoughts SET metadata = '{"topics": ["health"], "type": "note"}'::jsonb WHERE content = 'zq3 thought 28 on the release train'`; };
+        from = prompts.length;
+        const gated = await lint(t3Env(ALLOW), "--tier", "3", "--report", join(scratch, "t3gt.md"));
+        const gatedSecond = prompts[from + 1] ?? "";
+        const gatedCalls = prompts.length - from;
+        await sql`UPDATE thoughts SET metadata = '{"topics": ["release"], "type": "note"}'::jsonb WHERE content = 'zq3 thought 28 on the release train'`;
+        assert(gated.code === 0 && gatedCalls === 2 && gatedSecond.includes("zq3 thought 24 on") && !gatedSecond.includes("zq3 thought 28 on")
+               && /1 gone or held back before their call, 26 sent in 2 call\(s\)/.test(gated.stdout),
+          `…a thought a deny term refuses only when its batch is read again is left out of that call, the rest sent (exit ${gated.code}; ${gatedCalls} call(s); ${gated.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).pop()})`);
 
         // Review pass 3's cases. An edited thought goes as it is now; a batch the second read empties makes no call.
         onCall = async () => { await sql`UPDATE thoughts SET content = 'zq3 thought 24, edited, still on the release train' WHERE content = 'zq3 thought 24 on the release train'`; };
@@ -23070,7 +23101,7 @@ if (want("26")) {
         mode = "answer";
         const refLine = (i: number, issue: string) => line(1, [[i, i]], issue).test(spelledText);
         assert(edited.code === 0 && editedSecond.includes("zq3 thought 24, edited") && !editedSecond.includes("zq3 thought 24 on the")
-               && emptied.code === 0 && emptiedCalls === 1 && /1 gone or held back before their call, 20 sent in 1 call\(s\)/.test(emptied.stdout)
+               && emptied.code === 0 && emptiedCalls === 1 && /1 gone or held back before their call, 20 sent in 1 call\(s\)/.test(emptied.stdout) && !/unreadable/.test(emptied.stdout)
                && spelled.code === 0 && /\[tier 3\] model zq3-model;/.test(spelled.stdout) && spelledRows.every((r) => /^\d{4}-\d\d-\d\d$/.test(r.date))
                && refLine(2, "zq3 two") && refLine(3, "zq3 three") && refLine(4, "zq3 four") && refLine(5, "zq3 five") && refLine(6, "zq3 six")
                && refLine(7, "\\(no issue given\\)") && refLine(8, "y{300}")
@@ -23100,6 +23131,7 @@ if (want("26")) {
         const reasoningBody = bodies.at(-1) as { max_tokens?: number };
         mode = "cut";
         const cutRun = await lint(t3Env(ALLOW), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3cut.md"));
+        const cutBody = bodies.at(-1) as { temperature?: number; reasoning_effort?: string; max_tokens?: number };
         mode = "answer";
         const overSample = await lint(t3Env(ALLOW), "--tier", "3", "--sample-size", "1001");
         const overDays = await lint(t3Env(ALLOW), "--tier", "3", "--days", "36501");
@@ -23107,8 +23139,8 @@ if (want("26")) {
                && latePersonal.code === 0 && latePersonalSent.some((c) => c.includes("took 20 mg")) && !latePersonalSent.some((c) => /typed, long/.test(c))
                && badKey.code === 2 && /not one of the keys in MCP_ACCESS_KEYS/.test(badKey.stderr) && !existsSync(join(scratch, "t3bk.md"))
                && overSample.code === 2 && /sample-size/.test(overSample.stderr) && overDays.code === 2 && /days/.test(overDays.stderr)
-               && reasoning.code === 0 && !("max_tokens" in reasoningBody)
-               && cutRun.code === 0 && /1 answer\(s\) not JSON \(1 cut at the answer's budget\)/.test(cutRun.stdout) && /\(1 cut at the answer's budget, 4096 tokens with reasoning off\)/.test(read(join(scratch, "t3cut.md"))),
+               && reasoning.code === 0 && !("max_tokens" in reasoningBody) && cutBody.temperature === 0 && cutBody.reasoning_effort === "none" && cutBody.max_tokens === 4096
+               && cutRun.code === 0 && /1 answer\(s\) unreadable \(1 cut at the answer's budget\)/.test(cutRun.stdout) && /\(1 cut at the answer's budget, 4096 tokens with reasoning off\)/.test(read(join(scratch, "t3cut.md"))),
           `…a key in a topic straddling the 100-character cut held back (the patterns read the field whole), a personal pattern with no key held unless --include-personal, a deny marker in the type alone refused, 20 characters exactly read, an infinite date and padded short text not; a worker key the server would refuse refuses the run, exit 2, no report; --sample-size 1001 and --days 36501 refused; with reasoning on no answer budget is sent (it cut every real call), and an answer cut at the budget says so (exit ${late.code}, ${latePersonal.code}, ${badKey.code}, ${overSample.code}, ${overDays.code}; sent ${lateSent.slice(0, 3).join(" | ")})`);
 
         // The enhanced-thoughts column, added for these runs alone and dropped after: a thought its column alone marks
@@ -23138,7 +23170,7 @@ if (want("26")) {
         try {
           const lines: string[] = [];
           const writer = { out: (l: string) => lines.push(l), err: (l: string) => lines.push(l) };
-          const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_ALLOW: "marker:zq3-private" } as unknown as Parameters<typeof resolveEmbedConfig>[0]);
+          const cfg = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_API_KEY: "zq3-test-key", OB1_EGRESS_ALLOW: "marker:zq3-private" } as unknown as Parameters<typeof resolveEmbedConfig>[0]);
           const o3 = { cfg, model: "stub", sampleSize: 10, maxCalls: 5, days: 365, includePersonal: false };
           const capCode = await lintRun({ sql: one, tier: "3", report: join(scratch, "t3cap.md"), tier3: { ...o3, readMax: 7 }, writer });
           const capLine = lines.filter((l) => l.startsWith("[tier 3]")).join(" / ");
@@ -23157,7 +23189,7 @@ if (want("26")) {
           const failText = read(join(scratch, "t3fail.md"));
           const failLines = lines.join(" / ");
           lines.length = 0;
-          const allowAll = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_POLICY: "allow" } as unknown as Parameters<typeof resolveEmbedConfig>[0]);
+          const allowAll = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_API_KEY: "zq3-test-key", OB1_EGRESS_POLICY: "allow" } as unknown as Parameters<typeof resolveEmbedConfig>[0]);
           const failRecheck = { unsafe: (q: string, params?: unknown[]) => (/id = ANY\(\$1::uuid\[\]\) AND/.test(q) ? one.unsafe("SELECT 1 / 0") : one.unsafe(q, params)),
             array: one.array.bind(one), begin: one.begin.bind(one) } as unknown as SQL;
           const recheckCode = await lintRun({ sql: failRecheck, tier: "3", report: join(scratch, "t3rc.md"), tier3: { ...o3, cfg: allowAll }, writer });
@@ -23172,7 +23204,7 @@ if (want("26")) {
           const flakyCalls = prompts.length - flakyFrom;
           const retryDropped = (prompts[flakyFrom] ?? "").includes("zq3 late twenty") && !(prompts[flakyFrom + 1] ?? "").includes("zq3 late twenty");
           // The cap: a read of the whole window counts W rows; capped at W it was not cut, at W - 1 it was.
-          const none = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_ALLOW: "marker:zq3-none" } as unknown as Parameters<typeof resolveEmbedConfig>[0]);
+          const none = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_API_KEY: "zq3-test-key", OB1_EGRESS_ALLOW: "marker:zq3-none" } as unknown as Parameters<typeof resolveEmbedConfig>[0]);
           const readOf = async (readMax?: number) => {
             lines.length = 0;
             await lintRun({ sql: one, tier: "3", report: join(scratch, "t3w.md"), tier3: { ...o3, cfg: none, ...(readMax ? { readMax } : {}) }, writer });
@@ -23192,29 +23224,58 @@ if (want("26")) {
             JSON.stringify({ summary: "x", contradictions: [{ refs: ["t1"], issue: "zq3 a" }] }), JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "the </think> tag" }] }),
             `${good}\nNote: {x}`, `Here: ${good}`, `Draft: ${good}\n${JSON.stringify({ contradictions: [] })}`, JSON.stringify({ result: JSON.parse(good) }), `<think>${good}`,
             // Review pass 7: a </think> quoted in the words after a reasoning block; the core's fence rule (CRLF, one line).
-            `<think>r</think>\n${JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "a </think> b" }] })}`, "```json\r\n" + good + "\r\n```", "```json" + good + "```"];
+            `<think>r</think>\n${JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "a </think> b" }] })}`, "```json\r\n" + good + "\r\n```", "```json" + good + "```",
+            // Review pass 8: reasoning that names the tag before it ends (the first </think> is not the cut).
+            `<think>I will end with </think> once done</think>${good}`];
           const shapesRead = shapes.map((raw) => { const r = readTier3Answer(raw, b5); return r === null ? "none" : r.findings.map((f) => f.issue).join("|"); });
-          const shapesWant = ["zq3 a", "zq3 a", "zq3 a", "zq3 a", "zq3 a", "zq3 a", "the /think tag", "none", "none", "none", "none", "none", "a /think b", "zq3 a", "zq3 a"];
+          const shapesWant = ["zq3 a", "zq3 a", "zq3 a", "zq3 a", "zq3 a", "zq3 a", "the /think tag", "none", "none", "none", "none", "none", "a /think b", "zq3 a", "zq3 a", "zq3 a"];
           // A key split by a character the report drops (a backtick): withheld, read as the report would print it.
           const splitKey = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "t3 holds ghp_`ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789`" }] }), b5)?.findings[0]?.issue;
           // The real model's case (review pass 6): words that read as safe stay so whatever the ids look like.
           const digits = b5.map((r, i) => ({ ...r, id: `${String(20481930 + i)}-0000-0000-0000-000000000000` }));
           // A key starting near the 300-character cut: the words are judged whole, before the cut, so it is withheld.
           const lateKey = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: `${"x ".repeat(135)}wc_${"a1".repeat(32)}` }] }), b5)?.findings[0]?.issue;
+          // Review pass 8: a key in the suggested action alone withholds both; one the report's cleaning would join to the
+          // word before it (`]` dropped) is read as written too; words only the personal patterns match are printed.
+          const actionKey = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "fine", suggested_action: "rotate ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }] }), b5)?.findings[0];
+          const rawKey = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "see x]ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789" }] }), b5)?.findings[0]?.issue;
+          const personalWords = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "budget says $1200, the plan $900" }] }), b5)?.findings[0]?.issue;
           const { sanitizePreview } = await import("./lint-sweep.ts");
           const { sensitivityText } = await import("./sensitivity.ts");
           const supplement = String.fromCodePoint(0xe0101, 0xe01ef);
+          const { privateHost } = await import("./lint-sweep.ts");
+          const hosts = ["http://127.0.0.1:11434/v1", "http://localhost:1/v1", "http://ollama:11434/v1", "http://10.1.2.3/v1", "http://172.20.0.5/v1", "http://192.168.1.9/v1", "http://[::1]:8/v1", "http://box.local/v1",
+            "https://openrouter.ai/api/v1", "http://172.32.0.1/v1", "http://8.8.8.8/v1", "https://api.example.com/v1"].map(privateHost).map((b) => (b ? 1 : 0)).join("");
           const accountWords = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t2", "t3"], issue: "t2 says the staging AWS account is owned by the platform team; t3.large" }] }), digits)?.findings[0]?.issue;
           const nonRefs = readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "see /t3, t1.5, T2, t01 and ?d=t2" }] }), b5)?.findings[0];
+          // Review pass 8: a 503 every time stops after the pauses run out (one retry for one pause), exit 1.
+          mode = "down";
+          lines.length = 0;
+          const downFrom = prompts.length;
+          const downCode = await lintRun({ sql: one, tier: "3", report: join(scratch, "t3dn.md"), tier3: { ...o3, cfg: allowAll, maxCalls: 1, pausesMs: [10] }, writer });
+          const downCalls = prompts.length - downFrom;
+          const downText = read(join(scratch, "t3dn.md"));
           mode = "answer";
+          // A failure with no status and a code off the allowlist: the reason is this code's words, never the error's.
+          const { setModelCallHook } = await import("../server-portable/model-call.ts");
+          const priorHook = setModelCallHook(async () => { throw Object.assign(new Error("zq3 provider words"), { code: "zq3 bad code!" }); });
+          lines.length = 0;
+          let oddCode: number;
+          try {
+            oddCode = await lintRun({ sql: one, tier: "3", report: join(scratch, "t3od.md"), tier3: { ...o3, cfg: allowAll, maxCalls: 1, pausesMs: [10] }, writer });
+          } finally {
+            setModelCallHook(priorHook);
+          }
+          const oddText = read(join(scratch, "t3od.md")) + lines.join("\n");
           lines.length = 0;
           const cappedCode = await lintRun({ sql: one, tier: "3", report: join(scratch, "t3cs.md"), tier3: { ...o3, cfg: allowAll, sampleSize: 100, readMax: 15 }, writer });
           const cappedText = read(join(scratch, "t3cs.md"));
           // A wait for a slot (the hook installBackgroundSlots sets): a thought deleted while the call waits is not in it,
           // the batch read again inside the seam once the wait is over.
-          const { setModelCallHook } = await import("../server-portable/model-call.ts");
           let waited = false;
-          const before = setModelCallHook(async (_call, run) => {
+          const purposes: string[] = [];
+          const before = setModelCallHook(async (call, run) => {
+            purposes.push(call.purpose);
             if (!waited) {
               waited = true;
               await sql`DELETE FROM thoughts WHERE content = 'zq3 late: typed, long enough to read'`;
@@ -23262,15 +23323,20 @@ if (want("26")) {
                  && flakyCode === 0 && flakyCalls === 2 && retryDropped
                  && window > 10 && !/stopped at/.test(atWindow) && new RegExp(`of ${window - 1} read .*\\(the read stopped at ${window - 1}\\)`).test(belowWindow)
                  && shapesRead.join(",") === shapesWant.join(",") && accountWords === "t2 says the staging AWS account is owned by the platform team; t3.large"
-                 && lateKey === "(withheld: the model's words read as a secret)" && splitKey === "(withheld: the model's words read as a secret)" && sanitizePreview(`a${supplement}b`) === "ab" && sensitivityText(`a${supplement}b`) === "ab"
+                 && hosts === "111111110000" && lateKey === "(withheld: the model's words read as a secret)" && splitKey === "(withheld: the model's words read as a secret)" && sanitizePreview(`a${supplement}b`) === "ab" && sensitivityText(`a${supplement}b`) === "ab"
                  && /until the sample filled or the window ended\): /.test(recheckText)
                  && nonRefs?.issue === "see /t3, t1.5, T2, t01 and ?d=t2" && nonRefs.ids.length === 1
                  && readTier3Answer(`${good.slice(0, 30)}`, b5) === null
                  && readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "a } in it" }] }), b5)?.findings[0]?.issue === "a } in it" && /\[tier 3\] a transient failure .*503.*retrying/.test(flakyLines) && /10 sent in 1 call\(s\): 2 finding\(s\)/.test(flakyLines)
                  && cappedCode === 0 && /The read stopped at its cap with the sample not full/.test(cappedText) && /Read \(dated, the last 365 days, 20 characters or more, newest first, until the sample filled or the window ended\): \*\*15\*\*/.test(cappedText) && /\*\*13\*\* in \*\*1\*\* call/.test(cappedText)
-                 && slotDropped && /when read again just before their call: \*\*1\*\*/.test(slotText)
+                 && slotDropped && /when read again just before their call: \*\*1\*\*/.test(slotText) && purposes.length > 0 && purposes.every((p) => p === "lint")
+                 && actionKey?.issue === "(withheld: the model's words read as a secret)" && actionKey.action === "" && rawKey === "(withheld: the model's words read as a secret)"
+                 && personalWords === "budget says $1200, the plan $900" && sanitizePreview(`a${String.fromCharCode(0xfe0f)}b`) === "ab"
+                 && downCode === 1 && downCalls === 2 && /\*Stopped: batch 1 of 1's call: 127\.0\.0\.1:\d+ answered 503/.test(downText)
+                 && oddCode === 1 && /127\.0\.0\.1:\d+: the request failed/.test(oddText) && !/zq3 provider words|zq3 bad code/.test(oddText)
+                 && /\(the read stopped at its cap\)/.test(read(join(scratch, "t3cap.md")))
                  && capAtFetchEnd && !evenWindowCapped,
-            `…in process (and review pass 5: a thought deleted while the call waits for a model slot is not in it, the batch read again inside the seam; the cap's peek both ways): the read stops at its cap, 7 of 7, and a capped read that still sends says so; a read that fails on the server fails Tier 3 alone under its savepoint, the rows it read counted, tiers 1 and 2 reported, exit 1, and so does a batch's second read; a 503 is retried, the retry reading its batch again; a window of exactly the cap is not called cut; the reader takes one JSON document (a fence or reasoning before </think> taken off) and nothing else, and words safe as written are not withheld for the ids beside them; three 10 MB rows read whole one a statement, three unsized in one, a 17 MB row alone (${capCode}, ${failCode}, ${recheckCode}, ${flakyCode}, ${cappedCode}; ${capLine}; ${bySize}, ${unsized}, ${statements}; ${flakyLines.slice(-160)}; ${(cappedText.split("## Tier 3")[1] ?? "").split("\n").filter((l) => l.startsWith("- ")).join(" | ").slice(0, 400)}; ${recheckText.split("\n").find((l) => l.startsWith("*Stopped")) ?? "no stop"}; ${failText.split("\n").find((l) => l.startsWith("*Stopped")) ?? "no stop"})`);
+            `…in process (review pass 8: a key in the action alone, or one the report's cleaning would join to a word, withheld; personal words printed; a 503 every time stops once the pauses run out; a failure off the allowlist said in this code's words; the call's purpose "lint"; and review pass 5: a thought deleted while the call waits for a model slot is not in it, the batch read again inside the seam; the cap's peek both ways): the read stops at its cap, 7 of 7, and a capped read that still sends says so; a read that fails on the server fails Tier 3 alone under its savepoint, the rows it read counted, tiers 1 and 2 reported, exit 1, and so does a batch's second read; a 503 is retried, the retry reading its batch again; a window of exactly the cap is not called cut; the reader takes one JSON document (a fence or reasoning before </think> taken off) and nothing else, and words safe as written are not withheld for the ids beside them; three 10 MB rows read whole one a statement, three unsized in one, a 17 MB row alone (${capCode}, ${failCode}, ${recheckCode}, ${flakyCode}, ${cappedCode}; ${capLine}; ${bySize}, ${unsized}, ${statements}; ${flakyLines.slice(-160)}; ${(cappedText.split("## Tier 3")[1] ?? "").split("\n").filter((l) => l.startsWith("- ")).join(" | ").slice(0, 400)}; ${recheckText.split("\n").find((l) => l.startsWith("*Stopped")) ?? "no stop"}; ${failText.split("\n").find((l) => l.startsWith("*Stopped")) ?? "no stop"})`);
         } finally {
           await one.close();
         }

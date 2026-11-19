@@ -35,7 +35,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   if it holds `@ / # ? % :`. A role with SELECT on `thoughts`,
   `thought_entities`, `ob1_entities` and `ob1_entity_edges` is enough.
 - **The report.** `--report`, or `./lint-report-<UTC date>.md` in the directory
-  the run starts from. Its previews are thought text: keep it outside the
+  the run starts from. Its previews are thought text (Tier 2's are not held
+  back, a restricted thought's included; Tier 3's lines carry ids and the
+  model's words, a secret in them withheld): keep it outside the
   checkout, or under the default name in a place the checkout's `.gitignore`
   covers (its root, `db/` and `recipes/lint-sweep/`). It is written 0600 through
   a file of the run's own renamed into place, so a failed run leaves an earlier
@@ -56,13 +58,18 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   reads them from its own (below), and nothing from the stack's `deploy/.env`.
   So the job's `.env` carries them: `OB1_LLM_BASE_URL` (or `OB1_CHAT_BASE_URL`)
   at an address the host reaches (the stack's default, `http://ollama:11434/v1`,
-  resolves only inside it), its key as `OB1_LLM_API_KEY` (or
-  `OB1_CHAT_API_KEY`), `OB1_METADATA_MODEL` or `--model` naming a model that
-  endpoint serves, the `OB1_EGRESS_*` terms, and, for an `actor:` term,
-  `OB1_WORKER_KEY` with `MCP_ACCESS_KEYS`. `OPENROUTER_API_KEY` is still read,
-  as `OB1_LLM_API_KEY`'s fallback: left in the file, it goes as the bearer key
-  to whatever endpoint the job names, so remove it unless that endpoint is
-  OpenRouter. A job that ran Tier 3 needs the policy to let its thoughts leave,
+  resolves only inside it; with none set the run uses `http://127.0.0.1:11434/v1`
+  and the model `qwen2.5:7b`, which the `[tier 3] model …` line names), its
+  key, `OB1_METADATA_MODEL` or `--model` naming a model that endpoint serves,
+  the `OB1_EGRESS_*` terms, and, for an `actor:` term, `OB1_WORKER_KEY` with
+  `MCP_ACCESS_KEYS`. The keys pair with the bases: `OB1_LLM_API_KEY` (or its
+  fallback, `OPENROUTER_API_KEY`) goes to `OB1_LLM_BASE_URL`, and to the chat
+  endpoint only when it has no base of its own; a chat endpoint at
+  `OB1_CHAT_BASE_URL` takes `OB1_CHAT_API_KEY` alone. A leftover
+  `OPENROUTER_API_KEY` goes as the bearer key to whatever `OB1_LLM_BASE_URL`
+  names, so remove it unless that is OpenRouter. An endpoint not declared local
+  that carries no key at all is skipped before any read: a hosted provider
+  would refuse each call only after its text had left. A job that ran Tier 3 needs the policy to let its thoughts leave,
   or runs tiers 1 and 2 alone (`--max-llm-calls 0`). A read-only role the old README granted
   `entities` and `edges` needs SELECT on `ob1_entities` and `ob1_entity_edges`
   in their place: the run locks every table its tiers read first, so a missing
@@ -90,13 +97,19 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   skipped before any read, and the report says why. Release it with
   `OB1_EGRESS_ALLOW=actor:<the worker key's name>` (the `--name` keygen gave
   it, never the key itself, which the run would print and match nothing), or
-  with a source, type, topic or marker the thoughts to send carry, or run a
-  local model (`OB1_LLM_LOCAL=1`; `OB1_CHAT_LOCAL=1` for a chat endpoint of its
-  own). Once a thought could leave, a worker key the server would refuse (not
+  with a source, type, topic or marker the thoughts to send carry. Or run a
+  model on this machine or its private network and declare it so
+  (`OB1_LLM_LOCAL=1`; `OB1_CHAT_LOCAL=1` for a chat endpoint of its own): the
+  declaration is not checked, and it turns the egress gate off for that
+  endpoint, allow and deny terms alike, so never set it for a hosted provider
+  (the run warns when the declared host is no loopback or private address). Once a thought could leave, a worker key the server would refuse (not
   in `MCP_ACCESS_KEYS`, `MCP_ACCESS_KEYS` unset, revoked, or a forwarder's)
   refuses the run, exit 2. A skipped tier
   exits 0: the `[tier 3] skipped:` line and the report say why, with what was
-  read and held back. Under `OB1_EGRESS_POLICY=allow` a deny term (`topic:health`) holds its
+  read and held back, and the report's frontmatter carries `tier3: ran`,
+  `skipped`, `failed` or `unreadable` (every answer unreadable, which also
+  warns on stderr) for a job to read; a stop says `then stopped` on the stdout
+  line and exits 1. Under `OB1_EGRESS_POLICY=allow` a deny term (`topic:health`) holds its
   thoughts back. Before the gate, a thought `restricted`, or `personal` unless
   `--include-personal`, by its `sensitivity_tier` key or column or by the
   sensitivity patterns over what is sent and its whole text, is never sent
@@ -138,8 +151,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   line names its batch and each of its thoughts by its ref in that batch, its
   id and its date; the report's table of refs by batch maps any ref (`t7`) the
   model's own words name, which are kept as written. Words that read as a
-  secret are withheld. The answer must be one JSON document (the request asks
-  for JSON); anything else counts as an answer not JSON. A provider's failure
+  secret are withheld. The answer must be one JSON document with a category's
+  key (the request asks for JSON); anything else counts as an answer
+  unreadable. A provider's failure
   is reported by its host and status, never its error text. With
   `OB1_METADATA_REASONING` on, the call has no answer budget (a thinking
   model otherwise spends it on its thinking and answers nothing), and a batch

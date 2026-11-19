@@ -101,7 +101,13 @@
  * topics and tags) and, apart, its whole text: it goes only when both pass, so
  * a writer's marker anywhere in the thought is the thought's — and a refused
  * one is left out; the call names every thought it carries, and
- * providerCallPrepared gates each again. A policy that would refuse every thought skips the tier
+ * providerCallPrepared gates each again. A chat endpoint not declared local
+ * that carries no key (nor userinfo) skips the tier, before any read: a hosted
+ * provider would refuse each call only after its text had left; a host
+ * declared local that is no loopback or private address is warned of
+ * (privateHost), since the declaration turns the gate off. The report's
+ * frontmatter carries `tier3:` (ran, skipped, failed, unreadable) for a job.
+ * A policy that would refuse every thought skips the tier
  * before any read, and before the worker key is resolved, which happens only
  * once the connection is known to have reached the URL's database. Before that,
  * the hold-back weekly-digest uses (db/sensitivity.ts, decided the same day):
@@ -698,6 +704,26 @@ const skipped3 = (o: Tier3Options, reason: string, counts: Partial<Tier3> = {}, 
   sent: 0, calls: 0, answered: 0, unreadable: 0, cut: 0, dropped: 0, findings: [], legend: [], ...counts,
 });
 
+/**
+ * Whether a base URL names this machine or a private network: loopback, RFC 1918 and link-local IPv4, IPv6 loopback and
+ * unique-local, `localhost`, `*.local`, and a single-label name (a compose service, `ollama`). A warning's test, never
+ * the gate's: OB1_LLM_LOCAL stays a declaration (embed.ts reads nothing off the address).
+ */
+export function privateHost(base: string): boolean {
+  let host: string;
+  try {
+    host = new URL(base).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  } catch {
+    return false;
+  }
+  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || !host.includes(".") && !host.includes(":")) return true;
+  if (host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) return true;
+  const v4 = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254);
+}
+
 /** Retry a call while its failure is transient (429, 5xx, a connection's), after each of `pauses`. */
 async function withRetry<T>(pauses: readonly number[], w: Writer, cfg: EmbedConfig, fn: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
@@ -801,7 +827,9 @@ async function tier3Calls(sql: SQL, sample: Tier3Sample, o: Tier3Options, w: Wri
 export function renderReport(r: { tier: string; database: string; startedAt: string; finishedAt: string; t1: Tier1 | null; t2: Tier2 | null; t3?: Tier3 | null }): string {
   const day = r.startedAt.slice(0, 10);
   const L: string[] = [
-    "---", `title: Lint Sweep — ${day}`, `database: ${r.database}`, `tier: ${r.tier}`, `started_at: ${r.startedAt}`, `finished_at: ${r.finishedAt}`, "---", "",
+    "---", `title: Lint Sweep — ${day}`, `database: ${r.database}`, `tier: ${r.tier}`,
+    ...(r.t3 ? [`tier3: ${r.t3.status === "ran" && r.t3.answered > 0 && r.t3.unreadable === r.t3.answered ? "unreadable" : r.t3.status}`] : []),
+    `started_at: ${r.startedAt}`, `finished_at: ${r.finishedAt}`, "---", "",
     `# Brain Lint Sweep — ${day}`, "",
     "*Read-only audit: the tiers' reads are one snapshot (Tier 3 reads each batch again just before its call), and the tiers write nothing to the brain. Tier 3's findings are a model's reading: suggestions, not facts.*", "",
     "## Scan scope", "",
@@ -849,7 +877,7 @@ export function renderReport(r: { tier: string; database: string; startedAt: str
     L.push(`- Held back by the egress policy: **${t3.heldEgress}**`);
     L.push(`- Gone, or held back, when read again just before their call: **${t3.changed}**`);
     if (t3.readCapped) L.push("- The read stopped at its cap with the sample not full: older thoughts of the window were not read.");
-    L.push(`- Sent to ${t3.model}: **${t3.sent}** in **${t3.calls}** call(s), a failed one's included${t3.unreadable ? `; **${t3.unreadable}** answer(s) not JSON, their findings lost${t3.cut ? ` (${t3.cut} cut at the answer's budget, ${TIER3_ANSWER_TOKENS} tokens with reasoning off)` : ""}` : ""}${t3.dropped ? `; **${t3.dropped}** finding(s) dropped, naming no thought of their batch` : ""}`, "");
+    L.push(`- Sent to ${t3.model}: **${t3.sent}** in **${t3.calls}** call(s), a failed one's included${t3.unreadable ? `; **${t3.unreadable}** answer(s) unreadable (not one JSON document with a category's key), their findings lost${t3.cut ? ` (${t3.cut} cut at the answer's budget, ${TIER3_ANSWER_TOKENS} tokens with reasoning off)` : ""}` : ""}${t3.dropped ? `; **${t3.dropped}** finding(s) dropped, naming no thought of their batch` : ""}`, "");
     if (t3.answered > 0) {
       L.push("Each finding names its batch and each of its thoughts by its ref in that batch, its id and its date. A ref in the model's words is that batch's: the table at the end maps every one.", "");
       for (const c of CATEGORIES) {
@@ -964,7 +992,13 @@ export async function run(opts: SweepOptions): Promise<number> {
       // Before any read, once the database is the URL's: a tier turned off, or a policy that refuses every thought
       // even with an actor, sends nothing and resolves no key; then the key (its registry write lands in this brain),
       // and the policy again for an unkeyed run, whose thoughts carry no actor.
-      const keyed = o3.maxCalls === 0 ? "--max-llm-calls 0" : egressRefusal(o3.cfg.chat, o3.cfg.egress);
+      // The policy first, the more basic refusal; then a hosted endpoint with no credential, which would refuse each call
+      // only after its text had left (review pass 8).
+      const keyed = o3.maxCalls === 0 ? "--max-llm-calls 0"
+        : egressRefusal(o3.cfg.chat, o3.cfg.egress)
+          ?? (!o3.cfg.chat.local && !o3.cfg.chat.key && !o3.cfg.chat.userinfo
+            ? `the chat endpoint ${hostOf(o3.cfg.chat.base)} is not declared local and carries no key (OB1_CHAT_API_KEY for OB1_CHAT_BASE_URL; OB1_LLM_API_KEY, or OPENROUTER_API_KEY, for OB1_LLM_BASE_URL): a hosted provider would refuse each call after its text had left`
+            : null);
       if (keyed) t3 = skipped3(o3, keyed);
       else {
         if (o3.resolveActor) {
@@ -1029,7 +1063,8 @@ export async function run(opts: SweepOptions): Promise<number> {
     if (o3 && sample) t3 = await tier3Calls(opts.sql, sample, o3, w);
     if (t3) {
       w.out(t3.status === "skipped" ? `[tier 3] skipped: ${t3.reason}${t3.read > 0 ? ` (${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy)` : ""}` : t3.status === "failed" && t3.calls === 0 ? `[tier 3] failed: ${t3.reason}${t3.read > 0 ? ` (${t3.read} read, ${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy)` : ""}`
-        : `[tier 3] ${t3.read} read${t3.readCapped ? " (the read stopped at its cap)" : ""}, ${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy; ${t3.changed ? `${t3.changed} gone or held back before their call, ` : ""}${t3.sent} sent in ${t3.calls} call(s): ${t3.findings.length} finding(s)${t3.unreadable ? `, ${t3.unreadable} answer(s) not JSON${t3.cut ? ` (${t3.cut} cut at the answer's budget)` : ""}` : ""}${t3.dropped ? `, ${t3.dropped} dropped` : ""}`);
+        : `[tier 3] ${t3.read} read${t3.readCapped ? " (the read stopped at its cap)" : ""}, ${t3.heldSensitive} held back by sensitivity, ${t3.heldEgress} by the egress policy; ${t3.changed ? `${t3.changed} gone or held back before their call, ` : ""}${t3.sent} sent in ${t3.calls} call(s): ${t3.findings.length} finding(s)${t3.unreadable ? `, ${t3.unreadable} answer(s) unreadable${t3.cut ? ` (${t3.cut} cut at the answer's budget)` : ""}` : ""}${t3.dropped ? `, ${t3.dropped} dropped` : ""}${t3.status === "failed" ? "; then stopped" : ""}`);
+      if (t3.answered > 0 && t3.unreadable === t3.answered) w.err(`lint-sweep: every Tier 3 answer was unreadable (${t3.unreadable}): the model did not answer one JSON document with a category's key; try another --model`);
     }
   } catch (e) {
     w.err(`lint-sweep FAILED — ${reasonOf(e)}. No report was written.`);
@@ -1091,6 +1126,9 @@ if (import.meta.main) {
     const model = (cli.value("model") ?? "").trim() || cfg.metadataModel;
     if (maxCalls > 0) {
       console.log(`[tier 3] model ${model}; egress: ${egressDescription(cfg.chat, cfg.egress, cfg.chat.declaredBy ?? "OB1_LLM_LOCAL")}`);
+      if (cfg.chat.local && !privateHost(cfg.chat.base)) {
+        console.error(`  ⚠  ${hostOf(cfg.chat.base)} is declared local (${cfg.chat.declaredBy ?? "OB1_LLM_LOCAL"}) but is no loopback or private address: the egress gate does not apply to it, so every thought the hold-back leaves goes there. Unset the flag unless the endpoint runs on this machine or its private network.`);
+      }
       if (reasoningOn(cfg)) console.log(`[tier 3] OB1_METADATA_REASONING is on: a call of ${TIER3_BATCH} thoughts can take minutes (over 150 s on a 27b model); OB1_LLM_TIMEOUT is ${cfg.timeoutMs / 1000} s`);
     }
     tier3 = {

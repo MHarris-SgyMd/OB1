@@ -5860,7 +5860,7 @@ brings a brain back.
 ### `lint-sweep.ts`
 
 ```bash
-bun lint-sweep.ts --url postgres://…                         # every tier; ./lint-report-YYYY-MM-DD.md
+bun lint-sweep.ts --url postgres://…                         # every tier; ./lint-report-YYYY-MM-DD.md (or DATABASE_URL in ./.env, off the command line)
 bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, another path
 bun lint-sweep.ts --url … --max-llm-calls 0                  # tiers 1 and 2 alone: no model call
 #   --tier 1|2|3|all (all)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
@@ -5913,6 +5913,11 @@ its thoughts by ref, id and date, the refs' table mapping the model's words. Bef
 weekly-digest's hold-back (`db/sensitivity.ts`): a `restricted` thought, or a
 `personal` one unless `--include-personal`, by its key, the enhanced-thoughts
 column, or the patterns over what is sent and the whole text, never leaves.
+`OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` is an unchecked declaration that turns the
+gate off for that endpoint, for a model on this machine or its private network
+alone (the run warns at another host); an endpoint not declared local that
+carries no key is skipped before any read. The report's frontmatter carries
+`tier3:` (`ran`, `skipped`, `failed`, `unreadable`) for a job to read.
 Under the default deny with no allow term and no local endpoint, the tier is
 skipped before any read; release it with `OB1_EGRESS_ALLOW=actor:<the worker
 key's name>` (never the key itself; or a source, type, topic or marker), or declare a local model
