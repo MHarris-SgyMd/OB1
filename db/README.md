@@ -5961,10 +5961,12 @@ brings a brain back.
 ### `lint-sweep.ts`
 
 ```bash
-bun lint-sweep.ts --url postgres://…                         # both tiers; ./lint-report-YYYY-MM-DD.md
+bun lint-sweep.ts --url postgres://…                         # every tier; ./lint-report-YYYY-MM-DD.md (or DATABASE_URL in ./.env, off the command line)
 bun lint-sweep.ts --url … --tier 1 --report ~/lint/week.md   # one tier, another path
-#   --tier 1|2|all (all; 3 is refused until SMD-3318 PR 2b)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
-#   exits 0 report written · 1 a read or the write failed (no report) · 2 usage, the URL, or the connection reached another database (PGDATABASE)
+bun lint-sweep.ts --url … --max-llm-calls 0                  # tiers 1 and 2 alone: no model call
+#   --tier 1|2|3|all (all)   --report <path> (absolute, or inside the working directory; not a directory)   --statement-timeout SECONDS (60; 0: none)
+#   Tier 3: --sample-size N (100, 10–1000)   --max-llm-calls N (5, ≤ 100; 0: off)   --days N (365, ≤ 36500)   --model ID (OB1_METADATA_MODEL's)   --include-personal
+#   exits 0 report written · 1 a read of tiers 1 or 2 or the write failed (no report), or Tier 3 failed — its read, a batch's second read, or a call (the report written) · 2 usage, the URL, the worker key, or the connection reached another database (PGDATABASE)
 ```
 
 Tiers 1 and 2 of `recipes/lint-sweep` (SMD-2144), on the core's tables, read in
@@ -5986,14 +5988,51 @@ locks the tables the tiers read (ACCESS SHARE, as pg_dump does), under
 wait, the counts' included, is bounded by the same value (`lock_timeout`). Keep
 a sweep apart from an upgrade: an `ALTER` of those tables waits for it, and
 their traffic behind the `ALTER`. The markdown report is written 0600 through a
-file of the run's own renamed into place, once every read succeeded. Tier 3, a
-model's reading of sampled thoughts, follows in SMD-3318 PR 2b through the
-provider and the egress gate. test-live [26] holds every count against a
+file of the run's own renamed into place, once tiers 1 and 2's reads succeeded.
+
+Tier 3 (SMD-3318 PR 2b) is a model's reading of the newest dated thoughts of the
+last `--days`, 20 a call: contradictions, stale facts, superseded decisions,
+orphans and missing links, each naming its thoughts' ids (the model sees refs,
+`t1`…`t20`, mapped back). Its sample is read in the same snapshot, and its
+calls go after the transaction, so no lock is held across a model's answer.
+The thoughts leave as the brain's passes' do: to the chat endpoint and model
+`resolveEmbedConfig` reads from the run's own environment (not the stack's
+`deploy/.env`; `OPENROUTER_API_KEY` is read there as `OB1_LLM_API_KEY`'s
+fallback), each put to the egress gate on its own units
+(`OB1_WORKER_KEY`'s name as the actor, its source, type and topics, and as the
+marker what is sent of it and its whole text, both to pass; decided
+2026-11-17), a refused one left out, and the call naming every thought it
+carries (`providerCallPrepared` gates each). The sample is read through one cursor in
+`created_at` order until as many as the calls can send are found (at most
+10,000 rows), and each batch is read and judged again just before its call; a
+Tier 3 that fails leaves the report written with the other tiers, exit 1.
+Each retry of a call reads its batch again, inside the model-call seam once any
+wait for a slot is over; with `OB1_METADATA_REASONING` on
+the call has no answer budget (4096 tokens off; raise `OB1_LLM_TIMEOUT` with it
+on: a batch took over 150 s on a 27b model); each finding names its batch and
+its thoughts by ref, id and date, the refs' table mapping the model's words. Before that,
+weekly-digest's hold-back (`db/sensitivity.ts`): a `restricted` thought, or a
+`personal` one unless `--include-personal`, by its key, the enhanced-thoughts
+column, or the patterns over what is sent and the whole text, never leaves.
+`OB1_LLM_LOCAL` / `OB1_CHAT_LOCAL` is an unchecked declaration that turns the
+gate off for that endpoint, for a model on this machine or its private network
+alone (the run warns at another host); an endpoint at a public address, not
+declared local, that carries no key is skipped before any read. The report's frontmatter carries
+`tier3:` (`ran`, `skipped`, `failed`, `unreadable`) for a job to read.
+Under the default deny with no allow term and no local endpoint, the tier is
+skipped before any read; release it with `OB1_EGRESS_ALLOW=actor:<the worker
+key's name>` (never the key itself; or a source, type, topic or marker), or declare a local model
+(`OB1_LLM_LOCAL=1`, or `OB1_CHAT_LOCAL=1` for a chat endpoint of its own). An answer that is not one JSON document with a category's key
+loses its batch's findings, counted; a call that fails after the transient retries stops the
+tier, and the report is written with what came before (exit 1). The recipe's
+`low_signal` read `importance`, which the core retired. test-live [26] holds every count against a
 planted table (undated and infinite rows, non-array metadata, and each
 threshold's edge among it), the report's previews made safe and its path rules,
 the bound on a lock wait (a held table, and a held REINDEX under an unbounded
-count), a role that may not read a table, a report that cannot be written, and
-the refusals.
+count), a role that may not read a table, a report that cannot be written,
+Tier 3 against a stub (what the hold-back and each thought's gate keep back,
+the batches, the refs mapped, an allow term releasing its own thoughts alone,
+an unreadable answer, a refused call), and the refusals.
 
 ## Backfilling a thought's type and sensitivity tier (SMD-3318)
 
