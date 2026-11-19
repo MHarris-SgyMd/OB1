@@ -1,0 +1,163 @@
+# Claim validity: a thought's state on three axes, read from the records that already exist (SMD-3887)
+
+An architecture decision record. **Proposed on 2026-11-19.** The maintainer decided two rows before it was drafted: a thought no record speaks against reads **unchallenged**, not unknown and not supported (row 3); and a `pr:` or `version:` subject key takes its repository from the pull request's URL or from a brain setting (row 13). Every other row is proposed here, and the ticket asks for the maintainer's review of this record before the read is built. Nothing here is built yet. "Order" maps each row to the pull request or ticket that builds it.
+
+## Terms
+
+- **Thought:** a row of `thoughts`. A ticket row (board-sync's, `metadata.issue`) is a thought too; its lifecycle is the board's, read through `node_state` (058, 068), and this record does not restate it.
+- **Record:** a table, column or facet that already says something about a thought: a pointer, a proposal, a relation, a citation, a lineage row, an audit event.
+- **Version:** which text of a thought a record was made on: the thought's id with its `content_fingerprint` (003), or one audit event's `seq` (050).
+- **Axis:** one question asked of a thought. This record keeps three: **validity** (does it still hold), **review** (did someone decide on it), **freshness** (have the views derived from it caught up). Each has its own states, read from its own records.
+- **Settled part:** a statement inside a thought that a later thought settles, while the thought itself still stands. SMD-4446 builds its store (decided on SMD-3340, 2026-11-19). Nothing stores one today.
+- **Challenge:** a record that says a thought may not hold: a pending or stale supersession proposal that names it as the side that falls, or as one side of an undirected conflict.
+
+## Why
+
+Whether a thought still holds is answered on main by several records, each in its own words, and no read puts them together:
+
+- **The `supersedes` pointer** (025), on the newer thought. It is shown as `⚠ Superseded by a newer thought` (`server-portable/render.ts:786`, `:1001`, `:1128`), and `node_state.superseded_by` (068's `ob1_superseded_by`) demotes the older thought under `prefer_current` (059, 077).
+- **Supersession proposals** (029): `pending`, `accepted`, `rejected`, and since 063 `stale`. A pending conflict leaves both sides reading plain in search and fetch. The write-path eval's reader marks a thought contested by reading the proposal list itself (`evals/write-path.ts`).
+- **Judged relations** (084, 102): `related`, `evolves`, `duplicate`, `distinct`, and thread edges (120), which are `evolves` with a subject key.
+- **Citation facets** (042): active, expired or superseded, detached when their source is deleted.
+- **The lineage mark** (063): `derivations.stale_since` and `stale_reason`.
+- **"Moved since written"** (SMD-2540, `render.ts:793`), for the tickets a note names.
+- **The event's valid window** (046): `thought_audit.valid_from` and `valid_until`. SMD-2011 owns it.
+
+The tickets filed beside this one, SMD-3895 to SMD-3903, would each invent their own words for these states. SMD-3900 needs to leave out what is not fit to act on, and it is blocked until a read says what that is.
+
+Three questions are not kept apart in words. One thought can be current, unreviewed and stale at once: no proposal contests it, no one has reviewed it, and its entities were extracted from a text that has since been edited. A single word for all three would hide two of them.
+
+Versions exist and are never named for a claim. A record that says "thought X" without the version it read cannot tell a later reader whether it still applies.
+
+## Measured
+
+Stable, 2026-11-19, read-only queries on `open-brain-postgres-1` (v2.2.0, migration 147). The queries are in this record's ticket.
+
+| What | Count |
+| --- | --- |
+| Thoughts | 4,347 |
+| ... ticket rows (`metadata.issue`) | 1,419 |
+| ... notes (everything else) | 2,928 |
+| Thoughts holding a `supersedes` pointer (= thoughts superseded) | 706 |
+| ... the newer thought written by `session-hook` | 680 |
+| ... both sides written by the same key | 700 |
+| Supersession proposals: pending / accepted / rejected / stale | 2 / 2 / 127 / 0 |
+| Notes under a pending proposal | 4 |
+| Notes any validity record speaks for (a pointer on either side, any proposal, a citation) | 1,352 of 2,928 |
+| ... by writer kind: agent / ingested | 1,326 of 2,201 / 26 of 727 |
+| Citation facets | 0 |
+| Audit events with `valid_from` or `valid_until` set | 0 of 17,259 |
+| Standing judged relations (related / evolves / distinct) | 2,922 / 1,581 / 3,199 |
+| ... either side edited since judged | 1,526 of 7,702 |
+| Standing thread edges (`evolves`, origin `thread`) | 2,495 |
+| Lineage rows marked stale (`stale_since` set) | 0 |
+| Lineage artifacts whose input's fingerprint has moved: entities / relation / proposal / metadata | 672 / 1,586 / 66 / 10 |
+| Standing subject keys: `ticket:` / `pr:` / `phrase:` / `version:` (facets, distinct keys) | 4,119, 1,679 / 111, 82 / 51, 37 / 22, 10 |
+
+What the counts say:
+
+- **Supersession on this brain is mostly revision, not contradiction.** 680 of the 706 pointers are the session hook replacing its own earlier summary of a session (a compaction's checkpoint, then the session's end). The pointer says "a newer text of this replaced it", which is what superseded means here, and it rarely says "this was found wrong".
+- **Most notes have no record bearing on whether they hold.** 1,576 of 2,928 notes have no pointer, no proposal and no citation. If "no record" read unknown, half the brain would be unknown, and every ingested note but 26.
+- **Nothing reads supported today.** No citation facet exists: `record_citation` (042) has no caller.
+- **Freshness cannot be read from the mark.** No lineage row is marked stale, yet 672 entity extractions, 66 proposals and 10 tag sets were made on a text that has since moved. That is by design: 063's own column comment says `stale_since` is "Not staleness — that is the fingerprint read — but the request" for a re-run. The relations read already compares fingerprints (`server-portable/store-sql.ts`, the `edited since judged` label).
+- **No event declares a valid window.** The server's write event carries `trust` only (`server-portable/store.ts`, `WriteEvent`), so 046's columns are empty.
+
+## The decision
+
+| # | Decided | Status | Chosen over |
+|---|---|---|---|
+| 1 | **Three axes per thought: validity, review, freshness.** Each is read from its own records and none is inferred from another. A read that reports one reports all three. | proposed here | one combined state; validity alone, with review and freshness as notes on it |
+| 2 | **Validity has six states,** read in this order of precedence: **superseded**, **contested**, **unresolved**, **supported**, **unchallenged**, **unknown** (the table below). A state the records read can establish stands even when another record could not be read. A state that rests on an absence (supported, unchallenged) becomes **unknown** when any record that could have spoken against it was not read. | proposed here | the ticket's list as written, with "under review" a validity state (it is the review axis's, row 5); "unresolved" for a pending undirected conflict (that is contested, with its direction) |
+| 3 | **A thought no record speaks against, and none for, reads unchallenged.** Unchallenged is not supported: it says the records were read and none contests the thought, never that anything backs it. Unknown is kept for what could not be read. | **decided by the maintainer (2026-11-19)** | unknown for every thought no record speaks for (on stable, 1,576 of 2,928 notes) |
+| 4 | **Each move between validity states names the record that makes it and who may write that record** (the transitions table below). The actor is the key, stamped by the database (050, 114), never a payload's claim. The read moves nothing: it reads the records as they stand. | proposed here | a validity column on `thoughts`, written on each move; a state machine with its own table |
+| 5 | **Review has four states: none, pending, decided, verified.** Pending: a proposal naming the thought awaits a decision. Decided: a key accepted or rejected one; the read gives the key, its kind (114's stamp) and whether the decision was the pass's own settle (067's `settled by the pass:`) or a key's review. Verified: a deliverable on the thought (134) was verified or corrected at a checkpoint, and the read says whether that checkpoint is the thought's current version. The newest decision is the state; every decision is listed. | proposed here | review folded into validity (an accepted proposal already moves validity, and the reviewer is the review axis's fact) |
+| 6 | **Freshness is the fingerprint read, per derived kind.** For each lineage row with the thought among its inputs (chunks, entities, metadata, vector, subject, relation, proposal, section), the kind is **current** when every input's fingerprint matches its input's text now, **stale** when one does not, and **requested** when stale and a rebuild has asked for the re-run (`stale_since`). A kind with no lineage row reads **none**; a `legacy: true` row (061's backfill) reads **legacy**. The thought's freshness is the worst of its kinds, every kind listed. | proposed here | reading `stale_since` alone, which says current for all 748 moved artifacts on stable |
+| 7 | **A version is a thought's id with its `content_fingerprint`; an event's version is its audit `seq`.** The read returns both for each thought. A record written after this one that cites a thought names the id with its fingerprint, never a bare id. Today `derivations`, `supersession_proposals` and `thought_forgotten` do; a citation's `source_id`, a relation's `target` (its lineage row holds the fingerprints), `thought_audit.cites` and `deliverable_events.spec_ref` do not, and are read as unversioned. | proposed here | the audit `seq` as the only version (a capture that changes nothing writes no event, so two reads of one text could cite different seqs); a version number per thought |
+| 8 | **A revision trigger record has six fields:** what started it (an edit, a pointer set or cleared, an accepted proposal, a lapse, a forget, a trust change); the versions it touched, before and after; the reason, in 063's `stale_reason` vocabulary; the actor, from the key; the scope (the thoughts and derived kinds it reached); and when. This record fixes the fields. SMD-3901 builds the record. | proposed here | each revision ticket defining its own trigger shape |
+| 9 | **A judge's number is raw model output, and a read says so.** A proposal's `confidence` (029) and a relation's `payload.confidence` (084, the chosen word's token probability) are uncalibrated. SMD-1809's `evals/eval-calibration.ts` measures them; nothing in a read applies it. The new read returns each under `judge` with `calibrated: false`. The existing listings (`render.ts:1051`, `:1245`) keep their text until a ticket changes them. | proposed here | rewording the existing listings in this ticket (a change to a default read's output, which this ticket's Verify rules out) |
+| 10 | **Identity is not validity.** A thought's subject facets (111, 130), the sweep's keyed attempts, its thread edges (120) and its judged `related`, `evolves` and `distinct` relations say what a thought is about and what it sits beside. None says whether it holds, and none moves its validity. Code-artifact timelines (SMD-3207) and the work-thread read (SMD-3306) stay with their tickets. | proposed here | an `evolves` read as "superseded in part" (an evolves "settles nothing", SMD-3116's definition) |
+| 11 | **The read stands beside `node_state`, and does not extend it.** `node_state` is the one read search ranks by: `search_thoughts_current` inlines it, and test-schema reads that plan (059). A column added to it changes its `RETURNS TABLE` and re-creates every function that reads it. The validity read labels and ranks nothing. It reads superseded from the same projection (`ob1_superseded_by`, 068), so the two never disagree. | proposed here | new `node_state` columns, read by search |
+| 12 | **One read-scoped operation, `validity`, over REST and MCP alike,** backed by one SQL function. It takes up to 100 thought ids and returns, per thought: its version, each axis's state, the records each state was read from, the judges' numbers under `judge`, and what it could not read (`unread`, by record kind). An id that is not a thought answers not found; a forgotten one answers forgotten (139's ledger), with no text. It labels only: no default read's output and no ranking changes. | proposed here; the names are the plan's | a flag on `search` and `fetch` (that is SMD-3900's eligible mode, built on this read); a read per axis |
+| 13 | **A `pr:` or `version:` subject key names its repository:** `pr:<owner>/<repo>#<n>` and `version:<owner>/<repo>@v<n>.<n>…`, the owner and repository lowercased. The repository comes from the pull request's URL when the thought's text has one, else from a brain setting the operator sets. A brain with no setting keeps today's unscoped keys, and both shapes stay valid. Setting it maps the brain's unscoped keys to it, with their threads kept (the plan says how). `ticket:` keys keep their shape: the team prefix scopes them. | **decided by the maintainer (2026-11-19)**: the repository from the URL or a brain setting | leaving keys unscoped until a second repository is ingested (SMD-3011); naming this repository in a migration every brain runs |
+
+### Validity states
+
+| State | Read from | Means |
+|---|---|---|
+| **superseded** | A standing `supersedes` pointer names it (`ob1_superseded_by`, 068) | A newer thought replaced it whole. The read names the newer thought, the key that wrote the pointer and whether a reviewed proposal did. |
+| **contested** | A `pending` proposal names it as the side that falls: the older for `newer_supersedes_older`, the newer for `older_supersedes_newer`, either side of a `conflict_undirected` | A judge said it may not hold, and no one has decided. The read gives the proposal, its verdict and its judge's number. |
+| **unresolved** | A `stale` proposal names it as the side that falls | A challenge was made on a text that has since moved, and the pass has not judged it again (063, 067). |
+| **supported** | An active citation (042) on it whose source stands, is not superseded and is not contested | Something backs it. On stable today, nothing: there are no citations. |
+| **unchallenged** | Every record above was read and none applies | The records were read and none contests it (row 3). |
+| **unknown** | A record that could have applied was not read | The read cannot say. It names what it did not read. |
+
+A **partly settled** mark joins when SMD-4446's store lands: an accepted settled part says a statement in the thought no longer holds, while the thought stands. It sits beside the state, never in place of it, as SMD-4446 decides ("a part never sets `supersedes` and never demotes a thought").
+
+### Transitions
+
+Each move is made by a record, and the read follows the record. "Write key" means a key of write scope at the door (`server-portable/tools.ts`); the SQL functions record the scope and mostly do not gate on it (049), with the exceptions named.
+
+| Move | Record | Written by | Who may |
+|---|---|---|---|
+| → superseded | a pointer set on the newer thought | `upsert_thought` (capture's `supersedes`, 080); `update_thought` (099); an accepted proposal, through `update_thought` (036) | a write key; a capture key only onto its own capture no other key has taken (`ob1_check_capture_pointer`, 092, refuses with OB004) |
+| superseded → the state below it | the pointer cleared | `update_thought` with `supersedes: null` (099); a lapse (104); the newer thought deleted (025's `ON DELETE SET NULL`) | a write key; a lapse is the trigger's, when another key takes the capture key's thought |
+| → contested | a proposal recorded `pending` | `record_supersession_proposal` (063), from the consolidation pass | the pass's key |
+| contested → superseded | the proposal accepted, and its pointer written | `review_supersession_proposal` (036) | any write key, an agent's included (SMD-3338); the reviewer is stamped from the key (114) |
+| contested → the state below it | the proposal rejected | `review_supersession_proposal`; or the pass's settle (067) | any write key; the pass's settle is recorded as the pass's, not a review |
+| contested → unresolved | the proposal marked `stale` when a side's text moved | `rebuild_derived` (067) | the database, on a rebuild's request |
+| unresolved → contested, or the state below it | the pass judges the pair again: the row replaced `pending`, or settled `rejected` | `record_supersession_proposal`; `settle_supersession_proposal` (067) | the pass's key |
+| → supported, and back | a citation recorded, expired, superseded or detached | `record_citation` (042); 042's delete guard | no caller writes a citation today |
+| any → gone | the thought forgotten | `forget_thought` (139, 144) | a write key. The read answers forgotten, from `thought_forgotten`, and returns no text |
+
+A deleted thought (`delete_thought`, 060) is not a state: the read answers not found, as `fetch` does.
+
+## The shape
+
+The read is one SQL function and one core operation. Its names and file layout are the plan's, in PR 2. Its answer, per thought:
+
+```json
+{
+  "id": "…",
+  "version": { "fingerprint": "…", "seq": 1234 },
+  "validity": { "state": "contested", "records": [ { "kind": "proposal", "id": "…", "status": "pending", "verdict": "newer_supersedes_older", "falls": "this", "judge": { "confidence": 0.83, "calibrated": false } } ] },
+  "review": { "state": "pending", "decisions": [] },
+  "freshness": { "state": "stale", "kinds": [ { "kind": "entities", "state": "stale", "produced_by": "…", "moved": ["…"] }, { "kind": "vector", "state": "current" } ] },
+  "unread": []
+}
+```
+
+An id the caller gives twice is answered once. An id beyond the cap is refused, naming the cap.
+
+## What this reverses or amends
+
+- **Nothing that is built.** No default read changes. `node_state`, `prefer_current` and every label keep their behaviour.
+- **SMD-3887's own list of states** is amended: "under review" moves to the review axis (row 5), and "unresolved" means a challenge made on a text that has moved (a `stale` proposal), not an undirected conflict (row 2).
+- **`docs/subject-anchored-claims.md`'s key shapes** gain the repository (row 13). Its rows are otherwise unchanged.
+
+## Order
+
+| Piece | Builds | Depends on |
+|---|---|---|
+| SMD-3887 PR 1 | This record | — |
+| SMD-3887 PR 2 | Rows 1 to 7, 9, 11 and 12: the SQL function, the `validity` operation over REST and MCP, its tests | the maintainer's review of this record |
+| SMD-3887 PR 3 | Row 13: the brain setting, the key shapes in `subject_key_valid` (111) and `server-portable/subject.ts`, the sweep's URL read, the mapping of existing keys with their threads | — (independent of PR 2) |
+| SMD-3901 | Row 8's revision trigger record | PR 2 |
+| SMD-3900 | The eligible mode and the revalidation read, over this read | PR 2 |
+| SMD-4446 | The settled-part store; the partly settled mark joins the read when it lands | — |
+| SMD-2011 | The valid window on `thoughts`; the read gains it as one more input when it lands | — |
+
+## Not decided here
+
+- **What is fit to act on.** Whether an unchallenged thought, or a fresh one, is eligible is SMD-3900's decision, over this read.
+- **The valid window.** Assertion time and valid time are SMD-2011's: columns projected from 046's window, a valid-now flag and a `valid_at` read. This record names the window as one input to come, and repeats none of that work.
+- **"Moved since written."** It reads a subject's timeline against a thought's age (`docs/subject-anchored-claims.md`, row 1), not the thought's own validity, and SMD-2540's eval found that reading what a note states about a ticket is not reliable (precision 0.500 to 0.567). It stays a label where it is.
+- **Calibrating the judges.** Row 9 says the numbers are raw. Mapping them onto measured rates is a ticket of its own, from SMD-1809's ledger.
+- **Rewording the existing listings.** The proposal listing's `[confidence 0.83]` and the relations read's `confidence 0.83` keep their text here.
+- **Provenance and support structure.** How a thought's content was obtained (SMD-3895) and which sources suffice for a conclusion (SMD-3896) use this record's words, and decide their own records.
+
+## Related
+
+- SMD-1729 (the claim-log parent).
+- SMD-3895 to SMD-3898 and SMD-3900 to SMD-3903 (the tickets that use these words); SMD-3900 and SMD-3901 build on the read.
+- SMD-2011 (the valid window); SMD-4446 and SMD-3340 (settled parts); SMD-3306 (threads); SMD-3011 (a second repository); SMD-1809 (calibration); SMD-2074 (`node_state`); SMD-3338 (who may review a proposal).
+- `docs/event-log-as-truth.md`: the log of record, and the versions it carries. `docs/subject-anchored-claims.md`: subjects and their timelines. `docs/priority.md`: the same shape of record, for priority.
