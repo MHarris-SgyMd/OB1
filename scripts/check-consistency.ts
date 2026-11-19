@@ -9963,6 +9963,7 @@ const SUITE_WORKFLOW = ".github/workflows/brain-checks.yml";
 const SUITES_NOT_RUN: Record<string, string> = {
   "db/test-support.ts": "the db/ suites' shared helpers, imported by them; it runs nothing itself",
   "server-portable/test-support.ts": "the server suites' shared helpers, imported by them; it runs nothing itself",
+  "mcp-server/test-listen-on.ts": "a preload: test-mcp.ts starts its spawned entry with it, to hold listen streams (SMD-4347); it runs nothing itself, and its name keeps it out of the image",
   "db/test-bench-reuse.ts": "nine bench runs at 150,000 rows, about three minutes; run by hand with with-postgres.sh (db/README.md, db/ci-parity.sh)",
   "recipes/atomizer/test-atomize.mjs": "calls a live model provider with the operator's key; a reachability check, not a suite",
   "recipes/authorship-edges/test-attribution.mjs": "an upstream recipe's own self-test, run by hand as its README says (the maintainer's call, SMD-2895)",
