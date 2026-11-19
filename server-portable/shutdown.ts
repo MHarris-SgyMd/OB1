@@ -245,6 +245,7 @@ export interface DrainOptions {
 
 const requests = (n: number) => `${n} request${n === 1 ? "" : "s"}`;
 const heldStreams = (n: number) => `${n} stream${n === 1 ? "" : "s"} held open`;
+const closedStreams = (n: number) => `${n} held stream${n === 1 ? "" : "s"}`;
 const toolCalls = (n: number) => `${n} tool call${n === 1 ? "" : "s"}`;
 const pause = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
 
@@ -313,7 +314,7 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     // signal won the race — is a drain, not "0 still in flight … exit 1" (review pass 3).
     if (!drained && inFlight() === 0 && (calls?.running ?? 0) === 0) drained = true;
     if (!drained && server) {
-      log(`${signal}: ${requests(inFlight())} still in flight${running()} after ${((performance.now() - t0) / 1000).toFixed(1)} s, closed unfinished`);
+      log(`${signal}: ${requests(inFlight())} still in flight${running()} after ${((performance.now() - t0) / 1000).toFixed(1)} s, ${opts.closeHeld ? "cut unfinished, closed after the held streams" : "closed unfinished"}`);
       // Guarded: a sink that throws must not take the flush and the exit with it (review pass 3).
       try {
         opts.onCut?.();
@@ -407,19 +408,23 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     let heldSaid = "";
     if (opts.closeHeld) {
       const closing = held();
-      const before = server?.pendingRequests ?? 0;
+      // The server as it is now: an entry that had served no request at the signal had none to stop, went on
+      // serving, and has one by the time it holds a stream (found in review: such a stream lost its last word).
+      const last = server ?? opts.server();
+      const before = last?.pendingRequests ?? 0;
       let hurried = false;
       const hurry = new Promise<void>((resolve) => { cutShort = () => { hurried = true; resolve(); }; });
       // A close that throws, at once or later, takes nothing with it.
       const closeHeld = opts.closeHeld;
       await Promise.race([Promise.resolve().then(() => closeHeld()).catch(() => {}), pause(HELD_CLOSE_MS), hurry]);
-      if (server) {
+      if (last) {
         const until = performance.now() + HELD_CLOSE_MS;
-        while (!hurried && server.pendingRequests > before - closing && performance.now() < until) await Promise.race([pause(HELD_LEFT_POLL_MS), hurry]);
-        server.stop(true).catch(() => {});
+        while (!hurried && last.pendingRequests > before - closing && performance.now() < until) await Promise.race([pause(HELD_LEFT_POLL_MS), hurry]);
+        last.stop(true).catch(() => {});
       }
+      // What became of them: closed, each with its last word; or not, and then dropped with their connections, with none.
       const left = Math.min(closing, held());
-      if (closing > 0) heldSaid = left === 0 ? `; ${heldStreams(closing)} closed` : `; ${left === closing ? "" : `${left} of `}${heldStreams(closing)} not closed`;
+      if (closing > 0) heldSaid = left === 0 ? `; ${closedStreams(closing)} closed` : `; ${left === closing ? "" : `${left} of `}${closedStreams(closing)} not closed${hurried ? ": a second signal" : " in time"}, dropped`;
     }
     const code = drained ? 0 : 1;
     log(`${signal}: stopped in ${((performance.now() - t0) / 1000).toFixed(1)} s; ${closed}${sent}${heldSaid}; exit ${code}`);

@@ -640,6 +640,8 @@ export function createMcpApp(deps: McpDeps): Hono {
    */
   const lastSaid = new Map<string, number>();
   const sayOnce = (err: unknown, lead = "the caller could not be found") => {
+    // Nothing of a request the stop has cut: at a whole stack's stop the REST core goes away under it, and its line says `cut`.
+    if (cutNow()) return;
     // This server's forwarder refused, or its token exchange, is one misconfiguration, said in one line whichever
     // route met it (review pass 6; SMD-2286 PR 2 review pass 1: the exchange's said no fix).
     const misconfigured = err instanceof ForwarderRefused || err instanceof ExchangeMisconfigured;
@@ -1070,7 +1072,8 @@ export function createMcpApp(deps: McpDeps): Hono {
             // A notification by that name opens no stream and is owed no answer: refused bare, as this route's other refusals are.
             const refusal = target.expectsReply ? listenLimitResponse(target.id, asked.full) : notificationRefusedResponse();
             trace.status = refusal.status;
-            finish("refused", "LISTEN_LIMIT");
+            // Which bound, on the line: one caller's sessions, or the whole server full, are mended differently.
+            finish("refused", asked.full === "server" ? "LISTEN_SERVER_FULL" : "LISTEN_CALLER_FULL");
             return refusal;
           }
           place = asked;
@@ -1109,6 +1112,13 @@ export function createMcpApp(deps: McpDeps): Hono {
           // now, `ok`, its `ms` the time to open it, so the log shows the stream as it opens and the request's
           // duration is a request's. Its end writes nothing: a client that closes it has not abandoned a call, and
           // one open after ten minutes has not stalled. The SDK keeps it alive, a comment every 15 s.
+          // Opened as the stop cut: the answer would go to no one, the middleware sending nothing after the cut. Not held.
+          if (cutNow()) {
+            release();
+            void response.body?.cancel().catch(() => {});
+            abandoned();
+            return new Promise<Response>(() => {});
+          }
           try {
             trace.rpc ??= "subscriptions/listen";
             finish("ok");
@@ -1147,9 +1157,9 @@ export function createMcpApp(deps: McpDeps): Hono {
   // A throw from a route — the REST core away, this server's forwarder refused, a job store's fault — is a 500, as
   // Hono's default answers it, and one line naming the route at most once a minute, not a stack trace per request;
   // none for a client already gone, whose abandoned line says it (review passes 3 and 4), and none for a request the
-  // stop had cut, whose line says that: at a whole stack's stop the REST core goes away under it, and its 500 is not sent.
+  // stop had cut (sayOnce), whose 500 is not sent either.
   app.onError((err, c) => {
-    if (!c.req.raw.signal.aborted && !cutNow()) sayOnce(err, `${c.req.method} ${HEALTH_PATH.test(c.req.path) ? "/health" : "a route"} failed`);
+    if (!c.req.raw.signal.aborted) sayOnce(err, `${c.req.method} ${HEALTH_PATH.test(c.req.path) ? "/health" : "a route"} failed`);
     return c.text("Internal Server Error", 500);
   });
 
