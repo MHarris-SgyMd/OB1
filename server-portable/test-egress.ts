@@ -34,7 +34,8 @@ import {
   DEFAULT_EGRESS_MODE, decideCalls, describeEgress, flagOn, localKnob, mayLeaveBox, parseEgressTerms, refusesEverything, resolveEgressPolicy, termMatches,
   type EgressSubject,
 } from "./egress.ts";
-import { createEmbedder, providerCall, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { createEmbedder, providerCall, providerCallPrepared, ProviderError, resolveEmbedConfig } from "./embed.ts";
+import { setModelCallHook } from "./model-call.ts";
 import { judgePair } from "./consolidate.ts";
 import { extractEntities } from "./entities.ts";
 
@@ -269,6 +270,33 @@ console.log("\n[5] The diallers refuse BEFORE the request: the stub sees nothing
          "judgePair: one side allowed and one not is refused — the more restricted row decides for the pair");
   assert(await kindOf(judgePair({ content: "a", createdAt: null, metadata: { type: "reference" } }, { content: "b", createdAt: null, metadata: { type: "reference" } }, byType)) === "ok" && requests() === before + 1,
          "…and both allowed is one request");
+  // A call carrying several rows (lint-sweep's Tier 3, SMD-3318 PR 2b) names each: one refused refuses the call, every
+  // one allowed is one request, and a list naming none is refused before the request too.
+  const rows = (...types: string[]): EgressSubject[] => types.map((type) => ({ kind: "lint", metadata: { type }, content: `a ${type}` }));
+  const chat = { model: META_MODEL, messages: [] };
+  const r0 = requests();
+  const mixed = await kindOf(providerCall(byType, "/chat/completions", chat, rows("reference", "person_note", "reference")));
+  const none = await kindOf(providerCall(byType, "/chat/completions", chat, []));
+  assert(mixed === "egress" && /no subject for the egress gate to judge/.test(none) && requests() === r0,
+         `providerCall with several subjects: one refused of three refuses the call, an empty list is refused, neither dialled (${mixed}; ${none.slice(0, 60)}; ${requests() - r0})`);
+  assert(await kindOf(providerCall(byType, "/chat/completions", chat, rows("reference", "reference"))) === "ok" && requests() === r0 + 1,
+         "…and every one allowed is one request");
+  // providerCallPrepared (SMD-3318 PR 2b, review pass 5): `prepare` runs once the hook lets the call run, so rows read
+  // there are read after any wait for a slot; its subjects are gated then; null dials nothing; none at all is refused.
+  const order: string[] = [];
+  const priorHook = setModelCallHook(async (_call, run) => { order.push("hook"); return run(); });
+  const r1 = requests();
+  let prepared: unknown, nulled: unknown, refusedPrepared = "", emptyPrepared = "";
+  try {
+    prepared = await providerCallPrepared(byType, "/chat/completions", META_MODEL, "lint", async () => { order.push("prepare"); return { body: chat, subjects: rows("reference") }; });
+    nulled = await providerCallPrepared(byType, "/chat/completions", META_MODEL, "lint", async () => null);
+    refusedPrepared = await kindOf(providerCallPrepared(byType, "/chat/completions", META_MODEL, "lint", async () => ({ body: chat, subjects: rows("reference", "person_note") })));
+    emptyPrepared = await kindOf(providerCallPrepared(byType, "/chat/completions", META_MODEL, "lint", async () => ({ body: chat, subjects: [] })));
+  } finally {
+    setModelCallHook(priorHook);
+  }
+  assert(order.join(",") === "hook,prepare,hook,hook,hook" && prepared !== null && nulled === null && refusedPrepared === "egress" && /no subject for the egress gate to judge/.test(emptyPrepared) && requests() === r1 + 1,
+         `providerCallPrepared: prepare runs inside the hook, its rows gated then; null dials nothing, one refused subject or none refuses (${order.join(",")}; ${refusedPrepared}; ${emptyPrepared.slice(0, 50)}; ${requests() - r1} request(s))`);
 
   // Declared local: every dialler dials.
   const declared = resolveEmbedConfig({ OB1_LLM_BASE_URL: STUB, OB1_LLM_LOCAL: "1", OB1_EMBEDDING_MODEL: EMB_MODEL, OB1_EMBEDDING_DIM: String(DIM), OB1_METADATA_MODEL: META_MODEL });

@@ -72,7 +72,7 @@
  */
 
 import { commandLine } from "./cli.ts";
-import { sensitivityOf, sqlTier } from "./sensitivity.ts";
+import { heldByPatterns, heldTiers, sensitivityColumn, tierExcluded } from "./sensitivity.ts";
 import { databaseUrl, openSql, closeThenExit } from "./connect.ts";
 import { providerCall, providerEndpoint, refuseRedirect, resolveEmbedConfig, baseUrlOr, type EmbedConfig, type EmbedEnv, type ProviderEndpoint } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
@@ -98,9 +98,6 @@ const SYNTHESIZE_INPUT_CAP = 80;
 // keeps each group's newest, so a cut drops the later turns (each group's oldest
 // rows), never a day or a writer.
 const FETCH_HARD_CAP = 5000;
-// The rows whose whole text one statement reads for the sensitivity patterns: a window of long documents is read a
-// batch at a time, never whole (SMD-3318).
-const PATTERN_BATCH = 100;
 // The most effective_priority reads in one call (122's limit): the window is read in chunks of it.
 const PRIORITY_READ_MAX = 1000;
 
@@ -338,7 +335,7 @@ export function chunkForTelegram(text: string, limit = TELEGRAM_CHUNK_LIMIT): st
  * which hides a column the role may not read: such a column refuses the run),
  * and by the patterns over what the prompt would send — the text read here, the
  * type, the topics and the tags — and the row's whole text, read again in
- * batches of PATTERN_BATCH so a page of long documents is not held at once. A
+ * batches (sensitivity.ts's PATTERN_BATCH) so a page of long documents is not held at once. A
  * row the second read does not return (deleted, or out of sight) is held back
  * too. All unless the filter was waived. `patternExcluded` counts the rows the
  * patterns, or the second read, held back.
@@ -347,17 +344,9 @@ export async function readThoughts(
   sql: SQL,
   opts: { windowDays: number; includePersonal: boolean; noSensitivityFilter: boolean },
 ): Promise<{ rows: DigestThought[]; more: boolean; patternExcluded: number }> {
-  const [cols] = await sql`
-    SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_attribute
-                   WHERE attrelid = 'public.thoughts'::regclass AND attname = 'sensitivity_tier' AND NOT attisdropped) AS has_sensitivity`;
-  const hasSensitivity = Boolean(cols.has_sensitivity);
   const filter = !opts.noSensitivityFilter;
-  if (filter && hasSensitivity) {
-    const [{ readable }] = await sql`SELECT has_column_privilege('public.thoughts', 'sensitivity_tier', 'SELECT') AS readable`;
-    if (!readable) {
-      throw new Error("public.thoughts has a sensitivity_tier column this role may not read: refusing rather than send the rows it marks (grant SELECT on it, or pass --no-sensitivity-filter)");
-    }
-  }
+  const hasSensitivity = await sensitivityColumn(sql, filter,
+    "public.thoughts has a sensitivity_tier column this role may not read: refusing rather than send the rows it marks (grant SELECT on it, or pass --no-sensitivity-filter)");
 
   // Column names are fixed strings gated by the existence probe above — never
   // caller input — so building the select list is safe. Values go as $-params.
@@ -370,13 +359,8 @@ export async function readThoughts(
   const params: unknown[] = [opts.windowDays];
   let where = "created_at >= now() - make_interval(days => $1::int)";
   if (filter) {
-    const excluded = opts.includePersonal ? ["restricted"] : ["restricted", "personal"];
-    // The tier a row's metadata carries counts as the column's does: an import
-    // through the ingestion pipeline sets the facet, and the column keeps its
-    // default 'standard' (SMD-2493). Without the column the key is the tier.
-    if (hasSensitivity) where += ` AND (sensitivity_tier IS NULL OR ${sqlTier("sensitivity_tier")} <> ALL($2))`;
-    where += ` AND (metadata->>'sensitivity_tier' IS NULL OR ${sqlTier("metadata->>'sensitivity_tier'")} <> ALL($2))`;
-    params.push(sql.array(excluded, "TEXT"));
+    where += tierExcluded(hasSensitivity, "$2");
+    params.push(sql.array([...heldTiers(opts.includePersonal)], "TEXT"));
   }
 
   // `group` names the row's (day, writer), for pickForDigest to number again once priorities are read (SMD-4112).
@@ -395,22 +379,11 @@ export async function readThoughts(
   if (!filter || kept.length === 0) return { rows: kept, more, patternExcluded: 0 };
   // The patterns over what the prompt would send (the 280 characters read above, the type, topics and tags) and over the
   // row's whole text, read again (a secret can sit past 280 characters); a row that second read does not return is held.
-  const held = new Set<string>();
-  const tiers = new Set(opts.includePersonal ? ["restricted"] : ["restricted", "personal"]);
   const sent = (r: DigestThought) => {
     const list = (k: string) => (Array.isArray(r.metadata?.[k]) ? (r.metadata![k] as unknown[]).slice(0, 5) : []);
     return [String(r.content ?? ""), JSON.stringify(r.metadata?.type ?? null), JSON.stringify(list("topics")), JSON.stringify(list("tags"))].join("\n");
   };
-  for (let i = 0; i < kept.length; i += PATTERN_BATCH) {
-    const batch = kept.slice(i, i + PATTERN_BATCH);
-    const texts = (await sql.unsafe("SELECT id::text AS id, content FROM thoughts WHERE id = ANY($1::uuid[])", [sql.array(batch.map((r) => String(r.id)), "TEXT")])) as { id: string; content: string }[];
-    const whole = new Map(texts.map((t) => [t.id, t.content]));
-    for (const r of batch) {
-      const id = String(r.id);
-      const text = whole.get(id);
-      if (text === undefined || tiers.has(sensitivityOf(`${sent(r)}\n${text}`).tier)) held.add(id);
-    }
-  }
+  const held = await heldByPatterns(sql, kept.map((r) => ({ id: String(r.id), sent: sent(r) })), heldTiers(opts.includePersonal));
   return { rows: kept.filter((r) => !held.has(String(r.id))), more, patternExcluded: held.size };
 }
 
