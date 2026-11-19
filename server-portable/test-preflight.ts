@@ -2832,7 +2832,7 @@ else {
   const shippedPair = await run(SQL_ENV);
   assert(/atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped — the 3-argument body \(080's\) carries 022's rule, so a re-capture's windows stay only while the label vouches for them, 025's provenance envelope, the fingerprint lock, so a capture and an edit of one text are serialised, and writes provenance on a first capture only, so no capture can close a supersession loop, and both carry the write event \(046\) and append it first, projecting the row from it \(060\); the 3-argument body records the tags' lineage with the write \(061\); both stamp the trust the write declares, never above the key \(073\); every form leaves a row a capture-only key re-captures as it is, but for a vector it lacks \(080\); the 2-argument body \(080's\) refuses a non-object payload \(005\) and takes the lock\s*$/m.test(shippedPair.out),
          "…and 060, 061, 073 then 080 re-applied is the shipped pair again, said as such");
-  assert(/✓  audit events\s+046's event shape present[^\n]*055's payload in every capture event[^\n]*060's check on every projected row/.test(shippedPair.out) && /✓  edit signature\s+[^\n]*with 073's body \(which 088 and 099 carry\)/.test(shippedPair.out), "…and the event shape is whole again with 055's payload and 060's check: 046, 055, 060 then 061 re-applied put every body back");
+  assert(/✓  audit events\s+046's event shape present[^\n]*055's payload in every capture event[^\n]*060's check on every projected row/.test(shippedPair.out) && /✓  edit signature\s+[^\n]*with 073's body \(which 088, 099 and 148 carry\)/.test(shippedPair.out), "…and the event shape is whole again with 055's payload and 060's check: 046, 055, 060 then 061 re-applied put every body back");
   // 060 re-applied by hand over 061 (SMD-1731): 060's 3-argument body appends
   // and projects but records no lineage — a warning naming 061 — and 060's
   // 10-argument update_thought lands BESIDE 061's, refusing the start; 061
@@ -2880,7 +2880,7 @@ else {
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("073") });
   const pre080 = await run(SQL_ENV);
   assert(pre080.code === 0 && /!  atomic capture\s+the 2- and 3-argument upsert_thought present, and the 3-argument body stamps the trust the write declares \(073\), but it is from before migration 080 \(migration 080 is not yet applied, or 073 was re-applied by hand\): a capture-only key's re-capture of text another key wrote merges its metadata and source into that thought and moves its updated_at — an alteration the capture scope rules out \(SMD-2539\); and the 2-argument body is not 080's either — it is from before migration 080 \(migration 080 is not yet applied, or 073 was re-applied by hand\): a PostgREST caller's recapture "keep" is not honoured/.test(pre080.out)
-      && /→ Apply db\/migrations\/080_recapture_keep\.sql\.\s*$/.test(fix(pre080.out, "atomic capture")) && /✓  edit signature\s+[^\n]*with 073's body \(which 088 and 099 carry\)/.test(pre080.out),
+      && /→ Apply db\/migrations\/080_recapture_keep\.sql\.\s*$/.test(fix(pre080.out, "atomic capture")) && /✓  edit signature\s+[^\n]*with 073's body \(which 088, 099 and 148 carry\)/.test(pre080.out),
     `073 re-applied over 080 is a warning on the capture pair naming 080, both bodies said, the edit untouched (${pre080.out.split("\n").filter((l) => /atomic capture|edit signature/.test(l)).map((l) => l.trim().slice(0, 160)).join(" | ")})`);
   /** One CREATE statement of a migration's, from its head to the `$$` that closes it, as a hand re-apply of that form alone runs it. */
   const statementOf = (file: string, head: string) => {
@@ -3051,7 +3051,7 @@ else {
   const sweepLadder = await runScript(["bun", join(HERE, "..", "db", "rebuild.ts"), "--url", LIVE!, "--orphans"], { env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" }, cwd: join(HERE, "..", "db") });
   assert(sweepLadder.code === 0 && /deleted:\s+[1-9]\d* lineage row\(s\)/.test(sweepLadder.out), `the older bodies' passes left lineage rows whose mentions are gone; the sweep deletes them (exit ${sweepLadder.code}: ${sweepLadder.out.trim().split("\n").slice(0, 2).join(" / ").slice(0, 200)})`);
   const shipped061 = await run(SQL_ENV);
-  assert(shipped061.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(shipped061.out) && /✓  edit signature\s+[^\n]*with 073's body \(which 088 and 099 carry\)/.test(shipped061.out) && /✓  lineage\s+every derived row has its lineage row/.test(shipped061.out),
+  assert(shipped061.code === 0 && /atomic capture\s+the 2- and 3-argument upsert_thought present, both shipped/.test(shipped061.out) && /✓  edit signature\s+[^\n]*with 073's body \(which 088, 099 and 148 carry\)/.test(shipped061.out) && /✓  lineage\s+every derived row has its lineage row/.test(shipped061.out),
          `…and 061 then 063 after it is the shipped pair, the one update_thought and a clean lineage census again (exit ${shipped061.code}: ${shipped061.out.split("\n").filter((l) => /^\s*[✗!]\s/.test(l)).map((l) => l.trim().slice(0, 260)).join(" | ")})`);
   // 033 re-applied by hand over 035 (SMD-1453): 033's lock and sentinel are
   // back, and with them 025's fill of a NULL pointer on a re-capture and the
