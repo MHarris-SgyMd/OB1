@@ -3898,8 +3898,9 @@ if (want("9")) {
     const longFrom = embedCalls;
     const longRun = cliRun(stopKey(30), { OB1_BACKGROUND_SLOTS: "embed=2" });
     const longIn = await inHand(stopKey(30), longFrom);
-    // Its fan-out is made in one tick; a beat for the calls past the share to be waiting.
-    await Bun.sleep(100);
+    // Both of the share's slots taken, each on a connection of its own and an advisory lock, which a slow runner
+    // takes its time over: the count is waited for, not slept for. Past two it cannot move, the calls 5 s long.
+    await pollUntil(async () => embedCalls - longFrom >= 2, 10_000);
     const longCalls = embedCalls - longFrom;
     longRun.kill("SIGINT");
     const [longOut, longErr] = await Promise.all([new Response(longRun.stdout).text(), new Response(longRun.stderr).text()]);
