@@ -87,12 +87,12 @@ export function withSseKeepalive(
   opts: {
     intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; onCancel?: () => void; label?: string;
     /**
-     * Whether the server's stop has cut this answer (the MCP server's, where it keeps its connections open past
-     * the cut to close its listen streams last: SMD-4347). From then nothing more of it is passed on, no frame of
-     * this wrapper's among it, and its end is not passed on either: the answer stays open, as much of it as had
-     * left, until its connection goes. Its end is told as its reader's leaving is (`onCancel`).
+     * Whether the server's stop has cut this answer (the MCP server's tool calls, in the moment between its
+     * handler's close, which ends them, and its connections' close: SMD-4347). From then nothing more of it is
+     * passed on, no frame of this wrapper's among it, and its end is not passed on either: the answer stays open,
+     * as much of it as had left, until its connection goes. Its end is told as its reader's leaving is (`onCancel`).
      */
-    cut?: () => boolean;
+    isCut?: () => boolean;
     /**
      * A stream meant to stay open (the MCP server's listen streams, SMD-4347): no frame of this wrapper's and no
      * bound. Its writer keeps it alive itself, and past ten minutes it is neither stuck nor slow. Its end and its
@@ -121,7 +121,7 @@ export function withSseKeepalive(
     start(controller) {
       if (opts.held) return;
       timer = setInterval(() => {
-        if (opts.cut?.()) return;
+        if (opts.isCut?.()) return;
         const elapsed = performance.now() - started;
         if (elapsed >= maxMs) {
           stop();
@@ -138,13 +138,13 @@ export function withSseKeepalive(
       }, intervalMs);
     },
     transform(chunk, controller) {
-      if (opts.cut?.()) return;
+      if (opts.isCut?.()) return;
       bytes += chunk.byteLength;
       controller.enqueue(chunk);
     },
     flush() {
       stop(); // the transport closed the stream: the response is complete
-      if (opts.cut?.()) {
+      if (opts.isCut?.()) {
         opts.onCancel?.();
         return new Promise<void>(() => {});
       }

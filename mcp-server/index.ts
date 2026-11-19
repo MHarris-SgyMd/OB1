@@ -75,10 +75,10 @@ knowTools(plugins.flatMap((p) => p.operations.map((op) => op.tool)));
 const toolCalls = createCallCount();
 /**
  * The stop's word. `cut`: set when it cuts what is still in flight, so a request it ends then is `cut`, not
- * `abandoned`. `over`: set when its drain has ended, by a stop that closes listen streams last (SMD-4347): the app
- * then serves nothing that arrives.
+ * `abandoned`. `drainEnded`: set when its drain has ended, by a stop that closes listen streams itself (SMD-4347):
+ * the app then serves nothing that arrives.
  */
-const stop = { cut: false, over: false };
+const stop = { cut: false, drainEnded: false };
 const edge = edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN });
 // The token exchange (SMD-2286): on a configured stack with the `mcp` client's secret; without the secret a token is
 // no caller (refused as before), said once at the start rather than on every OAuth client's request.
@@ -108,9 +108,9 @@ if (import.meta.main) {
     server: () => bunServer,
     calls: toolCalls,
     close: async () => false,
-    // The listen streams are not waited on: the stop closes them itself, last, each with its closing frame. Given
-    // only where the server holds any, so a server that holds none stops as it always has.
-    ...(listenStreams.hold ? { held: () => listenStreams.open, closeHeld: () => listenStreams.close(), afterDrain: () => { stop.over = true; } } : {}),
+    // The listen streams are not waited on: the stop closes them itself, each with its closing frame, after the
+    // flush, or at its cut. Given only where the server holds any, so a server that holds none stops as it always has.
+    ...(listenStreams.hold ? { heldCount: () => listenStreams.count, closeHeld: () => listenStreams.close(), onDrainEnd: () => { stop.drainEnded = true; } } : {}),
     // The telemetry still batched goes under a bound of its own, said on its own; cut short, what each signal still
     // held is said by count (as the REST core's, SMD-2902).
     mark: markTelemetry,

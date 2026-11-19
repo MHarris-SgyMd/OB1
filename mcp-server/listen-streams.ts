@@ -26,7 +26,7 @@ export const LISTEN_STREAMS_MAX = 256;
  * The most it holds under one caller's name. One name is every session of one key, so this counts sessions, not
  * clients; the SDK has no such bound, and one caller could fill the server's (prototyped: 1,024 in a fraction of a second).
  */
-export const LISTEN_STREAMS_PER_NAME = 32;
+export const LISTEN_STREAMS_PER_CALLER = 32;
 
 /** The listen streams of one app: its settings, and what the app says back to its entry. */
 export interface ListenStreams {
@@ -35,17 +35,17 @@ export interface ListenStreams {
   /** The most held at once. */
   readonly max: number;
   /** The most held under one caller's name. */
-  readonly perName: number;
+  readonly perCaller: number;
   /** How many are open now: kept by the app. */
-  open: number;
+  count: number;
   /**
-   * Ends every open stream with the SDK's closing frame: the app's, for the entry's stop, which calls it last. It
-   * closes the SDK's handler with them, so no 2026-07-28 request is served after it.
+   * Ends every open stream with the SDK's closing frame: the app's, for the entry's stop, which calls it after its
+   * flush, or at its cut. It closes the SDK's handler with them, so no 2026-07-28 request is served after it.
    */
   close: () => Promise<void>;
 }
 
 /** An app's listen streams: the entry's with no argument, a suite's with what it tests. */
-export function createListenStreams(hold: boolean = HOLD_LISTEN_STREAMS, max: number = LISTEN_STREAMS_MAX, perName: number = LISTEN_STREAMS_PER_NAME): ListenStreams {
-  return { hold, max, perName, open: 0, close: async () => {} };
+export function createListenStreams(hold: boolean = HOLD_LISTEN_STREAMS, max: number = LISTEN_STREAMS_MAX, perCaller: number = LISTEN_STREAMS_PER_CALLER): ListenStreams {
+  return { hold, max, perCaller, count: 0, close: async () => {} };
 }

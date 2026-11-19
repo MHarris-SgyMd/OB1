@@ -71,10 +71,11 @@ export interface McpDeps {
   toolCalls?: CallCount & { track<T>(run: () => T | Promise<T>): Promise<T> };
   /**
    * Set by the entry's stop. `cut`: when it cuts what is still in flight, so a request it ends then is `cut`, said
-   * by the stop's line, not `abandoned`. `over`: when its drain has ended, on a server that keeps its connections
-   * open after that to close its listen streams last (SMD-4347): a request that arrives then is not served.
+   * by the stop's line, not `abandoned`. `drainEnded`: when its drain has ended, finished or cut, on a server that
+   * holds listen streams and so keeps its connections open after that to close them last (SMD-4347): a request
+   * that arrives then is not served.
    */
-  stop?: { cut: boolean; over?: boolean };
+  stop?: { cut: boolean; drainEnded?: boolean };
   /**
    * The token exchange (exchange.ts, SMD-2286): read at the first request that
    * needs it; null or absent where this server trades no token (a stack not
@@ -393,7 +394,7 @@ type Era = "legacy" | "modern";
  * A listen stream refused at one of this server's two bounds (SMD-4347): the answer the SDK gives one past its own,
  * a 200 carrying -32603, and which bound, in words that hold nothing of the caller's.
  */
-function listenLimitResponse(id: RefusalTarget["id"], full: "server" | "name"): Response {
+function listenLimitResponse(id: RefusalTarget["id"], full: "server" | "caller"): Response {
   const message = full === "server" ? "Subscription limit reached: this server holds no more listen streams" : "Subscription limit reached: this caller holds as many listen streams as one caller may";
   return Response.json({ jsonrpc: "2.0", id: id ?? null, error: { code: -32603, message } }, { status: 200, headers: corsHeaders });
 }
@@ -521,25 +522,25 @@ export function createMcpApp(deps: McpDeps): Hono {
     }
   };
 
-  // The listen streams this server holds open (SMD-4347), where it holds any: how many are open (`listen.open`, for
+  // The listen streams this server holds open (SMD-4347), where it holds any: how many are open (`listen.count`, for
   // the entry's stop), and how many under each caller's name. The SDK bounds the streams of the whole server and
   // nothing else, so one caller could take every place; the route gives each name its share before the handler is
   // asked, and gives the place back when the stream ends, however it ends.
   const listen = deps.listen?.hold ? deps.listen : null;
   const listening = new Map<string, number>();
   /** A place for one more stream under this name, to be given back once; or which bound refused it. */
-  const placeFor = (held: ListenStreams, name: string): { release: () => void } | { full: "server" | "name" } => {
-    if (held.open >= held.max) return { full: "server" };
+  const placeFor = (held: ListenStreams, name: string): { release: () => void } | { full: "server" | "caller" } => {
+    if (held.count >= held.max) return { full: "server" };
     const mine = listening.get(name) ?? 0;
-    if (mine >= held.perName) return { full: "name" };
-    held.open++;
+    if (mine >= held.perCaller) return { full: "caller" };
+    held.count++;
     listening.set(name, mine + 1);
     let released = false;
     return {
       release: () => {
         if (released) return;
         released = true;
-        held.open--;
+        held.count--;
         const left = (listening.get(name) ?? 1) - 1;
         if (left > 0) listening.set(name, left);
         else listening.delete(name);
@@ -547,14 +548,14 @@ export function createMcpApp(deps: McpDeps): Hono {
     };
   };
   /**
-   * Whether the stop has cut what is in flight, on a server whose connections outlast the cut: one that holds
-   * listen streams closes no connection at the bound, where that would drop each stream with no closing frame, so
-   * this app does the cutting. From the cut nothing more is answered and nothing more of an answer goes out, by
-   * any route; each connection goes when the stop closes it, as it went at the bound before.
+   * Whether the stop has cut what is in flight, on a server that holds listen streams. Such a stop closes the
+   * streams before the connections, through the SDK's handler, so for a moment (milliseconds as a rule, 200 ms
+   * at most) the handler is closed and the connections are not: a tool call's answer must not end in it, and
+   * nothing is begun in it. The connections' close, which follows, is the cut for every other answer, as ever.
    */
   const cutNow = () => listen !== null && deps.stop?.cut === true;
   /** Whether the stop's drain has ended, on such a server: what arrives from then is not served. An app that holds no stream heeds neither flag. */
-  const overNow = () => listen !== null && deps.stop?.over === true;
+  const drainEndedNow = () => listen !== null && deps.stop?.drainEnded === true;
 
   // The SDK's handler for the 2026-07-28 revision (SMD-4345), one for the app. It builds a server for each request
   // by the function the request's route hands it (forRequest), so that server is the caller's, as a 2025-era
@@ -593,7 +594,7 @@ export function createMcpApp(deps: McpDeps): Hono {
     // request on it (its headers half sent at the signal; on macOS, one never used): the stop waits on nothing
     // more, and its handler is about to be closed. Not served and not answered: its line `cut`, and its connection
     // goes with the process, as one that arrived a moment later would find it.
-    if (overNow()) {
+    if (drainEndedNow()) {
       if (!probe) beginRequest("mcp", c.req.raw).end({ outcome: "cut" });
       return new Promise<Response>(() => {});
     }
@@ -606,9 +607,6 @@ export function createMcpApp(deps: McpDeps): Hono {
       trace.end({ status: 500, outcome: "error" });
       throw err;
     }
-    // Cut by the stop while it ran: whatever it came to, an answer or a route's 500, is not sent. Its line is the
-    // stop's own, `cut`, written at the cut with every open record's.
-    if (cutNow()) return new Promise<Response>(() => {});
     if (trace.deferred || trace.ended) return;
     const at = performance.now();
     const gone = trace.clientGone;
@@ -640,8 +638,6 @@ export function createMcpApp(deps: McpDeps): Hono {
    */
   const lastSaid = new Map<string, number>();
   const sayOnce = (err: unknown, lead = "the caller could not be found") => {
-    // Nothing of a request the stop has cut: at a whole stack's stop the REST core goes away under it, and its line says `cut`.
-    if (cutNow()) return;
     // This server's forwarder refused, or its token exchange, is one misconfiguration, said in one line whichever
     // route met it (review pass 6; SMD-2286 PR 2 review pass 1: the exchange's said no fix).
     const misconfigured = err instanceof ForwarderRefused || err instanceof ExchangeMisconfigured;
@@ -914,7 +910,7 @@ export function createMcpApp(deps: McpDeps): Hono {
       // Its line written where the stream ends, with its bytes, as index.ts's job stream's is.
       const trace = traceOf(c.req.raw);
       const ends = trace ? endsWithStream(trace, c.req.raw.signal) : {};
-      return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream`, cut: cutNow, ...ends });
+      return withSseKeepalive(response, { signal: c.req.raw.signal, label: `jobs/${labelPart(id)}/stream`, ...ends });
     }
     const answered = await deps.rest.call("job_status", { job_id: id }, credOf(caller));
     const word = turned(answered);
@@ -1032,8 +1028,8 @@ export function createMcpApp(deps: McpDeps): Hono {
       const track = deps.toolCalls ? <T>(run: () => Promise<T>) => deps.toolCalls!.track(run) : <T>(run: () => Promise<T>) => run();
       const build = (era: Era) => buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err), era, listen !== null);
       const request = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined });
-      // Cut by the stop before it reached a transport (its key still being looked up at the bound): not begun now,
-      // where the handler may be closed already and would answer it 500.
+      // Cut by the stop before it reached a transport (its key still being looked up at the bound): not begun in
+      // the moment before its connection goes, where the handler is closed already and would answer it 500.
       if (cutNow()) {
         abandoned();
         return new Promise<Response>(() => {});
@@ -1112,13 +1108,6 @@ export function createMcpApp(deps: McpDeps): Hono {
           // now, `ok`, its `ms` the time to open it, so the log shows the stream as it opens and the request's
           // duration is a request's. Its end writes nothing: a client that closes it has not abandoned a call, and
           // one open after ten minutes has not stalled. The SDK keeps it alive, a comment every 15 s.
-          // Opened as the stop cut: the answer would go to no one, the middleware sending nothing after the cut. Not held.
-          if (cutNow()) {
-            release();
-            void response.body?.cancel().catch(() => {});
-            abandoned();
-            return new Promise<Response>(() => {});
-          }
           try {
             trace.rpc ??= "subscriptions/listen";
             finish("ok");
@@ -1141,12 +1130,11 @@ export function createMcpApp(deps: McpDeps): Hono {
       // The line is written at the stream's end, with the bytes the transport wrote; a stall settles the request too.
       return withSseKeepalive(response, {
         signal, label, startedAt: trace.started, ...keepalive,
-        // After the stop's cut nothing more of an answer goes out, and it does not end: its connection's close is
-        // its end, as a cut call's always was. A server that holds listen streams keeps its connections open past
-        // the cut, through the flush, and closes the streams through the SDK's handler, which ends each call in
-        // flight with them as an answer of nothing that ends whole (measured without this: a 200, an empty
-        // stream, no warning; and a call that ended by its own work in that time answered in full, its line `cut`).
-        cut: cutNow,
+        // After the stop's cut nothing more of this answer goes out, and it does not end: its connection's close
+        // is its end, as a cut call's always was. A server that holds listen streams closes them through the SDK's
+        // handler before it closes the connections, and that ends each call in flight with them, as an answer of
+        // nothing that ends whole (measured without this: a 200, an empty stream, no warning).
+        isCut: cutNow,
         onEnd: (bytes) => { settled = true; finish(undefined, undefined, bytes); },
         onStall: () => { settled = true; finish("stalled"); },
         onCancel: abandoned,
@@ -1156,8 +1144,7 @@ export function createMcpApp(deps: McpDeps): Hono {
 
   // A throw from a route — the REST core away, this server's forwarder refused, a job store's fault — is a 500, as
   // Hono's default answers it, and one line naming the route at most once a minute, not a stack trace per request;
-  // none for a client already gone, whose abandoned line says it (review passes 3 and 4), and none for a request the
-  // stop had cut (sayOnce), whose 500 is not sent either.
+  // none for a client already gone, whose abandoned line says it (review passes 3 and 4).
   app.onError((err, c) => {
     if (!c.req.raw.signal.aborted) sayOnce(err, `${c.req.method} ${HEALTH_PATH.test(c.req.path) ? "/health" : "a route"} failed`);
     return c.text("Internal Server Error", 500);
