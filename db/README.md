@@ -2519,7 +2519,8 @@ the envelope names the tags' recipe and the row the call would leave is not the
 row standing: there is none, it is marked stale, or it names another fingerprint
 or another recipe. No event is written, since nothing of the thought moved, and a
 re-send under the recipe the row already names, on its text, still records
-nothing, so board-sync's re-tag of every issue it adopts moves no row. The
+nothing, so a re-tag that finds the row already current moves nothing, and a
+row whose metadata is SQL NULL, which takes no patch, is never settled. The
 maintainer chose the one write path (2026-11-19) over a settling function of its
 own. SMD-2298's re-tag worker, `db/retag.ts`, is its PR 1b.
 
