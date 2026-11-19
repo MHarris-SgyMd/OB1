@@ -132,14 +132,18 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   `--max-llm-calls` (5, up to 100; 0 turns it off); `--days` is 1 to 36,500. Each batch is read again just before
   its call: a thought deleted or newly held back since is not sent. Each goes
   as a ref (`t1`…), its date, type, first 400 characters and five topics and
-  tags (each cut to 100 characters), with today's date. Each finding's line
-  names its thoughts by id and date; a ref the model writes in its own words
-  shows as the thought's id cut to 8 characters, that thought among the
-  line's, and words that read as a secret are withheld. A provider's failure
+  tags (each cut to 100 characters), with today's date (UTC). Each finding's
+  line names its batch and each of its thoughts by its ref in that batch, its
+  id and its date; the report's table of refs by batch maps any ref (`t7`) the
+  model's own words name, which are kept as written. Words that read as a
+  secret are withheld. The answer must be one JSON document (the request asks
+  for JSON); anything else counts as an answer not JSON. A provider's failure
   is reported by its host and status, never its error text. With
   `OB1_METADATA_REASONING` on, the call has no answer budget (a thinking
-  model otherwise spends it on its thinking and answers nothing); an answer cut
-  at the budget is counted as cut. The model names contradictions, stale facts, superseded
+  model otherwise spends it on its thinking and answers nothing), and a batch
+  of 20 can take minutes: over 150 s on a 27b model, past the 120 s
+  `OB1_LLM_TIMEOUT` default, so raise it; the run says so. An answer cut at the
+  budget is counted as cut. The model names contradictions, stale facts, superseded
   decisions, orphans and missing links; each finding lists its thoughts' ids,
   and its words are made safe as a preview is and cut to 300 characters. Fewer
   than 10 thoughts left to send skips the tier. The sample is read in the

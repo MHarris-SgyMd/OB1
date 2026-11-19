@@ -304,7 +304,10 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
  * taken, any wait for it over) and returns the body and the subject of every row it carries, each gated then, or null
  * for nothing to send (the call ends with null, dialling nothing). A caller whose rows can change while the call waits
  * for a slot (a thought deleted, restricted or edited meanwhile) reads them in `prepare`: lint-sweep's Tier 3 (SMD-3318
- * PR 2b, review pass 5, which found its rows read before a wait of minutes). An empty subject list is refused.
+ * PR 2b, review pass 5, which found its rows read before a wait of minutes). An empty subject list is refused. Unlike
+ * providerCall, a refusal is met after the wait for a slot (the subjects are known only then), and the seam tallies the
+ * call as one even when `prepare` returns null, and as failed when it throws: a caller that pre-judges its rows, as
+ * Tier 3 does, meets those rarely.
  */
 export async function providerCallPrepared<T>(
   cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", model: string, purpose: EgressSubject["kind"],

@@ -5907,8 +5907,9 @@ carries (`providerCall` gates each). The sample is read through one cursor in
 Tier 3 that fails leaves the report written with the other tiers, exit 1.
 Each retry of a call reads its batch again, inside the model-call seam once any
 wait for a slot is over; with `OB1_METADATA_REASONING` on
-the call has no answer budget (4096 tokens off); each finding names its
-thoughts by id and date. Before that,
+the call has no answer budget (4096 tokens off; raise `OB1_LLM_TIMEOUT` with it
+on: a batch took over 150 s on a 27b model); each finding names its batch and
+its thoughts by ref, id and date, the refs' table mapping the model's words. Before that,
 weekly-digest's hold-back (`db/sensitivity.ts`): a `restricted` thought, or a
 `personal` one unless `--include-personal`, by its key, the enhanced-thoughts
 column, or the patterns over what is sent and the whole text, never leaves.
