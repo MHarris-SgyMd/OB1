@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-4347]
-migrations: []
----
-
-## Changelog
-
-`docs/mcp-listen-streams.md` decides how `/mcp` will tell a connected client its tool list changed: hold the 2026-07-28 `subscriptions/listen` streams open and send no notification on them, so that a restart of the MCP server ends them and the client lists again. `docs/mcp-client-refresh.md` gains what Claude Code 2.1.327 does across a restart and how long the stack's own restarts take, measured with new modes of the probe in `evals/mcp-clients/` (SMD-4347). No migration, and nothing the brain serves changes yet.
-
-## Record
-
-The decision on listen streams, and the measurements under it — a restart of the MCP server is what tells Claude Code its list changed, if the server is back within 12 seconds: PR 1 (SMD-4347)
+# 545. The decision on listen streams, and the measurements under it — a restart of the MCP server is what tells Claude Code its list changed, if the server is back within 12 seconds: PR 1 (SMD-4347)
 
 **Why.** SMD-4344 measured that Claude Code fetches its tool list again on a `subscriptions/listen` notification and not on a `ttlMs`. SMD-4345 then served the 2026-07-28 revision with `tools.listChanged: false`, so no stream is held and a connected session keeps an old list until it is reconnected by hand. SMD-4347 asked whether to hold the streams, with four open questions about where a change event would come from and whom it would reach. Its first step is the decision.
 

@@ -1,17 +1,4 @@
----
-type: changed
-bump: minor
-tickets: [SMD-3318]
-migrations: []
----
-
-## Changelog
-
-`bun db/backfill-metadata.ts` runs thought-enrichment's type and sensitivity backfills in place of `recipes/thought-enrichment`'s `backfill-type.mjs` and `backfill-sensitivity.mjs`: it writes `metadata.type` (the capture's type, an alias's words in `type_raw`) and `metadata.sensitivity_tier` through `update_thought`, and the `type` and `sensitivity_tier` columns too where `schemas/enhanced-thoughts` added them, as those scripts did. `db/weekly-digest.ts` now also holds back what the sensitivity patterns (`db/sensitivity.ts`: the recipe's, widened, and the session-capture hook's secret table) rate over each row's whole text and the type, topics and tags it sends, an untagged capture included, and compares the key and the column in any case and white space; on a brain without that column it runs, by the key and the patterns, where it refused; a column the role may not read refuses the run. **Upgrading:** keep `DATABASE_URL` (not `SUPABASE_URL`) in the environment or a `.env` of the directory you run from, then call `bun <checkout>/db/backfill-metadata.ts` (a dry run) and add `--apply` to write, where you ran either script; a role of its own needs `bun db/migrate.ts --grant <role>`; `--dry-run` is refused (a run without `--apply` is one) and `--batch-size` is `--batch` (SMD-3318).
-
-## Record
-
-Thought-enrichment's backfills leave the SQL shim for `db/backfill-metadata.ts` — weekly-digest holds back what the sensitivity patterns rate (SMD-3318)
+# 538. Thought-enrichment's backfills leave the SQL shim for `db/backfill-metadata.ts` — weekly-digest holds back what the sensitivity patterns rate (SMD-3318)
 
 SMD-3216 retires `compat/supabase-sql`; its 2026-10-22 decision ports three maintenance scripts to `db/` scripts on Bun's Postgres client. SMD-3318's PR 1 (brain-backup's export, `db/backup.ts`) and PR 2 (lint-sweep's tiers 1 and 2, `db/lint-sweep.ts`) shipped in v2.1.0 as change 530. This is PR 3a: thought-enrichment's type and sensitivity backfills. Its enrichment is PR 3b's, as SMD-2298's re-tag worker, and lint-sweep's Tier 3 is PR 2b's.
 

@@ -1,18 +1,4 @@
----
-type: fixed
-bump: patch
-tickets: [SMD-4291]
-migrations: []
----
-
-## Changelog
-
-The session-capture hook (1.8.1) learns a team, and names a place's tickets, from a branch's or a directory's own ticket alone, where it read every ticket-shaped word of them: on a branch named for a ticket and a Node version bump, an ask's `node-22` was a named ticket and headed the summary, and with none named the branch's place listed `NODE-22` beside the branch's ticket (SMD-4291).
-**Upgrading:** pull the hook's checkout. Summaries captured before keep their headers, but a session that reaches a checkpoint after the pull (a compaction, its end, a resume) captures again each episode whose header changed, superseding its earlier summary. The brain's header rule keeps its team guard: 1.8.1 still reads a place with no ticket by its first ticket-shaped word and keeps the session's teams across its places.
-
-## Record
-
-The session-capture hook reads a place's own ticket, not every ticket-shaped word of it (SMD-4291)
+# 540. The session-capture hook reads a place's own ticket, not every ticket-shaped word of it (SMD-4291)
 
 Found by SMD-3306 PR 7a-3b-2's review pass 3, through the real hook: on branch `smd-610-bump-node-22` the asks "bump node-22 to node-24 in the Dockerfile" and "run the tests" gave the header `Session summary — NODE-22, NODE-24 — …`, the branch's own ticket missing, sent with `tickets_from: asks`; "the image still pins node-22, see smd-610" put NODE-22 first. The hook's README said `node-22` is no ticket.
 
