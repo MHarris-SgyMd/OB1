@@ -3672,7 +3672,7 @@ if (configFailed) {
                 `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is from before migration 073 (061 re-applied by hand?): the trust an edit declares never reaches the row, and a patch's metadata.trust above the key is dropped without being filed (SMD-1724)`,
                 writersRemedy(APPLY_073));
           } else if (current.length && extra.length === 0) {
-            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 073's body (which 088 and 099 carry) — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061), the declared trust stamped on a new text (073)`);
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 073's body (which 088, 099 and 148 carry) — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061), the declared trust stamped on a new text (073)`);
           } else if (current.length) {
             add("edit signature", "fail",
                 `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional call, fails with "function is not unique"`,
