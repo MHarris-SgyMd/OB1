@@ -1,17 +1,4 @@
----
-type: added
-bump: patch
-tickets: [SMD-3379]
-migrations: []
----
-
-## Changelog
-
-`db/bench-brains.ts` (new) measures two brains on one model server: it loads a backlog of generated notes into each, reads what each one's sleep held of the slots from its heartbeat, and deletes the notes after; `db/bench-live.ts` takes `--key-file`, for a brain no connector names, and neither harness's refusal says a path, a file's text or a parser's words (SMD-3379 PR 3b-3b). Measured on the canary and a scratch brain: one backlogged brain takes the slot broker's whole background room, and model residency, not slots, stalled live calls.
-
-## Record
-
-The two-brain measurement and its harness — one backlogged brain takes the slot broker's whole background room; model residency, not slots, stalls live calls (SMD-3379)
+# 544. The two-brain measurement and its harness — one backlogged brain takes the slot broker's whole background room; model residency, not slots, stalls live calls (SMD-3379)
 
 **What changed.** PR 3b-3b of the ticket, whose earlier PRs are change 495. The maintainer's cut of PR 3b-3 (2026-11-14) left 3b-3b the two-brain measurement, its arms decided 2026-11-16: the canary and a scratch brain (`ob1-3379`, the canary's model settings, sleep its one pass) on this Mac's Ollama (`OLLAMA_NUM_PARALLEL=3`, `OLLAMA_MAX_LOADED_MODELS=2`) and its h2o decide tier, both keyed to an `ob1-federated` broker (Ollama `slots: 3, reserve: 1`; h2o `slots: 1`, `per_model: false`), each brain's fixed share `chat=1,embed=1`, the two-brain share `.env.example` names, and stable left running and only read; three arms of 20 minutes (both brains backlogged under fixed shares, the same with the broker, one backlogged with the broker), each with the same ~150 generated notes in every backlogged brain (200 in the arm that ran) and `bench-live.ts` timing live calls on both from minute 12.
 
