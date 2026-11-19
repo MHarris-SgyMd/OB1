@@ -5205,19 +5205,20 @@ of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 bun sleep.ts --url … --follow      # a period whenever there is work, for ever
 bun sleep.ts --url …               # one period, if there is work, until its pools drain, pausing for live writes
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
+#   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --reembed-share SECONDS (120; 0 to 86,400, 0: alone until its pool drains)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
 #   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
-#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
+#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share with its pool left, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
 (`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_CAPTURE`,
-`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_MAX_WAIT`, `OB1_SLEEP_RESCAN`,
-`OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its six numbers, and
+`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_REEMBED_SHARE`, `OB1_SLEEP_MAX_WAIT`,
+`OB1_SLEEP_RESCAN`, `OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its seven
+numbers, and
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
@@ -5359,8 +5360,23 @@ the model or with no vector, finished rows whose thought has moved;
 `--dry-run` prints it, counting every lease, a hand run's too), so
 a brain with nothing to re-embed starts no pass and calls no embedding
 endpoint at all: re-embed's start is not among those the scheduler checks.
-Until its pool drains; anything else that ends it sets it down for that
-period — refused (a key, credit, the model not served, the egress policy, a
+Until its pool drains, or until it has had its share of the period alone:
+`--reembed-share` (`OB1_SLEEP_REEMBED_SHARE`, 120 s; SMD-4384, the
+maintainer's choices of 2026-11-19), on re-embed's clock, which a live
+write's pause stops, its isolation of an outage (below) not counted — that
+has its own cap — and never ended mid-isolation. Under a steady inflow of
+thoughts with no vector (an egress policy that keeps captures from a remote
+embedding provider, a provider too slow for captures, a bulk import) its pool
+never drains, since its follower pools every 15 s, and before the share it
+held extraction and consolidation the whole period: extraction ran 0 of 64
+thoughts in 240 s. At its share it gives way after the thought in hand, said,
+a model switch's backlog too, and the claim passes start; nothing is set down
+or backed off. The next idle poll reads the pools whole — no poll between
+reads re-embed's claims — so the next period begins as soon as the claim
+passes drain, re-embed first again; a one-shot run exits 1, its pool left.
+`0` is no share, alone until its pool drains, as before. Under an inflow the
+claim passes cannot drain either, re-embed waits for them. Anything else that
+ends it sets it down for that period — refused (a key, credit, the model not served, the egress policy, a
 refusal mid-pass), its provider not answering — said, on the row (`aside`,
 its kind; a thrown error's reason in the log), and the other passes run on;
 the next period tries it again. An outage that made the thought in hand a

@@ -28596,7 +28596,7 @@ if (want("38r")) {
 // and 3); each wait is probed on a fixed interval, nothing carried between them. Its body a function's, as [26]'s: the
 // module body is at TS2563's limit for control-flow analysis.
 if (want("38p")) await (async () => {
-  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated");
+  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated; under a steady inflow of thoughts with no vector, its pool never drained, re-embed gives way at its share of the period, extraction runs while the inflow goes on, and the periods after re-embed every thought (SMD-4384)");
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, EMBED_JOB, sw, env, capture, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
   // Every wait probes once a second (the scheduler's fixed probe, reembedThoughtProbeMs, at 1 s, and OUTAGE_MS for the
@@ -29097,6 +29097,46 @@ if (want("38p")) await (async () => {
         `a pause before a try's limit: the back-off runs its whole window from the limit on the scheduler's clock, not on re-embed's, which the pause held back (left ${manLeft}; paused ${manPaused}; limit ${manLimit}: ${manLine.trim().slice(0, 160)}; the row's until ${manAhead.toFixed(1)} s ahead; the left wait's start ${manWaitAge.toFixed(1)} s old at the resume; exit ${manCode})`);
       assert(manTry && manTryLines.some((l) => LEFT.test(l)) && manTryLines.some((l) => BACKS_OFF.exec(l)?.[1] === "60" && PAST_BOUND.test(l)) && !manTryLines.some((l) => BACKED_OFF.test(l)),
         `a period begun just past the back-off's end, after a pause: a try, left waiting, its limit backing off 60 s — the back-off read on the scheduler's clock, not on re-embed's, which the pause holds behind (${told(manTryLines) || "nothing said"}${manTry ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    }
+
+    // A steady inflow of thoughts with no vector (SMD-4384): one every 200 ms, each embedding 300 ms, so re-embed's pool
+    // never drains, and before the share it ran alone the whole period, extraction never starting (0 of 64 in 240 s at
+    // the shipped settings). Its share at 3 s: it gives way, extraction takes a note while the inflow goes on, and once
+    // the inflow ends the periods after re-embed every thought, each begun by the whole read the share's end asks for
+    // — re-embed's own claims are read by no idle poll — never set down.
+    {
+      const SHARE = /^ {2}re-embed has had its share of the period — ([\d.]+) s alone(?:, besides \d+ s isolating outages)? — (\d+) thought\(s\) left for the next period, which begins once the claim passes drain — extracting$/;
+      sw.embedSlowMs = 300;
+      const inflow: string[] = [];
+      let flowing = true;
+      const flow = (async () => {
+        for (let i = 0; flowing; i++) {
+          inflow.push(await vectorless(`An inflow note with no vector, number ${i}.`));
+          await Bun.sleep(200);
+        }
+      })();
+      const shareMeanwhile = await capture("A note extraction takes while vectorless thoughts keep arriving.", "sync-sleep", 0, 33);
+      let gave = false, extractedInFlow = false, flowed = 0, vectored = 0, shareCode = -9, downSaid = false;
+      const shareStop = follow({ reembedShareMs: 3000 });
+      try {
+        try {
+          gave = await pollUntil(async () => lines.some((l) => SHARE.test(l)), 30_000);
+          extractedInFlow = gave && await pollUntil(() => exSucceeded(shareMeanwhile), 20_000);
+        } finally {
+          flowing = false;
+          await flow;
+        }
+        flowed = inflow.length;
+        await pollUntil(async () => (vectored = await allAtEmbed(inflow)) === inflow.length, 60_000);
+      } finally {
+        sw.embedSlowMs = 0;
+        downSaid = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+        shareCode = await shareStop();
+      }
+      const periods = lines.filter((l) => /^ {2}working:/.test(l)).length;
+      const shareLine = lines.find((l) => SHARE.test(l)) ?? "";
+      assert(gave && SHARE.exec(shareLine)?.[1] === "3" && Number(SHARE.exec(shareLine)?.[2]) > 0 && extractedInFlow && vectored === flowed && periods >= 2 && !downSaid && shareCode === 0,
+        `a steady inflow of thoughts with no vector, re-embed's pool never drained: at its 3 s share it gives way, said with what it leaves, extraction takes a note while the inflow goes on, and the periods after re-embed every thought, never set down (gave way ${gave}: ${shareLine.trim().slice(0, 160)}; extracted during the inflow ${extractedInFlow}; ${vectored} of ${flowed} re-embedded; ${periods} period(s); set down ${downSaid}; exit ${shareCode}${gave && extractedInFlow && vectored === flowed ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
     }
   } finally {
     sw.embedCrashOn = null;

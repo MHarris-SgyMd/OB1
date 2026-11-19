@@ -2468,7 +2468,9 @@ pass's two followers' work, and re-embed, in work periods: a period begins once
 a pass has work and no live call has landed for `OB1_SLEEP_CAPTURE` seconds
 (unset, 20), and runs the re-derive sweep, then re-embed when the brain has
 vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
-on a brain the server embeds at its own model, so no embedding call), then
+on a brain the server embeds at its own model, so no embedding call) — alone
+until its pool drains or for `OB1_SLEEP_REEMBED_SHARE` seconds of the period
+(unset, 120; SMD-4384), what it leaves the next period's — then
 extraction, and
 consolidation beside it once extraction's pool is drained, so the backlog
 order above is built in. Beside consolidation runs the subject sweep
@@ -2615,7 +2617,14 @@ its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER`
 (60–86400, unset 60: how long a model call in hand may have run, counted from
 its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
-`OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: among the scheduler's own calls
+`OB1_SLEEP_REEMBED_SHARE` (0–86400, unset 120: the most re-embed runs alone
+first in a period before it gives way to extraction and consolidation, a
+pause and its isolation of an outage not counted; the next period begins once
+they drain, re-embed first again. Under a steady inflow of thoughts with no
+vector — an egress policy keeping captures from a remote embedding provider,
+a slow provider, a bulk import — its pool never drains, and without the share
+nothing was extracted; 0 runs it alone until its pool drains, as before
+SMD-4384), `OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: among the scheduler's own calls
 waiting for a share of a model server's slots, consolidation's go first, and
 one queued this long goes first at the next turn — as the call ahead of it
 takes its slot — after older ones that go first; not a timeout. It orders, and

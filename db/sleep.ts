@@ -12,12 +12,12 @@
  *   bun db/sleep.ts --url …                         # one period, if there is work — until its pools drain, pausing for live writes — then exit
  *   bun db/sleep.ts --url … --dry-run               # the idle reading and each pass's pool; writes nothing
  *   await run({ url, follow: true, signal })         # in-process: import { run } from "./sleep.ts" (SMD-2304's engine shape)
- *   --capture SECONDS (20)   --abort-after SECONDS (60; at least extraction's 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1, for each claim pass; the subject sweep runs one)
+ *   --capture SECONDS (20)   --abort-after SECONDS (60; at least extraction's 60 s stall floor)   --reembed-share SECONDS (120; 0 to 86,400, 0: alone until its pool drains)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1, for each claim pass; the subject sweep runs one)
  *   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
  *   --max-wait SECONDS (60; 1 to 86,400)   among this process's calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn — as the call ahead of it takes its slot — after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
  *   --dump-dir DIR (none)   each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump (SMD-3203)
  *   --quiet and --budget were removed in 2.0.0: either given is refused (2), naming what replaced it; OB1_SLEEP_QUIET and OB1_SLEEP_BUDGET are read by nothing
- *   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held (N9) or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first period included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock held at two polls or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one period ended, or a second signal (at once)
+ *   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share with its pool left (SMD-4384), or with a pass a statement held (N9) or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first period included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock held at two polls or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one period ended, or a second signal (at once)
  *
  * ── Work ────────────────────────────────────────────────────────────────────
  * A period begins once a pass has work and no live write has landed for
@@ -115,7 +115,22 @@
  * claim, is not counted) — so an empty one starts no pass, and nothing probes
  * the embedding endpoint: its start is no check of the scheduler's (Refusals).
  * It runs until its pool drains, then stops after the thought in hand, and
- * extraction starts. Anything else that ends it sets it down for that period —
+ * extraction starts — or until it has had its share of the period, alone
+ * (SMD-4384, the maintainer's choices of 2026-11-19): REEMBED_SHARE_S (120 s,
+ * --reembed-share, OB1_SLEEP_REEMBED_SHARE) on re-embed's clock, which a
+ * live write's pause stops, its isolation of an outage below not counted,
+ * which its own cap bounds; a share spent mid-isolation gives way once the
+ * isolation settles or is set down. Under a steady inflow of thoughts with
+ * no vector its pool never drains — the follower pools every 15 s, so one
+ * not yet pooled is always there — and before the share it held the claim
+ * passes the whole period. It gives way after the thought in hand, said, a
+ * model switch's backlog too, and the claim passes start; nothing set down,
+ * nothing backed off. What it leaves begins the next period: the next idle
+ * poll reads the pools whole, where re-embed's own claims are read by no
+ * poll between, so the next period begins as soon as the claim passes drain,
+ * re-embed first again. A one-shot run exits 1, its pool left, as at a
+ * set-down. 0 is no share: alone until its pool drains, as before. Under an
+ * inflow the claim passes cannot drain either, re-embed waits for them. Anything else that ends it sets it down for that period —
  * refused at its start (a key, credit, the model not served, the egress
  * policy) or mid-pass (the provider refusing the request itself), its
  * provider not answering (the embedding endpoint can be down while chat
@@ -537,8 +552,8 @@ import { embeddingContract, MIGRATE_LOCK, MIGRATE_LOCK_HOLDER_SQL, MIGRATION_EXI
 import { commandLine, consoleWriter, flagList, numberProblem, optionReader, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 
-const FLAGS = { url: "one", capture: "one", "abort-after": "one", "max-wait": "one", rescan: "one", poll: "one", workers: "one", "statement-timeout": "one", "work-mem": "one", "maintenance-work-mem": "one", "dump-dir": "one", follow: "none", "dry-run": "none" } as const;
-const HINTS = { url: "<postgres://…>", capture: "<SECONDS>", "abort-after": "<SECONDS>", "max-wait": "<SECONDS>", rescan: "<SECONDS>", poll: "<SECONDS>", workers: "<N>", "statement-timeout": "<SECONDS>", "work-mem": "<MB>", "maintenance-work-mem": "<MB>", "dump-dir": "<DIR>" };
+const FLAGS = { url: "one", capture: "one", "abort-after": "one", "reembed-share": "one", "max-wait": "one", rescan: "one", poll: "one", workers: "one", "statement-timeout": "one", "work-mem": "one", "maintenance-work-mem": "one", "dump-dir": "one", follow: "none", "dry-run": "none" } as const;
+const HINTS = { url: "<postgres://…>", capture: "<SECONDS>", "abort-after": "<SECONDS>", "reembed-share": "<SECONDS>", "max-wait": "<SECONDS>", rescan: "<SECONDS>", poll: "<SECONDS>", workers: "<N>", "statement-timeout": "<SECONDS>", "work-mem": "<MB>", "maintenance-work-mem": "<MB>", "dump-dir": "<DIR>" };
 
 /**
  * The flags v2.0.0 removed (SMD-3379 PR 1c-4b): the work period replaced the
@@ -575,6 +590,16 @@ const DEFAULT_POLL_S = 5;
  * the isolation they belong to. Exported for test-worker-bootstrap.ts's row on the shipped numbers.
  */
 export const REEMBED_THOUGHT_WAIT_MS = 120_000;
+/**
+ * The most re-embed runs alone in a period before the claim passes start, its pool not drained, in seconds (SMD-4384,
+ * the maintainer's choices of 2026-11-19: a share of the period, by time, 120 s, a model switch's backlog included):
+ * --reembed-share, OB1_SLEEP_REEMBED_SHARE; 0 for none, alone until its pool drains as before. On re-embed's clock, a
+ * live write's pause not counted, nor its isolation of an outage that made a thought a suspect, which
+ * REEMBED_THOUGHT_PERIOD_MS caps on its own, so the claim passes are held at most the two together. About 400 vectors
+ * at 0.3 s each; under a steady inflow of thoughts with no vector, re-embed's pool never drains (its follower pools
+ * every 15 s), and without a share extraction ran 0 of 64 thoughts in 240 s (SMD-4384's measurement).
+ */
+export const REEMBED_SHARE_S = 120;
 /**
  * The most re-embed spends isolating a period (REEMBED_THOUGHT_WAIT_MS's waits; SMD-4254, the maintainer's choices of
  * 2026-11-18), begun again at each period's start: an isolation counted from its first such wait's start until its
@@ -752,6 +777,8 @@ export interface SleepOptions {
   capture?: number;
   /** N12's bound in seconds (DEFAULT_ABORT_AFTER_S): --abort-after, at or above the stall floor (SMD-3379 PR 1c-4a). */
   abortAfter?: number;
+  /** The most re-embed runs alone in a period, its pool not drained, in seconds (REEMBED_SHARE_S): --reembed-share, 0 for none (SMD-4384). */
+  reembedShare?: number;
   /**
    * --max-wait, said at the start where given: the order of the slots' hook, which the CLI installs with it and run()
    * does not (SMD-3379 PR 2c-2, review pass 2: nothing showed the value in force).
@@ -813,6 +840,8 @@ export interface SleepOptions {
   wakeSlackMs?: number;
   /** The least time between two whole reads a vector's arrival brings forward, in ms, in place of VECTOR_FLOOR_S, when a test reaches it sooner (SMD-3379 PR 1d). */
   vectorFloorMs?: number;
+  /** Re-embed's share in ms in place of `reembedShare`'s whole seconds, when a test reaches it sooner (SMD-4384). */
+  reembedShareMs?: number;
   /** How long re-embed is left waiting on an outage that made a thought a suspect, in ms, in place of REEMBED_THOUGHT_WAIT_MS, when a test reaches it sooner (SMD-4254). */
   reembedThoughtWaitMs?: number;
   /** How long re-embed may isolate such outages in a period, its waits and the retries between them, in ms, in place of REEMBED_THOUGHT_PERIOD_MS, when a test reaches it sooner (SMD-4254). */
@@ -826,7 +855,7 @@ export interface SleepOptions {
 }
 
 /** The scheduler's numbers, its flags' or their defaults. */
-type Numbers = { capture: number; abortAfter: number; rescan: number; poll: number; workers: number; statementTimeout: number; workMem: number; maintenanceWorkMem: number };
+type Numbers = { capture: number; abortAfter: number; reembedShare: number; rescan: number; poll: number; workers: number; statementTimeout: number; workMem: number; maintenanceWorkMem: number };
 
 /**
  * The memory settings, alone: what the scheduler's own two connections open
@@ -1285,6 +1314,8 @@ function numbers(opts: SleepOptions): Numbers | string {
   // At or above the stall floor: below it an abort is a short stop, and a stalled thought never stalls.
   const abortAfter = read("--abort-after", opts.abortAfter, DEFAULT_ABORT_AFTER_S, { min: STALL_FLOOR_MS / 1000, max: 86_400 });
   if (typeof abortAfter === "string") return abortAfter;
+  const reembedShare = read("--reembed-share", opts.reembedShare, REEMBED_SHARE_S, { min: 0, max: 86_400 });
+  if (typeof reembedShare === "string") return reembedShare;
   const rescan = read("--rescan", opts.rescan, DEFAULT_RESCAN_S, { min: 60, max: 86_400 });
   if (typeof rescan === "string") return rescan;
   const poll = read("--poll", opts.poll, DEFAULT_POLL_S, { min: 1, max: MAX_POLL_S });
@@ -1297,7 +1328,7 @@ function numbers(opts: SleepOptions): Numbers | string {
   if (typeof workMem === "string") return workMem;
   const maintenanceWorkMem = read("--maintenance-work-mem", opts.maintenanceWorkMem, DEFAULT_MAINTENANCE_WORK_MEM_MB, { min: 1, max: MAX_MEM_MB });
   if (typeof maintenanceWorkMem === "string") return maintenanceWorkMem;
-  return { capture, abortAfter, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem };
+  return { capture, abortAfter, reembedShare, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem };
 }
 
 /**
@@ -1383,6 +1414,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const REEMBED_THOUGHT_WAIT = opts.reembedThoughtWaitMs ?? REEMBED_THOUGHT_WAIT_MS;
   const REEMBED_THOUGHT_PERIOD = opts.reembedThoughtPeriodMs ?? REEMBED_THOUGHT_PERIOD_MS;
   const REEMBED_THOUGHT_PROBE = opts.reembedThoughtProbeMs ?? REEMBED_THOUGHT_PROBE_MS;
+  /** Re-embed's share of a period alone, in ms; 0 for none (SMD-4384). */
+  const REEMBED_SHARE = opts.reembedShareMs ?? n.reembedShare * 1000;
   /** N12's caps a period's hour, by pass: consolidation's and the subject sweep's (SMD-3306 PR 6b-2). */
   const ABORT_CAPS: Partial<Record<PassName, number>> = { consolidate: opts.consolidateAborts ?? CONSOLIDATE_ABORTS, subjects: opts.subjectsAborts ?? SUBJECTS_ABORTS };
   /** Whether the subject sweep is one of the passes (SMD-3306 PR 6b-2): a test of the other three keeps it out. */
@@ -1467,6 +1500,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   if (startedAt === null) { err(STOPPED_EARLY); return 130; }
   out(`  work:   a period begins once a pass has work — a claim pending or in hand, read each poll, or its pools read whole every ${RESCAN} s and once a vector comes — and no live write has landed for ${CAPTURE} s; a live write is one in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background), and a search is none`);
   out(`  pause:  in a period, a live write pauses the passes between thoughts, windows and pairs until ${CAPTURE} s with none, a call in hand past ${ABORT_AFTER_MS / 1000} s aborted meanwhile; the period ends once its pools drain`);
+  if (REEMBED_OK) out(`  share:  re-embed runs alone first in a period, ${REEMBED_SHARE > 0 ? `at most ${REEMBED_SHARE / 1000} s of it — a pause and its isolation of an outage not counted — then gives way to the claim passes, what it leaves the next period's` : "until its pool drains (--reembed-share 0)"}`);
   out(`  budget: ${budgetWords({ minutes: 0, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: 0 })}${n.statementTimeout ? " — a statement past it holds its pass until a restart" : ""}`);
   if (opts.maxWait !== undefined) out(`  order:  among this process's calls waiting for a share of a model server's slots, consolidation's go first, and a call queued ${opts.maxWait} s goes first at the next turn, after older ones that go first; not a timeout`);
   if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
@@ -3252,14 +3286,17 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     /** The claim passes due to start, re-embed having ended by itself: started after this poll's live read (review pass 2). */
     let claimsDue = false;
     let reembedding = false;
+    /** When re-embed began this period, on its clock: its share counts from here (SMD-4384). */
+    let reembedFrom = 0;
     if (reembedRuns()) {
       const backlog = await reading(reembedPool);
       if (backlog === null) return stopped();
       if (!drained(backlog)) {
         const unlabelled = backlog.unlabelled ? ` (${backlog.unlabelled} of them unlabelled: vectors from before migration 021, which nothing vouches for)` : "";
-        out(`  re-embedding ${backlog.pending + backlog.claimed + backlog.unpooled} thought(s) to ${EMBED.model} first${unlabelled} — extraction starts once that pool drains`);
+        out(`  re-embedding ${backlog.pending + backlog.claimed + backlog.unpooled} thought(s) to ${EMBED.model} first${unlabelled} — extraction starts once that pool drains${REEMBED_SHARE > 0 ? ` or re-embed has had its ${REEMBED_SHARE / 1000} s share of the period` : ""}`);
         start("reembed");
         reembedding = true;
+        reembedFrom = reembedClock();
       }
     }
     if (!reembedding && !(await startClaims())) return stopped();
@@ -3463,7 +3500,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         // Past the cap between waits: a retry's call or its blame probe in hand, which a provider that hangs holds to
         // OB1_LLM_TIMEOUT each.
         const capBetween = pastPeriod && !waits;
-        if (drained(rp) || (waits && !leftWaiting) || capBetween) {
+        // Its share of the period spent (SMD-4384): on re-embed's clock from its start, its isolation not counted, and
+        // never mid-isolation, which its own limits end; it gives way after the thought in hand.
+        const shareSpent = REEMBED_SHARE > 0 && !drained(rp) && !waits && reembedIsolation === null && now - reembedFrom - isolatedMs(now) >= REEMBED_SHARE;
+        if (drained(rp) || (waits && !leftWaiting) || capBetween || shareSpent) {
           // The call or probe in hand aborted first, so the set-down does not wait out its timeout (review pass 2), and
           // said aborted only when one was (review pass 3: said with nothing in hand).
           const aborted = capBetween ? (running.find((r) => r.name === "reembed")?.abortInHand?.(0) ?? 0) : 0;
@@ -3489,6 +3529,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
               : `  re-embed has spent ${REEMBED_THOUGHT_PERIOD / 1000} s this period isolating outages that made the thought in hand a suspect, its waits and the retries between them — set down as at any outage${capBetween ? (aborted > 0 ? ", a retry's call or probe in hand aborted, its thought set back in the queue" : ", between its waits") : ""}`}; ${backs
               ? `backing off: such an outage met in the next ${Math.round(window / 1000)} s sets re-embed down at once`
               : reembedBlamed ? "not backing off: a suspect was recorded failed alone in this isolation" : "backing off already"}`);
+          } else if (shareSpent) {
+            // Its pool left, as at a set-down (a one-shot run exits 1), but nothing set down: the next idle poll reads
+            // the pools whole — no poll between reads re-embed's claims — so the next period begins once the claim
+            // passes drain, re-embed first again (SMD-4384).
+            reembedLeft = true;
+            lastWhole = 0;
+            const isolated = isolatedMs(now);
+            out(`  re-embed has had its share of the period — ${REEMBED_SHARE / 1000} s alone${isolated > 0 ? `, besides ${Math.round(isolated / 1000)} s isolating outages` : ""} — ${rp.pending + rp.claimed + rp.unpooled} thought(s) left for the next period, which begins once the claim passes drain — extracting`);
           }
           if (await endReembed()) return stopped();
           endIsolation();
@@ -3498,7 +3546,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
             const moved = await suspectsBehind();
             if (moved > 0) out(`  ${moved} suspect(s) of the outage moved behind re-embed's pool — the next period re-embeds the backlog before claiming them again`);
           }
-          if (!drained(rp) && reembedDown === null && reembedAside === null) await setReembedDown("outage");
+          if (!drained(rp) && !shareSpent && reembedDown === null && reembedAside === null) await setReembedDown("outage");
           reembedding = false;
           if (!(await startClaims())) return stopped();
         }
@@ -3903,6 +3951,7 @@ if (import.meta.main) {
   const url = databaseUrl(cli.value("url"));
   const capture = cli.int("capture", { absent: DEFAULT_CAPTURE_S, min: 1, max: 86_400 });
   const abortAfter = cli.int("abort-after", { absent: DEFAULT_ABORT_AFTER_S, min: STALL_FLOOR_MS / 1000, max: 86_400 });
+  const reembedShare = cli.int("reembed-share", { absent: REEMBED_SHARE_S, min: 0, max: 86_400 });
   const maxWait = cli.int("max-wait", { absent: DEFAULT_MAX_WAIT_S, min: 1, max: MAX_MAX_WAIT_S });
   const rescan = cli.int("rescan", { absent: DEFAULT_RESCAN_S, min: 60, max: 86_400 });
   const poll = cli.int("poll", { absent: DEFAULT_POLL_S, min: 1, max: MAX_POLL_S });
@@ -3918,7 +3967,7 @@ if (import.meta.main) {
   let uninstall = () => {};
   await closeThenExit(sql, async () => {
     return run({
-      sql, url, capture, abortAfter, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem,
+      sql, url, capture, abortAfter, reembedShare, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem,
       // The order said only where the hook is in: under `off` there is none (review pass 3).
       ...(slots.installed ? { maxWait } : {}),
       ...(dumpDir === undefined ? {} : { dumpDir }),
