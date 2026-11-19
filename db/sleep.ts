@@ -122,8 +122,54 @@
  * serves) — said, on the row (`aside`, its kind; the row's outcome failed for
  * a cause the operator mends, not for an outage; a thrown error's reason in
  * the log), the other passes running on; the next period tries it
- * again (Work). A statement past its timeout holds it until a restart, as it
- * holds any pass (Budget).
+ * again (Work). But an outage that made the thought in hand a suspect — or a
+ * suspect's alone (worker-bootstrap.ts's ProviderOutage.byThought), as when
+ * a thought's call crashes the provider — is waited out mid-pass, said, the
+ * provider probed every REEMBED_THOUGHT_PROBE_MS (5 s) from the wait's start
+ * (SMD-4254, the maintainer's choice of 2026-11-18): up to
+ * REEMBED_THOUGHT_WAIT_MS (120 s) a wait, and REEMBED_THOUGHT_PERIOD_MS
+ * (240 s) of isolation a period — counted from the first such wait's start
+ * until the suspects settle, the retries and probes between the waits
+ * included. Once the provider answers the run retries the suspects one at a
+ * time and fails the thought at its third outage alone, as a re-embed
+ * follower by hand does. A crashing thought costs four waits — its batch's
+ * outage, two alone, and the one it leaves once recorded failed — so it is
+ * failed in one period if the provider is back under about 80 s after each
+ * crash, and the backlog behind it re-embedded too if under about 60 s; a
+ * crash of a few seconds costs about 20 s once. Past either limit re-embed is
+ * set down as at any outage, said — past the cap between waits too, the
+ * retry's call or probe in hand aborted and its thought set back — so the
+ * claim passes are held 4 minutes and a poll at most a period from the first
+ * wait's start, a live write's pause not counted. And it backs off by time
+ * (the maintainer's decisions of 2026-11-18): a set-down at a limit with no
+ * thought recorded failed alone in the isolation makes such an outage met in
+ * the next REEMBED_THOUGHT_BACKOFF_MS (4 min) set re-embed down at once, as
+ * before SMD-4254, said ("backing off"); the first one met after that is
+ * waited out once more, a try, and a try ending at a limit backs off 8 min,
+ * then 16, 32, then an hour at each (REEMBED_THOUGHT_BACKOFF_MAX_MS), until
+ * re-embed drains or a suspect retried alone is recorded failed — the
+ * crashing thought found — for the scheduler's life. So a crash
+ * that ends between about 80 and 120 s is tried at 0, 8, 20, 40, … min, each
+ * try held to the cap; one longer than the bound that ends, at 0, 6, 16, 34,
+ * … min, each held to the bound, plus the wait for the provider to come back;
+ * one that never ends, once, every period after finding the provider down at
+ * its start. A try with a provider that hangs costs about 6 min (two
+ * OB1_LLM_TIMEOUTs and the bound) when it hangs for good, about 8 (the two
+ * and the cap) for a hang of about 240-360 s. The back-off spares the claim
+ * passes, not the provider: a crasher outlasting the limits crashes it every
+ * crash length, as before SMD-4254. At a limit's set-down and a backed-off one the
+ * outage's suspects, handed back at the pool's front, are moved behind the
+ * backlog pooled then, so the next periods re-embed it before claiming them
+ * again; thoughts captured after land behind them, so under a steady inflow
+ * each period still claims the crashing thought before its new captures, a
+ * new note waiting about one crash length, and on an idle brain the move pays
+ * at the next rescan. An endpoint simply down that a call first meets
+ * mid-pass with a 5xx, a refused or reset connection or a timeout makes a
+ * suspect too, and costs up to the bound once; the next period's start finds
+ * it down and sets re-embed down at once.
+ * An outage with no suspect — a 429, a 503, the model loading — and a wait at
+ * its start set it down at once, as before. A statement past its timeout
+ * holds it until a restart, as it holds any pass (Budget).
  * Before this, sleep needed no embedding endpoint, and a refused one would
  * have stopped the passes that do not use it. Its writes are marked
  * background, as the vector mender's are, so a vectorless row it gives a
@@ -476,7 +522,7 @@ import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { DEFAULT_MAX_WAIT_S, installBackgroundSlots, MAX_MAX_WAIT_S } from "../server-portable/slots.ts";
 import { extractionKey, windowingFor } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
-import { budgetWords, heldWords, NAME_CHARS, REEMBED_DOWN, reembedKeyUnfit, shellWord, SLEEP_HELD_NAMED, SLEEP_HOLD_WHY, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type ReembedDown, type SleepAside, type SleepHeld, type SleepHold, type SleepHoldWhy } from "../server-portable/brain-info.ts";
+import { budgetWords, heldWords, NAME_CHARS, REEMBED_DOWN, reembedKeyUnfit, shellWord, SLEEP_HELD_NAMED, SLEEP_HOLD_WHY, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepAside, type SleepHeld, type SleepHold, type SleepHoldWhy } from "../server-portable/brain-info.ts";
 import { run as runExtract, STALL_FLOOR_MS } from "./extract-entities.ts";
 import { JUDGE_TIMEOUT_S, run as runConsolidate } from "./consolidate.ts";
 import { JUDGE_WINDOW_KEY, judgeHeld, MAX_ATTEMPTS as SUBJECT_MAX_ATTEMPTS, readJudgeWindow, SET_BACK_AHEAD_MS, subjectsTimeoutS, sweepSubjects } from "./subject-sweep.ts";
@@ -514,6 +560,110 @@ const DEFAULT_RESCAN_S = 3600;
 const VECTOR_FLOOR_S = 60;
 /** How often the logs are read in a period: the most a pass goes on claiming beside a live call before it pauses; a call in hand runs on, to N12's bound once paused. */
 const DEFAULT_POLL_S = 5;
+/**
+ * How long the poll leaves re-embed waiting mid-pass on an outage that made the thought in hand a suspect (SMD-4254,
+ * the maintainer's choice of 2026-11-18), from the wait's start, before it sets re-embed down for the period as at any
+ * other outage. A provider a thought crashed comes back in seconds: its probe answering ends the wait, and the run
+ * retries the outage's suspects one at a time and fails the thought at its third outage alone, where a set-down forgot
+ * them and the thought, handed back at the pool's front, crashed the provider at every period's first claim. But
+ * re-embed runs alone at a period's start, the claim passes starting only once it ends, so a wait with no bound would
+ * hold extraction and consolidation for the period whenever the embedding endpoint is really down with a thought in
+ * hand — what the set-down is for, as the chat endpoint can serve while the embedding one is down. Two minutes: a
+ * crashed model server's restart, not an endpoint's outage. An endpoint simply down, first met mid-pass with a 5xx, a
+ * refused or reset connection or a timeout, makes a suspect too, and costs up to this once, before the next period's
+ * start finds it down and sets re-embed down at once. Each wait's own, from its start: REEMBED_THOUGHT_PERIOD_MS caps
+ * the isolation they belong to. Exported for test-worker-bootstrap.ts's row on the shipped numbers.
+ */
+export const REEMBED_THOUGHT_WAIT_MS = 120_000;
+/**
+ * The most re-embed spends isolating a period (REEMBED_THOUGHT_WAIT_MS's waits; SMD-4254, the maintainer's choices of
+ * 2026-11-18), begun again at each period's start: an isolation counted from its first such wait's start until its
+ * suspects settle (the follower's next drain not isolated — ProviderOutage.isolating) or re-embed ends — the waits, and
+ * the retries' calls and blame probes between them, where re-embed runs alone too. Past it re-embed is set down for the
+ * period as at the bound, between waits too: there the call or probe in hand is aborted (abortInHand), its thought set
+ * back, so the claim passes are held 4 minutes and a poll at most a period from the first wait's start. The bound is a
+ * wait's, so without this a provider that keeps erring and coming back within it — a flapping endpoint, each error
+ * making a suspect — would keep re-embed waiting, and the claim passes behind it, the whole period; and a cap on the
+ * waits alone left a provider that hangs holding them two OB1_LLM_TIMEOUTs a retry besides (review pass 2: ~16 min a
+ * period at the defaults). A crashing thought costs four waits (its batch's outage, two alone, then the outage it leaves
+ * once recorded failed): under this cap it is failed in one period if the provider is back under about 80 s after each
+ * crash (three waits, the retries between them a call each), the backlog behind it re-embedded too under about 60 s
+ * (four). Longer crashes are set down at the cap, as before SMD-4254, and re-embed backs off (ThoughtWaitBackoff)
+ * before it tries the thought again. A live write's pause does not count: the clock stops while the period's gate
+ * is closed (review pass 3), as the wait's bound's does.
+ */
+export const REEMBED_THOUGHT_PERIOD_MS = 240_000;
+/**
+ * How often re-embed's follower probes its provider while waiting on such an outage under the scheduler, from each
+ * wait's start (ReembedOptions' thoughtProbeMs, waitOutProvider's fixedProbeMs; SMD-4254, the maintainer's choice of
+ * 2026-11-18): a fixed interval, no doubling and nothing carried from the last wait. The schedule a follower by hand
+ * keeps (5, 15, 35, 75, 155 s, carried across waits nothing settles between) carried an isolation's waits past the
+ * bound: a provider back 36-75 s after each crash waited 75 s, then 80 s, then the bound, every period. At 5 s a
+ * crash of a few seconds costs about 20 s over its four waits, and a wait outlasts its provider by under 5 s.
+ */
+export const REEMBED_THOUGHT_PROBE_MS = 5_000;
+/**
+ * How long re-embed backs off after a try at a crashing thought ends at a limit, the first time (ThoughtWaitBackoff;
+ * SMD-4254, the maintainer's decision of 2026-11-18 after review pass 3): 4 minutes, then 8, 16, … at each limit a try
+ * reaches. By time, not periods: a period is capture-driven on a busy brain, about 30 s apart, and a back-off counted
+ * in periods set re-embed down at once in a crash's own aftermath — the periods after a skipped one met the provider
+ * still down from its crash — so a crash of 80 s or more still held the claim passes 40-63% of the time (review pass 3,
+ * run-it). Doubling up to REEMBED_THOUGHT_BACKOFF_MAX_MS. It spares the claim passes, not the provider: a crasher
+ * outlasting the limits is claimed by each period once the provider is back, and crashes it every crash length, as on
+ * main (about 24 times an hour at 150 s a crash, 40 at 90 s). Exported for test-worker-bootstrap.ts's row on the
+ * shipped numbers.
+ */
+export const REEMBED_THOUGHT_BACKOFF_MS = 240_000;
+/**
+ * The longest re-embed backs off after a try's limit (ThoughtWaitBackoff; SMD-4254 review pass 4): the window doubles
+ * from REEMBED_THOUGHT_BACKOFF_MS — 4, 8, 16, 32 min — and is then held at an hour, the hourly rescan's scale, so a
+ * crasher outlasting the limits is tried at most an hour after each try's limit; without it the next try after ten
+ * limits was about 68 hours away. Exported for test-worker-bootstrap.ts's row on the shipped numbers.
+ */
+export const REEMBED_THOUGHT_BACKOFF_MAX_MS = 3_600_000;
+/** The back-off's state on the scheduler's clock (ThoughtWaitBackoff.state): when it ends, and the back-off the next limit a try reaches begins. */
+export type ThoughtWaitBackoffState = { until: number; nextMs: number };
+/**
+ * Re-embed's back-off from waiting out outages that made a thought a suspect (SMD-4254, the maintainer's decisions of
+ * 2026-11-18): a crasher whose crash outlasts the limits cost the cap every period, where main set it down in a poll.
+ * A try — a wait on such an outage met outside a back-off — set down at a limit, the bound or the cap, with no suspect
+ * recorded failed alone in its isolation (`limited`), makes such an outage met before `until`, `windowMs` from then,
+ * set re-embed down at once, as before SMD-4254 (`skipping`): 4 min (REEMBED_THOUGHT_BACKOFF_MS), then 8, 16, 32, then
+ * an hour at each (REEMBED_THOUGHT_BACKOFF_MAX_MS, `maxMs`) — the first such outage met after `until` is waited out once
+ * more, a try, and a try ending at a limit again doubles it, up to the ceiling.
+ * By time, not by periods (review pass 3): see REEMBED_THOUGHT_BACKOFF_MS. Re-embed drained, or a suspect retried alone
+ * recorded failed — the isolation worked, the crashing thought found — resets it (`reset`). For the scheduler's life,
+ * not persisted: a restart tries at once. Pure: the scheduler passes its clock.
+ */
+export class ThoughtWaitBackoff {
+  /** The back-off's end on the caller's clock; null while none has begun since the last reset. */
+  until: number | null = null;
+  /** The back-off the next limit a try reaches begins: `baseMs`, doubled at each, held at `maxMs`. */
+  windowMs: number;
+  constructor(readonly baseMs: number = REEMBED_THOUGHT_BACKOFF_MS, readonly maxMs: number = REEMBED_THOUGHT_BACKOFF_MAX_MS) {
+    this.windowMs = Math.min(baseMs, maxMs);
+  }
+  /** Whether such an outage met at `now` sets re-embed down at once. */
+  skipping(now: number): boolean {
+    return this.until !== null && now < this.until;
+  }
+  /** A try set down at a limit at `now`: back off `windowMs` from now, and double it up to `maxMs`. Within a back-off none begins (false): only a try's limit begins one. */
+  limited(now: number): boolean {
+    if (this.skipping(now)) return false;
+    this.until = now + this.windowMs;
+    this.windowMs = Math.min(this.windowMs * 2, this.maxMs);
+    return true;
+  }
+  /** Re-embed drained, or a suspect retried alone recorded failed: no back-off. */
+  reset(): void {
+    this.until = null;
+    this.windowMs = Math.min(this.baseMs, this.maxMs);
+  }
+  /** The state while it backs off, or has since its last reset — `until` past then, a try due; null otherwise. */
+  state(): ThoughtWaitBackoffState | null {
+    return this.until === null ? null : { until: this.until, nextMs: this.windowMs };
+  }
+}
 /**
  * The time after the newest live write before a period begins or paused
  * passes go on (SMD-3379 PR 1c-3b, 1c-4b): draft 5's 20 s until 1c measures
@@ -663,6 +813,16 @@ export interface SleepOptions {
   wakeSlackMs?: number;
   /** The least time between two whole reads a vector's arrival brings forward, in ms, in place of VECTOR_FLOOR_S, when a test reaches it sooner (SMD-3379 PR 1d). */
   vectorFloorMs?: number;
+  /** How long re-embed is left waiting on an outage that made a thought a suspect, in ms, in place of REEMBED_THOUGHT_WAIT_MS, when a test reaches it sooner (SMD-4254). */
+  reembedThoughtWaitMs?: number;
+  /** How long re-embed may isolate such outages in a period, its waits and the retries between them, in ms, in place of REEMBED_THOUGHT_PERIOD_MS, when a test reaches it sooner (SMD-4254). */
+  reembedThoughtPeriodMs?: number;
+  /** How often re-embed's follower probes on such an outage, in ms, in place of REEMBED_THOUGHT_PROBE_MS, when a test scales it (SMD-4254). */
+  reembedThoughtProbeMs?: number;
+  /** How long re-embed first backs off after a try at such an outage ends at a limit, in ms, in place of REEMBED_THOUGHT_BACKOFF_MS, when a test scales it (SMD-4254 review pass 3). */
+  reembedThoughtBackoffMs?: number;
+  /** The longest re-embed backs off after such a try, in ms, in place of REEMBED_THOUGHT_BACKOFF_MAX_MS, when a test reaches it sooner (SMD-4254 review pass 4). */
+  reembedThoughtBackoffMaxMs?: number;
 }
 
 /** The scheduler's numbers, its flags' or their defaults. */
@@ -1166,7 +1326,7 @@ export async function run(opts: SleepOptions): Promise<number> {
   // --follow at all. The rule the flags' numbers keep (SMD-3048).
   const followProblem = opts.passFollowS === undefined ? null : numberProblem("passFollowS", opts.passFollowS, { min: 1 });
   if (followProblem !== null) throw new RangeError(followProblem);
-  for (const [name, v] of [["pollMs", opts.pollMs], ["captureMs", opts.captureMs], ["rescanMs", opts.rescanMs], ["sweepLimit", opts.sweepLimit]] as const) {
+  for (const [name, v] of [["pollMs", opts.pollMs], ["captureMs", opts.captureMs], ["rescanMs", opts.rescanMs], ["sweepLimit", opts.sweepLimit], ["reembedThoughtWaitMs", opts.reembedThoughtWaitMs], ["reembedThoughtPeriodMs", opts.reembedThoughtPeriodMs], ["reembedThoughtProbeMs", opts.reembedThoughtProbeMs], ["reembedThoughtBackoffMs", opts.reembedThoughtBackoffMs], ["reembedThoughtBackoffMaxMs", opts.reembedThoughtBackoffMaxMs]] as const) {
     const problem = v === undefined ? null : numberProblem(name, v, { min: 1 });
     if (problem !== null) throw new RangeError(problem);
   }
@@ -1219,6 +1379,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const RESCAN = opts.rescanMs !== undefined ? opts.rescanMs / 1000 : n.rescan;
   /** N12's bound (SMD-3379 PR 1c-3b). */
   const ABORT_AFTER_MS = opts.abortAfterMs ?? n.abortAfter * 1000;
+  /** How long re-embed is left waiting on an outage that made a thought a suspect, a wait and a period's isolation, and how often it probes meanwhile (SMD-4254). */
+  const REEMBED_THOUGHT_WAIT = opts.reembedThoughtWaitMs ?? REEMBED_THOUGHT_WAIT_MS;
+  const REEMBED_THOUGHT_PERIOD = opts.reembedThoughtPeriodMs ?? REEMBED_THOUGHT_PERIOD_MS;
+  const REEMBED_THOUGHT_PROBE = opts.reembedThoughtProbeMs ?? REEMBED_THOUGHT_PROBE_MS;
   /** N12's caps a period's hour, by pass: consolidation's and the subject sweep's (SMD-3306 PR 6b-2). */
   const ABORT_CAPS: Partial<Record<PassName, number>> = { consolidate: opts.consolidateAborts ?? CONSOLIDATE_ABORTS, subjects: opts.subjectsAborts ?? SUBJECTS_ABORTS };
   /** Whether the subject sweep is one of the passes (SMD-3306 PR 6b-2): a test of the other three keeps it out. */
@@ -1484,11 +1648,32 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * Re-embed set down for this period (review pass 1, the maintainer's
    * choice): refused at its start or mid-pass, its provider not answering —
-   * said, on the row, the claim passes running on; the next period with work
+   * past REEMBED_THOUGHT_WAIT_MS a wait or REEMBED_THOUGHT_PERIOD_MS of
+   * isolation a period for an outage that made a thought a suspect, or at
+   * once while the back-off runs (SMD-4254) — said, on the
+   * row, the claim passes running on; the next period with work
    * tries it again. Cleared as each period begins — but a statement past its
    * timeout holds it until a restart (N9).
    */
   let reembedDown: ReembedDown | null = null;
+  /** Re-embed's back-off from waiting out outages that made a thought a suspect, for the scheduler's life (SMD-4254, review pass 2), by time on the scheduler's clock (review pass 3): ThoughtWaitBackoff. */
+  const reembedBackoff = new ThoughtWaitBackoff(opts.reembedThoughtBackoffMs, opts.reembedThoughtBackoffMaxMs);
+  /** Whether the period in hand set re-embed down at once, backed off: the row's `skipped`, so preflight says "this period" only of one that was (review pass 3). */
+  let reembedSkipped = false;
+  /**
+   * The database's clock at the period's last live read, and the scheduler's then (SMD-4254, review pass 2): an
+   * instant of the scheduler's taken onto the database's clock, as the row's other times are (`paused.since`, `slept`),
+   * so preflight's reading of the mark against the row's stamp holds when the two clocks differ.
+   */
+  let dbClock: { db: number; at: number } | null = null;
+  const onDbClock = (at: number): string => new Date(dbClock === null ? at : dbClock.db + (at - dbClock.at)).toISOString();
+  /** The back-off's mark on the row (brain-info.ts's ReembedBackoff): its end on the database's clock, the back-off the next try's limit begins, and whether this period was set down at once. */
+  /** A span on the row in whole seconds, at least 1: the back-off's and the left wait's marks. */
+  const rowS = (ms: number): number => Math.max(1, Math.round(ms / 1000));
+  const backoffMark = (): ReembedBackoff | null => {
+    const st = reembedBackoff.state();
+    return st === null ? null : { until: onDbClock(st.until), nextS: rowS(st.nextMs), skipped: reembedSkipped };
+  };
   /** Re-embed set down or aside at any point of this period: its pool left, so a one-shot run exits 1 (review pass 3: one taken up mid-sleep exited 0). */
   let reembedLeft = false;
   const asideWord = (): SleepAside | null =>
@@ -1797,10 +1982,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const stamper: PassStamper = FOLLOW
     ? passStamper({ sql, worker: "sleep", intervalS: POLL, minEveryS: opts.minStampEveryS, reembedJob: REEMBED_JOB, onError: (e) => seen.migration || err(`  heartbeat: could not stamp heartbeat:sleep (${e.message}) — the scheduler goes on as it was; the row keeps its last word until a stamp lands`) })
     : { key: "", stamp: async () => {}, end: async () => {}, during: (p) => p, alive: async () => {} };
-  /** Re-embed's word and the holds, for the row's next write (SMD-3379 PR 1c-4a: `holds` beside `aside`). */
+  /** Re-embed's word and the holds, for the row's next write (SMD-3379 PR 1c-4a: `holds` beside `aside`), and re-embed's back-off beside them (SMD-4254). */
   const sayAside = (): void => {
     stamper.aside?.(asideWord());
     stamper.holds?.(holdList());
+    stamper.reembedBackoff?.(backoffMark());
   };
   sayAside();
   /** A statement hold's timeout and remedy, in words: with OB1_SLEEP_STATEMENT_TIMEOUT 0 the role's or the database's own timed it out (review pass 1 of PR 1c-4b). */
@@ -1880,9 +2066,78 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * provider rather than that its passes run (SMD-2905).
    */
   const waitingMidPass = new Set<PassName>();
+  /**
+   * Re-embed's clock for its bound and cap (SMD-4254 review pass 3, cold read): the scheduler's, stopped while a
+   * period's gate is closed. A live write's pause holds the isolated drain at the gate, and the claim passes are paused
+   * besides, so the pause is no hold of the isolation's; counted, it used up the cap, and the resume set re-embed down,
+   * the thought pending after one crash and the back-off begun. `gatePaused` the closures' time in all, `gateClosedAt`
+   * the one in hand's start.
+   */
+  let gatePaused = 0;
+  let gateClosedAt: number | null = null;
+  const reembedClock = (now = Date.now()): number => now - gatePaused - (gateClosedAt === null ? 0 : now - gateClosedAt);
+  /** The gate closed: re-embed's clock stops. */
+  const stopReembedClock = (): void => {
+    gateClosedAt ??= Date.now();
+  };
+  /** The gate open, or a period begun: re-embed's clock runs again, the closure's time folded in. */
+  const runReembedClock = (): void => {
+    if (gateClosedAt !== null) gatePaused += Date.now() - gateClosedAt;
+    gateClosedAt = null;
+  };
+  /**
+   * Re-embed's wait mid-pass on an outage that made the thought in hand a
+   * suspect (providerWait's byThought, SMD-4254): when it began on
+   * re-embed's clock (`since`), the period's isolation counted as it began
+   * (`earlier`), and whether the poll has said it leaves it running. The
+   * poll leaves such a wait running up to REEMBED_THOUGHT_WAIT from its
+   * start, and while the period's isolation stays under
+   * REEMBED_THOUGHT_PERIOD, each on re-embed's clock; null while re-embed
+   * waits on no such outage.
+   */
+  let reembedThoughtWait: { since: number; earlier: number; said: boolean } | null = null;
+  /**
+   * Re-embed's isolation in hand (SMD-4254, review pass 2, the maintainer's decision): from its first such wait's
+   * start, on re-embed's clock, through the retries' calls and blame probes between its waits, until the
+   * follower's next drain is not isolated — its suspects settled — or re-embed ends; null while none is.
+   */
+  let reembedIsolation: number | null = null;
+  /**
+   * A suspect of the isolation in hand recorded failed alone (SMD-4254 review pass 3, cold read): its limit then
+   * begins no back-off. The crashing thought found and failed, the outage it leaves (the fourth wait, begun with
+   * `blamed`) passing the cap re-armed the back-off blamedAlone had just reset. Cleared as the isolation ends.
+   */
+  let reembedBlamed = false;
+  /** The period's ended isolations in all, in ms: begun again as each period begins (asleep). */
+  let reembedIsolated = 0;
+  /** The period's isolation at `now` on re-embed's clock, the one in hand counted: what REEMBED_THOUGHT_PERIOD caps. */
+  const isolatedMs = (now = reembedClock()): number => reembedIsolated + (reembedIsolation === null ? 0 : now - reembedIsolation);
+  /** The isolation in hand, if any, ended: its length counted to the period's. */
+  const endIsolation = (): void => {
+    if (reembedIsolation !== null) reembedIsolated += reembedClock() - reembedIsolation;
+    reembedIsolation = null;
+    reembedBlamed = false;
+  };
+  /**
+   * The suspects re-embed's follower handed back at the pool's front in the period in hand (PassStamper.suspectBack;
+   * SMD-4254 review pass 3): moved behind the pool at a set-down at a limit, or backed off (suspectsBehind).
+   */
+  const reembedSuspects = new Set<string>();
+  /**
+   * Re-embed's left wait for the row, or null (SMD-4254): its start on the database's clock — the wall-clock instant as
+   * far back from now as the wait has run on re-embed's clock, so a pause does not count there either — its limits
+   * beside it. Not while the back-off sets such an outage down at once: the poll does not leave it waiting.
+   */
+  const waitMark = (): ReembedThoughtWait | null => {
+    const now = Date.now();
+    if (reembedThoughtWait === null || !waitingMidPass.has("reembed") || reembedBackoff.skipping(now)) return null;
+    return { since: onDbClock(now - (reembedClock(now) - reembedThoughtWait.since)), earlierS: Math.round(reembedThoughtWait.earlier / 1000), boundS: rowS(REEMBED_THOUGHT_WAIT), periodS: rowS(REEMBED_THOUGHT_PERIOD), backoffS: reembedBlamed ? 0 : rowS(reembedBackoff.windowMs) };
+  };
   const sayWaiting = async (outcome?: "ok" | "failed"): Promise<void> => {
     stamper.waiting?.(PASSES.filter((p) => waitingAtStart.has(p)));
     stamper.waitingMidPass?.(PASSES.filter((p) => waitingMidPass.has(p)));
+    // Re-embed left waiting, its limits beside it, for preflight's fix (SMD-4254).
+    stamper.reembedWait?.(waitMark());
     await stamper.alive(outcome);
   };
   /** What a pass stamps goes to the sleep's row: its outcome mid-period, never an end, which is the scheduler's. */
@@ -1904,9 +2159,19 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       else waitingAtStart.delete(pass);
       await sayWaiting();
     },
-    async providerWait(on) {
+    async providerWait(on, byThought) {
       if (on) waitingMidPass.add(pass);
       else waitingMidPass.delete(pass);
+      // Each wait its own: its start is the bound's, taken as the word comes (SMD-4254). The first of an isolation
+      // begins the isolation's count, which runs on between its waits (review pass 2).
+      if (pass === "reembed") {
+        reembedThoughtWait = null;
+        if (on && byThought === true) {
+          const now = reembedClock();
+          reembedIsolation ??= now;
+          reembedThoughtWait = { since: now, earlier: isolatedMs(now), said: false };
+        }
+      }
       // Re-embed's provider not answering is the provider's state, not a
       // failure (SMD-2679 PR 4b): the failed word its follower stamps as the
       // wait begins goes at once, not at the poll that sets it down, where the
@@ -1914,6 +2179,27 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       const cleared = on && pass === "reembed" && words.reembed === "failed";
       if (cleared) delete words.reembed;
       await sayWaiting(cleared ? sleepOutcome() : undefined);
+    },
+    // Re-embed's drain not isolated, with no such wait in hand: the isolation's suspects settled — the crashing
+    // thought recorded failed alone, or each re-embedded — so its count ends (SMD-4254, review pass 2).
+    isolating(on) {
+      if (pass !== "reembed" || on || reembedThoughtWait !== null) return;
+      endIsolation();
+    },
+    // A suspect retried alone recorded failed, its own: the isolation worked, and the back-off ends (SMD-4254, review
+    // pass 2, the maintainer's decision); a limit later in this isolation begins none (review pass 3), and the row says
+    // so now, not at its next stamp.
+    blamedAlone() {
+      if (pass !== "reembed") return;
+      reembedBackoff.reset();
+      if (reembedIsolation !== null) reembedBlamed = true;
+      sayAside();
+      void stamper.alive().catch(() => {});
+    },
+    // A suspect handed back at the pool's front: moved behind it if re-embed is set down at a limit or backed off
+    // (SMD-4254 review pass 3).
+    suspectBack(id) {
+      if (pass === "reembed") reembedSuspects.add(id);
     },
   });
 
@@ -2029,7 +2315,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // and summary read by none of it, under the pool the brain names — the rules' asking no model — its claims bounded
     // by the period's (SMD-3306 PR 6b-2); consolidation its judge calls' limit, read at each call, beside it (review
     // passes 2 and 3).
-    p.done = (name === "reembed" ? runReembed(common) : name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs })
+    // Re-embed's waits on an outage that made a thought a suspect probe on a fixed interval, carrying nothing from the
+    // last wait, so each fits the poll's bound (SMD-4254).
+    p.done = (name === "reembed" ? runReembed({ ...common, thoughtProbeMs: REEMBED_THOUGHT_PROBE }) : name === "extract" ? runExtract({ ...common, stallFloorMs: opts.stallFloorMs })
       : name === "subjects" ? sweepSubjects({ ...common, model: JOBS.subjects !== SUBJECTS_RULES_POOL, ...(subjectsBound === null ? {} : { claimsBy: subjectsBound }), ...(opts.subjectsTimeoutS === undefined ? {} : { timeout: opts.subjectsTimeoutS }) })
       : runConsolidate({ ...common, ...(opts.consolidateTimeoutS === undefined ? {} : { timeout: opts.consolidateTimeoutS }), timeoutNow: consolidateTimeoutS, ...(DUMP ? { dump: DUMP } : {}) })).then((code) => {
       p.settled = true;
@@ -2106,6 +2394,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       waitingMidPass.clear();
       stamper.waitingMidPass?.([]);
     }
+    if (reembedThoughtWait !== null) {
+      reembedThoughtWait = null;
+      stamper.reembedWait?.(null);
+    }
+    endIsolation();
     const thrown = results.find((r) => r.status === "rejected");
     if (thrown) throw (thrown as PromiseRejectedResult).reason;
   };
@@ -2485,7 +2778,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         if (ended !== null) break;
         // Null only when a stop ended an outage's wait.
         const live = stopping ? null : await reading(() => newestLive(sql, { us: fromUs }));
-        if (live !== null) sleptUntil = live.now.at;
+        if (live !== null) {
+          sleptUntil = live.now.at;
+          dbClock = { db: live.now.at.getTime(), at: Date.now() };
+        }
         const woken = live === null ? null : live.write;
         if (woken !== null) wokeBy = `write at ${woken.at.toISOString()}`;
         why = stopping || live === null ? "stopping" : woken !== null ? "woke" : null;
@@ -2582,6 +2878,17 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // The last period's set-down gone before the re-derive sweep, whose clock reads it (review pass 4: the row kept its word).
     reembedLeft = false;
     subjectsLeft = false;
+    // Re-embed's isolations on outages that made a thought a suspect are capped a period: the count begins again
+    // (SMD-4254, review pass 2), its clock running (a stop mid-pause left it stopped: review pass 3). The back-off is
+    // not: it runs on the scheduler's clock across periods; this period has set nothing down at once yet.
+    endIsolation();
+    reembedIsolated = 0;
+    reembedSuspects.clear();
+    runReembedClock();
+    if (reembedSkipped) {
+      reembedSkipped = false;
+      sayAside();
+    }
     // Not a statement's hold, which lasts until a restart (N9; review pass 1 of PR 1c-4b).
     if (reembedDown !== null && !statementHeld.has("reembed")) {
       reembedDown = null;
@@ -2813,6 +3120,32 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       }
       return stopping;
     };
+    /**
+     * The suspects re-embed's follower handed back at the pool's front this period (reembedSuspects), moved behind the
+     * pool (SMD-4254 review pass 3, the maintainer's decision), as re-embed is set down at a limit or backed off, its
+     * leases returned: at the front, the crashing thought among them was every next period's first claim, which crashed
+     * the provider again, so a period backed off re-embedded nothing and the one after met the provider still down.
+     * Dated now, as setBackAborted's set-back is (lease.ts' setBack): behind every row pooled before it, ahead of every
+     * thought captured after — so under a steady inflow each period still claims it before that period's new captures,
+     * a new note waiting about one crash length (review pass 4: a median 120-228 s measured), and on an idle brain the
+     * move pays at the next rescan. Pending rows alone — one re-embedded, recorded failed or claimed meanwhile is not
+     * the pool's to move. A courtesy, as stoppedLast is: one that fails is said, and the period goes on. The rows moved.
+     */
+    const suspectsBehind = async (): Promise<number> => {
+      if (reembedSuspects.size === 0) return 0;
+      const ids = [...reembedSuspects];
+      reembedSuspects.clear();
+      try {
+        const rows = (await sql`
+          UPDATE thought_work_claims SET enqueued_at = now()
+           WHERE work_type = ${JOBS.reembed} AND status = 'pending' AND thought_id = ANY(${sql.array(ids, "TEXT")}::uuid[])
+          RETURNING 1 AS ok`) as { ok: number }[];
+        return rows.length;
+      } catch (e) {
+        err(`  could not move re-embed's suspects behind its pool (${(e as Error).message}) — the next period claims them first`);
+        return 0;
+      }
+    };
     /** The words for what set re-embed down: its own lines name the cause; this says what the scheduler does about it. */
     const downCause: Record<ReembedDown, string> = {
       provider: "the embedding provider refused it (a key, credit, or the request itself)",
@@ -2936,6 +3269,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       const live = await reading(() => newestLive(sql, { us: readAt }));
       if (live === null) return stopped();
       sleptUntil = live.now.at;
+      dbClock = { db: live.now.at.getTime(), at: Date.now() };
       const nowUs = live.now.us;
       // A write newer than any seen: it stays new, read again, until a poll
       // reaches the pause below — one cut short by a pass's end (re-embed's
@@ -3024,6 +3358,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       if (meets) {
         gate.close();
         closedAt = Date.now();
+        // Re-embed's bound and cap do not count the pause (SMD-4254 review pass 3).
+        stopReembedClock();
         abortedNow = 0;
         out(`  paused: a live write at ${live.write!.at.toISOString()} — the passes wait between thoughts, windows and pairs until no live write for ${CAPTURE} s`);
         stamper.paused?.(live.now.at.toISOString());
@@ -3043,6 +3379,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           closedAt = 0;
           out(`  resumed: no live write for ${CAPTURE} s — the passes go on (paused ${Math.round(pausedFor / 1000)} s${abortedNow ? `, ${abortedNow} call(s) in hand aborted` : ""})`);
           stamper.paused?.(null);
+          // Re-embed's clock runs again, and a left wait's start on the row moves past the pause (SMD-4254 review pass 3).
+          runReembedClock();
+          stamper.reembedWait?.(waitMark());
           await sayHeld();
           await sayOutcome();
           gate.open();
@@ -3093,14 +3432,72 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // Re-embed alone first: once its pool drains, or while its provider
       // does not answer — the embedding endpoint can be down while chat
       // serves — it stops after the thought in hand and the claim passes
-      // start as they would have; it tries again at the next period.
+      // start as they would have; it tries again at the next period. But a
+      // wait mid-pass on an outage that made the thought in hand a suspect is
+      // left running, up to REEMBED_THOUGHT_WAIT from its start and while the
+      // period's isolation stays under REEMBED_THOUGHT_PERIOD (SMD-4254): the
+      // provider back, the run retries the outage's suspects one at a time and
+      // fails the thought that crashes it at its third outage alone, where a
+      // set-down forgot them and the thought crashed every period's first claim.
+      // The cap counts the isolation from its first wait's start, the retries
+      // between its waits included, and sets re-embed down between waits too
+      // (review pass 2), each on re-embed's clock, which a pause stops (review
+      // pass 3); such an outage met while the back-off runs sets it down at
+      // once, and a set-down at a limit or backed off moves the outage's
+      // suspects behind the pool.
       if (reembedding) {
         const rp = await reading(reembedPool);
         if (rp === null) return stopped();
         const waits = waitingAtStart.has("reembed") || waitingMidPass.has("reembed");
-        if (drained(rp) || waits) {
-          if (drained(rp)) out("  re-embed drained — extracting");
+        const thoughtWait = waitingMidPass.has("reembed") && !waitingAtStart.has("reembed") ? reembedThoughtWait : null;
+        const wall = Date.now();
+        const now = reembedClock(wall);
+        const pastBound = thoughtWait !== null && now - thoughtWait.since >= REEMBED_THOUGHT_WAIT;
+        const pastPeriod = reembedIsolation !== null && isolatedMs(now) >= REEMBED_THOUGHT_PERIOD;
+        const backingOff = thoughtWait !== null && reembedBackoff.skipping(wall);
+        const leftWaiting = thoughtWait !== null && !pastBound && !pastPeriod && !backingOff;
+        if (leftWaiting && !thoughtWait.said) {
+          thoughtWait.said = true;
+          out(`  re-embed waits for its provider after an outage that made the thought in hand a suspect — left running up to ${REEMBED_THOUGHT_WAIT / 1000} s from the wait's start and ${REEMBED_THOUGHT_PERIOD / 1000} s of isolation this period, its waits and the retries between them (${Math.round(thoughtWait.earlier / 1000)} s before this wait), its provider probed every ${REEMBED_THOUGHT_PROBE / 1000} s, so once it answers the outage's suspects are retried one at a time`);
+        }
+        // Past the cap between waits: a retry's call or its blame probe in hand, which a provider that hangs holds to
+        // OB1_LLM_TIMEOUT each.
+        const capBetween = pastPeriod && !waits;
+        if (drained(rp) || (waits && !leftWaiting) || capBetween) {
+          // The call or probe in hand aborted first, so the set-down does not wait out its timeout (review pass 2), and
+          // said aborted only when one was (review pass 3: said with nothing in hand).
+          const aborted = capBetween ? (running.find((r) => r.name === "reembed")?.abortInHand?.(0) ?? 0) : 0;
+          /** A set-down at a limit or backed off: the outage's suspects go behind the pool (review pass 3). */
+          let behind = false;
+          if (drained(rp)) {
+            out("  re-embed drained — extracting");
+            reembedBackoff.reset();
+            sayAside();
+            await sayOutcome();
+          } else if (backingOff) {
+            behind = true;
+            reembedSkipped = true;
+            out(`  re-embed's provider stopped answering after an outage that made the thought in hand a suspect, while re-embed backs off from a try's wait on such an outage that ended at a limit — set down at once, backing off: ${Math.max(0, Math.ceil(((reembedBackoff.until ?? wall) - wall) / 1000))} s more, then the first such outage is waited out once more`);
+          } else if (thoughtWait !== null || capBetween) {
+            // Which limit it passed, the wait's before the period's (SMD-4254); a try ended at a limit backs off, unless a
+            // suspect of its isolation was recorded failed alone — the outage that thought leaves (review pass 3).
+            behind = true;
+            const window = reembedBackoff.windowMs;
+            const backs = !reembedBlamed && reembedBackoff.limited(wall);
+            out(`${pastBound
+              ? `  re-embed's provider has not answered in ${REEMBED_THOUGHT_WAIT / 1000} s from the wait's start, after an outage that made the thought in hand a suspect — set down as at any outage`
+              : `  re-embed has spent ${REEMBED_THOUGHT_PERIOD / 1000} s this period isolating outages that made the thought in hand a suspect, its waits and the retries between them — set down as at any outage${capBetween ? (aborted > 0 ? ", a retry's call or probe in hand aborted, its thought set back in the queue" : ", between its waits") : ""}`}; ${backs
+              ? `backing off: such an outage met in the next ${Math.round(window / 1000)} s sets re-embed down at once`
+              : reembedBlamed ? "not backing off: a suspect was recorded failed alone in this isolation" : "backing off already"}`);
+          }
           if (await endReembed()) return stopped();
+          endIsolation();
+          // The outage's suspects behind the pool, the crashing thought among them: at its front, every period's first
+          // claim crashed the provider again (review pass 3).
+          if (behind) {
+            const moved = await suspectsBehind();
+            if (moved > 0) out(`  ${moved} suspect(s) of the outage moved behind re-embed's pool — the next period re-embeds the backlog before claiming them again`);
+          }
           if (!drained(rp) && reembedDown === null && reembedAside === null) await setReembedDown("outage");
           reembedding = false;
           if (!(await startClaims())) return stopped();

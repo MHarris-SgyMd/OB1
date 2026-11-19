@@ -253,6 +253,17 @@ export interface WorkerHeartbeat {
    */
   waitingMidPass?: SleepPass[];
   /**
+   * The sleep scheduler's re-embed left waiting mid-pass on an outage that made a thought a suspect (SMD-4254): the
+   * wait's start, the period's isolation before it, and the bound and cap past which it is set down. On a live sleep
+   * row naming re-embed in `waitingMidPass` alone; absent otherwise, and when not of the shape.
+   */
+  reembedWait?: ReembedThoughtWait;
+  /**
+   * The sleep scheduler's back-off from leaving re-embed waiting on such outages (SMD-4254 review pass 2). On a live
+   * sleep row alone, while it backs off or has since its last reset; absent otherwise, and when not of the shape.
+   */
+  reembedBackoff?: ReembedBackoff;
+  /**
    * The worker's model calls by pass since its process began, `-` for calls of no pass (SMD-3379 PR 2b-2a): by
    * class, how many failed, their own time, and their asks for a slot by how each ended — a slot taken, run without one (the
    * semaphore failed open), stopped — how many waited at all, their time in all and the longest. No telemetry runs in a worker, so its
@@ -344,6 +355,25 @@ export const REEMBED_DOWN = ["provider", "model", "egress", "tables", "usage", "
 export type ReembedDown = (typeof REEMBED_DOWN)[number];
 /** `unprintable`: names outside a model name's alphabet, left out (recorded and configured empty) — the kind kept, so a set-aside is not hidden (review pass 6). */
 export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; configured: string; unprintable?: true } | { kind: ReembedDown } };
+/**
+ * The sleep scheduler's re-embed left waiting mid-pass on an outage that made a thought a suspect (WorkerHeartbeat's
+ * reembedWait, SMD-4254), as db/sleep.ts writes it: `since`, the wait's start (a UTC instant on the database's clock,
+ * as the row's other times are: review pass 2); `earlierS`, the period's isolation as the wait began — earlier
+ * isolations, and this one's waits and the retries between them before this wait; `boundS`, how long one is left
+ * waiting from its start, and `periodS`, how long the period's isolation may run — past either the scheduler sets
+ * re-embed down for the period. The time left: min(boundS − waited, periodS − earlierS − waited). A live write's pause
+ * counts toward neither (review pass 3): `since` is moved past it. `backoffS`, the back-off a set-down at either limit
+ * begins (review pass 3), 0 when a suspect of the isolation was recorded failed alone, which begins none.
+ */
+export type ReembedThoughtWait = { since: string; earlierS: number; boundS: number; periodS: number; backoffS: number };
+/**
+ * The sleep scheduler's back-off from leaving re-embed waiting on such outages (WorkerHeartbeat's reembedBackoff,
+ * SMD-4254 review pass 2), by time, as db/sleep.ts's ThoughtWaitBackoff writes it: `until`, when
+ * it ends — such an outage met before it sets re-embed down at once, the first met after it is waited out once more
+ * (a UTC instant on the database's clock; past, a try is due); `nextS`, the back-off the next try that ends at a limit
+ * begins; `skipped`, whether the period in hand set re-embed down at once so.
+ */
+export type ReembedBackoff = { until: string; nextS: number; skipped: boolean };
 
 /**
  * Who runs re-embed under a key, read from the heartbeat rows and the record
@@ -944,6 +974,18 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // Paused by a live call, on a live row alone, and its held passes, kept on an ended one (SMD-3379 PR 1c); each left off when not of the shape.
     const p = worker === "sleep" && live ? (v!.paused as Record<string, unknown> | undefined) : undefined;
     const paused = p !== null && typeof p === "object" && typeof p.since === "string" && UTC_INSTANT.test(p.since) ? { since: p.since } : undefined;
+    // Re-embed left waiting on an outage that made a thought a suspect (SMD-4254): the sleep's, on a live row naming
+    // re-embed mid-pass alone, left off when not of the shape.
+    const rw = worker === "sleep" && live && waitingMidPass?.includes("reembed") ? (v!.reembedWait as Record<string, unknown> | undefined) : undefined;
+    const reembedWait = rw !== null && typeof rw === "object" && typeof rw.since === "string" && UTC_INSTANT.test(rw.since)
+        && count(rw.earlierS, 86_400) && count(rw.boundS, 86_400) && (rw.boundS as number) > 0 && count(rw.periodS, 86_400) && (rw.periodS as number) > 0 && count(rw.backoffS)
+      ? { since: rw.since, earlierS: rw.earlierS as number, boundS: rw.boundS as number, periodS: rw.periodS as number, backoffS: rw.backoffS as number }
+      : undefined;
+    // Re-embed's back-off from such waits (SMD-4254 review pass 2): the sleep's, on a live row alone, left off when not of the shape.
+    const rb = worker === "sleep" && live ? (v!.reembedBackoff as Record<string, unknown> | undefined) : undefined;
+    const reembedBackoff = rb !== null && typeof rb === "object" && typeof rb.until === "string" && UTC_INSTANT.test(rb.until) && count(rb.nextS) && (rb.nextS as number) > 0 && typeof rb.skipped === "boolean"
+      ? { until: rb.until, nextS: rb.nextS as number, skipped: rb.skipped }
+      : undefined;
     const holds = worker === "sleep" ? parseHolds(v!.holds) : undefined;
     // board-sync's hold on Linear's rate limit (SMD-4133), on a live row alone and left off when not of the shape.
     const lim = worker === "board-sync" && live ? (v!.limited as Record<string, unknown> | undefined) : undefined;
@@ -967,6 +1009,8 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
       ...(slept ? { slept } : {}),
       ...(waiting ? { waiting } : {}),
       ...(waitingMidPass ? { waitingMidPass } : {}),
+      ...(reembedWait ? { reembedWait } : {}),
+      ...(reembedBackoff ? { reembedBackoff } : {}),
       ...(refused ? { refused } : {}),
       ...(models ? { models } : {}),
       ...(restart ? { restart } : {}),
