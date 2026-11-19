@@ -17,7 +17,7 @@
  *   --max-wait SECONDS (60; 1 to 86,400)   among this process's calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn — as the call ahead of it takes its slot — after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
  *   --dump-dir DIR (none)   each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump (SMD-3203)
  *   --quiet and --budget were removed in 2.0.0: either given is refused (2), naming what replaced it; OB1_SLEEP_QUIET and OB1_SLEEP_BUDGET are read by nothing
- *   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share with its pool left (SMD-4384), or with a pass a statement held (N9) or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first period included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock held at two polls or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one period ended, or a second signal (at once)
+ *   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share, or caught up, with its pool left (SMD-4384), or with a pass a statement held (N9) or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (a pass's start checked before the first period included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start earlier, which is retried — "Refusals" below) · 75 a migration seen — migrate.ts's lock held at two polls or the ledger moved since the start — which its supervisor runs again at once; a hand run is run again once it is done (SMD-3379 PR 1c-1) · 130 a signal before one period ended, or a second signal (at once)
  *
  * ── Work ────────────────────────────────────────────────────────────────────
  * A period begins once a pass has work and no live write has landed for
@@ -127,8 +127,9 @@
  * of thoughts with no vector its pool never drains — the follower pools
  * every 15 s, so one not yet pooled is always there — and before the share
  * it held the claim passes the whole period. It gives way after the thought
- * in hand, said, a model switch's backlog too, but only to a claim pass with
- * a claim pending or in hand, so on a brain with nothing else to do it runs
+ * in hand, said, a model switch's backlog too, but only while a claim pass
+ * has work — a claim pending or in hand, or thoughts not yet in extraction's
+ * pool — so on a brain with nothing else to do it runs
  * on until its pool drains (review pass 1); nothing set down, nothing backed
  * off. Then the two take turns in the period (review pass 1, the
  * maintainer's choice: alternate turns): under an inflow the claim passes'
@@ -148,13 +149,16 @@
  * extraction's pool, read whole at most once a turn floor: on a fresh brain
  * no trigger pools a capture until extraction records its key. Each re-embed
  * turn has its own isolation cap, below, as a period had, and a re-embed set
- * down in the period is tried again at the claim passes' whole turn's end, as
- * a period's start would (review pass 2: set down at a turn's start, it
- * stayed down while the inflow went on). The period ends as before,
- * once the claim passes drain: what re-embed left then begins the next
- * period, by the next idle poll's whole read of its own — re-embed's claims
- * are read by no poll between, and the rescan's clock is left be — re-embed
- * first again; a one-shot run exits 1, its pool left, as at a set-down. 0 is
+ * down in the period for an outage is tried again at the claim passes' whole
+ * turn's end, as a period's start would — not while SMD-4254's back-off sets
+ * such an outage down at once, and no other kind (review passes 2 and 3).
+ * The period ends as before, once the claim passes drain: drained a turn
+ * floor or more into their turn, re-embed has had a turn first and, with
+ * nothing to give way to, drained; drained sooner, what re-embed left begins
+ * the next period, by the next idle poll's whole read of its own — re-embed's
+ * claims are read by no poll between, and the rescan's clock is left be —
+ * re-embed first again, and a one-shot run exits 1, its pool left, as at a
+ * set-down. 0 is
  * no share and no turns: alone until its pool drains, as before. Anything
  * else that ends re-embed sets it down for that period —
  * refused at its start (a key, credit, the model not served, the egress
@@ -624,9 +628,9 @@ export const REEMBED_THOUGHT_WAIT_MS = 120_000;
  * pass 2). --reembed-share, OB1_SLEEP_REEMBED_SHARE; 0 for neither,
  * re-embed alone until its pool drains as before. On re-embed's clock, a live write's pause not counted; re-embed's
  * start (its probe, a model loading) counted in its turn, its isolation of an outage that made a thought a suspect
- * not — REEMBED_THOUGHT_PERIOD_MS caps that, a turn — so the claim passes are held for about the two together a turn,
- * and the thought in hand as it gives way. It gives way only to a claim pass with a claim pending or in hand (review
- * pass 1). About 400 vectors at 0.3 s each; under a steady inflow of thoughts with no vector, re-embed's pool never
+ * not — REEMBED_THOUGHT_PERIOD_MS caps that, a turn — so the claim passes are held for the share plus
+ * REEMBED_THOUGHT_PERIOD_MS a turn at most, and the thought in hand as it gives way. It gives way only while a claim
+ * pass has work: a claim pending or in hand, or thoughts not yet in extraction's pool (review passes 1 and 2). About 400 vectors at 0.3 s each; under a steady inflow of thoughts with no vector, re-embed's pool never
  * drains (its follower pools every 15 s), and without a share extraction ran 0 of 64 thoughts in 240 s (SMD-4384's
  * measurement).
  */
@@ -1392,6 +1396,9 @@ export async function run(opts: SleepOptions): Promise<number> {
     const problem = v === undefined ? null : numberProblem(name, v, { min: 1 });
     if (problem !== null) throw new RangeError(problem);
   }
+  // The tests' share in ms, 0 for none, as --reembed-share's seconds (SMD-4384 review pass 3).
+  const shareProblem = opts.reembedShareMs === undefined ? null : numberProblem("reembedShareMs", opts.reembedShareMs, { min: 0 });
+  if (shareProblem !== null) throw new RangeError(shareProblem);
   // N12's bound at or above the stall floor: below it an abort is a short stop, and a stalled thought never stalls (SMD-3379 PR 1c-3b).
   const abortProblem = opts.abortAfterMs === undefined ? null : numberProblem("abortAfterMs", opts.abortAfterMs, { min: opts.stallFloorMs ?? STALL_FLOOR_MS });
   if (abortProblem !== null) throw new RangeError(abortProblem);
@@ -1561,7 +1568,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   if (startedAt === null) { err(STOPPED_EARLY); return 130; }
   out(`  work:   a period begins once a pass has work — a claim pending or in hand, read each poll, or its pools read whole every ${RESCAN} s and once a vector comes — and no live write has landed for ${CAPTURE} s; a live write is one in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background), and a search is none`);
   out(`  pause:  in a period, a live write pauses the passes between thoughts, windows and pairs until ${CAPTURE} s with none, a call in hand past ${ABORT_AFTER_MS / 1000} s aborted meanwhile; the period ends once its pools drain`);
-  if (REEMBED_OK) out(`  share:  ${REEMBED_SHARE > 0 ? `re-embed and the claim passes take turns in a period, ${REEMBED_SHARE / 1000} s each while the other has work — re-embed alone first, the claim passes waiting between thoughts in its turns; a pause and re-embed's isolation of an outage not counted` : "re-embed runs alone first in a period until its pool drains (--reembed-share 0)"}`);
+  if (REEMBED_OK) out(`  share:  ${REEMBED_SHARE > 0 ? `re-embed and the claim passes take turns in a period, ${REEMBED_SHARE / 1000} s each while the other has work — re-embed alone first, the claim passes waiting between thoughts in its turns, either side handing over sooner once caught up, after ${TURN_FLOOR / 1000} s; a pause and re-embed's isolation of an outage not counted` : "re-embed runs alone first in a period until its pool drains (--reembed-share 0)"}`);
   out(`  budget: ${budgetWords({ minutes: 0, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: 0 })}${n.statementTimeout ? " — a statement past it holds its pass until a restart" : ""}`);
   if (opts.maxWait !== undefined) out(`  order:  among this process's calls waiting for a share of a model server's slots, consolidation's go first, and a call queued ${opts.maxWait} s goes first at the next turn, after older ones that go first; not a timeout`);
   if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
@@ -3287,7 +3294,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       else words.reembed = "failed";
       err(kind === "statement"
         ? `  re-embed held until a restart — ${downCause[kind]}; the other passes run on`
-        : `  re-embed set down for this period — ${downCause[kind]}; the other passes run on, and the end of their whole turn, or the next period — begun by other work, or the next rescan of its pools — tries re-embed again`);
+        : `  re-embed set down for this period — ${downCause[kind]}; the other passes run on, and ${kind === "outage" && REEMBED_SHARE > 0 ? "the end of their whole turn, or " : ""}the next period — begun by other work, or the next rescan of its pools — tries re-embed again`);
       await sayReembed();
     };
     /**
@@ -3370,21 +3377,27 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       (!statementHeld.has("extract") && (await claimsBusy("extract"))) || (!statementHeld.has("consolidate") && (await claimsBusy("consolidate")))
       || (subjectsRuns() && (await claimsBusy("subjects", subjectsBound ?? undefined, since.at)));
     /**
-     * The claim passes behind: a claim in hand, or one pending since before the last turn floor — what their followers
-     * have had a poll to claim (SMD-4384 review pass 2). Not caught up while it holds. A claim pending since then is
-     * none: 016's trigger pools each capture at once, so under an inflow extraction always has one pending between its
-     * follower's polls, and caught up only by an empty pool it never was — a vector waited out the whole turn. A
-     * thought set back is dated ahead, and none of it. The subject sweep's, claimsBusy's by the period's bound.
+     * The claim passes behind: of the passes running now, a claim of this run's in hand, or one pending since before
+     * the last turn floor — what their followers have had a poll to claim (SMD-4384 review pass 2). Not caught up
+     * while it holds. A claim pending since then is none: 016's trigger pools each capture for extraction at once, and
+     * 113's into the named subject pool, so under an inflow one is always pending between their followers' polls, and
+     * caught up only by an empty pool they never were — a vector waited out the whole turn. Of the passes running only
+     * (review pass 3, cold read): consolidation's rows while it has not joined, or the subject sweep's before it
+     * starts, are no turn's work — under an inflow consolidation never joins — and another process's lease is not
+     * theirs. A thought dated ahead — a stopped thought set last, a sweep's set-back — is none either: it waits for
+     * the newer work by design. The subject sweep's by the period's bound, as claimsBusy reads it.
      */
     const claimsBehind = async (): Promise<boolean> => {
-      for (const pass of ["extract", "consolidate"] as const) {
-        if (statementHeld.has(pass)) continue;
+      for (const pass of ["extract", "consolidate", "subjects"] as const) {
+        if (statementHeld.has(pass) || !running.some((r) => r.name === pass && !r.settled)) continue;
+        const bound = pass === "subjects" ? sql` AND enqueued_at <= ${byWhen(sql, subjectsBound ?? undefined)}` : sql``;
         const [r] = (await sql`
           SELECT EXISTS (SELECT 1 FROM thought_work_claims WHERE work_type = ${JOBS[pass]}
-                           AND (status = 'claimed' OR (status = 'pending' AND enqueued_at < now() - make_interval(secs => ${TURN_FLOOR / 1000})))) AS behind`) as { behind: boolean }[];
+                           AND ((status = 'claimed' AND claimed_at >= ${startedAt}::timestamptz AND NOT COALESCE(ttl_expires_at < now(), false))
+                             OR (status = 'pending' AND enqueued_at < now() - make_interval(secs => ${TURN_FLOOR / 1000})${bound}))) AS behind`) as { behind: boolean }[];
         if (r.behind) return true;
       }
-      return subjectsRuns() && (await claimsBusy("subjects", subjectsBound ?? undefined, since.at));
+      return false;
     };
     /**
      * Thoughts not yet in extraction's pool, which no claim row shows — on a fresh brain, or after an extraction key's
@@ -3415,6 +3428,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     const reembedTurn = (): void => {
       endIsolation();
       reembedIsolated = 0;
+      reembedSuspects.clear();
       start("reembed");
       reembedding = true;
       reembedFrom = reembedClock();
@@ -3704,7 +3718,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           // claim crashed the provider again (review pass 3).
           if (behind) {
             const moved = await suspectsBehind();
-            if (moved > 0) out(`  ${moved} suspect(s) of the outage moved behind re-embed's pool — the next period re-embeds the backlog before claiming them again`);
+            if (moved > 0) out(`  ${moved} suspect(s) of the outage moved behind re-embed's pool — its next turn re-embeds the backlog before claiming them again`);
           }
           if (!drained(rp) && !shareSpent && reembedDown === null && reembedAside === null) await setReembedDown("outage");
           reembedding = false;
@@ -3717,17 +3731,22 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // steady inflow their pools never drain either — extraction's follower pools every 15 s too — so the period never
       // ended, and re-embed, once it had given way, waited for the inflow to stop (review pass 1's run: vectors 131-202
       // s late over a 5-minute inflow, main 15 s). Once they have run the share on re-embed's clock with re-embed's
-      // pool not drained — read at most once a share — they wait at their turn gate between thoughts, windows and
+      // pool not drained — read at most once a turn floor, once a share past a whole turn — they wait at their turn gate between thoughts, windows and
       // pairs, as at a live write's pause, and re-embed runs alone again in the same period, for its share at most;
       // then they go on (review pass 2: the first cut ended the period, soft-stopping them with calls in hand, which
       // then ran under a stopping run's rules — a timeout recorded against its thought, not probed — and consolidation
-      // had to join again each turn). Not while re-embed is set down, aside or held.
+      // had to join again each turn).
       //
-      // Caught up too (review pass 2, the maintainer's choice): no claim pending or in hand, once they have run a turn
-      // floor. And a re-embed set down in the period — an outage or a refusal at a turn's start — is tried again at
-      // their whole turn's end, as a period's start would (review pass 2's run: a set-down at a turn's start held the
-      // vectors until the inflow stopped, the period never ending); not one set aside, or a statement holds.
-      if (REEMBED_SHARE > 0 && claimsFrom !== null && REEMBED_OK && reembedAside === null && !statementHeld.has("reembed")) {
+      // Caught up too (review pass 2, the maintainer's choice): none of this run's claims in hand and none pending since
+      // before the last turn floor (claimsBehind), once they have run a turn floor. And a re-embed set down in the
+      // period for an outage — its provider not answering at a turn's start — is tried again at their whole turn's
+      // end, as a period's start would (review pass 2's run: a set-down at a turn's start held the vectors until the
+      // inflow stopped, the period never ending); not while SMD-4254's back-off sets such an outage down at once, which
+      // would claim the crashing thought again each turn, and no other kind — a key, credit, the egress policy, the
+      // tables, a refusal mid-pass — which the next period or rescan tries, as before (review pass 3, cold read: each
+      // was tried again every turn). Not one set aside, or a statement holds.
+      const retryable = reembedDown === null || (reembedDown === "outage" && !reembedBackoff.skipping(Date.now()));
+      if (REEMBED_SHARE > 0 && claimsFrom !== null && REEMBED_OK && reembedAside === null && !statementHeld.has("reembed") && retryable) {
         const at = reembedClock();
         const ran = at - claimsFrom;
         if (ran >= TURN_FLOOR && at >= turnReadAt) {
@@ -3753,7 +3772,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
               await sleepUnless(POLL * 1000, wake);
               continue;
             }
-            turnReadAt = at + TURN_FLOOR;
+            // Its pool drained: nothing a share left (review pass 3, walkthrough); read again in a turn floor, or a
+            // share past a whole turn, where it was read every floor for the rest of the period (review pass 3, cold read).
+            shareLeft = false;
+            turnReadAt = at + (full ? REEMBED_SHARE : TURN_FLOOR);
           }
         }
       }

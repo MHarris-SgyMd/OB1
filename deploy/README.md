@@ -2580,7 +2580,9 @@ thought(s) left for its next turn …` when re-embed gives way to extraction,
 and `the claim passes have had their turn — 120 s — with N thought(s) waiting
 for re-embed: they wait between thoughts while re-embed runs alone again`
 when it takes its next turn — `caught up` in place of `had its share` or
-`had their turn` when a side hands over sooner (SMD-4384); `budget:`
+`had their turn` when a side hands over sooner, and `re-embed, set down
+earlier in this period (outage), is tried again at the claim passes' turn's
+end` (SMD-4384); `budget:`
 at its start names the session settings in force, and a statement past its
 timeout says `<pass>: a statement passed the pass's statement_timeout (300 s)`
 and `<pass> held until a restart`. Each period begins with the re-derive
@@ -2627,13 +2629,14 @@ its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
 `OB1_SLEEP_REEMBED_SHARE` (0–86400, unset 120: each turn's length as re-embed
 and extraction with consolidation take turns in a period — re-embed alone
-first, at most this long while they have work, then they as long while
+first, at most this long while they have work, then they run as long while
 re-embed has work, waiting between thoughts in its turns as at a live call's
 pause, either side handing over sooner once caught up, after the followers'
 15 s poll — a pause and re-embed's isolation of an outage not counted; a
-re-embed set down in the period is tried again at their turn's end; the period
-ends, as before, once extraction and consolidation drain, and what re-embed
-left begins the next once the brain is quiet. Under a steady inflow of
+re-embed set down in the period for an outage is tried again at their whole
+turn's end; the period ends, as before, once extraction and consolidation
+drain, and what re-embed left, if they drained within a turn floor of its
+giving way, begins the next once the brain is quiet. Under a steady inflow of
 thoughts with no vector — an egress policy keeping captures from a remote
 embedding provider, a slow provider, a bulk import — neither pool drains:
 without the share nothing was extracted, and with a share one way only no

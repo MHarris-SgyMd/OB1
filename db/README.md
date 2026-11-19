@@ -5210,7 +5210,7 @@ bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; wr
 #   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
-#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share with its pool left, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
+#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share, or caught up, with its pool left, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
@@ -5374,7 +5374,8 @@ its pool never drains, since its follower pools every 15 s, and before the
 share it held extraction and consolidation the whole period: extraction ran
 0 of 64 thoughts in 240 s. At its share it gives way after the thought in
 hand, said ("re-embed has had its share"), a model switch's backlog too, but
-only to a claim pass with a claim pending or in hand: on a brain with
+only while a claim pass has work — a claim pending or in hand, or thoughts
+not yet in extraction's pool: on a brain with
 nothing else to do it runs on until its pool drains (review pass 1); nothing
 is set down or backed off. Then the two take turns in the period (review
 pass 1, the maintainer's choice): under an inflow the claim passes' pools
@@ -5387,7 +5388,7 @@ claim passes have had their turn"), and re-embed runs alone again for its
 share; then they go on, consolidation still joined. Either side hands over
 sooner once caught up — re-embed with nothing pending or in hand, only
 thoughts its follower has yet to pool; the claim passes with nothing in hand
-and nothing pending since before the last floor, as each capture is pooled
+and nothing pending since before the last turn floor, as each capture is pooled
 for extraction at once — after a turn floor of the followers' own poll (15
 s), so under an inflow both keep up turn by turn and a vector waits about
 that, not the share (review pass 2, the maintainer's choice; "re-embed has
@@ -5395,13 +5396,15 @@ caught up", "the claim passes have caught up"). The claim passes' work is
 their claims, and on a brain with no extraction key yet — no trigger pools a
 capture until extraction's first pass records it — extraction's pool read
 whole, at most once a turn floor. Each re-embed turn has its own isolation
-cap (below), as a period had, and a re-embed set down in the period is tried
-again at the claim passes' whole turn's end, as a period's start would (review
-pass 2: one set down at a turn's start stayed down while the inflow went on). The period ends as before,
-once the claim passes drain; what re-embed left then begins the next period,
-by the next idle poll's whole read of its own — no poll between reads
-re-embed's claims — re-embed first again; a one-shot run exits 1, its pool
-left. `0` is no share and no turns, re-embed alone until its pool drains, as
+cap (below), as a period had, and a re-embed set down in the period for an
+outage is tried again at the claim passes' whole turn's end, as a period's
+start would — not while SMD-4254's back-off sets such an outage down at once,
+and no other kind (review passes 2 and 3). The period ends as before, once
+the claim passes drain: drained a turn floor or more into their turn,
+re-embed has had a turn first and, with nothing to give way to, drained;
+drained sooner, what re-embed left begins the next period, by the next idle
+poll's whole read of its own — no poll between reads re-embed's claims —
+re-embed first again, and a one-shot run exits 1, its pool left. `0` is no share and no turns, re-embed alone until its pool drains, as
 before. Anything else that
 ends re-embed sets it down for that period — refused (a key, credit, the model not served, the egress policy, a
 refusal mid-pass), its provider not answering — said, on the row (`aside`,
@@ -5410,7 +5413,7 @@ the next period tries it again. An outage that made the thought in hand a
 suspect, or a suspect's alone — as when a thought's call crashes the provider —
 is waited out instead, said, the provider probed every 5 s from the wait's
 start (no doubling, nothing carried from the last wait), up to 2 minutes a wait
-and 4 minutes of isolation a period — a re-embed turn since SMD-4384 — (SMD-4254, the maintainer's choices of
+and 4 minutes of isolation a re-embed turn (a period before SMD-4384; SMD-4254, the maintainer's choices of
 2026-11-18) — the isolation counted from its first such wait's start until its
 suspects settle, the retries' calls and probes between the waits included:
 once the provider answers, re-embed retries the outage's suspects one at a
