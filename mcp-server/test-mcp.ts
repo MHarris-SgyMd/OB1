@@ -871,12 +871,13 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
     `SIGTERM with a tool call running: the stop waits on it, then cuts it, one \`cut\` line naming its key (exit ${code}; ${JSON.stringify(cut)}; ${err.split("\n").filter(Boolean).slice(0, 2).join(" | ").slice(0, 200)})`);
 }
 
-console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): it waits for the rest, then closes each stream with its closing frame, last; a server that holds none stops as before");
+console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): it waits for the rest and closes each stream itself, with its closing frame, after its flush or at its cut; a server that holds none stops as before");
 {
   const counted = { total: 3, oldest: "2026-10-01T00:00:00Z", newest: "2026-10-02T00:00:00Z", types: { idea: 3 }, topics: { rest: 2 }, people: {}, aggregated: 3 };
   const restServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => restApp.fetch(req) });
-  // An entry given this collector sends its spans here, so its stop has a flush before the streams are closed: the
-  // second and third holding entries below. The first has none, and the last two a collector that never answers.
+  // An entry given this collector sends its spans here: the second and third holding entries below, the one whose
+  // drain finishes, with its flush before its streams are closed, and the one that is cut. The first has none, and
+  // the three after them a collector that never answers.
   // The environment's own OTEL_* is set aside, as [8g] does.
   const exported: string[] = [];
   const collector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { if (new URL(req.url).pathname === "/v1/traces") exported.push(await req.text()); return Response.json({}); } });
@@ -938,8 +939,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const plainStopped = await plain.stop();
     assert(plain.up && plainSays === false && plainStopped.code === 0 && !/held open/.test(plainStopped.out), `the entry as it is holds no listen stream, and stops as before (listChanged ${plainSays}; exit ${plainStopped.code}; ${plainStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
     // …and its cut is the one it had: the connections go at the bound. A call of each revision whose work ends 300 ms
-    // after it is not answered then, though a silent collector holds the process a second longer. (Given the new
-    // steps of a stop that closes streams, this entry answered such a call in full after saying it closed it.)
+    // after it is not answered then, though a silent collector holds the process a second longer.
     answer = (n) => (n === "thoughtStats" ? Bun.sleep(1_500).then(() => ok(counted)) : ok({}));
     const plainCutting = await start(false, silent.port!);
     const plainAnswers = [true, false].map((modern) => fetch(plainCutting.url, { method: "POST", headers: requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern }).headers, body: JSON.stringify({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "thought_stats", arguments: {}, ...(modern ? { _meta: ENVELOPE } : {}) } }) })
@@ -1092,7 +1092,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const lateGot = [await earlyModern.got, await earlyLegacy.got];
     const lateText = await lateStream.text;
     const lateCut = lateStopped.lines.filter((l) => l.outcome === "cut");
-    assert(lateEntry.up && lateStopped.code === 0 && lateStopped.ms > 1_500 && lateStream.endedAt() - lateAt > 1_500 && /telemetry not all sent within \d+ ms; 1 held stream closed; exit 0/.test(lateStopped.out) && lateText.includes('"resultType":"complete"'),
+    assert(lateEntry.up && lateStopped.code === 0 && lateStopped.ms > 1_500 && lateStream.endedAt() - lateAt > 1_500 && Number(/telemetry not all sent within (\d+) ms/.exec(lateStopped.out)?.[1]) > 1_700 && Number(/telemetry not all sent within (\d+) ms/.exec(lateStopped.out)?.[1]) <= 1_800 && /telemetry not all sent within \d+ ms; 1 held stream closed; exit 0/.test(lateStopped.out) && lateText.includes('"resultType":"complete"'),
       `a stop whose flush a silent collector holds for its whole bound of 1.8 s: the stream is closed after the flush has run it out, not before, its frame read, exit 0 (exit ${lateStopped.code} in ${Math.round(lateStopped.ms)} ms, the stream ended at ${Math.round(lateStream.endedAt() - lateAt)} ms; ${lateStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     assert(lateGot.every((x) => x === "") && lateAsked === 0 && lateCut.length === 2 && lateCut.every((l) => l.status === 0) && !lateStopped.lines.some((l) => l.status === 500 || l.outcome === "error" || l.outcome === "unrun") && !/has been closed|route failed/.test(lateStopped.err),
       `…and a request that is whole only then, its headers half sent at the signal, in either revision: not served and not answered, the core not asked, its line \`cut\`, and no 500 from a handler already closed (${JSON.stringify(lateGot.map((x) => x.slice(0, 40)))}; asked ${lateAsked}; ${JSON.stringify(lateStopped.lines.filter((l) => l.rpc !== "subscriptions/listen").map((l) => [l.outcome, l.status]))}; ${lateStopped.err.split("\n").filter((l) => /closed|failed/.test(l)).join(" | ").slice(0, 200)})`);
@@ -1544,11 +1544,11 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   const a2 = reading(await ask("write-raw"));
   await a1.read(100);
   await a2.read(100);
-  const overName = await ask("write-raw");
-  const overNameBody = await refusalOf(overName);
-  assert(overName.status === 200 && overNameBody.error?.code === -32603 && /this caller holds as many/.test(overNameBody.error?.message ?? "") && overNameBody.id !== undefined && overNameBody.id !== null && streams.count === 2
-    && last().rpc === "subscriptions/listen" && last().outcome === "refused" && last().code === "LISTEN_CALLER_FULL" && last().agent === "laptop" && last().status === 200 && overName.headers.get("access-control-allow-origin") === "*",
-    `a third stream under a name that may hold two: refused, a 200 carrying -32603 and the request's id, its line \`refused\` LISTEN_CALLER_FULL (${overName.status} ${JSON.stringify(overNameBody)}; open ${streams.count}; ${JSON.stringify(last())})`);
+  const overCaller = await ask("write-raw");
+  const overCallerBody = await refusalOf(overCaller);
+  assert(overCaller.status === 200 && overCallerBody.error?.code === -32603 && /this caller holds as many/.test(overCallerBody.error?.message ?? "") && overCallerBody.id !== undefined && overCallerBody.id !== null && streams.count === 2
+    && last().rpc === "subscriptions/listen" && last().outcome === "refused" && last().code === "LISTEN_CALLER_FULL" && last().agent === "laptop" && last().status === 200 && overCaller.headers.get("access-control-allow-origin") === "*",
+    `a third stream under a name that may hold two: refused, a 200 carrying -32603 and the request's id, its line \`refused\` LISTEN_CALLER_FULL (${overCaller.status} ${JSON.stringify(overCallerBody)}; open ${streams.count}; ${JSON.stringify(last())})`);
   // A refusal is the end of its request: its client going afterwards writes nothing more.
   const refusedThenGone = new AbortController();
   await refusalOf(await ask("write-raw", undefined, { signal: refusedThenGone.signal }));
@@ -1757,13 +1757,15 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
     const begunLate = await unanswered(callOn(stoppable, true));
     assert(begunLate === "unanswered" && asked === 0 && lines.length === linesAtCut + 1 && last().outcome === "cut", `a request the cut finds not yet at its transport is not begun: no answer, the core not asked, its line \`cut\` (${begunLate}; asked ${asked}; ${JSON.stringify(last())})`);
     // After the drain's end, whatever arrives: not served, a keyed request's line `cut` with the status of one never answered, a liveness probe's none.
+    // With the cut's flag down, so that what holds each request back is this gate and not the guard before a transport.
+    stopping.cut = false;
     stopping.drainEnded = true;
-    const linesAtOver = lines.length;
+    const linesAtDrainEnd = lines.length;
     const lateCall = await unanswered(callOn(stoppable, false));
     const lateList = await unanswered(stoppable.fetch(requestFor("tools/list", {}, "write-raw", { modern: true })));
-    const lateLines = lines.slice(linesAtOver);
+    const lateLines = lines.slice(linesAtDrainEnd);
     const lateProbe = await unanswered(stoppable.fetch(new Request("http://mcp/health")));
-    assert(lateCall === "unanswered" && lateList === "unanswered" && lateProbe === "unanswered" && asked === 0 && lateLines.length === 2 && lateLines.every((l) => l.outcome === "cut" && l.status === 0) && lines.length === linesAtOver + 2,
+    assert(lateCall === "unanswered" && lateList === "unanswered" && lateProbe === "unanswered" && asked === 0 && lateLines.length === 2 && lateLines.every((l) => l.outcome === "cut" && l.status === 0) && lines.length === linesAtDrainEnd + 2,
       `a request that arrives after the stop's drain has ended is not served and not answered: its line \`cut\`, its status 0; a probe the same, with no line (${lateCall}, ${lateList}, ${lateProbe}; asked ${asked}; ${JSON.stringify(lateLines.map((l) => [l.outcome, l.status]))})`);
     // A listen whose client goes after its place is taken and before its stream is handed over (here as the caller's
     // server is built, which only a suite can time): its place is given back at once, though nothing in process

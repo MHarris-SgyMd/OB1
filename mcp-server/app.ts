@@ -72,8 +72,8 @@ export interface McpDeps {
   /**
    * Set by the entry's stop. `cut`: when it cuts what is still in flight, so a request it ends then is `cut`, said
    * by the stop's line, not `abandoned`. `drainEnded`: when its drain has ended, finished or cut, on a server that
-   * holds listen streams and so keeps its connections open after that to close them last (SMD-4347): a request
-   * that arrives then is not served.
+   * holds listen streams (SMD-4347). Where the drain finished, such a server keeps its connections open through
+   * the flush, to close its streams after it; a request that arrives from then is not served.
    */
   stop?: { cut: boolean; drainEnded?: boolean };
   /**
@@ -524,26 +524,26 @@ export function createMcpApp(deps: McpDeps): Hono {
 
   // The listen streams this server holds open (SMD-4347), where it holds any: how many are open (`listen.count`, for
   // the entry's stop), and how many under each caller's name. The SDK bounds the streams of the whole server and
-  // nothing else, so one caller could take every place; the route gives each name its share before the handler is
-  // asked, and gives the place back when the stream ends, however it ends.
+  // nothing else, so one caller could take every place; the route gives each caller its share before the handler
+  // is asked, and gives the place back when the stream ends, however it ends.
   const listen = deps.listen?.hold ? deps.listen : null;
   const listening = new Map<string, number>();
-  /** A place for one more stream under this name, to be given back once; or which bound refused it. */
-  const placeFor = (held: ListenStreams, name: string): { release: () => void } | { full: "server" | "caller" } => {
-    if (held.count >= held.max) return { full: "server" };
-    const mine = listening.get(name) ?? 0;
-    if (mine >= held.perCaller) return { full: "caller" };
-    held.count++;
-    listening.set(name, mine + 1);
+  /** A place for one more stream under this caller's name, to be given back once; or which bound refused it. */
+  const placeFor = (streams: ListenStreams, caller: string): { release: () => void } | { full: "server" | "caller" } => {
+    if (streams.count >= streams.max) return { full: "server" };
+    const mine = listening.get(caller) ?? 0;
+    if (mine >= streams.perCaller) return { full: "caller" };
+    streams.count++;
+    listening.set(caller, mine + 1);
     let released = false;
     return {
       release: () => {
         if (released) return;
         released = true;
-        held.count--;
-        const left = (listening.get(name) ?? 1) - 1;
-        if (left > 0) listening.set(name, left);
-        else listening.delete(name);
+        streams.count--;
+        const left = (listening.get(caller) ?? 1) - 1;
+        if (left > 0) listening.set(caller, left);
+        else listening.delete(caller);
       },
     };
   };
@@ -551,10 +551,14 @@ export function createMcpApp(deps: McpDeps): Hono {
    * Whether the stop has cut what is in flight, on a server that holds listen streams. Such a stop closes the
    * streams before the connections, through the SDK's handler, so for a moment (milliseconds as a rule, 200 ms
    * at most) the handler is closed and the connections are not: a tool call's answer must not end in it, and
-   * nothing is begun in it. The connections' close, which follows, is the cut for every other answer, as ever.
+   * no request at `/mcp` is begun in it. The connections' close, which follows, is the cut for everything else, as
+   * ever: another route's answer that is ready in that moment still leaves.
    */
   const cutNow = () => listen !== null && deps.stop?.cut === true;
-  /** Whether the stop's drain has ended, on such a server: what arrives from then is not served. An app that holds no stream heeds neither flag. */
+  /**
+   * Whether the stop's drain has ended, on such a server: what arrives from then is not served. An app that holds
+   * no stream has neither this gate nor the one above: for it `cut` only names a request the stop cut, as it did.
+   */
   const drainEndedNow = () => listen !== null && deps.stop?.drainEnded === true;
 
   // The SDK's handler for the 2026-07-28 revision (SMD-4345), one for the app. It builds a server for each request
@@ -577,7 +581,7 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!build) throw new Error("a 2026-07-28 request reached the SDK's handler with no caller");
     return build();
   }, { legacy: "reject", responseMode: "sse", onerror: (err) => { const said = handlerSaid.getStore(); if (said) said.err ??= err; }, ...(listen ? { maxSubscriptions: listen.max } : {}) });
-  // The entry's stop ends the streams through this, last (listen-streams.ts): the handler's own close, which sends each its closing frame.
+  // The entry's stop ends the streams through this, after its flush or at its cut (listen-streams.ts): the handler's own close, which sends each its closing frame.
   if (listen) listen.close = () => modern.close();
   /** What the handler is given for one request: no token and no identity of the SDK's, only the function that builds the caller's server. */
   const forRequest = (build: () => McpServer): AuthInfo => ({ token: "", clientId: "", scopes: [], extra: { build } });
@@ -590,10 +594,11 @@ export function createMcpApp(deps: McpDeps): Hono {
   app.use("*", async (c, next) => {
     const probe = (c.req.method === "GET" || c.req.method === "HEAD") && HEALTH_PATH.test(c.req.path)
       && !c.req.path.startsWith("/.well-known/") && presentedKeys(c.req.raw).length === 0;
-    // Arrived after the stop's drain ended, on a connection the runtime kept through its stop with no whole
-    // request on it (its headers half sent at the signal; on macOS, one never used): the stop waits on nothing
-    // more, and its handler is about to be closed. Not served and not answered: its line `cut`, and its connection
-    // goes with the process, as one that arrived a moment later would find it.
+    // Arrived after the stop's drain ended: on a connection the runtime kept through its stop with no whole
+    // request on it (its headers half sent at the signal; on macOS, one never used), or on any connection to an
+    // entry signalled before its first request, whose listener stays open. The stop waits on nothing more, and its
+    // handler is about to be closed. Not served and not answered: its line `cut`, and its connection goes with the
+    // process, as one that arrived a moment later would find it.
     if (drainEndedNow()) {
       if (!probe) beginRequest("mcp", c.req.raw).end({ outcome: "cut" });
       return new Promise<Response>(() => {});
