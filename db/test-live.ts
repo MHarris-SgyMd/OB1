@@ -150,17 +150,20 @@ if (!URL_) {
  * signal waits, went to sweep (~141 s of live step on main's runs to
  * 27ea5b19) rather than the rest, by then the run's longest cell (~562 s).
  * SMD-4254's [38p], a thought crashing re-embed's provider under the
- * scheduler, went to long beside [38r], whose scaffold it shares, rather than
- * the rest, still the longest.
+ * scheduler, went to long beside [38r] at first; its review passes took it to
+ * ~220 s, and with [9f] ~190 s on main's CI long's live step passed 600 s
+ * under ci-parity's load, so it runs in sweep (~376 s here with it, against
+ * long's ~450 and the rest's ~600 on CI), the sleep scaffold being the
+ * module's, not [38r]'s.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
   sleep: ["5d", "10g", "37b", "38"],
-  long: ["9", "9f", "10e", "17", "38r", "38p", "38b", "39"],
+  long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
   extract: ["10f", "10h"],
-  sweep: ["38s", "50", "51"],
+  sweep: ["38s", "50", "51", "38p"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
