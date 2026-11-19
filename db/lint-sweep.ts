@@ -185,7 +185,7 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { SQL } from "bun";
 import { commandLine, consoleWriter, type Writer } from "./cli.ts";
-import { closeThenExit, databaseUrl, openSql, reachedDatabaseRefusal } from "./connect.ts";
+import { closeThenExit, databaseUrl, LOOPBACK_HOSTS, openSql, reachedDatabaseRefusal } from "./connect.ts";
 import { heldByPatterns, heldTiers, sensitivityColumn, sensitivityOf, tierExcluded } from "./sensitivity.ts";
 import { classifyError, egressDescription, egressRefusal, TRANSIENT_PAUSES_MS, workerIdentity } from "./worker-bootstrap.ts";
 import { ProviderError, providerCallPrepared, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
@@ -705,19 +705,22 @@ const skipped3 = (o: Tier3Options, reason: string, counts: Partial<Tier3> = {}, 
 });
 
 /**
- * Whether a base URL names this machine or a private network: loopback, RFC 1918 and link-local IPv4, IPv6 loopback and
- * unique-local, `localhost`, `*.local`, and a single-label name (a compose service, `ollama`). A warning's test, never
- * the gate's: OB1_LLM_LOCAL stays a declaration (embed.ts reads nothing off the address).
+ * Whether a base URL names this machine or a private network: connect.ts's loopback hosts (its rule is the one), the
+ * rest of 127/8, RFC 1918 and link-local IPv4, IPv6 unique-local and link-local, `*.local`, `*.internal`, and a
+ * single-label name (a compose service, `ollama`). A warning's test, never the gate's: OB1_LLM_LOCAL stays a
+ * declaration (embed.ts reads nothing off the address).
  */
 export function privateHost(base: string): boolean {
-  let host: string;
+  let bracketed: string;
   try {
-    host = new URL(base).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    bracketed = new URL(base).hostname.toLowerCase();
   } catch {
     return false;
   }
-  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || !host.includes(".") && !host.includes(":")) return true;
-  if (host === "::1" || /^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) return true;
+  if (LOOPBACK_HOSTS.has(bracketed)) return true;
+  const host = bracketed.replace(/^\[|\]$/g, "");
+  if (host.endsWith(".local") || host.endsWith(".internal") || !host.includes(".") && !host.includes(":")) return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(host) || /^fe80:/.test(host)) return true;
   const v4 = /^(\d+)\.(\d+)\.\d+\.\d+$/.exec(host);
   if (!v4) return false;
   const [a, b] = [Number(v4[1]), Number(v4[2])];
