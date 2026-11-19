@@ -55,8 +55,8 @@ servers:
     slots: 3
     reserve: 1
     ps: http://host.containers.internal:11434/api/ps
-    # stay_s: 60
     # ps: http://host.docker.internal:11434/api/ps   # under Docker Engine on Linux
+    # stay_s: 60
   # The decide tier both brains reach (jev/h2o/README.md), one call at a time:
   # h2o:
   #   bases:

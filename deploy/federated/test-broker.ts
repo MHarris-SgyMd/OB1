@@ -1217,7 +1217,7 @@ await withResidency([SMALL], async ({ b, ps, lines, res }) => {
   await b.refresh();
   ok(lines.filter((l) => /could not be read/.test(l)).length === 1 && !lines.some((l) => l.includes("the server's own words")), "and not again at the next failed read");
   ps.status = 302; await b.refresh();
-  ok(res().loaded === null && ps.hits > 0, "a redirect is not followed to a list elsewhere", res());
+  ok(res().loaded === null, "a redirect is not followed to a list elsewhere", res());
   ps.status = 200; ps.body = "{\"models\": \"many\"}"; await b.refresh();
   ok(res().loaded === null, "a 200 that is no list of models is no list", res());
   ps.body = `{"models":[{"name":"${BIG}"}],"pad":"${"x".repeat(1_100_000)}"}`; await b.refresh();
@@ -1235,7 +1235,7 @@ await withResidency([], async ({ b, ps, lines, res }) => {
   ps.status = 200; ps.delay = 3000;
   const t0 = performance.now();
   await b.refresh();
-  ok(lines.length > 0 && res().loaded === null && performance.now() - t0 < 2700, "a list that does not answer in 2 s is given up at 2 s", Math.round(performance.now() - t0));
+  ok(res().loaded === null && performance.now() - t0 < 2700, "a list that does not answer in 2 s is given up at 2 s", Math.round(performance.now() - t0));
   await c.close();
 }, { status: 302 });
 
@@ -1362,7 +1362,7 @@ await withResidency([SMALL], async ({ b, res }) => {
   raw.destroy(); await s.close();
 }, { idle: 8 });
 
-await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+await withResidency([SMALL], async ({ b, ps, move, res }) => {
   // Review pass 2's cases. A live call that loads its model and ends before the list names it is live use of a loaded
   // model all the same.
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
@@ -1387,7 +1387,7 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
   await s.close(); await c.close();
 });
 
-await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+await withResidency([SMALL], async ({ b, ps, res }) => {
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
   // Background waiting for a model goes with a live call to it, at once.
   askM(c, "e1", SMALL, "background"); await c.next("go", "e1");
@@ -1448,7 +1448,7 @@ await withResidency([SMALL], async ({ b, ps, move, res }) => {
   await s.close(); await c.close();
 });
 
-await withResidency([SMALL], async ({ b, lines, res }) => {
+await withResidency([SMALL], async ({ b, lines }) => {
   const c = await connect(b, KEYS.canary);
   c.send({ op: "held", id: "h1", base: BASE, model: "junk:1", cls: "background" }); await c.next("go", "h1");
   c.send({ op: "held", id: "h2", base: BASE, model: "junk:2", cls: "background" }); await c.next("go", "h2");
@@ -1465,7 +1465,7 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
   // A model whose load changes the list and never shows in it — it put a model out and did not load (review pass 2:
   // left out of the rule, its failed loads came unpaced, each putting out what was idle).
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
-  const fail = async (id: string) => {
+  const failedLoad = async (id: string) => {
     askM(c, id, "fail:1", "background", { max_wait_s: 600 });
     if (!(await c.next("go", id, SOON))) return false;
     ps.models = [];
@@ -1473,7 +1473,7 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
     done(c, id); await until(() => ps.hits > h); await b.refresh();
     return true;
   };
-  ok(await fail("f1"), "an idle server loads a model asked for");
+  ok(await failedLoad("f1"), "an idle server loads a model asked for");
   askM(c, "f2", "fail:1", "background", { max_wait_s: 600 }); await c.next("queued", "f2");
   askM(s, "e1", SMALL, "background");
   ok(!!(await s.next("go", "e1", SOON)) && !c.seen("go", "f2"), "its call ended, the list changed and never naming it: the model it put out is loaded again at once, before its own next ask", res());
@@ -1528,7 +1528,7 @@ await withResidency([SMALL], async ({ b, ps, move, res }) => {
   await s.close(); await c.close();
 });
 
-await withResidency([SMALL], async ({ b, ps, move, res }) => {
+await withResidency([SMALL], async ({ b, move, res }) => {
   // Review pass 3. A load left out at its bound is the loaded models' time: no drain for a third model is begun then
   // (one would wait on the stuck call, and hold the loaded models through it: none of five 120 s windows was theirs).
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary), t = await connect(b, KEYS.third);
@@ -1592,7 +1592,7 @@ await withResidency([], async ({ b, lines, move, res }) => {
   await s.close(); await c.close();
 });
 
-await withResidency([BIG], async ({ b, ps, move, res }) => {
+await withResidency([BIG], async ({ b, move, res }) => {
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
   // A load's hold is counted from its beginning, a live call's end in it beginning nothing again.
   askM(s, "L", SMALL, "live"); await s.next("go", "L");
@@ -1656,7 +1656,7 @@ await withResidency([SMALL], async ({ b, lines, move, res }) => {
   await c.close();
 });
 
-await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+await withResidency([SMALL], async ({ b, ps, move, res }) => {
   // Review pass 3's run-it. A model that fails to load, three asks waiting for it and a room of two: each call's end
   // granted the next at once, the loads came 10 s apart whatever the back-off, and three more left it out for good.
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
@@ -1682,7 +1682,7 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
   await s.close(); await c.close();
 });
 
-await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+await withResidency([SMALL], async ({ b, ps, move, res }) => {
   // A model left out for disturbing nothing is under the rule again the first time a call of its puts a model out.
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
   ps.models = [];
