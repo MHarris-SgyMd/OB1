@@ -22833,7 +22833,9 @@ if (want("26")) {
         ('zq3 unread', '{}', now() - interval '46 minutes'),
         ('zq3 unread: no date at all, long enough', '{}', NULL)`);
       const idOf = new Map(((await sql`SELECT id::text AS id, content FROM thoughts`) as { id: string; content: string }[]).map((r) => [r.content, r.id]));
-      let mode: "answer" | "prose" | "number" | "refuse" | "refs" | "flaky" = "answer";
+      let mode: "answer" | "prose" | "number" | "refuse" | "refs" | "flaky" | "cut" = "answer";
+      // Each request's body, for its budget and reasoning fields.
+      const bodies: Record<string, unknown>[] = [];
       // Run once, as the first call arrives: what a session does to the brain while a sweep's calls are out.
       let onCall: (() => Promise<void>) | null = null;
       const prompts: string[] = [];
@@ -22842,6 +22844,7 @@ if (want("26")) {
         hostname: "127.0.0.1",
         async fetch(req) {
           const body = (await req.json()) as { messages?: { content?: string }[] };
+          bodies.push(body as Record<string, unknown>);
           prompts.push(String(body.messages?.at(-1)?.content ?? ""));
           if (onCall) {
             const act = onCall;
@@ -22851,6 +22854,7 @@ if (want("26")) {
           // A provider's error body that would forge report lines: carriage returns are line ends in markdown.
           if (mode === "refuse") return new Response(`bad request\r# zq3 forged heading\r---\r**Safety:** zq3 forged <img src=x> [x](javascript:x) ${String.fromCharCode(27)}[31m`, { status: 400 });
           if (mode === "number") return Response.json({ choices: [{ message: { content: 7 } }] });
+          if (mode === "cut") return Response.json({ choices: [{ message: { content: '{"contradictions": [{"refs": ["t1", "t2"], "issue": "cut sh' }, finish_reason: "length" }] });
           // Transient once: a 503, then the answer.
           if (mode === "flaky") {
             mode = "answer";
@@ -22860,6 +22864,7 @@ if (want("26")) {
             return Response.json({ choices: [{ message: { content: JSON.stringify({ stale_facts: [
               { refs: [2], issue: "zq3 two" }, { refs: ["3"], issue: "zq3 three" }, { refs: ["T4"], issue: "zq3 four" },
               { refs: [" t5 "], issue: "zq3 five" }, { thought_ids: ["t6"], issue: "zq3 six" }, { refs: ["t7"], issue: 7 }, { refs: ["t8"], issue: "y".repeat(300) },
+              { refs: ["t9"], issue: "zq3 t9 restates t10" },
             ] }) } }] });
           }
           const content = mode === "prose" ? "I could not find any issues worth naming."
@@ -22886,7 +22891,8 @@ if (want("26")) {
         // Call 1's t1 and t2 are the two newest of the release train, its t2 stale too (2 and "t2" one thought); call 2's
         // t1 is the 21st. t77 and t99 name none of a batch: the orphan is dropped, and so is the item that is no object.
         const first = (i: number) => idOf.get(`zq3 thought ${i} on the release train${i <= 12 ? " zq3-public" : i <= 16 ? " zq3-few" : ""}`)!;
-        const contradiction = (a: number, b: number) => new RegExp(`^- ${first(a)}, ${first(b)} — zq3 iconflict/i x z{282}… → merge them$`, "m");
+        const DAY = " \\(\\d{4}-\\d\\d-\\d\\d\\)";
+        const contradiction = (a: number, b: number) => new RegExp(`^- ${first(a)}${DAY}, ${first(b)}${DAY} — zq3 iconflict/i x z{282}… → merge them$`, "m");
         assert(allowed.code === 0 && prompts.length - from === 2 && sent.length === 30 && sent.every((r) => r.content.startsWith("zq3 thought "))
                && held.every((c) => !prompts.slice(from).some((p) => p.includes(c.slice(0, 30)))) && !prompts.slice(from).some((p) => p.includes("hunter22"))
                && prompts[from].includes(`Today: ${new Date().toISOString().slice(0, 10)}`) && sent[0].ref === "t1" && sent[20].ref === "t1"
@@ -22895,7 +22901,8 @@ if (want("26")) {
                && !/## Tier 1|## Tier 2/.test(t3Text) && /Read \(dated, the last 365 days, 20 characters or more, newest first, until the sample filled or the window ended\): \*\*38\*\*/.test(t3Part)
                && /sensitivity patterns: \*\*4\*\*/.test(t3Part) && /egress policy: \*\*4\*\*/.test(t3Part) && /when read again just before their call: \*\*0\*\*/.test(t3Part)
                && contradiction(1, 2).test(t3Part) && contradiction(21, 22).test(t3Part) && /### Contradictions \(2\)/.test(t3Part)
-               && new RegExp(`^- ${first(2)} — zq3 old news$`, "m").test(t3Part) && new RegExp(`^- ${first(22)} — zq3 old news$`, "m").test(t3Part)
+               && new RegExp(`^- ${first(2)}${DAY} — zq3 old news$`, "m").test(t3Part) && new RegExp(`^- ${first(22)}${DAY} — zq3 old news$`, "m").test(t3Part)
+               && (bodies.at(-1) as { max_tokens?: number }).max_tokens === 4096
                && /### Orphans \(0\)/.test(t3Part) && /\*\*4\*\* finding\(s\) dropped/.test(t3Part),
           `…Tier 3 under allow with two deny terms: 38 of the window read (not the old, short or undated), the SSN, the password past 400 characters, the restricted and personal keys held back, the health topic and the marker in the text, in a tag alone and past the 400 characters sent refused by the gate, 30 sent in a batch of 20 and one of 10 with today's date; each ref mapped to its batch's thought, a repeated ref once, the model's words made safe and cut at 300, the refs naming none and the item no object dropped (exit ${allowed.code}; ${prompts.length - from} calls; ${allowed.stdout.split("\n").filter((l) => l.startsWith("[tier 3]")).join(" / ")}; ${allowed.stderr.trim().split("\n").pop()})`);
 
@@ -22964,9 +22971,9 @@ if (want("26")) {
                && numeric.code === 0 && /20 sent in 1 call\(s\): 0 finding\(s\), 1 answer\(s\) not JSON/.test(numeric.stdout)
                && wide.length < 2000 && wideRow.type.length === 100 && wideRow.topics.length === 5 && wideRow.topics.every((t) => t.length === 100) && wideRow.tags[0].length === 100
                && failed.code === 1 && prompts.length - from === 1 && /## Tier 1 — thoughts/.test(failedText) && /## Tier 2 — the entity graph/.test(failedText)
-               && /\*Stopped: call 1 of 2: .*400/.test(failedText) && /\*\*20\*\* in \*\*1\*\* call\(s\), a failed one's included/.test(failedText)
+               && /\*Stopped: batch 1 of 2's call: .*400/.test(failedText) && /\*\*20\*\* in \*\*1\*\* call\(s\), a failed one's included/.test(failedText)
                && !/^# zq3 forged/m.test(failedText) && !/\r/.test(failedText) && !/<img|\]\(javascript/.test(failedText) && !failed.stderr.includes(String.fromCharCode(27))
-               && /lint-sweep: Tier 3 stopped — call 1 of 2: .*The report was written with tiers 1 and 2 and the findings before it\./.test(failed.stderr),
+               && /lint-sweep: Tier 3 stopped — batch 1 of 2's call: .*The report was written with tiers 1 and 2 and the findings before it\./.test(failed.stderr),
           `…an answer that is no JSON object, or no text, loses its batch, counted; a type, topics and tags each cut to 100 characters; a refused call (400, not retried) stops the tier: every tier's report written, the batch it dialled counted as sent, the provider's body neither a heading, a link, HTML nor an escape, exit 1 (exit ${prose.code}, ${numeric.code}, ${failed.code}; ${wide.length}; ${failed.stderr.trim().split("\n").pop()})`);
 
         // A session deletes one thought and marks another restricted while the first call is out: the second batch,
@@ -23001,13 +23008,13 @@ if (want("26")) {
         const spelledRows = sentRows(from) as unknown as { ref: string; date: string; content: string }[];
         const spelledText = read(join(scratch, "t3rf.md"));
         mode = "answer";
-        const refLine = (i: number, issue: string) => new RegExp(`^- ${first(i)} — ${issue}$`, "m").test(spelledText);
+        const refLine = (i: number, issue: string) => new RegExp(`^- ${first(i)}${DAY} — ${issue}$`, "m").test(spelledText);
         assert(edited.code === 0 && editedSecond.includes("zq3 thought 24, edited") && !editedSecond.includes("zq3 thought 24 on the")
                && emptied.code === 0 && emptiedCalls === 1 && /1 gone or held back before their call, 20 sent in 1 call\(s\)/.test(emptied.stdout)
                && spelled.code === 0 && /\[tier 3\] model zq3-model;/.test(spelled.stdout) && spelledRows.every((r) => /^\d{4}-\d\d-\d\d$/.test(r.date))
                && refLine(2, "zq3 two") && refLine(3, "zq3 three") && refLine(4, "zq3 four") && refLine(5, "zq3 five") && refLine(6, "zq3 six")
-               && refLine(7, "\\(no issue given\\)") && refLine(8, "y{300}") && /### Stale facts \(7\)/.test(spelledText),
-          `…an edited thought goes as it is now; a batch its second read empties makes no call; refs as 2, "3", "T4", " t5 " and thought_ids each map to their thought, an issue that is no text reads as none and one of 300 characters is not cut; --model names the model; each row carries its date (exit ${edited.code}, ${emptied.code}, ${spelled.code}; ${emptiedCalls} call(s); ${(spelledText.split("### Stale facts")[1] ?? "").slice(0, 200)})`);
+               && refLine(7, "\\(no issue given\\)") && refLine(8, "y{300}") && refLine(9, `zq3 ${first(9).slice(0, 8)} restates ${first(10).slice(0, 8)}`) && /### Stale facts \(8\)/.test(spelledText),
+          `…an edited thought goes as it is now; a batch its second read empties makes no call; refs as 2, "3", "T4", " t5 " and thought_ids each map to their thought, an issue that is no text reads as none and one of 300 characters is not cut, a ref in the model's words becomes its thought's id cut to 8; --model names the model; each row carries its date (exit ${edited.code}, ${emptied.code}, ${spelled.code}; ${emptiedCalls} call(s); ${(spelledText.split("### Stale facts")[1] ?? "").slice(0, 200)})`);
 
         // Late thoughts, the newest: a personal pattern with no key (held unless --include-personal), a deny marker in
         // the type alone (refused), exactly 20 characters trimmed (read), and three never read: an infinite date, a
@@ -23026,13 +23033,20 @@ if (want("26")) {
         const latePersonalSent = sentRows(from).map((r) => r.content);
         // A worker key the server would refuse, once a thought could leave: exit 2, no report.
         const badKey = await lint(t3Env({ ...ALLOW, OB1_WORKER_KEY: "d".repeat(64), MCP_ACCESS_KEYS: byActor.MCP_ACCESS_KEYS }), "--tier", "3", "--report", join(scratch, "t3bk.md"));
+        const reasoning = await lint(t3Env({ ...ALLOW, OB1_METADATA_REASONING: "on" }), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3rs.md"));
+        const reasoningBody = bodies.at(-1) as { max_tokens?: number };
+        mode = "cut";
+        const cutRun = await lint(t3Env(ALLOW), "--tier", "3", "--max-llm-calls", "1", "--report", join(scratch, "t3cut.md"));
+        mode = "answer";
         const overSample = await lint(t3Env(ALLOW), "--tier", "3", "--sample-size", "1001");
         const overDays = await lint(t3Env(ALLOW), "--tier", "3", "--days", "36501");
         assert(late.code === 0 && lateSent.includes("zq3 late twentyxxxxx") && !lateSent.some((c) => /took 20 mg|typed, long|infinitely new|zq3 pad/.test(c))
                && latePersonal.code === 0 && latePersonalSent.some((c) => c.includes("took 20 mg")) && !latePersonalSent.some((c) => /typed, long/.test(c))
                && badKey.code === 2 && /not one of the keys in MCP_ACCESS_KEYS/.test(badKey.stderr) && !existsSync(join(scratch, "t3bk.md"))
-               && overSample.code === 2 && /sample-size/.test(overSample.stderr) && overDays.code === 2 && /days/.test(overDays.stderr),
-          `…a personal pattern with no key held unless --include-personal, a deny marker in the type alone refused, 20 characters exactly read, an infinite date and padded short text not; a worker key the server would refuse refuses the run, exit 2, no report; --sample-size 1001 and --days 36501 refused (exit ${late.code}, ${latePersonal.code}, ${badKey.code}, ${overSample.code}, ${overDays.code}; sent ${lateSent.slice(0, 3).join(" | ")})`);
+               && overSample.code === 2 && /sample-size/.test(overSample.stderr) && overDays.code === 2 && /days/.test(overDays.stderr)
+               && reasoning.code === 0 && !("max_tokens" in reasoningBody)
+               && cutRun.code === 0 && /1 answer\(s\) not JSON \(1 cut at the answer's budget\)/.test(cutRun.stdout) && /\(1 cut at the answer's budget, 4096 tokens with reasoning off\)/.test(read(join(scratch, "t3cut.md"))),
+          `…a personal pattern with no key held unless --include-personal, a deny marker in the type alone refused, 20 characters exactly read, an infinite date and padded short text not; a worker key the server would refuse refuses the run, exit 2, no report; --sample-size 1001 and --days 36501 refused; with reasoning on no answer budget is sent (it cut every real call), and an answer cut at the budget says so (exit ${late.code}, ${latePersonal.code}, ${badKey.code}, ${overSample.code}, ${overDays.code}; sent ${lateSent.slice(0, 3).join(" | ")})`);
 
         // The enhanced-thoughts column, added for these runs alone and dropped after: a thought its column alone marks
         // restricted is held back, before the run and while the first call is out.
@@ -23066,10 +23080,12 @@ if (want("26")) {
           const capCode = await lintRun({ sql: one, tier: "3", report: join(scratch, "t3cap.md"), tier3: { ...o3, readMax: 7 }, writer });
           const capLine = lines.filter((l) => l.startsWith("[tier 3]")).join(" / ");
           lines.length = 0;
+          let fetches = 0;
+          // The second fetch fails on the server: the first's counts are kept.
           const failFetch = (tx: SQL) => new Proxy(tx, {
             get(t, k) {
               const v = (t as unknown as Record<string | symbol, unknown>)[k];
-              if (k === "unsafe") return (q: string, params?: unknown[]) => t.unsafe(/^FETCH /.test(q) ? "SELECT 1 / 0" : q, params);
+              if (k === "unsafe") return (q: string, params?: unknown[]) => t.unsafe(/^FETCH \d+ FROM/.test(q) && ++fetches === 2 ? "SELECT 1 / 0" : q, params);
               return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(t) : v;
             },
           });
@@ -23085,10 +23101,29 @@ if (want("26")) {
           const recheckText = read(join(scratch, "t3rc.md"));
           lines.length = 0;
           mode = "flaky";
+          // The thought deleted while the 503 is out is not in the retry: each attempt reads its batch again.
+          onCall = async () => { await sql`DELETE FROM thoughts WHERE content = 'zq3 late twentyxxxxx'`; };
           const flakyFrom = prompts.length;
           const flakyCode = await lintRun({ sql: one, tier: "3", report: join(scratch, "t3fl.md"), tier3: { ...o3, cfg: allowAll, maxCalls: 1, pausesMs: [10] }, writer });
           const flakyLines = lines.join(" / ");
           const flakyCalls = prompts.length - flakyFrom;
+          const retryDropped = (prompts[flakyFrom] ?? "").includes("zq3 late twenty") && !(prompts[flakyFrom + 1] ?? "").includes("zq3 late twenty");
+          // The cap: a read of the whole window counts W rows; capped at W it was not cut, at W - 1 it was.
+          const none = resolveEmbedConfig({ OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_EGRESS_ALLOW: "marker:zq3-none" } as unknown as Parameters<typeof resolveEmbedConfig>[0]);
+          const readOf = async (readMax?: number) => {
+            lines.length = 0;
+            await lintRun({ sql: one, tier: "3", report: join(scratch, "t3w.md"), tier3: { ...o3, cfg: none, ...(readMax ? { readMax } : {}) }, writer });
+            return lines.find((l) => l.startsWith("[tier 3] skipped")) ?? "";
+          };
+          const whole = await readOf();
+          const window = Number(/of (\d+) read/.exec(whole)?.[1] ?? 0);
+          const atWindow = await readOf(window);
+          const belowWindow = await readOf(window - 1);
+          const { readTier3Answer } = await import("./lint-sweep.ts");
+          const b5 = Array.from({ length: 5 }, (_, i) => ({ id: `0000000${i + 1}-0000-0000-0000-000000000000`, created: "2026-11-01", content: "x", metadata: null }));
+          const good = JSON.stringify({ contradictions: [{ refs: ["t1", "t2"], issue: "zq3 a" }] });
+          const shapes = [`<think>a {b} "contradictions": [</think>${good}`, `${good}\nNote: {x}`, `Here {is} it: ${good}`, `${JSON.stringify({ contradictions: [] })}\nFinal: ${good}`];
+          const shapesRead = shapes.map((raw) => readTier3Answer(raw, b5)?.findings.length ?? -1);
           mode = "answer";
           lines.length = 0;
           const cappedCode = await lintRun({ sql: one, tier: "3", report: join(scratch, "t3cs.md"), tier3: { ...o3, cfg: allowAll, sampleSize: 100, readMax: 15 }, writer });
@@ -23105,13 +23140,18 @@ if (want("26")) {
           statements = 0;
           await heldByPatterns(counting, [{ id: ids[0], sent: "", bytes: 17 * 1024 * 1024 }], ["restricted"]);
           assert(capCode === 0 && /\[tier 3\] skipped: 1 thought\(s\) left to send of 7 read in the last 365 days \(the read stopped at 7\)/.test(capLine)
-                 && failCode === 1 && /## Tier 1 — thoughts/.test(failText) && /## Tier 2 — the entity graph/.test(failText) && /\*Stopped: its sample's read: 22012 division by zero/.test(failText)
-                 && /\[tier 3\] failed: its sample's read: 22012/.test(failLines)
+                 && failCode === 1 && /## Tier 1 — thoughts/.test(failText) && /## Tier 2 — the entity graph/.test(failText) && /\*Stopped: its sample's read: 22012 division by zero\.\*/.test(failText)
+                 && /newest first, until the sample filled or the window ended\): \*\*20\*\*/.test(failText) && !/findings below|### Contradictions/.test(failText)
+                 && /\[tier 3\] failed: its sample's read: 22012 division by zero \(20 read,/.test(failLines) && /The report was written with tiers 1 and 2\./.test(failLines)
                  && bySize === 3 && unsized === 1 && statements === 1
                  && recheckCode === 1 && /\*Stopped: batch 1 of 1, read again before its call: 22012 division by zero/.test(recheckText)
-                 && flakyCode === 0 && flakyCalls === 2 && /\[tier 3\] a transient failure .*503.*retrying/.test(flakyLines) && /10 sent in 1 call\(s\): 2 finding\(s\)/.test(flakyLines)
+                 && flakyCode === 0 && flakyCalls === 2 && retryDropped
+                 && window > 10 && !/stopped at/.test(atWindow) && new RegExp(`of ${window - 1} read .*\\(the read stopped at ${window - 1}\\)`).test(belowWindow)
+                 && shapesRead.every((n) => n === 1) && readTier3Answer(`<think>${good}`, b5) === null
+                 && readTier3Answer(`<think>${good}</think>${good.slice(0, 30)}`, b5) === null
+                 && readTier3Answer(JSON.stringify({ contradictions: [{ refs: ["t1"], issue: "a } in it" }] }), b5)?.findings[0]?.issue === "a } in it" && /\[tier 3\] a transient failure .*503.*retrying/.test(flakyLines) && /10 sent in 1 call\(s\): 2 finding\(s\)/.test(flakyLines)
                  && cappedCode === 0 && /The read stopped at its cap with the sample not full/.test(cappedText) && /Read \(dated, the last 365 days, 20 characters or more, newest first, until the sample filled or the window ended\): \*\*15\*\*/.test(cappedText) && /\*\*14\*\* in \*\*1\*\* call/.test(cappedText),
-            `…in process: the read stops at its cap, 7 of 7, and a capped read that still sends says so; a read that fails on the server fails Tier 3 alone under its savepoint, tiers 1 and 2 reported, exit 1, and so does a batch's second read; a 503 is retried; three 10 MB rows read whole one a statement, three unsized in one, a 17 MB row alone (${capCode}, ${failCode}, ${recheckCode}, ${flakyCode}, ${cappedCode}; ${capLine}; ${bySize}, ${unsized}, ${statements}; ${flakyLines.slice(-160)}; ${(cappedText.split("## Tier 3")[1] ?? "").split("\n").filter((l) => l.startsWith("- ")).join(" | ").slice(0, 400)}; ${recheckText.split("\n").find((l) => l.startsWith("*Stopped")) ?? "no stop"}; ${failText.split("\n").find((l) => l.startsWith("*Stopped")) ?? "no stop"})`);
+            `…in process: the read stops at its cap, 7 of 7, and a capped read that still sends says so; a read that fails on the server fails Tier 3 alone under its savepoint, the rows it read counted, tiers 1 and 2 reported, exit 1, and so does a batch's second read; a 503 is retried, the retry reading its batch again; a window of exactly the cap is not called cut; the parser finds the answer past a reasoning block, a note, prose and a draft; three 10 MB rows read whole one a statement, three unsized in one, a 17 MB row alone (${capCode}, ${failCode}, ${recheckCode}, ${flakyCode}, ${cappedCode}; ${capLine}; ${bySize}, ${unsized}, ${statements}; ${flakyLines.slice(-160)}; ${(cappedText.split("## Tier 3")[1] ?? "").split("\n").filter((l) => l.startsWith("- ")).join(" | ").slice(0, 400)}; ${recheckText.split("\n").find((l) => l.startsWith("*Stopped")) ?? "no stop"}; ${failText.split("\n").find((l) => l.startsWith("*Stopped")) ?? "no stop"})`);
         } finally {
           await one.close();
         }

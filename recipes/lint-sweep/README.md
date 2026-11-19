@@ -132,7 +132,12 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   `--max-llm-calls` (5, up to 100; 0 turns it off); `--days` is 1 to 36,500. Each batch is read again just before
   its call: a thought deleted or newly held back since is not sent. Each goes
   as a ref (`t1`…), its date, type, first 400 characters and five topics and
-  tags (each cut to 100 characters), with today's date. The model names contradictions, stale facts, superseded
+  tags (each cut to 100 characters), with today's date. Each finding's line
+  names its thoughts by id and date; a ref the model writes in its own words
+  shows as the thought's id cut to 8 characters. With
+  `OB1_METADATA_REASONING` on, the call has no answer budget (a thinking
+  model otherwise spends it on its thinking and answers nothing); an answer cut
+  at the budget is counted as cut. The model names contradictions, stale facts, superseded
   decisions, orphans and missing links; each finding lists its thoughts' ids,
   and its words are made safe as a preview is and cut to 300 characters. Fewer
   than 10 thoughts left to send skips the tier. The sample is read in the
