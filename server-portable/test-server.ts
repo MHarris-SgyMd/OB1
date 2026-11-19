@@ -2648,6 +2648,86 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   assert(c === 0 && lateClose >= 30 && lateClose <= 70,
     `a drain that ends late gives the close what is left of the bound, not its full second (${lateClose} ms of a 200 ms bound ended at about 170)`);
 
+  // Streams a server holds open on purpose (the MCP server's listen streams, SMD-4347): not waited on, and closed by
+  // the stop itself, last. The stand-in is Bun's shape: its count holds each stream, and its stop() resolves only
+  // once every answer has ended, a held stream's among them.
+  const { HELD_CLOSE_MS } = await import("./shutdown.ts");
+  const holding = (others: number, streams = 1) => {
+    const calls: string[] = [];
+    const at: Record<string, number> = {};
+    let ended: () => void = () => {};
+    const state = { others, streams };
+    const said = (name: string) => { calls.push(name); at[name] ??= performance.now(); };
+    const server = {
+      get pendingRequests() { return state.others + state.streams; },
+      stop: (force?: boolean) => { said(force ? "stop(true)" : "stop()"); return force ? new Promise<void>(() => {}) : new Promise<void>((resolve) => { ended = resolve; }); },
+    };
+    /** What the app's close does: every stream ended, and with nothing else left the server's own end comes. */
+    const closeHeld = async () => {
+      said("closeHeld");
+      state.streams = 0;
+      if (state.others === 0) ended();
+    };
+    const opts = { server: () => server, held: () => state.streams, closeHeld, onCut: () => said("onCut"), flush: async () => { said("flush"); return "sent" as const; }, close: async () => { said("close"); return false; } };
+    return { calls, at, state, opts, end: () => { state.others = 0; if (state.streams === 0) ended(); } };
+  };
+
+  let kept = holding(0);
+  let bh = performance.now();
+  h = harness(kept.opts);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && performance.now() - bh < 150 && kept.calls.join() === "stop(),flush,close,closeHeld"
+    && /^SIGTERM: no longer accepting; 0 requests in flight, waited on for up to 0\.2 s \(SMD-2250\); 1 stream held open, closed last \(SMD-4347\)$/.test(h.lines[0]) && /; telemetry sent; 1 stream held open closed; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a stop with only a held stream: not waited on, closed after the flush and the pool, no connection cut, exit 0 at once (${Math.round(performance.now() - bh)} ms; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+
+  kept = holding(1, 2);
+  bh = performance.now();
+  h = harness({ ...kept.opts, drainBoundMs: 2_000 });
+  h.handlers.get("SIGTERM")!();
+  setTimeout(kept.end, 120);
+  c = await settled(h.stopped);
+  const waited = performance.now() - bh;
+  assert(c === 0 && waited >= 110 && waited < 600 && kept.calls.join() === "stop(),flush,close,closeHeld" && h.lines[0].includes("1 request in flight") && h.lines[0].includes("2 streams held open, closed last") && /2 streams held open closed; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a stop with held streams and a request running: the request is waited on and counted alone, the streams closed after it, exit 0 (${Math.round(waited)} ms; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+
+  // Cut at the bound: the connections are not closed there, where it would drop each stream with no last word, but
+  // after the streams are closed and their answers have left (the runtime's count fallen by as many).
+  kept = holding(1);
+  const closeHeldThenLeave = kept.opts.closeHeld;
+  h = harness({ ...kept.opts, closeHeld: async () => { kept.calls.push("closeHeld"); kept.at.closeHeld = performance.now(); setTimeout(() => { kept.state.streams = 0; }, 60); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const leftFor = kept.at["stop(true)"] - kept.at.closeHeld;
+  assert(c === 1 && kept.calls.join() === "stop(),onCut,flush,close,closeHeld,stop(true)" && leftFor >= 50 && leftFor < HELD_CLOSE_MS && h.lines.some((l) => /^SIGTERM: 1 request still in flight after 0\.\d s, closed unfinished$/.test(l)) && /1 stream held open closed; exit 1$/.test(h.lines.at(-1) ?? ""),
+    `a stop with a held stream and a request that never ends: the cut told at the bound, the stream closed after the flush, and the connections cut only once its answer has left; exit 1 (${kept.calls.join()}; stop(true) ${Math.round(leftFor)} ms after the close; ${h.lines.join(" | ")})`);
+
+  // A second signal: the drain and the flush are cut short as ever, and the streams are still closed before the connections are.
+  kept = holding(1);
+  bh = performance.now();
+  h = harness({ ...kept.opts, drainBoundMs: 5_000 });
+  h.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && performance.now() - bh < 1_000 && kept.calls.join() === "stop(),onCut,flush,close,closeHeld,stop(true)" && h.lines.some((l) => /SIGTERM again/.test(l)),
+    `a second signal with a held stream: the wait cut short, the stream closed all the same and the connections after it, exit 1 (${Math.round(performance.now() - bh)} ms; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+
+  // A close that hangs, one that throws, and a count that throws: each bounded or read as nothing, and the stop still ends.
+  kept = holding(1);
+  h = harness({ ...kept.opts, closeHeld: () => { kept.calls.push("closeHeld"); kept.at.closeHeld = performance.now(); return new Promise<void>(() => {}); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const hungFor = kept.at["stop(true)"] - kept.at.closeHeld;
+  assert(c === 1 && kept.calls.at(-1) === "stop(true)" && hungFor >= HELD_CLOSE_MS - 20 && hungFor < 3 * HELD_CLOSE_MS,
+    `a close of the held streams that never returns is bounded, and one whose answers never leave too: the connections are cut and the stop ends (${c}; ${kept.calls.join()}; ${Math.round(hungFor)} ms)`);
+  kept = holding(0);
+  h = harness({ ...kept.opts, closeHeld: async () => { await closeHeldThenLeave(); throw new Error("close failed"); }, held: () => { throw new Error("no count"); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert((c === 0 || c === 1) && h.exits.length === 1 && !h.lines.some((l) => /held open/.test(l)),
+    `a close that throws and a count that throws take nothing with them: the stop ends, and says no stream it could not count (exit ${c}; ${h.lines.join(" | ")})`);
+
   const aborter = new AbortController();
   embedDelayMs = 700;
   const gone = fetch(BASE, { method: "POST", headers: AUTH, signal: aborter.signal, body: JSON.stringify({ jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "a call whose client leaves" } } }) }).then(async (r) => { await r.text(); return "read"; }, () => "left");
@@ -3605,7 +3685,7 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
   const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./sse.ts") as {
-    withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string }) => Response;
+    withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void | Promise<void>; onStall?: () => void; onCancel?: () => void; label?: string; held?: boolean }) => Response;
     requestLabel: (body: string | null) => string;
     abandonedRequestLine: (label: string, elapsedMs: number) => string;
     stalledRequestLine: (label: string, elapsedMs: number) => string;
@@ -3775,6 +3855,61 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   let ended = false;
   const plain = new Response("{}", { headers: { "content-type": "application/json" } });
   assert(withSseKeepalive(plain, { onEnd: () => { ended = true; } }) === plain && ended, "a response that is not an event stream passes through untouched, complete at once");
+
+  // A stream meant to stay open (`held`, the MCP server's listen streams, SMD-4347): no frame of the wrapper's and
+  // no bound, its end and its reader's leaving still told. And an end its caller holds: the answer stays open.
+  {
+    const sse = { headers: { "content-type": "text/event-stream" } };
+    const bytesOf = (text: string) => new TextEncoder().encode(text);
+    const textOf = (read: { value?: Uint8Array }) => new TextDecoder().decode(read.value);
+    const fed = () => {
+      let feed!: ReadableStreamDefaultController<Uint8Array>;
+      const source = new ReadableStream<Uint8Array>({ start: (controller) => { feed = controller; } });
+      return { source, feed };
+    };
+    const warned: string[] = [];
+    const warnBefore = console.warn;
+    console.warn = (...a: unknown[]) => void warned.push(a.join(" "));
+    try {
+      const open = fed();
+      let stalls = 0;
+      let cancels = 0;
+      let endedWith: number | undefined;
+      const reader = withSseKeepalive(new Response(open.source, sse), { held: true, intervalMs: 20, maxMs: 100, label: "subscriptions/listen", onStall: () => { stalls++; }, onEnd: (b) => { endedWith = b; }, onCancel: () => { cancels++; } }).body!.getReader();
+      open.feed.enqueue(bytesOf("data: 1\n\n"));
+      const one = textOf(await reader.read());
+      const next = reader.read();
+      const meanwhile = await Promise.race([next.then(() => "a frame"), Bun.sleep(250).then(() => "nothing")]);
+      open.feed.enqueue(bytesOf("data: 2\n\n"));
+      const two = textOf(await next);
+      open.feed.close();
+      const done = (await reader.read()).done;
+      assert(one === "data: 1\n\n" && meanwhile === "nothing" && two === "data: 2\n\n" && done === true && stalls === 0 && warned.length === 0 && endedWith === 18 && cancels === 0,
+        `a held stream: past the stall bound nothing of the wrapper's is written and nothing said, its writer's frames pass, and its end is told with its bytes (${JSON.stringify([one, meanwhile, two])}; done ${done}; ${stalls} stall(s), ${warned.length} warning(s), ${endedWith} bytes, ${cancels} cancel(s))`);
+
+      const left = fed();
+      let leftCancels = 0;
+      const leaving = withSseKeepalive(new Response(left.source, sse), { held: true, onCancel: () => { leftCancels++; } }).body!.getReader();
+      left.feed.enqueue(bytesOf("data: 1\n\n"));
+      await leaving.read();
+      await leaving.cancel();
+      assert(leftCancels === 1, `…and its reader's leaving is told (${leftCancels})`);
+
+      const kept = fed();
+      let letGo: () => void = () => {};
+      const keeping = withSseKeepalive(new Response(kept.source, sse), { onEnd: () => new Promise<void>((resolve) => { letGo = resolve; }) }).body!.getReader();
+      kept.feed.enqueue(bytesOf("data: 1\n\n"));
+      await keeping.read();
+      kept.feed.close();
+      const last = keeping.read();
+      const stillOpen = await Promise.race([last.then(() => "ended"), Bun.sleep(150).then(() => "open")]);
+      letGo();
+      const afterwards = await Promise.race([last.then((r) => (r.done ? "ended" : "a frame")), Bun.sleep(1_000).then(() => "open")]);
+      assert(stillOpen === "open" && afterwards === "ended", `an end its caller holds leaves the answer open, and ends it when let go: a caller that will not end an answer as a whole one (${stillOpen}, then ${afterwards})`);
+    } finally {
+      console.warn = warnBefore;
+    }
+  }
 }
 
 console.log("\n[18] Async job routes: keyed GETs, no key shown nothing, an id required (SMD-2273)");

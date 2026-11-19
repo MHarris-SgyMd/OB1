@@ -33,6 +33,7 @@ import {
   unauthorizedResponse, unavailableResponse, worseOutcome, type CallRecord, type MirrorTool, type RefusalTarget, type RequestParts,
 } from "../server-portable/mcp-edge.ts";
 import type { Answer, RestClient } from "../rest-client/index.ts";
+import type { ListenStreams } from "./listen-streams.ts";
 
 /**
  * This server's name: what MCP clients see in `initialize`, as server-portable's
@@ -76,6 +77,12 @@ export interface McpDeps {
    * configured, or no `mcp` client secret), and a token is then no caller.
    */
   exchanger?: () => Exchanger | null;
+  /**
+   * The listen streams (listen-streams.ts, SMD-4347): whether this server holds a 2026-07-28 `subscriptions/listen`
+   * stream open, how many, and how many under one caller's name. The app keeps its count of the open ones there.
+   * Absent, or `hold` false: none is held, and a listen is acknowledged and ended as before.
+   */
+  listen?: ListenStreams;
 }
 
 /**
@@ -379,6 +386,15 @@ const WORDS: Record<ToolName, Words> = {
 type Era = "legacy" | "modern";
 
 /**
+ * A listen stream refused at one of this server's two bounds (SMD-4347): the answer the SDK gives one past its own,
+ * a 200 carrying -32603, and which bound, in words that hold nothing of the caller's.
+ */
+function listenLimitResponse(id: RefusalTarget["id"], full: "server" | "name"): Response {
+  const message = full === "server" ? "Subscription limit reached: this server holds no more listen streams" : "Subscription limit reached: this key holds as many listen streams as one key may";
+  return Response.json({ jsonrpc: "2.0", id: id ?? null, error: { code: -32603, message } }, { status: 200, headers: corsHeaders });
+}
+
+/**
  * The MCP server for one request: the tools the caller's operations name,
  * each validated by the SDK against the tool's own schema (core/schemas.ts,
  * or a plugin's manifest), called on the REST core with the caller's key, and
@@ -386,14 +402,15 @@ type Era = "legacy" | "modern";
  * trailing slash — a scan's job links go under it, as server-portable's do.
  * `ops`: the enabled plugins' operations. `raw`: each call's arguments as its
  * client sent them (argumentsById), which a plugin tool sends on. `era`: the
- * revision family the request speaks (SMD-4345). A 2026-07-28 server says it
- * sends no list-changed notification: this server holds no connection open to
- * send one on, and a client told so opens no `subscriptions/listen` stream
- * (Claude Code 2.1.325, measured; serving that stream is SMD-4347). The
+ * revision family the request speaks (SMD-4345). `holdsListen`: whether this
+ * server holds a `subscriptions/listen` stream open (SMD-4347), which is what a
+ * 2026-07-28 server's `tools.listChanged` says here. It sends no notification
+ * either way: told `false`, a client opens no stream (Claude Code, measured);
+ * told `true`, it opens one, and lists again when a restart ends it. The
  * 2025-era server declares what the SDK declares for it, as it always has.
  */
-function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void, era: Era): McpServer {
-  const server = new McpServer({ name: SERVER_NAME, version: BRAIN_VERSION }, era === "modern" ? { capabilities: { tools: { listChanged: false } } } : undefined);
+function buildServer(rest: RestClient, caller: Extract<Standing, { kind: "caller" }>, endpoint: string, ops: readonly LoadedOp[], raw: RawArguments, record: CallRecord, track: <T>(run: () => Promise<T>) => Promise<T>, tell: (err: unknown) => void, era: Era, holdsListen: boolean): McpServer {
+  const server = new McpServer({ name: SERVER_NAME, version: BRAIN_VERSION }, era === "modern" ? { capabilities: { tools: { listChanged: holdsListen } } } : undefined);
   const registerTool = server.registerTool.bind(server) as unknown as (name: string, spec: unknown, handler: (input: never, ctx: { mcpReq?: { id?: unknown } }) => Promise<say.Reply>) => unknown;
   // Each call counted while it runs, past its client leaving, for the stop (index.ts's registerTool, SMD-2250), and
   // under its own span, the request's child (index.ts's registerOp, PR 4c): what it sends the REST core carries that
@@ -500,6 +517,32 @@ export function createMcpApp(deps: McpDeps): Hono {
     }
   };
 
+  // The listen streams this server holds open (SMD-4347), where it holds any: how many are open (`listen.open`, for
+  // the entry's stop), and how many under each caller's name. The SDK bounds the streams of the whole server and
+  // nothing else, so one caller could take every place; the route gives each name its share before the handler is
+  // asked, and gives the place back when the stream ends, however it ends.
+  const listen = deps.listen?.hold ? deps.listen : null;
+  const listening = new Map<string, number>();
+  /** A place for one more stream under this name, to be given back once; or which bound refused it. */
+  const placeFor = (held: ListenStreams, name: string): { release: () => void } | { full: "server" | "name" } => {
+    if (held.open >= held.max) return { full: "server" };
+    const mine = listening.get(name) ?? 0;
+    if (mine >= held.perName) return { full: "name" };
+    held.open++;
+    listening.set(name, mine + 1);
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        held.open--;
+        const left = (listening.get(name) ?? 1) - 1;
+        if (left > 0) listening.set(name, left);
+        else listening.delete(name);
+      },
+    };
+  };
+
   // The SDK's handler for the 2026-07-28 revision (SMD-4345), one for the app. It builds a server for each request
   // by the function the request's route hands it (forRequest), so that server is the caller's, as a 2025-era
   // request's is. 2025-era traffic never reaches it (`legacy: "reject"`): the route sends that to the transport it
@@ -518,6 +561,8 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!build) throw new Error("a 2026-07-28 request reached the SDK's handler with no caller");
     return build();
   }, { legacy: "reject", responseMode: "sse", onerror: (err) => { const said = handlerSaid.getStore(); if (said) said.err ??= err; } });
+  // The entry's stop ends the streams through this, last (listen-streams.ts): the handler's own close, which sends each its closing frame.
+  if (listen) listen.close = () => modern.close();
   /** What the handler is given for one request: no token and no identity of the SDK's, only the function that builds the caller's server. */
   const forRequest = (build: () => McpServer): AuthInfo => ({ token: "", clientId: "", scopes: [], extra: { build } });
 
@@ -957,7 +1002,7 @@ export function createMcpApp(deps: McpDeps): Hono {
       label = requestLabel(rawBody);
       read(rawBody);
       const track = deps.toolCalls ? <T>(run: () => Promise<T>) => deps.toolCalls!.track(run) : <T>(run: () => Promise<T>) => run();
-      const build = (era: Era) => buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err), era);
+      const build = (era: Era) => buildServer(deps.rest, standing, rawPath(c.req.raw).replace(/\/{2,}/g, "/").replace(/\/+$/, ""), opsHere(), argumentsById(rawBody), call, track, (err) => sayOnce(err), era, listen !== null);
       const request = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body: rawBody ?? undefined });
       // Which revision family the request speaks, by the SDK's own rule (SMD-4345). A well-formed 2025-era
       // request (no envelope, no 2026-07-28 header) stays on the 2025-era transport, as every request did. One
@@ -968,17 +1013,37 @@ export function createMcpApp(deps: McpDeps): Hono {
       // to the handler and never to a 2025-era one. Each path reads the body itself, so the bound is one: handing
       // either the body already parsed would lift it for one revision and not the other.
       let response: Response | undefined;
+      let place: { release: () => void } | null = null;
       if (await isLegacyRequest(request)) {
         const transport = new WebStandardStreamableHTTPServerTransport();
         await build("legacy").connect(transport);
         response = await transport.handleRequest(request);
       } else {
+        // A listen stream this server would hold needs a place first: past the server's bound or the caller's own
+        // it is refused here, as the SDK refuses one past its bound (a 200, -32603), its line `refused` with a
+        // code, where the SDK's refusal is a 200 whose line reads `ok`.
+        if (listen && parts.rpc === "subscriptions/listen") {
+          const asked = placeFor(listen, standing.name);
+          if ("full" in asked) {
+            settled = true;
+            trace.status = 200;
+            finish("refused", "LISTEN_LIMIT");
+            return listenLimitResponse(refusalTarget(rawBody).id, asked.full);
+          }
+          place = asked;
+        }
         const said: { err?: Error } = {};
-        response = await handlerSaid.run(said, () => modern.fetch(request, { authInfo: forRequest(() => build("modern")) }));
+        try {
+          response = await handlerSaid.run(said, () => modern.fetch(request, { authInfo: forRequest(() => build("modern")) }));
+        } catch (err) {
+          place?.release();
+          throw err;
+        }
         // A fault the handler caught and answered 500: thrown here, so it is said and recorded as a 2025-era
         // request's is (the catch above: this server's 500, its line `error`, one line in the log). A request the
         // handler refused is a 4xx, and its error is let go: the request's line says it by its status.
         if (response.status >= 500 && said.err) {
+          place?.release();
           void response.body?.cancel().catch(() => {});
           throw said.err;
         }
@@ -992,10 +1057,36 @@ export function createMcpApp(deps: McpDeps): Hono {
       response.headers.delete("mcp-session-id");
       for (const [k, v] of Object.entries(corsHeaders)) response.headers.set(k, v);
       trace.status = response.status;
+      if (place) {
+        const release = place.release;
+        // What the handler answered in one piece is no stream to hold: it refused the listen in its own words.
+        if (response.status !== 200 || !/^text\/event-stream\b/i.test(response.headers.get("content-type") ?? "")) release();
+        else {
+          // A listen stream, held open from here. Its request is answered once the stream is: the line is written
+          // now, `ok`, its `ms` the time to open it, so the log shows the stream as it opens and the request's
+          // duration is a request's. Its end writes nothing: a client that closes it has not abandoned a call, and
+          // one open after ten minutes has not stalled. The SDK keeps it alive, a comment every 15 s.
+          settled = true;
+          finish("ok");
+          signal.addEventListener("abort", release, { once: true });
+          return withSseKeepalive(response, { held: true, signal, label, onEnd: release, onCancel: release });
+        }
+      }
       // The line is written at the stream's end, with the bytes the transport wrote; a stall settles the request too.
       return withSseKeepalive(response, {
         signal, label, startedAt: trace.started, ...keepalive,
-        onEnd: (bytes) => { settled = true; finish(undefined, undefined, bytes); },
+        onEnd: (bytes) => {
+          // Ended after the stop's cut: the stop ended it, not its work. A server that holds listen streams closes
+          // them through the SDK's handler, which ends every call in flight with them, each an answer of nothing
+          // that ends as a whole one would. Said as cut, and left open for the stop to drop with its connection,
+          // as a cut call's answer always was (measured without this: a 200, an empty stream, and no warning).
+          if (listen && deps.stop?.cut === true && !settled) {
+            abandoned();
+            return new Promise<void>(() => {});
+          }
+          settled = true;
+          finish(undefined, undefined, bytes);
+        },
         onStall: () => { settled = true; finish("stalled"); },
         onCancel: abandoned,
       });

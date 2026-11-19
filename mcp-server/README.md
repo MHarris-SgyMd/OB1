@@ -25,8 +25,10 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
 | `app.ts` | `createMcpApp`: the MCP endpoint, `/health`, the keyed worker mirrors, the job routes, the method guard and discovery |
 | `index.ts` | The entry, `bun index.ts`: OB1_REST_URL, OB1_FORWARDER_KEY, OB1_PLUGINS, PORT, OB1_LISTEN_HOST (one IP address to listen on, as the REST core's: unset, every address; never forwarded by compose; a value that is no IP address, a link-local IPv6 one, or one this host does not have, exits 2), OB1_STOP_GRACE, and for OAuth COMPOSE_PROFILES (naming `auth`), OB1_PUBLIC_ORIGIN and OB1_AUTH_SECRET_MCP |
 | `exchange.ts` | The token exchange at the hop (SMD-2286): an OAuth token traded for the REST core's, cached by its digest |
+| `listen-streams.ts` | The 2026-07-28 listen streams (SMD-4347): whether this server holds them, one constant and `false` until that ticket's PR 2b; the two bounds; and what the entry's stop is given to close them |
 | `stack.ts` | This server with the REST core behind it in one process, for server-portable's suites |
 | `test-mcp.ts` | The suite |
+| `test-listen-on.ts` | The suite's preload: starts its spawned entry holding listen streams, by loading `listen-streams.ts` with its one word changed. Kept out of the image by its name |
 
 ## How a request is answered
 
@@ -54,7 +56,8 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   line. What differs for a 2026-07-28 client:
   - its server declares `tools.listChanged: false`, since this server holds no
     connection open to send a notification on; a `subscriptions/listen` is acknowledged
-    with nothing honoured and ended at once (SMD-4347 decides whether one is ever served);
+    with nothing honoured and ended at once. SMD-4347 decided that it will hold them
+    (`docs/mcp-listen-streams.md`); the server can since its PR 2a, and does not until its PR 2b;
   - list results carry the revision's cache fields, `ttlMs: 0` and
     `cacheScope: "private"` (SMD-4346 chooses a real `ttlMs`);
   - the SDK's handler refuses in its own words a request whose `Mcp-Method` header

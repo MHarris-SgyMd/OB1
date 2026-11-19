@@ -83,7 +83,19 @@ const SSE_KEEPALIVE_FRAME = new TextEncoder().encode(": keepalive\n\n");
 export function withSseKeepalive(
   response: Response,
   opts: {
-    intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; onCancel?: () => void; label?: string;
+    intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onStall?: () => void; onCancel?: () => void; label?: string;
+    /**
+     * Told at the stream's end, before the answer is closed. What it returns is waited on first: a caller that will
+     * not have the answer end as a whole one returns a promise that stays pending, and the stream stays open until
+     * its connection goes (the MCP server's stop, for a call its cut ended: SMD-4347).
+     */
+    onEnd?: (bytes?: number) => void | Promise<void>;
+    /**
+     * A stream meant to stay open (the MCP server's listen streams, SMD-4347): no frame of this wrapper's and no
+     * bound. Its writer keeps it alive itself, and past ten minutes it is neither stuck nor slow. Its end and its
+     * reader's leaving are still told (`onEnd`, `onCancel`).
+     */
+    held?: boolean;
   } = {},
 ): Response {
   const body = response.body;
@@ -104,6 +116,7 @@ export function withSseKeepalive(
   };
   const keepalive = new TransformStream<Uint8Array, Uint8Array>({
     start(controller) {
+      if (opts.held) return;
       timer = setInterval(() => {
         const elapsed = performance.now() - started;
         if (elapsed >= maxMs) {
@@ -126,7 +139,7 @@ export function withSseKeepalive(
     },
     flush() {
       stop(); // the transport closed the stream: the response is complete
-      opts.onEnd?.(bytes);
+      return opts.onEnd?.(bytes);
     },
     cancel() {
       stop(); // the reader let go: no end will come
