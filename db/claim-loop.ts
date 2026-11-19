@@ -92,15 +92,7 @@ export type ClaimWorkerOptions<Row extends { id: string }> = {
   finallyFirst?: (workerId: string) => void;
   /** In the finally, before the worker's leases are returned. */
   beforeReturn?: (workerId: string) => Promise<void>;
-  /**
-   * After each pass of the admit gate, a wait or an open gate's, an engine's own reason to end this worker beside the
-   * loop's; not asked where there is no gate. Re-embed's: its follower saw the record's model move. `beforeClaim`
-   * ends a worker that reads the record still moved, so this decides the case it cannot: the record moved back
-   * before a worker mid-thought is through the gate again. The follower ends all the same, and that worker claims
-   * no more (SMD-4401).
-   */
-  afterGate?: () => boolean;
-  /** Before each claim, inside the claim's own error handling: true ends this worker with nothing claimed (re-embed's follower reads the record's model). */
+  /** Before each claim, with a gate or with none, inside the claim's own error handling: true ends this worker with nothing claimed (re-embed's follower reads the record's model, and ends once any worker has read it moved). */
   beforeClaim?: () => Promise<boolean>;
   /** Where an engine's return of its leases differs from the claim passes' (re-embed's). */
   leaseReturn?: {
@@ -143,7 +135,7 @@ export async function claimWorker<Row extends { id: string }>(o: ClaimWorkerOpti
       // here holding no claim, and a stop while it waits ends it.
       if (o.admit) {
         if (!(await admitted(o.admit, o.gate()))) return;
-        if (o.stopping() || outage.reason !== null || limitReached() || o.afterGate?.()) return;
+        if (o.stopping() || outage.reason !== null || limitReached()) return;
       }
       let batch: Claimed[];
       let byId: Map<string, Row>;
