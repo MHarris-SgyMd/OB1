@@ -1061,13 +1061,13 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const lateEntry = await start(true, silent.port!);
     const lateStream = toEnd(await lateEntry.send("subscriptions/listen", listenParams));
     /** A bare connection, opened now, its request line and first header written; the rest written when told, and what came back by its close. */
-    const early = (port: number, modern: boolean) => new Promise<{ send: () => void; got: Promise<string> }>((opened) => {
+    const early = (port: number, modern: boolean, method = "tools/call", params: unknown = { name: "thought_stats", arguments: {} }) => new Promise<{ send: () => void; got: Promise<string> }>((opened) => {
       let got = "";
       let done: (text: string) => void = () => {};
       const gotAll = new Promise<string>((resolve) => { done = resolve; });
       const socket = net.connect(port, "127.0.0.1", () => socket.write("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n", () => opened({
         send: () => {
-          const made = requestFor("tools/call", { name: "thought_stats", arguments: {} }, "write-raw", { modern });
+          const made = requestFor(method, params, "write-raw", { modern });
           void made.text().then((body) => socket.write(`${[...made.headers].map(([k, v]) => `${k}: ${v}`).join("\r\n")}\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`));
         },
         got: gotAll,
@@ -1096,6 +1096,24 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
       `a stop whose flush a silent collector holds for its whole bound of 1.8 s: the stream is closed after the flush has run it out, not before, its frame read, exit 0 (exit ${lateStopped.code} in ${Math.round(lateStopped.ms)} ms, the stream ended at ${Math.round(lateStream.endedAt() - lateAt)} ms; ${lateStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     assert(lateGot.every((x) => x === "") && lateAsked === 0 && lateCut.length === 2 && lateCut.every((l) => l.status === 0) && !lateStopped.lines.some((l) => l.status === 500 || l.outcome === "error" || l.outcome === "unrun") && !/has been closed|route failed/.test(lateStopped.err),
       `…and a request that is whole only then, its headers half sent at the signal, in either revision: not served and not answered, the core not asked, its line \`cut\`, and no 500 from a handler already closed (${JSON.stringify(lateGot.map((x) => x.slice(0, 40)))}; asked ${lateAsked}; ${JSON.stringify(lateStopped.lines.filter((l) => l.rpc !== "subscriptions/listen").map((l) => [l.outcome, l.status]))}; ${lateStopped.err.split("\n").filter((l) => /closed|failed/.test(l)).join(" | ").slice(0, 200)})`);
+    // A listen made whole during the drain, on an entry that held no stream at its signal: its headers half sent
+    // then, the rest 150 ms on, while the drain waits on a call. It is served, and is then a stream the server's own
+    // end would wait on to the bound, a second: the drain looks for the call all the same, ends with it, and the
+    // stream is closed after it with its frame.
+    answer = (n) => (n === "thoughtStats" ? Bun.sleep(600).then(() => ok(counted)) : ok({}));
+    const opening = await start(true, null);
+    const openingCall = opening.send("tools/call", { name: "thought_stats", arguments: {} }).then(async (r) => (r.status === 200 && /Total thoughts: 3/.test(await r.text()) ? "answered in full" : `answered ${r.status}`));
+    const earlyListen = await early(opening.port, true, "subscriptions/listen", listenParams);
+    await Bun.sleep(200);
+    const openingStopping = opening.stop();
+    await Bun.sleep(150);
+    earlyListen.send();
+    const openingStopped = await openingStopping;
+    const openingGot = [await openingCall, await earlyListen.got];
+    answer = () => ok({});
+    assert(opening.up && openingStopped.code === 0 && openingStopped.ms < 900 && openingGot[0] === "answered in full" && /^HTTP\/1\.1 200/.test(openingGot[1]) && openingGot[1].includes('"resultType":"complete"')
+      && /SIGTERM: no longer accepting; 1 request in flight/.test(openingStopped.out) && !/held open/.test(openingStopped.out) && /; 1 held stream closed; exit 0/.test(openingStopped.out) && openingStopped.lines.some((l) => l.rpc === "subscriptions/listen" && l.outcome === "ok"),
+      `a listen made whole during the drain of an entry that held none at its signal: held, the drain ended with the call and not at its bound of a second, the stream closed after it with its frame, exit 0 (exit ${openingStopped.code} in ${Math.round(openingStopped.ms)} ms; the call ${openingGot[0]}; the listen ${JSON.stringify(openingGot[1].slice(0, 15))}, frame ${openingGot[1].includes('"resultType":"complete"')}; ${openingStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
     // Today's entry and such a request: its stop waits on that connection, as it always has (Bun's own end does),
     // and serves the request once it is whole. Where the holding stop differs from it most, and what holds it apart.
     answer = (n) => (n === "thoughtStats" ? ok(counted) : ok({}));
@@ -1778,7 +1796,7 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
     assert(goneEarly.signal.aborted && goneAnswered === 200 && goneStreams.count === 0, `a listen whose client goes between its place and its stream holds no place (answered ${goneAnswered}; open ${goneStreams.count})`);
     void goneStreams.close();
 
-    // An app that holds none heeds neither flag: its stop closes its connections at the cut and has no handler to close first, so a call that ends after the flag is whatever it was, and what arrives after the drain's end is served.
+    // An app that holds none has neither gate: its stop closes its connections at the cut and has no handler to close first, so a call that ends after the flag is whatever it was, and what arrives after the drain's end is served.
     const plainStop = { cut: false, drainEnded: false };
     const plainApp = createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: (l) => said.push(l), stop: plainStop });
     answer = (n) => (n === "thoughtStats" ? Bun.sleep(100).then(() => ok(stats)) : ok({}));

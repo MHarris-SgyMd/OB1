@@ -32,8 +32,9 @@
  * the server's return starts as late as it can; at the bound where the drain
  * was cut, and then every connection, as at any cut. The server is told as
  * the drain ends, so that it serves nothing that arrives after. One that gives
- * none of the three, or holds no stream as its drain ends, stops as it always
- * has.
+ * none of the three stops as it always has. One that gives them and holds no
+ * stream as its drain ends closes nothing and keeps nothing back from its
+ * flush; its drain is still the one that looks, and it is still told.
  *
  * Bun only, and only when index.ts is the entry: Workers has no signals, and a
  * suite that imports the module must keep its own. jev/serve.ts handles the
@@ -115,7 +116,11 @@ export const CLOSE_AFTER_CUT_MS = 250;
  */
 export const HELD_POLL_MS = 20;
 
-/** How often the stop looks for the closed streams' answers to have ended: a turn or two of the event loop, as a rule. */
+/**
+ * How often the stop looks for the closed streams' answers to have ended. After a drain that finished, its first look
+ * comes before the runtime has counted them ended and its second finds them so (measured on macOS), so closing the
+ * streams costs one of these as a rule.
+ */
 export const HELD_ENDED_POLL_MS = 2;
 
 /**
@@ -340,11 +345,16 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
     // lost; and with the connections closed straight after it, lost again where the drain had finished (a reset
     // in its place). So the stop waits for the streams' answers to have ended, which the runtime's count says by
     // falling by as many as were closed; then every connection is closed: the cut requests', and any with no whole
-    // request on it yet, which the runtime's own end would wait on. The count is of every request, so a cut
-    // request that ends in the wait reads as a stream's answer: what makes that safe is that the streams' answers
-    // all end in the one turn of the event loop after the close, before the first look (measured on the entry,
-    // 256 streams beside 256 requests ending around the bound, no frame lost). A second signal ends either wait,
-    // and is one for the flush that may follow.
+    // request on it yet, which the runtime's own end would wait on. That count is of every request, and moves for
+    // others in the wait. It falls for a cut request that ends then, which would read as a stream's answer: so the
+    // wait also holds while the app still counts a stream, whose end has then not passed its wrapper. And it rises
+    // for a request made whole then on a connection the runtime kept, which is never answered and never leaves the
+    // count: the wait then runs out its bound, and the last line says the frames were not seen to leave though they
+    // were read (measured after a finished drain: one such request made whole in the 2 ms the wait takes). What was
+    // measured of the wait itself, on the entry: after a finished drain the count has not fallen at the first look
+    // and has at the second, 2 ms on; with a 2026-07-28 call cut beside the streams it has at the first (macOS).
+    // And 256 streams beside 256 other requests ending around the bound lost no frame, on macOS and in a Linux
+    // container. A second signal ends either wait, and is one for the flush that may follow.
     const closeStreams = async (): Promise<string> => {
       const closeHeld = opts.closeHeld;
       // Not reached: its two callers have looked. It is here for the type.
@@ -358,7 +368,7 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
       let seen = true;
       if (server) {
         const until = performance.now() + HELD_CLOSE_MS;
-        while (!hurried && server.pendingRequests > before - closing && performance.now() < until) await Promise.race([pause(HELD_ENDED_POLL_MS), hurry]);
+        while (!hurried && (heldNow() > 0 || server.pendingRequests > before - closing) && performance.now() < until) await Promise.race([pause(HELD_ENDED_POLL_MS), hurry]);
         seen = server.pendingRequests <= before - closing;
         server.stop(true).catch(() => {});
       }
@@ -372,9 +382,9 @@ export function drainOnSignal(opts: DrainOptions): { stopped: Promise<number> } 
       return seen ? `; ${closedStreams(closing)} closed` : `; ${closedStreams(closing)} closed, not seen to leave${why}`;
     };
     let heldSaid = "";
-    // Whether there are streams to close: none held as the drain ends, and none will be (nothing more is served),
-    // so the stop goes on as one that was given no such option does. And whether they are still to be closed after
-    // the flush: not once a cut has closed them.
+    // Whether there are streams to close: with none held as the drain ends, none will be (nothing more is served),
+    // so nothing is closed, nothing is kept back from the flush, and a cut closes the connections in its own turn.
+    // And whether they are still to be closed after the flush: not once a cut has closed them.
     let closeLast = opts.closeHeld !== undefined && heldNow() > 0;
     if (!drained && server) {
       log(`${signal}: ${requests(inFlight())} still in flight${running()} after ${((performance.now() - t0) / 1000).toFixed(1)} s, closed unfinished`);

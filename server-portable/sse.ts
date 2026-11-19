@@ -87,8 +87,8 @@ export function withSseKeepalive(
   opts: {
     intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; onCancel?: () => void; label?: string;
     /**
-     * Whether the server's stop has cut this answer (the MCP server's tool calls, in the moment between its
-     * handler's close, which ends them, and its connections' close: SMD-4347). From then nothing more of it is
+     * Whether the server's stop has cut this answer (an answer of the MCP server's at `/mcp`, in the moment between
+     * its handler's close, which ends a 2026-07-28 tool call's, and its connections' close: SMD-4347). From then nothing more of it is
      * passed on, no frame of this wrapper's among it, and its end is not passed on either: the answer stays open,
      * as much of it as had left, until its connection goes. Its end is told as its reader's leaving is (`onCancel`).
      */
