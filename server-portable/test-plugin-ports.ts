@@ -91,12 +91,15 @@ let extraction: ((document: string) => Response) | null = null;
 let embedFailOn: ((input: string) => boolean) | null = null;
 /** Each extraction request the stub answered, as sent. */
 const extractionCalls: Body[] = [];
+/** How many embedding requests reached the stub, answered or not (agent-memory's egress section, SMD-3984). */
+let embedRequests = 0;
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input instanceof Request ? input.url : input);
   if (url.startsWith(STUB_BASE)) {
     const sent = typeof init?.body === "string" ? (JSON.parse(init.body) as Body) : {};
     if (url.endsWith("/embeddings")) {
+      embedRequests++;
       if (embedDown) return new Response("down", { status: 503 });
       if (embedStatus !== null) return new Response(`{"error":"stub answers ${embedStatus}"}`, { status: embedStatus, headers: { "Content-Type": "application/json" } });
       const onThis = embedStatusOn?.(String(sent.input ?? ""));
@@ -3104,6 +3107,11 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
   const th = await thoughtOf(w[0]?.thought_id ?? null);
   assert(th?.source === "agent-memory" && th.ws === "ws-am" && th.type === "decision" && th.runtime === "codex" && th.actor === "writer",
     `…its thought captured through the core: source agent-memory, the agent_memory_* keys, the caller's key on its audit row (${JSON.stringify(th)})`);
+  // With a local embedder, a write-back's thought carries the brain's model (SMD-3984's Verify), and no memory is in no_vector.
+  const firstModel = await one<{ model: string | null; brain: string | null }>(sql`
+    SELECT embedding_model AS model, (SELECT value FROM ob1_config WHERE key = 'embedding_model') AS brain FROM thoughts WHERE id = ${w[0]?.thought_id ?? null}::uuid`);
+  assert(firstModel?.model !== null && firstModel?.model === firstModel?.brain && first.body.no_vector === undefined,
+    `…embedded by the brain's own model with a local embedder, and no no_vector (${JSON.stringify(firstModel)} ${JSON.stringify(first.body.no_vector)})`);
   const refs = (await sql`SELECT source_kind, source_timestamp FROM plugin_agent_memory.source_refs WHERE memory_id = ${w[0]?.memory_id}::uuid ORDER BY source_kind`) as { source_kind: string; source_timestamp: Date | null }[];
   assert(refs.length === 2 && refs[0].source_kind === "chat" && refs[0].source_timestamp === null && refs[1].source_timestamp?.toISOString() === "2026-11-05T10:00:00.000Z",
     `…each source ref beside it, a time that is no time stored as none (${JSON.stringify(refs)})`);
@@ -3646,8 +3654,107 @@ console.log("\n[agent-memory] write-back through capture_thought, recall through
     const k = mems(kept)[0];
     assert(kept.status === 200 && k?.review_status === "pending" && (await thoughtOf(k.thought_id))?.vector === false,
       `writeback while the provider does not answer: the memory kept, its thought without a vector for the mender (${kept.status} ${JSON.stringify(kept.body).slice(0, 160)})`);
+    const nv = kept.body.no_vector as { memory_id: string; why: string; reason?: string }[] | undefined;
+    assert(nv?.length === 1 && nv[0].memory_id === k?.memory_id && nv[0].why === "provider_down" && !("reason" in nv[0]),
+      `…and the reply names it in no_vector, provider_down, its word alone (SMD-3984; ${JSON.stringify(nv)})`);
   } finally {
     embedDown = false;
+  }
+  // One memory of two meets the provider down: no_vector names that one alone, by its own capture (review pass 1, mutant).
+  embedFailOn = (input) => input.includes("am_half_down");
+  try {
+    const half = await am("writeback", { ...base, task_id: "task-half", memory_payload: { lessons: ["am_ledger am_half_down: this one meets the provider down.", "am_ledger this one is embedded beside it."] } });
+    const hm = mems(half);
+    const hnv = half.body.no_vector as { memory_id: string; why: string }[] | undefined;
+    const downMem = hm.find((m) => m.content.includes("am_half_down"));
+    assert(half.status === 200 && hm.length === 2 && hnv?.length === 1 && hnv[0].memory_id === downMem?.memory_id && hnv[0].why === "provider_down",
+      `…one memory of two met the provider down: no_vector names it alone (${half.status} ${JSON.stringify(hnv)})`);
+  } finally {
+    embedFailOn = null;
+  }
+  // no_vector is what each memory's own capture in this request did, not its thought's (review pass 2): a memory answered
+  // from its idempotency key beside a new memory of the same text is not named, nor a memory whose capture made the vector.
+  embedDown = true;
+  try {
+    const once = await am("writeback", { ...base, workspace_id: "ws-am-nv", task_id: "task-held", memory_payload: { lessons: ["am_ledger am_held the same words twice."] } });
+    const heldId = mems(once)[0]?.memory_id;
+    const twice = await am("writeback", { ...base, workspace_id: "ws-am-nv", task_id: "task-held", memory_payload: { lessons: ["am_ledger am_held the same words twice."], constraints: ["am_ledger am_held the same words twice."] } });
+    const tnv = (twice.body.no_vector ?? []) as { memory_id: string; why: string }[];
+    const fresh = mems(twice).find((m) => m.memory_id !== heldId);
+    assert(twice.status === 200 && mems(twice).length === 2 && tnv.length === 1 && tnv[0].memory_id === fresh?.memory_id && tnv[0].why === "provider_down",
+      `…a memory answered from its idempotency key is not named beside a new memory of its text, one thought between them (${twice.status} ${JSON.stringify(tnv)})`);
+  } finally {
+    embedDown = false;
+  }
+  let flaps = 0;
+  embedFailOn = (input) => input.includes("am_flap") && ++flaps === 1;
+  try {
+    const f = await am("writeback", { ...base, workspace_id: "ws-am-nv", task_id: "task-flap", memory_payload: { lessons: ["am_ledger am_flap one text, two memories."], constraints: ["am_ledger am_flap one text, two memories."] } });
+    const fnv = (f.body.no_vector ?? []) as { memory_id: string; why: string }[];
+    const lesson = mems(f).find((m) => m.memory_type === "lesson");
+    assert(f.status === 200 && flaps === 2 && fnv.length === 1 && fnv[0].memory_id === lesson?.memory_id && (await thoughtOf(lesson?.thought_id ?? null))?.vector === true,
+      `…of one text's two memories, the one whose capture met the provider down is named, not the one whose capture made the vector (${f.status} ${flaps} ${JSON.stringify(fnv)})`);
+  } finally {
+    embedFailOn = null;
+  }
+  // ── The egress policy keeping the text in (SMD-3984) ──
+  // A provider that is not local, under deny with no term for this key: the core makes no embedding request for a recall
+  // or a write-back. The recall is refused REFUSED_EGRESS; the write-back keeps its memory, its thought without a vector,
+  // and says the gate refused, which no retry changes — never the provider's retryable 503. A term naming the writer's key
+  // lets both through, and the thought carries the brain's model.
+  // The servers froze their environment at their first request (root.ts initEnv) and resolve the provider's settings
+  // from that object at each call (core/context.ts embedConfig): this section sets the policy there, and puts it back.
+  const coreEnv = (await import("./root.ts")).env() as Record<string, string | undefined>;
+  const egressEnv = { local: coreEnv.OB1_LLM_LOCAL, policy: coreEnv.OB1_EGRESS_POLICY, allow: coreEnv.OB1_EGRESS_ALLOW, deny: coreEnv.OB1_EGRESS_DENY };
+  delete coreEnv.OB1_LLM_LOCAL;
+  coreEnv.OB1_EGRESS_POLICY = "deny";
+  delete coreEnv.OB1_EGRESS_ALLOW;
+  try {
+    const before = embedRequests;
+    const keptIn = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back under a policy that keeps it in."] } });
+    const kin = mems(keptIn)[0];
+    const deniedRecall = await am("recall", rq({ query: "am_ledger under a policy that keeps it in" }), { as: KEYS.writer });
+    const capOnly = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back by a capture key under the policy."] } }, { as: KEYS.capture });
+    const sent = embedRequests - before;
+    const nv = keptIn.body.no_vector as { memory_id: string; why: string; reason?: string }[] | undefined;
+    const nvCap = capOnly.body.no_vector as { memory_id: string; why: string; reason?: string }[] | undefined;
+    assert(sent === 0, `under deny with a remote provider, a write-back and a recall make no embedding request (${sent} made)`);
+    assert(keptIn.status === 200 && (await thoughtOf(kin?.thought_id))?.vector === false && nv?.length === 1 && nv[0].memory_id === kin?.memory_id
+      && nv[0].why === "refused" && !("reason" in nv[0]),
+      `…the write-back keeps its memory without a vector and names the gate's refusal in no_vector, its word alone: the gate's words name the provider's host (${keptIn.status} ${JSON.stringify(nv)})`);
+    assert(deniedRecall.status === 422 && deniedRecall.body.code === "CORE_REFUSED" && deniedRecall.body.refused === "REFUSED_EGRESS" && deniedRecall.body.retryable === false,
+      `…the recall is refused REFUSED_EGRESS, final, not the provider's 503 (${deniedRecall.status} ${JSON.stringify(deniedRecall.body).slice(0, 200)})`);
+    assert(capOnly.status === 200 && nvCap?.length === 1 && nvCap[0].why === "refused" && !("reason" in nvCap[0]),
+      `…and so is a key that can only capture (${capOnly.status} ${JSON.stringify(nvCap)})`);
+    coreEnv.OB1_EGRESS_ALLOW = "actor:writer,actor:reader";
+    const beforeAllowed = embedRequests;
+    const let_ = await am("writeback", { ...base, memory_payload: { lessons: ["am_ledger written back under a term that lets the writer out."] } });
+    const lm = mems(let_)[0];
+    const allowedRecall = await am("recall", rq({ query: "am_ledger under a term that lets the writer out" }), { as: KEYS.reader });
+    const lt = await one<{ vector: boolean; model: string | null; brain: string | null }>(sql`
+      SELECT embedding IS NOT NULL AS vector, embedding_model AS model, (SELECT value FROM ob1_config WHERE key = 'embedding_model') AS brain
+      FROM thoughts WHERE id = ${lm?.thought_id ?? null}::uuid`);
+    assert(let_.status === 200 && let_.body.no_vector === undefined && lt?.vector === true && lt.model !== null && lt.model === lt.brain && allowedRecall.status === 200
+      && embedRequests - beforeAllowed >= 2,
+      `…OB1_EGRESS_ALLOW terms naming the keys let the write-back and the recall through, the thought carrying the brain's model (${let_.status} ${allowedRecall.status} ${JSON.stringify(lt)})`);
+    // One write-back, two causes: each memory named, each with its own why (review pass 3, mutant).
+    coreEnv.OB1_EGRESS_POLICY = "allow";
+    coreEnv.OB1_EGRESS_DENY = "marker:am_keep_in";
+    embedFailOn = (input) => input.includes("am_mixed_down");
+    try {
+      const mixed = await am("writeback", { ...base, task_id: "task-mixed", memory_payload: { lessons: ["am_ledger am_mixed_down meets the provider down."], constraints: ["am_ledger am_keep_in stays home."] } });
+      const xnv = (mixed.body.no_vector ?? []) as { memory_id: string; why: string }[];
+      const whyOf = (t: string) => xnv.find((x) => x.memory_id === mems(mixed).find((m) => m.memory_type === t)?.memory_id)?.why;
+      assert(mixed.status === 200 && xnv.length === 2 && whyOf("lesson") === "provider_down" && whyOf("constraint") === "refused",
+        `…of a write-back's two memories, one meeting the provider down and one a deny term, each is named with its own why (${mixed.status} ${JSON.stringify(xnv)})`);
+    } finally {
+      embedFailOn = null;
+    }
+  } finally {
+    for (const [k, v] of [["OB1_LLM_LOCAL", egressEnv.local], ["OB1_EGRESS_POLICY", egressEnv.policy], ["OB1_EGRESS_ALLOW", egressEnv.allow], ["OB1_EGRESS_DENY", egressEnv.deny]] as const) {
+      if (v === undefined) delete coreEnv[k];
+      else coreEnv[k] = v;
+    }
   }
   // ── The embedding provider refusing the brain's key (SMD-2892, SMD-1992's other half) ──
   // The core refuses the search and the capture coded, final; the plugin answers each as its own coded JSON — 422, as a
