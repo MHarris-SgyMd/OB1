@@ -27,13 +27,13 @@
  *   DATABASE_URL=... bun test-live.ts          # against a LOCAL one you already have
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  *
- * OB1_LIVE_SHARD=sleep|long|extract|rest runs one shard of the sections
- * (SHARDS below). Brain Checks runs the four side by side, one matrix cell each,
- * every one on a database of its own (SMD-3048, SMD-3169), and so does
- * db/ci-parity.sh, from one checkout, each on a Postgres of its own under a
- * with-postgres.sh (SMD-3688): [2] edits a copy of the migrations, not the
- * tracked tree (SMD-3639). Never two in one Postgres: each drops the schema,
- * and roles and backends are the cluster's.
+ * OB1_LIVE_SHARD=sleep|long|extract|sweep|claims|rest runs one shard of the
+ * sections (SHARDS below). Brain Checks runs the six side by side, one matrix
+ * cell each, every one on a database of its own (SMD-3048, SMD-3169), and so
+ * does db/ci-parity.sh, from one checkout, each on a Postgres of its own
+ * under a with-postgres.sh (SMD-3688): [2] edits a copy of the migrations,
+ * not the tracked tree (SMD-3639). Never two in one Postgres: each drops the
+ * schema, and roles and backends are the cluster's.
  */
 
 import { SQL } from "bun";
@@ -156,17 +156,35 @@ if (!URL_) {
  * ~220 s, and with [9f] ~190 s on main's CI long's live step passed 600 s
  * under ci-parity's load, so it runs in sweep (~376 s here with it, against
  * long's ~450 and the rest's ~600 on CI), the sleep scaffold being the
- * module's, not [38r]'s. The two met in a merge: [26] stays in sweep beside
- * [38p], the rest having no room for it.
+ * module's, not [38r]'s. The two met in a merge: [26] stayed in sweep beside
+ * [38p], the rest having no room for it. By then the rest was the run's
+ * longest cell by ~110 s, a live step of 571 s at the median of main's 15
+ * runs to 42ab662a (max 604), and db/ci-parity.sh stopped it at its 600 s
+ * limit in seven runs of twenty on the maintainer's laptop with nothing
+ * failed (SMD-4366). Of its 545 s of sections [10] was 238 and [16] 200, by
+ * the medians of main's runs 44529853317, 44538524681 and 44557642841, each
+ * mostly real clocks: in [10] 211 s is waits of 2 s or more before a row, in
+ * [16] 161 s, and across the three runners [10] moved 0.4 s and [16] 2.5.
+ * Neither fits beside another cell's sections, so [10] runs in a sixth cell,
+ * claims, with [38b] (~100 s) from long, by then the next longest (a 460 s
+ * live step): on those runs' section times the rest ~308 s, claims ~338,
+ * long ~347, against sweep's ~365, sleep's ~296 and extract's ~313, a live
+ * step some 10-27 s more for the module's load. The rest keeps [16] and the
+ * most room, since a section no shard lists is its own. This met [26] in a
+ * merge too: with its ~72 s (main's runs 44570891422, 44576704741 and
+ * 44588332017) sweep was ~435 s of sections, the longest cell once the rest
+ * was cut, so [26] runs in sleep, ~292 s without it: sleep ~364 s, sweep
+ * ~363, the rest ~303.
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["5d", "10g", "37b", "38"],
-  long: ["9", "9f", "10e", "17", "38r", "38b", "39"],
+  sleep: ["5d", "10g", "26", "37b", "38"],
+  long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
-  sweep: ["26", "38s", "50", "51", "38p"],
+  sweep: ["38s", "50", "51", "38p"],
+  claims: ["10", "38b"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -29720,9 +29738,9 @@ if (want("38b")) {
    */
   const SCALE = 0.7;
   const scaled = (ms: number) => Math.round(ms * SCALE);
-  // The extraction key [38r] and [38p] leave recorded, in a full run and the
-  // long cell alike, is another model's, which every pass's start would refuse:
-  // set aside, and put back at the end.
+  // The extraction key [38r] and [38p] leave recorded in a full run is another
+  // model's, which every pass's start would refuse: set aside, and put back at
+  // the end. In its own cell, claims, there is none: [10] ends by deleting it.
   const [keptKey] = (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`) as { value: string }[];
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   /** Each extraction call's window ("whole" for a one-window thought), the text's marker and its start; each judgement's time. */
