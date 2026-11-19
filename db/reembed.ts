@@ -1812,8 +1812,10 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
     // it, and that is the account's state, not the row's. A redirect too
     // (SMD-2908): never followed, so the base redirects every row's call.
     if (e instanceof ProviderError) return e.kind === "body" || (e.kind === "http" && ([400, 401, 402, 403, 404].includes(e.status ?? 0) || isRedirect(e.status ?? 0)));
+    // The width alone is read from the words: embed.ts raises it as a plain error. A reply with no embedding is a
+    // ProviderError of kind `body`, returned on above (SMD-4143: its words here never decided).
     const msg = (e as Error).message ?? "";
-    return /Embedding width mismatch|returned no embedding/.test(msg);
+    return /Embedding width mismatch/.test(msg);
   }
   /** `s` cut to `n` characters, a cut marked "…", so a number cut short does not read whole (SMD-2636 PR 3b, review passes 1, 2 and 4). */
   const cutMarked = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n)}…` : s);
