@@ -92,7 +92,13 @@ export type ClaimWorkerOptions<Row extends { id: string }> = {
   finallyFirst?: (workerId: string) => void;
   /** In the finally, before the worker's leases are returned. */
   beforeReturn?: (workerId: string) => Promise<void>;
-  /** After a wait at the admit gate, an engine's own reason to end this worker beside the loop's (re-embed: the record's model moved). */
+  /**
+   * After each pass of the admit gate, a wait or an open gate's, an engine's own reason to end this worker beside the
+   * loop's; not asked where there is no gate. Re-embed's: its follower saw the record's model move. `beforeClaim`
+   * ends a worker that reads the record still moved, so this decides the case it cannot: the record moved back
+   * before a worker mid-thought is through the gate again. The follower ends all the same, and that worker claims
+   * no more (SMD-4401).
+   */
   afterGate?: () => boolean;
   /** Before each claim, inside the claim's own error handling: true ends this worker with nothing claimed (re-embed's follower reads the record's model). */
   beforeClaim?: () => Promise<boolean>;

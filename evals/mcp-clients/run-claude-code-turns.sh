@@ -2,15 +2,16 @@
 # One headless Claude Code session of TWO user turns against a running probe, the control step run from outside
 # between them, then the probe's log of it:
 #
-#   ./run-claude-code-turns.sh <mcp|legacy|session> <toggle|toggle-quiet|expire|drop> [seconds between step and turn 2, default 10]
+#   ./run-claude-code-turns.sh <mcp|legacy|session> <toggle|toggle-quiet|expire|drop|down/N|refuse/N|busy/N|fault/N|cut/N> [seconds between step and turn 2, default 10]
 #
 # run-claude-code.sh makes the change inside one turn. This asks the other question: does the client fetch the list
-# again when a NEW turn starts, with nothing sent to it? The session stays one process, so it never reconnects.
+# again when a NEW turn starts, with nothing sent to it? The session stays one process throughout; it reconnects
+# only where the step makes it (a port closed with `refuse/N`).
 # Read the result from the log, not from the model's report.
 set -u
 cd "$(dirname "$0")" || exit 1
 path=${1:?path: mcp, legacy or session}
-step=${2:?step: toggle, toggle-quiet, expire or drop}
+step=${2:?step: toggle, toggle-quiet, expire, drop, or down/N, refuse/N, busy/N, fault/N, cut/N for N seconds}
 wait=${3:-10}
 first_turn=${FIRST_TURN_S:-30}
 base=${BASE:-http://127.0.0.1:8765}

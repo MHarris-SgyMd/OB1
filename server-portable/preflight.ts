@@ -33,7 +33,7 @@ import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
-import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
+import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, PRIORITY_GRANT_FIX, priorityFindingsRow, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
 import { drainBoundFrom } from "./shutdown.ts";
@@ -239,8 +239,9 @@ const chatIsOwn = Boolean(env.OB1_CHAT_BASE_URL || env.OB1_CHAT_API_KEY);
  * said in a clause of its own, so a qualifier of the others (on an open item) is never read as its (SMD-4193 PR 2
  * review pass 2). 133's thought_sources is read by every priority call on a thought or a ticket, which asks which
  * ticket's row a thought is (a ticket and its own rows are one item, SMD-4127), and by the agenda since 122: a clause of
- * its own too. 142's priority_findings is written by the priority review's scan and by an operator's decision on a
- * finding (SMD-3671), and read by nothing else: a clause of its own, no board lost for it.
+ * its own too. 142's priority_findings is written by the priority review's scan (INSERT, UPDATE, DELETE) and by an
+ * operator's decision on a finding (UPDATE) (SMD-3671), and read by list_priority_findings, brain_info and preflight's
+ * own priority findings row (PR 2): a clause of its own naming what the missing privilege fails, no board lost for it.
  */
 function priorityUngrantedWords(ungranted: readonly string[]): string {
   const weights = ungranted.filter((g) => g.startsWith("priority_weight_settings "));
@@ -266,7 +267,13 @@ function priorityUngrantedWords(ungranted: readonly string[]): string {
       : "set_priority_weights fails naming priority_weight_settings (migration 132)");
   }
   if (findings.length) {
-    clauses.push("the priority review's scan (ob1_priority_review) and review_priority_finding fail naming priority_findings (migration 142)");
+    // By the privilege missing: SELECT every reader's and the writers'; UPDATE the scan's and the decision's (which
+    // selects FOR UPDATE and updates); INSERT and DELETE the scan's alone (new findings, moot ones pruned).
+    clauses.push(findings.includes("priority_findings SELECT")
+      ? "the priority review's scan (ob1_priority_review), list_priority_findings and review_priority_finding fail naming priority_findings (migration 142), and brain_info and the priority findings row say it was not read"
+      : findings.includes("priority_findings UPDATE")
+      ? "the priority review's scan (ob1_priority_review) and review_priority_finding fail naming priority_findings (migration 142)"
+      : "the priority review's scan (ob1_priority_review) fails naming priority_findings (migration 142)");
   }
   const board = rest.some((g) => g === "priority_assertions SELECT" || g === "open_items SELECT") || weights.includes("priority_weight_settings SELECT") || sources.length > 0;
   return `${clauses.join("; ")}${board ? "; plan_context answers with no board (SMD-2684)" : ", and nothing else does"}`;
@@ -484,7 +491,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -3260,7 +3267,7 @@ if (configFailed) {
                 ledgerRemedy("116", "Apply db/migrations/116_priority_assertions.sql."));
           } else if (pr.ungranted?.length) {
             add("priority", "warn", `the server's role holds no ${pr.ungranted.join(", ")}: ${priorityUngrantedWords(pr.ungranted)}`,
-                "Grant the priority group (SMD-3663): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups priority (db/README.md, Grants for a capturing role).");
+                PRIORITY_GRANT_FIX);
           } else {
             add("priority", "ok", "assert_priority, clear_priority, priority_history and their helpers present; the server's role holds the priority group");
           }
@@ -5128,6 +5135,17 @@ if (configFailed) {
               : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
           }
+        }
+
+        // The priority review's findings (SMD-3671 PR 2, migration 142): what
+        // sleep's scan proposed and no operator has decided, from the record's
+        // own read (brain-info.ts), so this row and brain_info say one thing. A
+        // queue, not a fault: it never warns for pending findings, only when the
+        // table could not be read. The priority row says what the role's grants
+        // on it fail.
+        {
+          const r = priorityFindingsRow(facts.priorityFindings, facts.unread.priorityFindings);
+          add("priority findings", r.status, r.detail, r.fix);
         }
 
         // The work threads (SMD-3306 PR 7a-2c): whether each thread's edges (120)

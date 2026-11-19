@@ -72,6 +72,7 @@
  * could not answer their reference lists, 15 to 22 windows of 24 parsed.
  */
 
+import { isRecord } from "./is-record.ts";
 import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox, type EgressSubject } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
@@ -693,7 +694,6 @@ export function buildMessages(content: string, part?: { index: number; of: numbe
   return [{ role: "user", content: ENTITY_EXTRACTION_PROMPT.replace("{content}", () => wrapContent(body)) }];
 }
 
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Strip ASCII control characters except tab, newline and return; trim; clip. */
 function cleanName(v: unknown): string {

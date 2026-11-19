@@ -12,6 +12,7 @@ import * as mend from "./mend.ts";
 import * as claims from "./claims.ts";
 import * as priority from "./priority.ts";
 import * as weights from "./weights.ts";
+import * as findings from "./findings.ts";
 import * as threads from "./threads.ts";
 import * as relations from "./relations.ts";
 import * as items from "./items.ts";
@@ -80,6 +81,8 @@ export function createCore(deps: CoreDeps) {
     clearPriority: bind(ctx, priority.clearPriority),
     priorityHistory: bind(ctx, priority.priorityHistory),
     setPriorityWeights: bind(ctx, weights.setPriorityWeights),
+    listPriorityFindings: bind(ctx, findings.listPriorityFindings),
+    reviewPriorityFinding: bind(ctx, findings.reviewPriorityFinding),
     openItem: bind(ctx, items.openItem),
     updateItem: bind(ctx, items.updateItem),
     setItemStatus: bind(ctx, items.setItemStatus),

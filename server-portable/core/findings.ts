@@ -1,0 +1,98 @@
+// The priority review's findings (SMD-3671 PR 2): migration 142's list and its
+// operator's decision as operations of the core, so the REST core and the MCP
+// server answer them alike. Sleep's scan (ob1_priority_review, PR 1) proposes
+// each finding; nothing changes a priority until an operator decides one. The
+// database decides every rule of the decision — who may (a key the registry
+// classifies operator, by its agent id, with write scope), which arguments go
+// together, what an accept states, what holds the same finding back — and this
+// file passes the caller's envelope, its scope stated, and turns 142's answers
+// into values and refusals.
+
+import type { Principal } from "../auth.ts";
+import { closedOf, PriorityRefused, type FindingItem, type PriorityAssertion, type PriorityFinding } from "../store.ts";
+import type { FindingInputError, FindingKind, FindingStatus } from "../priority-kinds.ts";
+import { findingsCursor, parseFindingsCursor, sameFindingSelection, type FindingSelection } from "./list-cursor.ts";
+import { dueBy } from "../priority-scale.ts";
+import type { Ctx } from "./context.ts";
+import { asked, notOperator, operatorGate, writerScope } from "./caller.ts";
+import { ok, refuse, type Outcome } from "./refusal.ts";
+import type { Input } from "./schemas.ts";
+import { actorOf } from "./writes.ts";
+
+/**
+ * list_priority_findings' value: the filters it read under, how many findings match and how many come before this page
+ * in the order, the page, and the cursor for the next (null at the end).
+ */
+export type FindingsListed = { status: FindingStatus | "all"; kind: FindingKind | null; total: number; before: number; findings: PriorityFinding[]; cursor: string | null };
+
+export async function listPriorityFindings(ctx: Ctx, _principal: Principal, { status, kind, limit, after }: Input<"list_priority_findings">): Promise<Outcome<FindingsListed, "REFUSED_CURSOR">> {
+  // `after` is a cursor a page ended with, read before the store sees it, and one made under other filters is refused
+  // (list_supersession_proposals' rule): it would start this listing at a place in another.
+  const selection: FindingSelection = { list: "findings", status, kind: kind ?? null };
+  const position = after === undefined ? undefined : parseFindingsCursor(after);
+  if (position === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "shape" });
+  if (position && !sameFindingSelection(position.selection, selection)) {
+    return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "filters", made: position.selection });
+  }
+  // A brain before 142 holds no table: the read faults naming priority_findings, and the fault's hint says so
+  // (render.ts findingsHint), as a listing before its migration does.
+  const page = await (await ctx.store()).listPriorityFindings({ status: status === "all" ? null : status, kind: kind ?? null, limit, ...(position ? { after: position.at } : {}) });
+  return ok({ status, kind: kind ?? null, total: page.total, before: page.before, findings: page.findings, cursor: page.next ? findingsCursor(selection, page.next) : null });
+}
+
+/**
+ * What an operator's decision did: the finding (its item as written, or null, with `itemUnread`, when this server does
+ * not read it), its status now, what the accept's writer did (`outcome`: the operator's
+ * statement asserted, the same one re-confirmed unchanged, or the operator's own cleared; null for a reject), the
+ * statement it wrote or the newest it closed (`assertion`), every one it closed, the item's winner after, and until
+ * when the decision holds the same finding back.
+ */
+export type FindingReviewed = {
+  id: string; kind: FindingKind | (string & {}); kindUnread?: true; item: FindingItem | null; itemUnread?: true; status: "accepted" | "rejected";
+  outcome: "asserted" | "unchanged" | "cleared" | null; assertion: PriorityAssertion | null; closed: PriorityAssertion[]; winner: PriorityAssertion | null;
+  suppressedUntil: string | null; caller: string;
+  /** The decision was recorded, but the writer's answer is in a shape this server does not read: `outcome` and `assertion` are then null. */
+  answerUnread?: true;
+};
+export type FindingReviewCode = "REFUSED_NOT_OPERATOR" | "PRIORITY_UNATTRIBUTED" | "WRITE_SCOPE_REQUIRED" | "NOT_FOUND" | "REFUSED_FINDING_INPUT" | "REFUSED_FINDING_DECISION" | "REFUSED_PRIORITY_INPUT";
+const inputRefused = (problem: FindingInputError, message: string) => refuse({ code: "REFUSED_FINDING_INPUT", retryable: false, problem, message });
+
+export async function reviewPriorityFinding(ctx: Ctx, principal: Principal, input: Input<"review_priority_finding">): Promise<Outcome<FindingReviewed, FindingReviewCode>> {
+  // 142 asks who first (an operator, then write scope), then whether the arguments go together, so a key that may never
+  // decide is told that and not how to mend a call it cannot make; the schema takes each field alone, and the rules that
+  // join them are 142's alone. One exception: a due time Postgres cannot read is refused binding the call, after the
+  // agent-id check below and before 142's operator check, so any key with an agent id is told so (REFUSED_PRIORITY_INPUT,
+  // naming nothing about the finding).
+  // Who may is the database's to say, as for set_priority_weights (operatorGate).
+  const gate = operatorGate("PRIORITY_UNATTRIBUTED", principal);
+  if (gate) return gate;
+  const id = input.id.toLowerCase();
+  // A date alone is due by the end of that day, as set_priority reads one (SMD-3778). A due time Postgres cannot read,
+  // or a 22023 of the writer 142 calls, is set_priority's refusal, the same input answered the same.
+  const r = await asked(PriorityRefused, async () => (await ctx.store()).reviewPriorityFinding({
+    id, decision: input.decision, level: input.level, dueAt: dueBy(input.due_at),
+    clear: input.clear, note: input.note, actor: actorOf(ctx, principal), scope: writerScope(principal),
+  }));
+  if (r instanceof PriorityRefused) return refuse({ code: "REFUSED_PRIORITY_INPUT", retryable: false, problem: r.problem, message: r.message });
+  if (!r.ok) {
+    switch (r.error) {
+      case "NOT_OPERATOR": return notOperator(principal, r.kind);
+      case "NOT_WRITE_SCOPE": return refuse({ code: "WRITE_SCOPE_REQUIRED", retryable: false, key: principal.name });
+      case "NOT_FOUND": return refuse({ code: "NOT_FOUND", retryable: false, id });
+      case "NOT_PENDING": return refuse({ code: "REFUSED_FINDING_DECISION", retryable: false, id, problem: "NOT_PENDING", message: r.message, ...(r.status === "pending" ? {} : { status: r.status }), ...(r.statusUnread ? { statusUnread: true as const } : {}) });
+      case "NOTHING_TO_CLEAR":
+      case "WRITER_REFUSED":
+        return refuse({ code: "REFUSED_FINDING_DECISION", retryable: false, id, problem: r.error, message: r.message, ...(r.writerCode ? { writerCode: r.writerCode } : {}) });
+      default: return inputRefused(r.error, r.message);
+    }
+  }
+  // 142 committed the decision: it is reported made whatever the writer's answer holds. A reject reaches no writer; an
+  // accept's answer the store could not read is `answerUnread` (normaliseReviewFinding), never a fault.
+  const a = r.answer;
+  // No action-log row, as set_priority_weights: a decision is no search.
+  return ok({
+    id: r.id, kind: r.kind, ...(r.kindUnread ? { kindUnread: true as const } : {}), item: r.item, ...(r.itemUnread ? { itemUnread: true as const } : {}), status: r.status, outcome: a ? a.outcome as FindingReviewed["outcome"] : null, assertion: a?.assertion ?? null,
+    closed: a ? closedOf(a) : [], winner: a?.winner ?? null,
+    suppressedUntil: r.suppressedUntil, caller: principal.name, ...(r.answerUnread ? { answerUnread: true as const } : {}),
+  });
+}
