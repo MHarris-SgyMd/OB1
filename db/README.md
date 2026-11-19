@@ -783,7 +783,9 @@ pending, when the pass finds the conflict again; a pair the pass no longer
 finds in conflict is the pass's to settle since 067, below; a reviewer may
 decide a stale row sooner, accepting it with `p_force` or rejecting it —
 `consolidate.ts --list stale`); the
-tags are marked with no pool to feed (no worker re-tags a thought). With
+tags are marked and not queued (`unqueued`): nothing requeues them under
+the re-tag key yet, and `db/retag.ts` pools a marked row at its next run
+(SMD-2298; its PR 2 gives this function the arm that requeues). With
 `p_input_gone` —
 SMD-1723's forget, called BEFORE the row delete, in one transaction — the
 windows, the input's mentions and edges (the entities locked first, then the
@@ -5144,10 +5146,11 @@ and hands everything else to the worker that owns the recipe, through 016's
 written on the lineage row (`stale_since`, `stale_reason`) until the
 producer's next write clears it. A row whose artifact is gone is deleted. A
 `derived_from` child is listed as irreproducible — prose no recipe re-runs —
-and left standing. The tags have no pool: no worker re-tags a thought, so a
-stale tags row is marked and waits for a re-capture or an edit that carries
-the extractor's recipe — since 148 one whose tags came out the same settles it
-too (SMD-2298, whose PR 1b is the re-tag worker).
+and left standing. The tags' pool has no feed from here yet: a stale tags row
+is marked and waits for `db/retag.ts`, whose every run pools the marked rows
+itself (below), or for a re-capture or an edit that carries the extractor's
+recipe — since 148 one whose tags came out the same settles it too (SMD-2298;
+its PR 2 has this function requeue the row under the recorded re-tag key).
 
 ### `rebuild.ts`
 
@@ -6096,8 +6099,50 @@ run writing nothing (and the same over pages of two), each pass's writes and
 audit events, the cases left, the digest's read with and without the column
 (its patterns before any backfill included), a row edited or deleted mid-run, a
 failure, a second run writing nothing, `--pass`, `--limit`, the statement bound
-and the refusals. The recipe's `enrich-thoughts.mjs` becomes SMD-2298's re-tag
-worker (SMD-3318 PR 3b).
+and the refusals. The recipe's `enrich-thoughts.mjs` is retired for
+SMD-2298's re-tag worker, `retag.ts` below (SMD-3318 PR 3b).
+
+### `retag.ts`
+
+```bash
+bun retag.ts --url …                    # the backlog, then exit
+bun retag.ts --url … --status           # the pool and the backlog; writes nothing
+bun retag.ts --url … --dry-run          # what a run would do; writes nothing
+bun retag.ts --url … --limit 25         # a trial
+bun retag.ts --url … --retry-failed     # failed rows back into the pool first
+bun retag.ts --url … --switch-key       # a model or prompt version other than ob1_config.retag_key's
+#   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60)   --timeout SECONDS (OB1_LLM_TIMEOUT's)   --job <retag:model@pN>
+#   exits 0 clean · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal
+```
+
+The tags' re-run path (SMD-2298), the last of the lineage kinds to get one. The
+backlog is every thought tagged (`type` or `topics`) with no tags row and no
+failure marker — preflight's "tagged before 061" — every one whose tags row
+(`derivations`, kind `metadata`) is marked (`stale_since`) or names another
+fingerprint, and every one whose capture fell back
+(`metadata_extraction_failed` set, the egress refusal's marker included: nothing
+else re-tags a thought the policy kept from the model at capture, so the
+worker's own gate fails it naming the rule while the policy refuses it, and
+`--retry-failed` revisits it once the policy changes). Each run
+pools it under `retag:<metadata model>@p<METADATA_PROMPT_VERSION>`
+(`db/config.mjs`'s `retagKey`, recorded in `ob1_config.retag_key` by the first
+run that writes): `enqueue_thoughts` for the thoughts not pooled, and
+`requeue_thought_work` for one re-tagged before and back in the backlog; a
+failed row waits for `--retry-failed`. A claimed thought still in the backlog
+goes to `server-portable/metadata.ts`'s `extractMetadata`, the capture's call,
+through the egress gate (kind `retag`, the worker key's name as the actor),
+and its answer is written through the 11-argument `update_thought` with
+`tagsOverExisting`'s patch, the row's stamp as `p_if_unchanged_since`, and
+`p_lineage = {"metadata": metadataRecipe(…)}` — under 148 that records the
+tags row at the text, the mark cleared, even when the tags came out the same
+(no event then). The run is refused before 148. A thought the policy refuses
+is failed naming the rule, nothing sent; an answer that is not tags is failed
+and nothing written; a provider error is read by `claim-loop.ts`'s rule; an
+edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
+key other than the recorded one needs `--switch-key`; `--status` and
+`--dry-run` write nothing. Not yet: `rebuild_derived`'s requeue (PR 2),
+preflight's rows and the prompt version's `--switch` (PR 3), a sleep pass and
+`--follow` (PR 4). test-live [29] drives it against a stub chat endpoint.
 
 ## Extensions
 
@@ -7391,8 +7436,8 @@ SMD-2888 — would otherwise stand on current text forever), every facet goes ov
 nearest a shallow merge comes to removing it (`tagsOverExisting`, the rule in
 `server-portable/metadata.ts` every writer that edits a tagged row shares). A row
 whose tags fell back at capture, with its text unchanged, is not this tool's to
-repair: that is SMD-1975's retag worker, for every thought and not ticket rows
-alone; a row that landed without a vector is the servers' vector mender's
+repair: that is SMD-2298's re-tag worker, `db/retag.ts`, for every thought and
+not ticket rows alone; a row that landed without a vector is the servers' vector mender's
 (SMD-2889), as any vectorless row is. Labels render and store
 sorted, whatever order Linear returns them. A ticket deleted in Linear (trashed)
 falls out of the census and its row reads *extra*; a completed one Linear
@@ -7715,7 +7760,7 @@ page, which Brain Checks writes on every push to main (SMD-3614).
 
 ```bash
 bun test-schema.ts                          # PGlite, no container
-./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off — or a recipe's env file skips a case: [29]'s no-URL case under recipes/thought-enrichment/.env.local)
+./with-postgres.sh bun test-live.ts         # real server, throwaway container (fewer assertions when a group is skipped — PostgreSQL 18, JIT off)
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Brain Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts

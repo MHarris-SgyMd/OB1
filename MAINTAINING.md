@@ -516,13 +516,13 @@ Deliberate. Recorded so nobody assumes they were missed.
   credentials (Gmail, Slack). The shim itself is tested against
   real Postgres, and CI checks every banner-carrying file still parses and that
   the codemod round-trips byte-for-byte — but exercise the ones you actually run
-  before trusting them. The hand port (`recipes/thought-enrichment`'s
-  `enrich-thoughts.mjs`, SMD-2139) carries no banner and is driven instead, as
-  deployed, by `db/test-live.ts` [29]. `recipes/brain-backup`'s,
-  `recipes/lint-sweep`'s and thought-enrichment's two backfills were the
-  others (SMD-2144, SMD-2139), until they moved to `db/backup.ts`,
+  before trusting them. The hand ports — `recipes/thought-enrichment`'s three
+  scripts (SMD-2139), `recipes/brain-backup`'s and `recipes/lint-sweep`'s
+  (SMD-2144) — carried no banner and were driven as deployed by
+  `db/test-live.ts`, until they moved to `db/`: `db/backup.ts`,
   `db/lint-sweep.ts` and `db/backfill-metadata.ts` (SMD-3318, [50], [26] and
-  [51]).
+  [51]), and the enrichment retired for the core's re-tag worker,
+  `db/retag.ts` (SMD-2298, [29]).
 - **No file imports supabase-js at runtime any more.** The six servers that
   used resource embedding and nested `.or()` moved with SMD-1798; the
   dashboard's type-only import went with its Supabase sign-in (SMD-1801). Check

@@ -239,6 +239,12 @@ export function parseReembedKey(key: string): { model: string; dim: number } | n
 export function poolModelFor(key: string): string | null;
 /** How preflight attributes a claim-table key to db/consolidate.ts (029): `consolidate:<model>@p<version>`. */
 export const CONSOLIDATE_KEY_PREFIX: "consolidate:";
+/** A re-tag pool key's prefix (SMD-2298): `retag:<metadata model>@p<prompt version>`. */
+export const RETAG_KEY_PREFIX: "retag:";
+/** `retag:<model>@p<promptVersion>` — db/retag.ts's pool for the tags' extractor at a prompt version. */
+export function retagKey(model: string, promptVersion: number): string;
+/** `retag:<model>@p<version>` → the model and prompt version it names; null for any other shape. */
+export function parseRetagKey(key: string): { model: string; promptVersion: number } | null;
 /** `SELECT embedding_model AS model, count(*) AS c` over the rows with a vector, grouped (021). */
 export const CORPUS_BY_MODEL_SQL: string;
 /** Those rows read against one model: at it, unlabelled, and the other models with counts. */
