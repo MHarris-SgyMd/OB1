@@ -3851,25 +3851,25 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
     assert(marked.rest.every((r) => days(on(r, STALE)?.unreviewed) === 75 && (on(r, STALE)?.unreviewed as { findingId?: string }).findingId === found.id && days(on(r, MIRROR)?.unreviewed) === "none"
         && days(r?.priority?.find((p) => p.self)?.unreviewed) === 70),
       `every read's REST answer marks the stale ticket stated 75 days ago (the newer statement's, not the 90), with its finding; board-sync's ticket not, a pending disagreement on it no mark; the note's own 70 (${marked.rest.map((r) => `${days(on(r, STALE)?.unreviewed)}/${days(on(r, MIRROR)?.unreviewed)}/${days(r?.priority?.find((p) => p.self)?.unreviewed)}`).join(" ")})`);
-    assert(marked.texts.every((t) => t.includes(`ticket ${STALE} at 4 (urgent (4)), medium (2) by [27] agent b, stated 75 days ago, unreviewed`) && !new RegExp(`ticket ${MIRROR} at [^;]*unreviewed`).test(t) && t.includes("this thought at 1 (low (1)), low (1) by rival, stated 70 days ago, unreviewed")
+    assert(marked.texts.every((t) => t.includes(`ticket ${STALE} at 4 (urgent (4)), medium (2) by "[27] agent b", stated 75 days ago, unreviewed`) && !new RegExp(`ticket ${MIRROR} at [^;]*unreviewed`).test(t) && t.includes("this thought at 1 (low (1)), low (1) by \"rival\", stated 70 days ago, unreviewed")
           && t.split("Unreviewed: sleep's priority review found that statement stale").length === 2)
         && marked.sc.every((p) => days(p?.find((x) => x.key === STALE)?.unreviewed) === 75 && !("unreviewed" in (p?.find((x) => x.key === MIRROR) ?? { unreviewed: 1 })))
-        && [marked.compatTitle, marked.fetchTitle].every((t) => t.startsWith(`[priority: this thought low (1), low (1) by rival, stated 70 days ago, unreviewed; ticket ${STALE} urgent (4), medium (2) by [27] agent b, stated 75 days ago, unreviewed; and 1 more] `))
+        && [marked.compatTitle, marked.fetchTitle].every((t) => t.startsWith(`[priority: this thought low (1), low (1) by "rival", stated 70 days ago, unreviewed; ticket ${STALE} urgent (4), medium (2) by "[27] agent b", stated 75 days ago, unreviewed; and 1 more] `))
         && marked.notes.every((n) => typeof n === "string" && n.startsWith("Unreviewed: sleep's priority review found that statement stale")) && marked.scRead.every((x) => x === undefined),
       `the MCP texts, values and titles say it, naming the agents' medium under review beside board-sync's counted urgent: search_thoughts', search_thoughts_keyword's and list_thoughts' lines and the key once, every value (search's and fetch's too), search's and fetch's titles and their note (${(marked.texts[0].match(/Priority: .*/) ?? ["none"])[0].slice(0, 220)} | ${marked.compatTitle.slice(0, 160)})`);
     assert(marked.items.map((i) => `${i.key}:${days(i.unreviewed)}`).join(" ") === `${AG2}:none ${AG}:80 ${AG4}:none` && marked.agSame
         && marked.items[2]?.inheritedFrom?.key === AG3 && days(marked.items[2]?.inheritedFrom?.unreviewed) === 65
-        && marked.agText.includes(`inherited 3 from ticket ${AG3} (urgent (4), 1 hop) (urgent (4) by writer, stated 65 days ago, unreviewed)`)
-        && marked.agText.includes(`2. ticket ${AG} ("backlog") "${AG} — [27] ${AG}" — 3: high (3) [high (3) by writer, stated 80 days ago, unreviewed]`)
+        && marked.agText.includes(`inherited 3 from ticket ${AG3} (urgent (4), 1 hop) (urgent (4) by "writer", stated 65 days ago, unreviewed)`)
+        && marked.agText.includes(`2. ticket ${AG} ("backlog") "${AG} — [27] ${AG}" — 3: high (3) [high (3) by "writer", stated 80 days ago, unreviewed]`)
         && days(marked.board.find((t) => t.key === AG)?.unreviewed) === 80 && days(marked.board.find((t) => t.key === AG2)?.unreviewed) === "none"
-        && marked.pcText.includes("[high (3) by writer, stated 80 days ago, unreviewed]") && (marked.pcBoard.find((t) => t.key === AG)?.unreviewed as { days?: number } | undefined)?.days === 80,
+        && marked.pcText.includes("[high (3) by \"writer\", stated 80 days ago, unreviewed]") && (marked.pcBoard.find((t) => t.key === AG)?.unreviewed as { days?: number } | undefined)?.days === 80,
       `the agenda's item and plan_context's board ticket marked 80 days (its newer statement's), over both doors, the higher one beside them not; a child ticket's inherited parent marked 65 on the source, the child itself not (${marked.items.map((i) => `${i.key}:${days(i.unreviewed)}`).join(" ")} | ${(marked.agText.match(/2\. .*/) ?? ["none"])[0]})`);
 
     assert(itemLevel.status === 200 && days(marked.bill?.fromItem?.unreviewed) === 85 && days(marked.bill?.unreviewed) === "none"
-        && marked.billTitle.startsWith(`[priority: this thought urgent (4) from open item ${itemId} (urgent (4) by writer, stated 85 days ago, unreviewed)] `)
+        && marked.billTitle.startsWith(`[priority: this thought urgent (4) from open item ${itemId} (urgent (4) by "writer", stated 85 days ago, unreviewed)] `)
         && (marked.billSc?.fromItem as { unreviewed?: { days?: number } } | undefined)?.unreviewed?.days === 85 && !("unreviewed" in (marked.billSc ?? { unreviewed: 1 }))
         && days(marked.heir?.find((p) => p.self)?.inheritedFrom?.unreviewed) === 65 && days(marked.heir?.find((p) => p.self)?.unreviewed) === "none" && days(marked.heir?.find((p) => p.key === AG3)?.unreviewed) === 65
-        && marked.heirTitle.includes(`inherited from urgent (4) ticket ${AG3} (urgent (4) by writer, stated 65 days ago, unreviewed)`),
+        && marked.heirTitle.includes(`inherited from urgent (4) ticket ${AG3} (urgent (4) by "writer", stated 65 days ago, unreviewed)`),
       `a level's source carries its finding's mark: the open item a note reads its level from, and the ticket a note inherits from, said in the title on the source, the note itself unmarked (${marked.billTitle.slice(0, 160)} | ${marked.heirTitle.slice(0, 200)})`);
 
     // The operator decides: a reject over REST, one over MCP, and the other findings mooted as a scan moots one.

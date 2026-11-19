@@ -1801,7 +1801,7 @@ export type Unreviewed = { findingId: string; statedAt: string | null; days: num
 /**
  * A priority label's unreviewed mark (SMD-3671 PR 3): the item's pending stale finding; `false` when it has none; null
  * when it was not checked — the findings read failed (a brain before 142, a role without its SELECT) or ran out of
- * time, the item was past the read's reach (a result counts those in `unreviewedNotRead`), or the answer came from a
+ * time, the item was past the read's reach (a result names those in `unreviewedUnchecked`), or the answer came from a
  * store or REST core that does not read them.
  */
 export type UnreviewedMark = Unreviewed | false | null;

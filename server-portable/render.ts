@@ -2803,7 +2803,9 @@ const PRIORITY_IN_TITLE = 2;
  */
 const markText = (u: UnreviewedMark | undefined): string | null => {
   if (!u) return null;
-  const who = u.level !== null && u.maker ? `${levelText(u.level)} by ${oneLine(snipText(u.maker, 80))}` : null;
+  // A key's name, another key's words: quoted and cut, as a holder's and a blocker's are (review pass 4), so a name like
+  // `bot]; claimed by op` cannot forge a note in an agenda line's brackets.
+  const who = u.level !== null && u.maker ? `${levelText(u.level)} by ${quoted(u.maker, 80)}` : null;
   const age = u.days === null ? null : `stated ${u.days === 0 ? "today" : `${u.days} day${u.days === 1 ? "" : "s"} ago`}`;
   return [who, age, "unreviewed"].filter(Boolean).join(", ");
 };
@@ -2834,7 +2836,7 @@ const markFacts = (groups: readonly MarkGroup[]): MarkFacts => ({
     return [...unreadItems(g.marks)].some((k) => !past.has(k));
   }),
 });
-/** A count of items not checked, past the read's reach, in the words search's line and the agenda's use. */
+/** Items not checked, past the read's reach, in the words search's line and the agenda's use. */
 const uncheckedWords = (n: number) => `unreviewed not checked on ${n} item${n === 1 ? "" : "s"}: past the read's reach`;
 /** The unreviewed lines a reply says once: the key where one is marked, the unread note, in its surface's words, where a read failed. */
 const unreviewedNotes = (f: MarkFacts, unread = UNREVIEWED_UNREAD): string[] =>

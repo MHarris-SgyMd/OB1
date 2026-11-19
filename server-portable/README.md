@@ -608,8 +608,9 @@ left of it; out of time or failed, a note in the reply's `notes`
 words. The compact board value carries a ticket's sources' marks as it does the
 ticket's.
 
-Over MCP a marked item reads `…, medium (2) by codex, stated 75 days ago,
-unreviewed` (`1 day`, `today`, or no statement and no age when not read) in the
+Over MCP a marked item reads `…, medium (2) by "codex", stated 75 days ago,
+unreviewed` (the maker's name quoted and cut, as a holder's is; `1 day`, `today`,
+or no statement and no age when not read) in the
 `Priority` line, the title and the agenda's and board's lines, a source's in
 brackets after the source; the reply says once what it means. The compact value
 carries `unreviewed` (no maker: a key's name rides the text) only where a mark is

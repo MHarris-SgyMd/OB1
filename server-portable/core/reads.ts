@@ -716,8 +716,10 @@ export async function priorityRead(store: Pick<ThoughtStore, "effectivePriority"
   try {
     labels = priorityLabels(await readPriorities(store, rows, { have, ask, ...(weights === undefined ? {} : { weights }) }), rows);
   } catch (e) {
-    // The first read's own failure goes unsaid (review pass 2): the priorities' is the reply's, and logged here.
+    // The first read's own failure goes unsaid (review pass 2): the priorities' is the reply's, and logged here. It is
+    // settled before the reply goes (review pass 4): abandoned, it held its pool connection, plan_context's in a transaction.
     console.error(`priority: the effective priority read failed (${sqlState(e) || "no code"}): ${String((e as { message?: unknown }).message ?? e).slice(0, 200)}; results carry priority: null`);
+    await first;
     return { labels: null, unread: null };
   }
   const reads = [await first];
@@ -781,12 +783,16 @@ export async function unreviewedOf(store: Pick<ThoughtStore, "staleUnreviewedOn"
   }
 }
 
-/** An item's mark from its reads: its finding, false for none; null when the read that asked it failed (`cut` false) or none reached it (`cut` true). */
+/**
+ * An item's mark from its reads: its finding, false for none; null when the read that asked it failed (`cut` false) or
+ * none reached it (`cut` true) — unless the read that left it past its reach failed too (review pass 4): then no second
+ * read ran for it, and it is that failure's, not unchecked.
+ */
 export function markOf(reads: readonly UnreviewedRead[], item: MarkItem): { mark: UnreviewedMark; cut: boolean } {
   const k = itemKey(item);
   const r = reads.find((x) => x.asked.has(k));
   if (r) return { mark: r.failed ? null : (r.by.get(k) ?? false), cut: false };
-  return { mark: null, cut: reads.some((x) => x.cut.has(k)) };
+  return { mark: null, cut: reads.some((x) => x.cut.has(k) && !x.failed) };
 }
 
 /** A priority, an agenda item or a board ticket with its mark and its level's sources' marks, the distinct items no read reached added to `cut`. */

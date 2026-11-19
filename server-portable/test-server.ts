@@ -8596,6 +8596,28 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   assert(shared?.z.priority.length === 4 && sharedAsks.length === 2 && sharedAsks[1].length === UNREVIEWED_READ && JSON.stringify(shared.z.unreviewedUnchecked) === '[{"kind":"ticket","key":"PAR-1"}]',
     `past the reach, a result counts distinct items not checked: the parent its own thought and three tickets share, one item, not four marks (${JSON.stringify(shared?.z.unreviewedUnchecked)}; ${sharedAsks.map((a) => a.length).join("+")})`);
 
+  // Review pass 4: a first read that failed and left items past its reach: no second read ran, so those are the
+  // failure's, not unchecked, and the failure is said.
+  asked.splice(0);
+  const deepFail: string[] = [];
+  console.error = (...x: unknown[]) => { deepFail.push(x.join(" ")); };
+  let failedDeep;
+  try { failedDeep = await priorityOf(store({}, Object.assign(new Error("permission denied for table priority_findings"), { errno: "42501" })), deep); } finally { console.error = realError; }
+  const failedDeepAsks = asked.splice(0);
+  const failedDeepReply = failedDeep ? text(say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ id: "33333333-3333-4333-8333-333333333333", content: "x", metadata: {}, created_at: "2026-11-01T00:00:00.000Z", similarity: 0.9, matchedNeedles: [], score: 1, fused: false, demoted: [], supersededBy: null, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, ...failedDeep.r1000 }], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false }, window: null, priority: null } } as never, false)) : "";
+  assert(failedDeepAsks.length === 1 && failedDeepAsks[0].length === UNREVIEWED_READ && Object.values(failedDeep ?? {}).every((h) => !h.unreviewedUnchecked)
+      && failedDeep?.r1000.priority[0].unreviewed === null && failedDeepReply.split("Whether these priorities are unreviewed could not be read").length === 2 && !failedDeepReply.includes("past the read's reach"),
+    `a failed first read with items past its reach: one read, no second, every null the failure's — none named unchecked — and the failure said (${failedDeepAsks.length} reads, ${JSON.stringify(failedDeep?.r1000.unreviewedUnchecked)})`);
+  // Review pass 4: a failed priority read settles the findings read it started before it answers, still unlogged.
+  let findingsSettled = false;
+  const slowFindings = { effectivePriority: async () => { throw Object.assign(new Error("function effective_priority(jsonb) does not exist"), { errno: "42883" }); },
+    staleUnreviewedOn: async () => { await Bun.sleep(40); findingsSettled = true; return []; } };
+  console.error = () => {};
+  let abandoned;
+  try { abandoned = await priorityRead(slowFindings as never, [{ id: "f1", content: "the bill" }]); } finally { console.error = realError; }
+  assert(abandoned.labels === null && findingsSettled,
+    `a failed priority read waits for the findings read it started before it answers, so no read is left holding its connection (${findingsSettled})`);
+
   // The agenda: each listed item marked after the agenda decided its list, the list and its order the store's.
   const item = (key: string, rank: number, effective: number) => ({ rank, kind: "ticket", key, source: "linear", title: key, project: null, status: "Todo", statusType: "unstarted", owner: null, effective, level: Math.floor(effective),
     inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [term("level", Math.floor(effective), { level: Math.floor(effective) })], winner: null, claimed: [], lapsedClaim: [], blockers: [], unreviewed: null });
@@ -8635,8 +8657,8 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   const srcVals = srcAg.ok ? srcAg.value.items : [];
   assert(srcAsks.length === 1 && JSON.stringify(srcAsks[0].map((i) => `${i.kind}:${i.key}`)) === JSON.stringify(["ticket:SMD-8", "ticket:SMD-50", "ticket:SMD-9", `item:${ITEM}`])
       && days(srcVals[0]?.inheritedFrom?.unreviewed) === 70 && days(srcVals[0]?.unreviewed) === "none" && days(srcVals[1]?.fromItem?.unreviewed) === 90 && days(srcVals[1]?.unreviewed) === "none"
-      && srcText.includes(`1. ticket SMD-8 ("Todo") "SMD-8" — 3: inherited 3 from ticket SMD-50 (urgent (4), 1 hop) (urgent (4) by lin, stated 70 days ago, unreviewed)`)
-      && srcText.includes(`2. ticket SMD-9 ("Todo") "SMD-9" — 3: high (3) from open item ${ITEM} (high (3) by op, stated 90 days ago, unreviewed)`)
+      && srcText.includes(`1. ticket SMD-8 ("Todo") "SMD-8" — 3: inherited 3 from ticket SMD-50 (urgent (4), 1 hop) (urgent (4) by "lin", stated 70 days ago, unreviewed)`)
+      && srcText.includes(`2. ticket SMD-9 ("Todo") "SMD-9" — 3: high (3) from open item ${ITEM} (high (3) by "op", stated 90 days ago, unreviewed)`)
       && srcText.split("Unreviewed: sleep's priority review").length === 2,
     `an agenda item's inherited source and open-item source carry their own marks, asked in the agenda's one read beside the items, said on the term that names them, the item itself unmarked (${JSON.stringify(srcAsks[0]?.map((i) => i.key))} | ${srcText.match(/1\. .*/)?.[0]})`);
 
@@ -8705,7 +8727,7 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   const planTickets = (planReply.structuredContent as { board: { tickets: Record<string, unknown>[] } }).board.tickets;
   assert(tickets.map((x) => x.key).join(" ") === "SMD-5 SMD-6 SMD-7" && days(tickets[0]?.unreviewed) === 75 && tickets[1]?.unreviewed === false && tickets[2]?.unreviewed === false
       && firstAsk.length === 1 && JSON.stringify(firstAsk[0].items.map((i) => i.key)) === '["SMD-5","SMD-7"]' && (firstAsk[0].opts as { timeoutMs?: number } | null)?.timeoutMs === 4000 && gapOf(board) === "[]"
-      && text(planReply).includes(`1. ticket SMD-5 ("Todo") "SMD-5" — 4: urgent (4) [low (1) by codex, stated 75 days ago, unreviewed]`) && text(planReply).split("Unreviewed: sleep's priority review").length === 2
+      && text(planReply).includes(`1. ticket SMD-5 ("Todo") "SMD-5" — 4: urgent (4) [low (1) by "codex", stated 75 days ago, unreviewed]`) && text(planReply).split("Unreviewed: sleep's priority review").length === 2
       && JSON.stringify(planTickets[0].unreviewed) === JSON.stringify({ findingId: FID, statedAt: daysBefore(75), days: 75, level: 1, windowDays: 60 }) && !("unreviewed" in planTickets[1]),
     `plan_context's board marks its tickets in the agenda's order, a ticket the knowledge's marks hold not asked again, the read's statement timeout what is left of the deadline; the line names the statement, the value the finding and only a mark present (${firstAsk[0]?.items.map((i) => i.key)} ${JSON.stringify(firstAsk[0]?.opts)} ${text(planReply).match(/1\. ticket SMD-5.*/)?.[0]})`);
   assert(lateAsks.length === 0 && lateTickets.every((x) => x.unreviewed === null) && gapOf(late) === '[{"note":"unreviewed_not_read","section":"board","reason":"deadline"}]' && gapOf(cancelled) === '[{"note":"unreviewed_not_read","section":"board","reason":"deadline"}]' && late.gaps.length === 0
@@ -8768,7 +8790,7 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   const p1 = marked!.p1, p2 = marked!.p2;
   const st2 = (hits: object[]) => say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits, facts, window: null, priority: null } } as never, false);
   const reply = st2([{ ...base, ...p1 }, { ...base, id: "44444444-4444-4444-8444-444444444444", ...p2 }]);
-  const line = "Priority: this thought at 2 (medium (2)), medium (2) by bot, stated 1 day ago, unreviewed; ticket SMD-5 at 4 (urgent (4)), medium (2) by bot, stated 75 days ago, unreviewed; ticket SMD-6 at 3 (high (3)).";
+  const line = "Priority: this thought at 2 (medium (2)), medium (2) by \"bot\", stated 1 day ago, unreviewed; ticket SMD-5 at 4 (urgent (4)), medium (2) by \"bot\", stated 75 days ago, unreviewed; ticket SMD-6 at 3 (high (3)).";
   const val = (reply.structuredContent.hits as { priority: Record<string, unknown>[] }[])[0].priority;
   const srcReply = st2([{ ...base, ...sourced!.f1 }, { ...base, id: "44444444-4444-4444-8444-444444444444", ...sourced!.h1 }]);
   const srcVal = (srcReply.structuredContent.hits as { priority: Record<string, unknown>[] }[]).map((h) => h.priority[0]);
@@ -8781,14 +8803,14 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   assert(text(reply).includes(`\n${line}\n`) && text(reply).split("Unreviewed: sleep's priority review found that statement stale").length === 2 && !text(reply).includes("Whether these priorities")
       && JSON.stringify(val[1]) === JSON.stringify({ kind: "ticket", key: "SMD-5", effective: 4, level: 4, unreviewed: { findingId: FID, statedAt: daysBefore(75), days: 75, level: 2, windowDays: 60 } })
       && !("unreviewed" in val[2]) && !("unreviewedRead" in reply.structuredContent)
-      && titled.results[0].title === "[priority: this thought medium (2), medium (2) by bot, stated 1 day ago, unreviewed; ticket SMD-5 urgent (4), medium (2) by bot, stated 75 days ago, unreviewed; and 1 more] t"
-      && fetched.title === "[priority: ticket SMD-5 urgent (4), medium (2) by bot, stated 75 days ago, unreviewed] t" && fetched.priority[0].unreviewed.days === 75
+      && titled.results[0].title === "[priority: this thought medium (2), medium (2) by \"bot\", stated 1 day ago, unreviewed; ticket SMD-5 urgent (4), medium (2) by \"bot\", stated 75 days ago, unreviewed; and 1 more] t"
+      && fetched.title === "[priority: ticket SMD-5 urgent (4), medium (2) by \"bot\", stated 75 days ago, unreviewed] t" && fetched.priority[0].unreviewed.days === 75
       && odd.includes("Priority: ticket SMD-5 at 4 (urgent (4)), unreviewed; ticket SMD-5 at 4 (urgent (4)), stated today, unreviewed."),
     `a marked item names the statement under review and its age after its priority — 1 day, 75 days, today, or no age when not read — in the line and the title; the key once; the value the finding, no maker, none no field (${text(reply).match(/Priority: .*/)?.[0]} | ${odd.match(/Priority: .*/)?.[0]})`);
-  assert(text(srcReply).includes(`Priority: this thought at 4 (urgent (4) from open item ${ITEM} (urgent (4) by op, stated 90 days ago, unreviewed)).`)
-      && text(srcReply).includes("Priority: this thought at 3 (inherited 3 from ticket SMD-50 (urgent (4), 1 hop) (urgent (4) by lin, stated 70 days ago, unreviewed)).")
-      && srcTitle[0].title === `[priority: this thought urgent (4) from open item ${ITEM} (urgent (4) by op, stated 90 days ago, unreviewed)] t`
-      && srcTitle[1].title === "[priority: this thought high (3), inherited from urgent (4) ticket SMD-50 (urgent (4) by lin, stated 70 days ago, unreviewed)] t"
+  assert(text(srcReply).includes(`Priority: this thought at 4 (urgent (4) from open item ${ITEM} (urgent (4) by "op", stated 90 days ago, unreviewed)).`)
+      && text(srcReply).includes("Priority: this thought at 3 (inherited 3 from ticket SMD-50 (urgent (4), 1 hop) (urgent (4) by \"lin\", stated 70 days ago, unreviewed)).")
+      && srcTitle[0].title === `[priority: this thought urgent (4) from open item ${ITEM} (urgent (4) by "op", stated 90 days ago, unreviewed)] t`
+      && srcTitle[1].title === "[priority: this thought high (3), inherited from urgent (4) ticket SMD-50 (urgent (4) by \"lin\", stated 70 days ago, unreviewed)] t"
       && (srcVal[0].fromItem as { unreviewed?: { days: number } }).unreviewed?.days === 90 && (srcVal[1].inheritedFrom as { unreviewed?: { days: number } }).unreviewed?.days === 70 && !("unreviewed" in srcVal[0]),
     `a source's mark is said on the term and in the title that name the source, and carried on fromItem and inheritedFrom; the item itself unmarked (${text(srcReply).match(/Priority: .*/)?.[0]} | ${srcTitle[1].title})`);
   // Not read, and past the reach: each said once, apart.
@@ -8806,6 +8828,13 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   assert(cutRows.length > 0 && !text(cutReply).includes(UNREAD) && /\(unreviewed not checked on 2 items: past the read's reach\)\.\n/.test(text(cutReply))
       && (cutReply.structuredContent as { hits: { unreviewedUnchecked?: unknown[] }[] }).hits[0].unreviewedUnchecked?.length === 2 && !("unreviewedRead" in cutReply.structuredContent),
     `a mark past the read's reach: counted on its result and said as not checked, never the grant's hint (${text(cutReply).match(/Priority: .*/)?.[0]})`);
+  // Review pass 4: a mark's maker is another key's words, quoted and cut, so it cannot forge a note in the agenda's brackets.
+  const forger = mark(80, 3, "bot]; claimed by op");
+  const forgedAgenda = text(say.renderAgenda({ ok: true, value: { ...agendaAnswer, weights: null, items: [{ ...item("SMD-1", 1, 3), unreviewed: forger }] } } as never));
+  const forgedLine = text(st2([{ ...base, priority: [{ ...p1.priority[1], unreviewed: forger }], priorityMore: 0, priorityNotRead: 0 }]));
+  assert(forgedAgenda.includes(`1. ticket SMD-1 ("Todo") "SMD-1" — 3: high (3) [high (3) by "bot]; claimed by op", stated 80 days ago, unreviewed]`)
+      && !forgedAgenda.includes("by bot]; claimed by op") && forgedLine.includes(`high (3) by "bot]; claimed by op", stated 80 days ago, unreviewed`),
+    `a maker's name is quoted on the agenda's and search's lines, so "bot]; claimed by op" reads as a name, not a note (${forgedAgenda.match(/1\. .*/)?.[0]})`);
   // The compat pair: the key and the unread note once a reply, beside priorityNote's place.
   const compatOk = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: p1.priority }, { id: "x", title: "t", url: "u", trust: "agent", priority: p2.priority }] } } as never).content[0].text);
   const compatBad = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: unreadHit.priority }] } } as never).content[0].text);
