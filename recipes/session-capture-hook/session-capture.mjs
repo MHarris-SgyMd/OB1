@@ -2870,14 +2870,16 @@ const holdDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8"
 /**
  * Whether a queued file holds a copy as the hook writes one: an object with a string `tool`, an object `args` and an
  * `at` that is a date. Anything else, a hand edit or a corrupt file, is given up as one that does not parse: it threw
- * on every drain, ahead of the week's give-up, or with no date was never given up, and every copy behind it waited
- * for good (SMD-4412).
+ * on every drain, ahead of the week's give-up, or, with no date, was never given up once a fault kept it, and every
+ * copy behind it waited for good (SMD-4412).
  */
 const isCopy = (op) => typeof op?.tool === "string" && op.args !== null && typeof op.args === "object" && !Array.isArray(op.args)
   && Number.isFinite(Date.parse(op.at));
 
 /** A copy as the log names it: the tool and the id or key it names, never its text. */
-const opLabel = (op) => `${op.tool}${op.tool === "capture_thought" ? ` (client_key ${op.args.client_key})` : ` of ${op.args.id}`}`;
+const opLabel = (op) => `${op.tool}${op.tool === "capture_thought" ? ` (client_key ${shownName(op.args.client_key)})` : ` of ${shownName(op.args.id)}`}`;
+/** A name as the log prints it: a value that is no string (a hand edit's) as JSON, which cannot throw on parsed JSON as a template can (`{"toString":1}`, SMD-4412 review pass 1). */
+const shownName = (v) => (typeof v === "string" ? v : JSON.stringify(v));
 
 /**
  * One copy onto a brain, through its write key. `done` — landed, or skipped
