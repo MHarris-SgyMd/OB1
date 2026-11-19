@@ -2251,14 +2251,15 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
       stopping: () => stopping || haltedByProvider || configError !== null,
       hardStopped: () => hardStopped, isolated: () => isolated, pollNow: () => { pollNow = true; },
       count: { lost: () => { lost++; }, vanished: () => { vanished++; }, beats: (k) => { beats += k; } },
-      // The follower saw the record's model move: a worker through the gate again claims nothing, though the record has
-      // moved back since and the read before its claim would pass it (SMD-4401). Under a gate only: the loop asks nowhere else.
-      afterGate: () => switchedTo !== null,
       // A follower reads the record before each batch, not only at its poll: a --switch-model run by hand beside
       // it had the whole drain — a sleep's backlog — written at the old model after the switch (SMD-2679 PR 4b,
       // review pass 4). The batches in hand still land; the follower ends, 2, once the drain returns.
       beforeClaim: async () => {
         if (!FOLLOW) return false;
+        // The follower has seen the record move, on another worker's read: this one claims nothing more, though the
+        // record has moved back since and its own read would pass it. With a gate or with none (SMD-4401, SMD-4413:
+        // the loop asked this after the admit gate alone, so an ungated follower's second worker drained the pool).
+        if (switchedTo !== null) return true;
         const [r] = (await sql`SELECT value FROM ob1_config WHERE key = 'embedding_model'`) as { value: string }[];
         if (!r || r.value === embedConfig.embeddingModel) return false;
         switchedTo = r.value;

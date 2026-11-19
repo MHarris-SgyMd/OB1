@@ -1095,7 +1095,7 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
     }) as unknown as import("bun").SQL;
     return { sql, wants, statements };
   };
-  const drive = async (db: ReturnType<typeof database>, o: { batch?: number; limit?: number; follow?: boolean; isolated?: boolean; outage?: InstanceType<typeof ProviderOutage>; admit?: import("./lease.ts").Admit; gate?: AbortSignal; row?: (id: string, hand: import("./claim-loop.ts").ClaimHand) => "stop" | "next"; extra?: Pick<import("./claim-loop.ts").ClaimWorkerOptions<Row>, "afterGate" | "beforeClaim" | "leaseReturn">; active?: Set<string>; errThrows?: RegExp } = {}) => {
+  const drive = async (db: ReturnType<typeof database>, o: { batch?: number; limit?: number; follow?: boolean; isolated?: boolean; outage?: InstanceType<typeof ProviderOutage>; admit?: import("./lease.ts").Admit; gate?: AbortSignal; row?: (id: string, hand: import("./claim-loop.ts").ClaimHand) => "stop" | "next"; extra?: Pick<import("./claim-loop.ts").ClaimWorkerOptions<Row>, "beforeClaim" | "leaseReturn">; active?: Set<string>; errThrows?: RegExp } = {}) => {
     const seen: string[] = [];
     const errs: string[] = [];
     const counts = { lost: 0, vanished: 0, beats: -1 };
@@ -1178,12 +1178,14 @@ for (const env of [{}, { OB1_EMBEDDING_MODEL: "  m1  ", OB1_EMBEDDING_DIM: " 768
   const checkFails = database([["a"]]);
   const c2 = await drive(checkFails, { follow: false, extra: { beforeClaim: () => Promise.reject(Object.assign(new Error("could not serialize access"), { name: "PostgresError", errno: "40001" })) } });
   ok(c2.seen.length === 0 && checkFails.statements.join(" ") === "return" && c2.errs.some((e) => /could not serialize access — this worker stops$/.test(e)), `…and a check the database refuses is the claim's own refusal: this worker stops with it said (${c2.errs.join(" | ")})`);
+  // The check is asked past an open admit gate as it is with none (SMD-4413: re-embed's rule that a follower which saw
+  // its record move claims no more is its check's now, where the loop asked it after the gate alone).
   const { liveGate: openGate } = await import("./lease.ts");
   const moved = database([["a"]]);
-  const c3 = await drive(moved, { follow: true, admit: openGate().admit, extra: { afterGate: () => true } });
+  const c3 = await drive(moved, { follow: true, admit: openGate().admit, extra: { beforeClaim: async () => true } });
   const ungated = database([["a"]]);
-  const c4 = await drive(ungated, { follow: true, extra: { afterGate: () => true } });
-  ok(c3.seen.length === 0 && moved.statements.join(" ") === "return" && c4.seen.join(" ") === "a:a", `an engine's own reason after the admit gate ends the worker before its claim, and is not asked where there is no gate (${moved.statements.join(" ")}; ${c4.seen.join(" ")})`);
+  const c4 = await drive(ungated, { follow: true, extra: { beforeClaim: async () => true } });
+  ok(c3.seen.length === 0 && moved.statements.join(" ") === "return" && c4.seen.length === 0 && ungated.statements.join(" ") === "return", `an engine's check before each claim ends the worker with nothing claimed past an open admit gate, and with no gate the same (${moved.statements.join(" ")}; ${ungated.statements.join(" ")})`);
   const cut = () => Object.assign(new Error("connection closed"), { name: "PostgresError", errno: "08006" });
   const plainRefused = await drive(database([["a"]], { returnThrows: cut() }), { follow: true });
   const oneShotRefused = await drive(database([["a"]], { returnThrows: cut() }), { follow: false });
