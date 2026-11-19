@@ -35,8 +35,9 @@
 #               a model background keeps busy (deploy/README.md). Without
 #               it, or while it can't be read, no such rule;
 #   stay_s      optional, with ps: how long a model that background loaded
-#               stays before background loads another (default 60), so one
-#               brain's asks can't cut another brain's turn short.
+#               stays, busy or idle, before background loads another
+#               (default 60), so one brain's asks can't cut another
+#               brain's turn short.
 # brains        each brain by name, with the sha256 of its broker key:
 #               `bun deploy/federated/federated.ts key --brain <name>` prints
 #               a new key once, for that brain's deploy/.env, and this line.

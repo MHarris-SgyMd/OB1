@@ -1020,9 +1020,9 @@ await withResidency([], async ({ b, ps, move, res }) => {
   move(4_000); await quiet();
   ok(!c.seen("go", "y1"), "nor 4 s after");
   move(1_100);
-  ok(!!(await c.next("go", "y1", SOON)), "BG_QUIET_S (5 s) with no background call and no live one lately, the next model goes", res());
+  ok(!!(await c.next("go", "y1", SOON)), "BG_QUIET_S (5 s) with no background call and no live one lately, the next model goes (stay_s 0 here)", res());
   await s.close(); await c.close();
-});
+}, { stay: 0 });
 
 await withResidency([SMALL], async ({ b, ps, move, res }) => {
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
@@ -1046,8 +1046,8 @@ await withResidency([SMALL], async ({ b, move, res }) => {
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
   askM(s, "L", SMALL, "live"); await s.next("go", "L");
   askM(c, "k", BIG, "background", { max_wait_s: 600 }); await c.next("queued", "k");
-  move(300_000); await quiet();
-  ok(!c.seen("go", "k"), "a live call still running on a loaded model holds it, however long ago it began", res());
+  move(100_000); await quiet();
+  ok(!c.seen("go", "k"), "a live call still running on a loaded model holds it, though no live call has ended lately", res());
   askM(c, "z", BIG, "background", { max_wait_s: 0 }); await c.next("queued", "z");
   b.turn(); await quiet();
   ok(res().want === null && !c.seen("go", "k"), "and no drain begins under it, for an ask come of age: the load might wait on the live call's model (review pass 1)", res());
@@ -1093,6 +1093,16 @@ await withResidency([SMALL], async ({ b, ps, move, res }) => {
   ok(res().want === null, "stay_s: 10 in the registry, 9 s after a load: not chosen", res());
   move(1_100);
   ok(res().want === `ollama/${SMALL}`, "and at 10 s, chosen", res());
+  // The stay holds for a loaded model gone idle too (review pass 2: put out 5 s after its last call, 85 loads for
+  // 86 calls of two passes with 6 s between their calls).
+  done(c, "k1"); await s.next("go", "e1");
+  ps.models = [SMALL]; await b.refresh();
+  done(s, "e1");
+  askM(c, "k2", BIG, "background", { max_wait_s: 600 }); await c.next("queued", "k2");
+  move(6_000); await quiet();
+  ok(!c.seen("go", "k2"), "a loaded model idle 6 s, 6 s after background loaded it: not put out for an ask not yet due", res());
+  move(4_100);
+  ok(!!(await c.next("go", "k2", SOON)), "past its stay, idle, it is", res());
   await s.close(); await c.close();
 }, { stay: 10 });
 
@@ -1101,7 +1111,7 @@ await withResidency([BIG], async ({ b, ps, lines, res }) => {
   askM(c, "b1", BIG, "background"); askM(c, "b2", BIG, "background"); await c.next("go", "b2");
   askM(s, "L", SMALL, "live");
   ok(!!(await s.next("go", "L")), "a live call to a model not loaded is granted at once");
-  ok(res().loading.join() === `ollama/${SMALL}` && lines.some((l) => l.includes(`ollama/${SMALL}: a live call to a model not loaded — ollama's other background waits while it loads`)), "and is a load under way, said", [res(), lines]);
+  ok(res().loading.join() === `ollama/${SMALL}` && lines.some((l) => l.includes(`ollama/${SMALL}: brain stable's live call to a model not loaded — ollama's other background waits while it loads`)), "and is a load under way, said with its brain", [res(), lines]);
   done(c, "b1"); askM(c, "b3", BIG, "background"); await c.next("queued", "b3"); await quiet();
   ok(!c.seen("go", "b3"), "while it waits to load, the loaded model is granted no more background, though it has the room");
   askM(c, "m1", SMALL, "background");
@@ -1166,16 +1176,30 @@ await withResidency([SMALL], async ({ b, lines, move, res }) => {
   askM(s, "stuck", SMALL, "background"); await s.next("go", "stuck");
   askM(c, "k", BIG, "background", { max_wait_s: 0 }); await c.next("queued", "k");
   await until(() => res().want === `ollama/${BIG}`);
-  move(119_000); await quiet();
-  ok(!c.seen("go", "k"), "a drain waits 119 s on a background call never given back");
-  move(2_000);
-  ok(!!(await c.next("go", "k", SOON)), "past HOLD_S (120 s) the ask is granted, that call still counted", b.snapshot());
   askM(s, "e2", SMALL, "background"); await s.next("queued", "e2");
   move(119_000); await quiet();
-  ok(!s.seen("go", "e2") && res().loading.length === 1, "the load, never listed, holds the other background 119 s", res());
+  ok(!c.seen("go", "k") && !s.seen("go", "e2") && res().want === `ollama/${BIG}`, "a drain waits 119 s on a background call never given back", res());
   move(2_000);
-  ok(!!(await s.next("go", "e2", SOON)) && res().unlisted.join() === BIG && res().loading.length === 0, "past HOLD_S its model is left out of the rule, and the others go on", res());
-  ok(lines.filter((l) => l.includes(`ollama/${BIG}: a call to it has run 120 s and the server's loaded models do not name it: left out of the residency rule until it is listed`)).length === 1, "said once", lines);
+  ok(!!(await s.next("go", "e2", SOON)) && res().want === null && !c.seen("go", "k"), "past HOLD_S (120 s) the drain is given up: the loaded model's background goes on, and no load is granted beside a call still running (review pass 2)", res());
+  ok(lines.filter((l) => l.includes(`ollama/${BIG}: 1 background call on ollama still running 120 s into the drain for it: given up, and no drain begun for 120 s`)).length === 1, "said", lines);
+  move(119_000); await quiet();
+  ok(res().want === null, "nor is a drain begun again for 119 s", res());
+  done(s, "stuck"); done(s, "e2");
+  move(2_000);
+  ok(!!(await c.next("go", "k", SOON)), "HOLD_S after, the drain is begun again, and with nothing running now the ask is granted", res());
+  askM(s, "e3", SMALL, "background"); await s.next("queued", "e3");
+  move(100_000); await quiet();
+  askM(s, "L", BIG, "live"); await s.next("go", "L");
+  move(19_000); await quiet();
+  ok(!s.seen("go", "e3") && res().loading.length === 1, "the load, never listed, holds the other background 119 s — a live call joining it does not begin the count again", res());
+  move(2_000);
+  ok(!!(await s.next("go", "e3", SOON)) && res().unlisted.join() === BIG && res().loading.length === 0, "past HOLD_S its model is left out of the rule, and the others go on", res());
+  ok(lines.filter((l) => l.includes(`ollama/${BIG}: a call to it has run 120 s and the server's loaded models do not name it: left out of the residency rule 120 s, or until it is listed`)).length === 1, "said", lines);
+  move(119_000); await quiet();
+  ok(res().unlisted.join() === BIG && res().loading.length === 0, "left out 119 s", res());
+  move(2_000);
+  askM(s, "e4", SMALL, "background"); await s.next("queued", "e4"); await quiet();
+  ok(res().unlisted.length === 0 && res().loading.join() === `ollama/${BIG}` && !s.seen("go", "e4"), "then, its calls still running unlisted, held to again: turn about, so a load waiting on a busy model has the server's background out of its way half the time (review pass 2)", res());
   await s.close(); await c.close();
 });
 
@@ -1208,10 +1232,10 @@ await withResidency([], async ({ b, ps, lines, res }) => {
   ok(res().loaded === null && lines.some((l) => /could not be read \(a redirect, not followed\)/.test(l)), "a list that never read is no rule from the start, said with why", lines);
   askM(c, "a", SMALL, "background"); askM(c, "k", BIG, "background");
   ok(!!(await c.next("go", "a")) && !!(await c.next("go", "k")), "and every model's asks go by the room alone, as before 3c-1");
-  ps.status = 200; ps.delay = 2300;
+  ps.status = 200; ps.delay = 3000;
   const t0 = performance.now();
   await b.refresh();
-  ok(lines.length > 0 && res().loaded === null && performance.now() - t0 < 2250, "a list that does not answer in 2 s is given up at 2 s", Math.round(performance.now() - t0));
+  ok(lines.length > 0 && res().loaded === null && performance.now() - t0 < 2700, "a list that does not answer in 2 s is given up at 2 s", Math.round(performance.now() - t0));
   await c.close();
 }, { status: 302 });
 
@@ -1219,10 +1243,10 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
   // A model the list never names — a name it writes another way — is left out of the rule after its calls ended at
   // three reads running.
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
-  const said = () => lines.filter((l) => l.includes("ollama/odd-name:latest: its calls ended at 3 reads running and the server's loaded models never named it")).length;
+  const said = () => lines.filter((l) => l.includes("ollama/odd-name:latest: its calls ended at 3 reads running, the server's loaded models the same and never naming it — a name it lists another way, or a model it does not know: left out of the residency rule until it is listed")).length;
   const call = async (id: string) => {
-    // Past BG_QUIET_S from the last call's end, so the idle server is free for it.
-    move(5_100);
+    // Past the stay from the last call's end, a background load's, so the idle server is free for it.
+    move(61_000);
     askM(c, id, "odd-name", "background");
     ok(!!(await c.next("go", id)), `call ${id} to a model the list never names is granted on the idle server`);
     const hits = ps.hits;
@@ -1334,6 +1358,145 @@ await withResidency([SMALL], async ({ b, res }) => {
   ok(res().want === null && !!(await s.next("go", "e2", SOON)), "silent 4 s of its 8 s: nothing is wanted, and the loaded model's background goes on", res());
   raw.destroy(); await s.close();
 }, { idle: 8 });
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // Review pass 2's cases. A live call that loads its model and ends before the list names it is live use of a loaded
+  // model all the same.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  askM(s, "L", "embed:4b", "live"); await s.next("go", "L");
+  ps.models = [SMALL, "embed:4b"];
+  done(s, "L");
+  await until(() => res().loaded?.length === 2 && res().loading.length === 0);
+  askM(c, "k", BIG, "background", { max_wait_s: 600 }); await c.next("queued", "k");
+  move(119_000); await quiet();
+  ok(!c.seen("go", "k"), "a live call that loaded its model and ended before the list named it: the models loaded are not put out for 119 s after", res());
+  move(2_000);
+  ok(!!(await c.next("go", "k", SOON)), "but at 120 s");
+  // Three live calls to a name the list never shows, each read: left out, as background's are.
+  for (let i = 1; i <= 3; i++) { askM(s, `o${i}`, "odd", "live"); await s.next("go", `o${i}`); const h = ps.hits; done(s, `o${i}`); await until(() => ps.hits > h); await b.refresh(); }
+  ok(res().unlisted.includes("odd:latest"), "a live call's end unlisted is a miss too: three reads running, and the name is left out", res());
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  // Background waiting for a model goes with a live call to it, at once.
+  askM(c, "e1", SMALL, "background"); await c.next("go", "e1");
+  askM(c, "x1", "x:1", "background", { max_wait_s: 600 }); await c.next("queued", "x1");
+  askM(s, "L", "x:1", "live"); await s.next("go", "L");
+  ok(!!(await c.next("go", "x1", SOON)), "background waiting for the model a live call loads goes with it, not at the tick");
+  // ...and, joining a live call's load, begins no stay: the next model's ask is not held for one.
+  ps.models = [SMALL, "x:1"]; await b.refresh();
+  done(s, "L"); done(c, "x1"); done(c, "e1"); await quiet();
+  askM(c, "k", BIG, "background", { max_wait_s: 0 });
+  ok(!!(await c.next("go", "k", SOON)), "a live call's load, background joining it, begins no stay: an ask due goes at once", res());
+  // While that load is under way, a new ask for a model taken for loaded — unnamed, or left out — is held as any other's.
+  c.send({ op: "ask", id: "u1", base: BASE, cls: "background" }); await c.next("queued", "u1"); await quiet();
+  ok(!c.seen("go", "u1"), "an unnamed model's new ask is held while a load is under way");
+  ps.models = [SMALL, "x:1", BIG]; await b.refresh();
+  ok(!!(await c.next("go", "u1", SOON)), "and goes when the list names the model loading");
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, move, res }) => {
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary), t = await connect(b, KEYS.third);
+  // Of two models due, the one whose ask has waited longest goes first.
+  askM(s, "e1", SMALL, "background"); await s.next("go", "e1");
+  askM(c, "x", "x:1", "background", { max_wait_s: 30 }); await c.next("queued", "x");
+  move(10_000);
+  askM(t, "y", "y:1", "background", { max_wait_s: 10 }); await t.next("queued", "y");
+  move(21_000);
+  ok(res().want === "ollama/x:1", "two models due at once: the server drains for the one asked for first", res());
+  // A call re-registered (`held`) on a model not loaded is a load under way, and the drain's choice is made again after.
+  t.send({ op: "held", id: "h", base: BASE, model: "z:1", cls: "background" }); await t.next("go", "h");
+  ok(res().want === null && res().loading.join() === "ollama/z:1", "a held on a model not loaded: a load under way, and nothing wanted meanwhile", res());
+  // A load background began whose calls end with the list never naming it loaded nothing: it begins no stay.
+  const h = ps.hits;
+  done(t, "h"); await until(() => ps.hits > h); await b.refresh();
+  ok(res().want === "ollama/x:1", "a load whose calls ended unlisted begins no stay: the asks long due are drained for at once", res());
+  await s.close(); await c.close(); await t.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, move, res }) => {
+  // A model's hold is counted for each load of it: put out with its call still running, it is loading again, and
+  // held to HOLD_S from then.
+  const c = await connect(b, KEYS.canary);
+  askM(c, "k", BIG, "background"); await c.next("go", "k");
+  move(10_000); ps.models = [SMALL, BIG]; await b.refresh();
+  move(200_000); ps.models = [SMALL]; await b.refresh();
+  ok(res().loading.join() === `ollama/${BIG}`, "listed, then put out with its call running: loading again", res());
+  move(119_000); await quiet();
+  ok(res().loading.length === 1 && res().unlisted.length === 0, "and 119 s into this load it is not left out, 329 s after its first began", res());
+  move(2_000);
+  ok(res().unlisted.join() === BIG, "but at 120 s", res());
+  // A live call's load is held to the same bound.
+  const s = await connect(b, KEYS.stable);
+  askM(s, "L", "third:1", "live"); await s.next("go", "L");
+  move(119_000); await quiet();
+  ok(res().loading.join() === "ollama/third:1", "a live call's load holds the others 119 s", res());
+  move(2_000);
+  ok(res().unlisted.includes("third:1") && !res().loading.includes("ollama/third:1"), "and is left out at 120 s as background's is", res());
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, lines, res }) => {
+  const c = await connect(b, KEYS.canary);
+  c.send({ op: "held", id: "h1", base: BASE, model: "junk:1", cls: "background" }); await c.next("go", "h1");
+  c.send({ op: "held", id: "h2", base: BASE, model: "junk:2", cls: "background" }); await c.next("go", "h2");
+  const said = lines.filter((l) => l.includes("brain canary re-registers a call to a model not loaded — ollama's other background waits while it loads"));
+  ok(said.length === 1 && said[0].startsWith("ollama/junk:1:"), "a brain's calls re-registered on models not loaded are said, once a minute a brain", lines);
+  const s = await connect(b, KEYS.stable);
+  askM(c, "l1", "junk:3", "live"); askM(c, "l2", "junk:4", "live"); askM(s, "l3", "junk:5", "live"); await s.next("go", "l3"); await c.next("go", "l2");
+  const live = lines.filter((l) => l.includes("live call to a model not loaded"));
+  ok(live.length === 2 && live[0].includes("ollama/junk:3: brain canary's") && live[1].includes("ollama/junk:5: brain stable's"), "and its live calls to such models likewise: each brain's said, a second of the same brain's not", live);
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // A model whose load changes the list and never shows in it — it put a model out and did not load (review pass 2:
+  // left out of the rule, its failed loads came unpaced, each putting out what was idle).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  const fail = async (id: string) => {
+    askM(c, id, "fail:1", "background", { max_wait_s: 600 });
+    if (!(await c.next("go", id, SOON))) return false;
+    ps.models = [];
+    const h = ps.hits;
+    done(c, id); await until(() => ps.hits > h); await b.refresh();
+    return true;
+  };
+  ok(await fail("f1"), "an idle server loads a model asked for");
+  askM(c, "f2", "fail:1", "background", { max_wait_s: 600 }); await c.next("queued", "f2");
+  askM(s, "e1", SMALL, "background");
+  ok(!!(await s.next("go", "e1", SOON)) && !c.seen("go", "f2"), "its call ended, the list changed and never naming it: the model it put out is loaded again at once, before its own next ask", res());
+  ps.models = [SMALL]; await b.refresh(); done(s, "e1"); await quiet();
+  move(59_000); await quiet();
+  ok(!c.seen("go", "f2"), "and its next load waits BACKOFF_S: not 59 s after, on an idle server (stay_s 0 here)", res());
+  move(2_000);
+  ok(!!(await c.next("go", "f2", SOON)), "but at 60 s");
+  ps.models = []; { const h = ps.hits; done(c, "f2"); await until(() => ps.hits > h); await b.refresh(); }
+  ps.models = [SMALL]; await b.refresh();
+  askM(c, "f3", "fail:1", "background", { max_wait_s: 600 }); await c.next("queued", "f3");
+  move(119_000); await quiet();
+  ok(!c.seen("go", "f3"), "a second such load: the next waits twice that, not 119 s after");
+  move(2_000);
+  ok(!!(await c.next("go", "f3", SOON)), "but at 120 s");
+  ps.models = []; { const h = ps.hits; done(c, "f3"); await until(() => ps.hits > h); await b.refresh(); }
+  ok(lines.filter((l) => l.includes("ollama/fail:1: its calls ended 3 times with the server's loaded models changed and never naming it — a model that does not load: its next load waits 180 s, and 60 s more each time")).length === 1 && res().unlisted.length === 0, "the third is said, with the wait; it is not left out of the rule", lines);
+  await s.close(); await c.close();
+}, { stay: 0 });
+
+await withResidency([SMALL], async ({ b, move, res }) => {
+  // A live call never given back: brains give theirs up at 120 s, so one running HOLD_S and more holds back no load
+  // (review pass 2: it stopped every background load until lease_s, unsaid).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  askM(s, "leak", SMALL, "live"); await s.next("go", "leak");
+  askM(c, "k", BIG, "background", { max_wait_s: 0 }); await c.next("queued", "k");
+  move(119_000); await quiet();
+  ok(res().want === null && !c.seen("go", "k"), "a live call 119 s old holds back the drain for an ask due", res());
+  move(2_000);
+  ok(!!(await c.next("go", "k", SOON)), "one 121 s old does not");
+  await s.close(); await c.close();
+});
 
 await withBroker(registry(), async (b) => {
   const c = await connect(b, KEYS.canary);
