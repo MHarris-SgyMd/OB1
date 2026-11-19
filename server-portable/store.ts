@@ -2016,9 +2016,11 @@ export type AgendaItem = {
   blockers: string[];
   /**
    * Sleep's pending stale finding on the item (SMD-3671 PR 3), a label that never moves its place: the core reads it
-   * beside the agenda (core/reads.ts unreviewedOf). The store's own answer carries null, not read.
+   * beside the agenda (core/reads.ts markItems). The store's own answer carries null, not read.
    */
   unreviewed: UnreviewedMark;
+  /** The items among its marks, its own and its sources', past the read's reach, not checked (review pass 3), present when any. */
+  unreviewedUnchecked?: { kind: string; key: string }[];
 };
 /** An agenda (migrations 123 and 124): the first `limit` items, how many passed the filters, how many carry no priority, what was left out and why, board-sync's last heartbeat, and the live claims the brain records. */
 export type AgendaResult = {

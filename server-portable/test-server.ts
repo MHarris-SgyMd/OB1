@@ -8443,7 +8443,7 @@ console.log("\n[36h] The dashboard's build stage copies every module the dashboa
 console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pending stale finding's statements read leniently, its age, level and maker from the newest; the first read beside the priorities, a second only for what 122 named that it did not ask, a level's source among them; a failed read every mark null and the priorities as read; past the reach counted apart; the agenda's items and plan_context's board marked under the deadline, the knowledge's marks reused, their order unchanged; the words, the source's mark, one day and today; the compact value and the notes once");
 {
   const { normaliseStaleUnreviewed } = await import("./store.ts");
-  const { priorityOf, readPriorities, unreviewedOf, markOf, UNREVIEWED_READ } = await import("./core/reads.ts");
+  const { priorityOf, priorityRead, readPriorities, unreviewedOf, markOf, UNREVIEWED_READ } = await import("./core/reads.ts");
   const { agenda: agendaRead } = await import("./core/agenda.ts");
   const { boardOf } = await import("./core/plan.ts");
   const say = await import("./render.ts");
@@ -8537,7 +8537,7 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   } finally { console.error = realError; }
   const unmarked = await priorityOf(store({}), rows);
   const strip = (h: typeof marked) => JSON.stringify(Object.values(h ?? {}).map((x) => x.priority.map(({ unreviewed: _u, ...p }) => p)));
-  assert(failed != null && strip(failed) === strip(unmarked) && strip(failed) === strip(marked) && Object.values(failed ?? {}).every((x) => x.priority.every((p) => p.unreviewed === null) && !x.unreviewedNotRead)
+  assert(failed != null && strip(failed) === strip(unmarked) && strip(failed) === strip(marked) && Object.values(failed ?? {}).every((x) => x.priority.every((p) => p.unreviewed === null) && !x.unreviewedUnchecked)
       && Object.values(unmarked ?? {}).every((x) => x.priority.every((p) => p.unreviewed === false))
       && failedSourced?.f1.priority[0].fromItem?.unreviewed === null && failedSourced.f1.priority[0].level === null && failedSourced.f1.priority[0].effective === 4
       && logged.filter((l) => l.startsWith("unreviewed: the priority findings read failed (42P01): relation \"priority_findings\" does not exist")).length === 1,
@@ -8562,8 +8562,8 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   // Review pass 2: a reply's deadline (plan_context's knowledge) bounds both reads; out of it, the second is not asked and the reply is told why.
   asked.splice(0); askedOpts.splice(0);
   const lefts = [5000, 0];
-  const told: string[] = [];
-  const bounded = await priorityOf(store({ [`item:${ITEM}`]: mark(90) }), [{ id: "f1", content: "the bill" }], undefined, undefined, { leftMs: () => lefts.shift() ?? 0, onUnread: (why) => { told.push(why); } });
+  const boundedRead = await priorityRead(store({ [`item:${ITEM}`]: mark(90) }), [{ id: "f1", content: "the bill" }], undefined, undefined, { leftMs: () => lefts.shift() ?? 0 });
+  const bounded = boundedRead.labels, told = [boundedRead.unread];
   const boundedAsks = asked.splice(0), boundedOpts = askedOpts.splice(0);
   assert(boundedAsks.length === 1 && JSON.stringify(boundedOpts) === '[{"timeoutMs":5000}]' && bounded?.f1.priority[0].fromItem?.unreviewed === null && JSON.stringify(told) === '["deadline"]',
     `a reply's deadline bounds each findings read: the first under what was left (5000 ms), the second, nothing left, not asked, its source not read, and the reply told the deadline (${JSON.stringify(boundedOpts)} ${JSON.stringify(told)})`);
@@ -8576,11 +8576,11 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   for (const r of deep) answers[`thought:${r.id}`] = ans("thought", r.id, 3, { level: null, inheritedFrom: { kind: "ticket", key: `INH-${r.id}`, level: 4, hops: 1 }, terms: [term("inherited", 3, { from: { kind: "ticket", key: `INH-${r.id}`, level: 4, hops: 1 } })] });
   const deepRead = await priorityOf(store({}), deep);
   const deepAsks = asked.splice(0);
-  const cutRows = Object.entries(deepRead ?? {}).filter(([, h]) => h.unreviewedNotRead);
+  const cutRows = Object.entries(deepRead ?? {}).filter(([, h]) => h.unreviewedUnchecked?.length);
   assert(reachAsked.length === 1 && reachAsked[0].length === UNREVIEWED_READ && markOf([reach], wide[0]).mark !== false && markOf([reach], wide[1]).mark === false
       && JSON.stringify(markOf([reach], wide[UNREVIEWED_READ])) === '{"mark":null,"cut":true}' && reach.failed === null
-      && deepAsks.length === 2 && deepAsks.every((a) => a.length <= UNREVIEWED_READ) && JSON.stringify(cutRows.map(([id, h]) => [id, h.unreviewedNotRead])) === '[["r1000",2]]',
-    `one read asks at most ${UNREVIEWED_READ} items; past it a mark is not checked (cut), counted on its result; 1001 rows inheriting from 1001 tickets: two reads, two marks counted past the reach (${reachAsked[0]?.length} ${deepAsks.map((a) => a.length).join("+")} ${cutRows.map(([id, h]) => `${id}:${h.unreviewedNotRead}`).join(" ")})`);
+      && deepAsks.length === 2 && deepAsks.every((a) => a.length <= UNREVIEWED_READ) && JSON.stringify(cutRows.map(([id, h]) => [id, h.unreviewedUnchecked])) === '[["r1000",[{"kind":"thought","key":"r1000"},{"kind":"ticket","key":"INH-r1000"}]]]',
+    `one read asks at most ${UNREVIEWED_READ} items; past it a mark is not checked (cut), counted on its result; 1001 rows inheriting from 1001 tickets: two reads, two marks counted past the reach (${reachAsked[0]?.length} ${deepAsks.map((a) => a.length).join("+")} ${cutRows.map(([id, h]) => `${id}:${h.unreviewedUnchecked?.length}`).join(" ")})`);
 
   // Review pass 2: a source three priorities share, past the reach, is one item not checked, not three.
   answers["thought:z"] = ans("thought", "z", 3, { level: null, inheritedFrom: { kind: "ticket", key: "PAR-1", level: 4, hops: 1 }, terms: [term("inherited", 3, { from: { kind: "ticket", key: "PAR-1", level: 4, hops: 1 } })] });
@@ -8593,8 +8593,8 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   asked.splice(0);
   const shared = await priorityOf(store({}), [...many, { id: "z", content: "SMD-801 SMD-802 SMD-803" }]);
   const sharedAsks = asked.splice(0);
-  assert(shared?.z.priority.length === 4 && sharedAsks.length === 2 && sharedAsks[1].length === UNREVIEWED_READ && shared.z.unreviewedNotRead === 1,
-    `past the reach, a result counts distinct items not checked: the parent its own thought and three tickets share, one item, not four marks (${shared?.z.unreviewedNotRead}; ${sharedAsks.map((a) => a.length).join("+")})`);
+  assert(shared?.z.priority.length === 4 && sharedAsks.length === 2 && sharedAsks[1].length === UNREVIEWED_READ && JSON.stringify(shared.z.unreviewedUnchecked) === '[{"kind":"ticket","key":"PAR-1"}]',
+    `past the reach, a result counts distinct items not checked: the parent its own thought and three tickets share, one item, not four marks (${JSON.stringify(shared?.z.unreviewedUnchecked)}; ${sharedAsks.map((a) => a.length).join("+")})`);
 
   // The agenda: each listed item marked after the agenda decided its list, the list and its order the store's.
   const item = (key: string, rank: number, effective: number) => ({ rank, kind: "ticket", key, source: "linear", title: key, project: null, status: "Todo", statusType: "unstarted", owner: null, effective, level: Math.floor(effective),
@@ -8640,6 +8640,41 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
       && srcText.split("Unreviewed: sleep's priority review").length === 2,
     `an agenda item's inherited source and open-item source carry their own marks, asked in the agenda's one read beside the items, said on the term that names them, the item itself unmarked (${JSON.stringify(srcAsks[0]?.map((i) => i.key))} | ${srcText.match(/1\. .*/)?.[0]})`);
 
+  // Review pass 3: the compact board value carries a ticket's source's mark, present alone; the board reads marks for
+  // the first BOARD_SHOWN tickets only, the ones the reply shows.
+  {
+    const { BOARD_SHOWN } = await import("./core/plan.ts");
+    const srcBoardValue = (say.renderPlanContext({ ok: true, value: { request: "r", knowledge: { preferCurrent: true, hits: [] }, board: { available: true, tickets: srcVals, others: [], waiting: [], claimsRead: true, claimsLive: 0, boardSync: null },
+      specs: { available: false, reason: "r", waitsOn: [] }, procedures: { available: false, reason: "r", waitsOn: [] }, tools: { scope: "read", core: [], plugins: [], elsewhere: "unknown" }, gaps: [], notes: [], deadlineMs: 10000 } } as never)
+      .structuredContent as { board: { tickets: Record<string, Record<string, unknown> | undefined>[] } }).board.tickets;
+    assert((srcBoardValue[0].inheritedFrom?.unreviewed as { days?: number } | undefined)?.days === 70 && srcBoardValue[0].inheritedFrom?.key === "SMD-50" && !("fromItem" in srcBoardValue[0])
+        && (srcBoardValue[1].fromItem?.unreviewed as { days?: number } | undefined)?.days === 90 && !("inheritedFrom" in srcBoardValue[1]) && !JSON.stringify(srcBoardValue).includes("null"),
+      `the compact board value carries a ticket's inherited and open-item source's mark, present alone, no null (${JSON.stringify(srcBoardValue)})`);
+    const twenty = Array.from({ length: 20 }, (_, n) => item(`SMD-${100 + n}`, n + 1, 3));
+    const wideAsks: { kind: string; key: string }[][] = [];
+    const wideCtx = { store: async () => ({
+      agenda: async () => ({ ...structuredClone(agendaAnswer), items: structuredClone(twenty), total: 20, keyed: { others: [], waiting: [], missing: [] } }),
+      staleUnreviewedOn: async (items: { kind: string; key: string }[]) => { wideAsks.push(items); return []; },
+    }) };
+    const wide = await boardOf(wideCtx as never, { keys: twenty.map((x) => x.key), notRead: 0 }, 5000, new Map(), () => 0);
+    const wideTickets = wide.board.available ? wide.board.tickets : [];
+    assert(BOARD_SHOWN === 15 && wideAsks.length === 1 && JSON.stringify(wideAsks[0].map((x) => x.key)) === JSON.stringify(twenty.slice(0, BOARD_SHOWN).map((x) => x.key))
+        && wideTickets.length === 20 && wideTickets.slice(0, BOARD_SHOWN).every((x) => x.unreviewed === false) && wideTickets.slice(BOARD_SHOWN).every((x) => x.unreviewed === null),
+      `the board reads marks for the ${BOARD_SHOWN} tickets the reply shows, in its order, and none for those past them, listed by key (${wideAsks[0]?.length} asked of ${twenty.length})`);
+  }
+  // Review pass 3: past the reach on the agenda is said as not checked, as search's is, never the grant's hint.
+  {
+    const many = Array.from({ length: UNREVIEWED_READ + 1 }, (_, n) => item(`SMD-${2000 + n}`, n + 1, 3));
+    const manyCtx = { store: async () => ({ ...(store({}) as unknown as Record<string, unknown>), agenda: async () => ({ ...structuredClone(agendaAnswer), items: structuredClone(many), total: many.length }) }), logAgenda: async () => {} };
+    const manyAg = await agendaRead(manyCtx as never, P, I);
+    const manyText = manyAg.ok ? text(say.renderAgenda(manyAg)) : "";
+    const last = manyAg.ok ? manyAg.value.items[UNREVIEWED_READ] : undefined;
+    assert(last?.unreviewed === null && JSON.stringify(last.unreviewedUnchecked) === `[{"kind":"ticket","key":"SMD-${2000 + UNREVIEWED_READ}"}]`
+        && manyText.includes(`ticket SMD-${2000 + UNREVIEWED_READ} ("Todo") "SMD-${2000 + UNREVIEWED_READ}" — 3: high (3) [unreviewed not checked on 1 item: past the read's reach]`)
+        && !manyText.includes("Whether these priorities are unreviewed could not be read"),
+      `an agenda item past the read's reach: not checked, said in the words search uses, never the grant's hint (${JSON.stringify(last?.unreviewedUnchecked)})`);
+  }
+
   // plan_context's board: the listed tickets marked as the agenda's, under what is left of the deadline; those the
   // knowledge's marks hold not asked again; out of time, or past the statement timeout, not read and a gap says so.
   const boardAsks: { items: { kind: string; key: string }[]; opts: unknown }[] = [];
@@ -8661,10 +8696,10 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   const late = await boardOf(boardCtx({ "ticket:SMD-5": mark(75) }) as never, keys, 1000, new Map(), () => (t += 1000));
   const lateAsks = boardAsks.splice(0);
   const cancelled = await boardOf(boardCtx({}, Object.assign(new Error("canceling statement due to statement timeout"), { errno: "57014" })) as never, keys, 5000, new Map(), clock);
-  const gapOf = (b: typeof board) => JSON.stringify(b.gaps.filter((g) => g.gap === "unreviewed_not_read"));
+  const gapOf = (b: typeof board) => JSON.stringify(b.notes);
   const lateTickets = late.board.available ? late.board.tickets : [];
   const planValue = (b: typeof board) => ({ request: "r", knowledge: { preferCurrent: true, hits: [] }, board: b.board, specs: { available: false, reason: "r", waitsOn: [] }, procedures: { available: false, reason: "r", waitsOn: [] },
-    tools: { scope: "read", core: [], plugins: [], elsewhere: "unknown" }, gaps: b.gaps, deadlineMs: 10000 });
+    tools: { scope: "read", core: [], plugins: [], elsewhere: "unknown" }, gaps: b.gaps, notes: b.notes, deadlineMs: 10000 });
   const planReply = say.renderPlanContext({ ok: true, value: planValue(board) } as never);
   const lateReply = say.renderPlanContext({ ok: true, value: planValue(late) } as never);
   const planTickets = (planReply.structuredContent as { board: { tickets: Record<string, unknown>[] } }).board.tickets;
@@ -8673,10 +8708,10 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
       && text(planReply).includes(`1. ticket SMD-5 ("Todo") "SMD-5" — 4: urgent (4) [low (1) by codex, stated 75 days ago, unreviewed]`) && text(planReply).split("Unreviewed: sleep's priority review").length === 2
       && JSON.stringify(planTickets[0].unreviewed) === JSON.stringify({ findingId: FID, statedAt: daysBefore(75), days: 75, level: 1, windowDays: 60 }) && !("unreviewed" in planTickets[1]),
     `plan_context's board marks its tickets in the agenda's order, a ticket the knowledge's marks hold not asked again, the read's statement timeout what is left of the deadline; the line names the statement, the value the finding and only a mark present (${firstAsk[0]?.items.map((i) => i.key)} ${JSON.stringify(firstAsk[0]?.opts)} ${text(planReply).match(/1\. ticket SMD-5.*/)?.[0]})`);
-  assert(lateAsks.length === 0 && lateTickets.every((x) => x.unreviewed === null) && gapOf(late) === '[{"gap":"unreviewed_not_read","section":"board","reason":"deadline"}]' && gapOf(cancelled) === '[{"gap":"unreviewed_not_read","section":"board","reason":"deadline"}]'
-      && text(lateReply).includes("- A note, not a gap: whether the board's priorities are unreviewed was not read (out of the read's time)") && !text(lateReply).includes("could not be read (for instance")
-      && text(lateReply).includes("None found") === false && text(lateReply).includes("How close the hits are to the request"),
-    `the deadline spent on the agenda: the board's marks not read, none asked, a note among the gaps saying so, never the grant's hint, and no coverage gap for it; a statement cut at the deadline alike (${gapOf(late)} ${gapOf(cancelled)} ${lateAsks.length})`);
+  assert(lateAsks.length === 0 && lateTickets.every((x) => x.unreviewed === null) && gapOf(late) === '[{"note":"unreviewed_not_read","section":"board","reason":"deadline"}]' && gapOf(cancelled) === '[{"note":"unreviewed_not_read","section":"board","reason":"deadline"}]' && late.gaps.length === 0
+      && text(lateReply).includes("\nWhether the board's priorities are unreviewed was not read (out of the read's time), so a ticket not marked unreviewed may still be.\n") && !text(lateReply).includes("could not be read (for instance")
+      && text(lateReply).includes("\n## Gaps\n- None found.") && JSON.stringify((lateReply.structuredContent as { notes?: unknown }).notes) === gapOf(late),
+    `the deadline spent on the agenda: the board's marks not read, none asked, a note (in notes, not the gaps) saying so in the board's section and the value, never the grant's hint; a statement cut at the deadline alike (${gapOf(late)} ${gapOf(cancelled)} ${lateAsks.length})`);
 
   // Review pass 2: plan_context's knowledge reads its marks in its own share of the deadline; out of it, a note among the
   // gaps, and the knowledge's notes never the grant's hint for it.
@@ -8686,29 +8721,45 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
     const hitRow = { id: "11111111-1111-4111-8111-111111111111", content: "about nothing", metadata: { trust: "agent" }, created_at: "2027-01-01T00:00:00.000Z", similarity: 0.5, matchedNeedles: [], score: 0.9, fused: 0.9, demoted: [], supersededBy: null };
     const outHit = { ...hitRow, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0,
       priority: [{ ...marked!.p1.priority[0], unreviewed: null }], priorityMore: 0, priorityNotRead: 0 };
-    const search = async (_c: unknown, _p: unknown, q: { marks?: { leftMs?: () => number; onUnread?: (why: "deadline" | "failed") => void } }) => {
+    const search = async (_c: unknown, _p: unknown, q: { marks?: { leftMs?: () => number } }) => {
       pt += 2000;
       gotLeft = q.marks?.leftMs?.() ?? -1;
-      q.marks?.onUnread?.("deadline");
-      return { rows: [hitRow], hits: [outHit] };
+      return { rows: [hitRow], hits: [outHit], marksUnread: "deadline" as const };
     };
     const ctx = { env: () => ({}), store: async () => ({ agenda: async () => ({ ...structuredClone(agendaAnswer), keyed: { others: [], waiting: [], missing: [] } }), staleUnreviewedOn: async () => [] }), logPlanContext: async () => {} };
     const pc = await planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, now: () => pt, search: search as never });
     const pcv = pc.ok ? pc.value : null;
     const pcText = pc.ok ? text(say.renderPlanContext(pc)) : "";
-    assert(gotLeft === 8000 - 2000 && JSON.stringify(pcv?.gaps.filter((g) => g.gap === "unreviewed_not_read")) === '[{"gap":"unreviewed_not_read","section":"knowledge","reason":"deadline"}]'
-        && pcText.includes("- A note, not a gap: whether the hits' priorities are unreviewed was not all read (out of the knowledge's time)") && !pcText.includes("Whether these priorities are unreviewed could not be read"),
-      `plan_context's knowledge reads its marks under its share of the deadline (what is left of the 8000 ms before the board's reserve); out of it, a note among the gaps, never the grant's hint (${gotLeft} ${JSON.stringify(pcv?.gaps)})`);
+    // The knowledge read's labels pass the marks' answer on (review pass 3): out of time, labelHitsRead says so.
+    const { labelHitsRead } = await import("./core/reads.ts");
+    answers[`thought:${hitRow.id}`] = ans("thought", hitRow.id, 2);
+    const anyStore = new Proxy(store({}) as unknown as Record<string, unknown>, { get: (t, k) => (k in t || k === "then" ? t[k as string] : async () => (k === "supersededAmong" ? {} : [])) });
+    const labelled = await labelHitsRead({ store: async () => anyStore } as never, { name: "k", scope: "read" } as never, [hitRow] as never, undefined, { leftMs: () => 0 });
+    assert(labelled.unread === "deadline" && labelled.hits[0]?.priority?.[0]?.unreviewed === null && labelled.hits[0].priority[0].effective === 2,
+      `labelHitsRead hands plan_context the marks' answer: out of the knowledge's time, "deadline", the hit's priority kept and its mark null (${labelled.unread})`);
+    assert(gotLeft === 8000 - 2000 && JSON.stringify(pcv?.notes) === '[{"note":"unreviewed_not_read","section":"knowledge","reason":"deadline"}]'
+        && pcText.includes("\nWhether the hits' priorities are unreviewed was not all read (out of the knowledge's time)") && !pcText.includes("Whether these priorities are unreviewed could not be read"),
+      `plan_context's knowledge reads its marks under its share of the deadline (what is left of the 8000 ms before the board's reserve); out of it, the read's answer a note in notes, said in the knowledge's section, never the grant's hint (${gotLeft} ${JSON.stringify(pcv?.notes)})`);
     // The budget: a hit's priorities cut to HIT_LABELS.priority keep a count of those not checked they still show.
     const cutAll = sourced!.f1.priority[0];
     const longHit = { ...outHit, priority: [{ ...cutAll, unreviewed: false }, { ...cutAll, key: "SMD-A", kind: "ticket", self: false, unreviewed: false }, { ...cutAll, key: "SMD-B", kind: "ticket", self: false, unreviewed: null, fromItem: null },
-      { ...cutAll, key: "SMD-C", kind: "ticket", self: false, unreviewed: null, fromItem: null }, { ...cutAll, key: "SMD-D", kind: "ticket", self: false, unreviewed: null, fromItem: null }], unreviewedNotRead: 3 };
-    const budget = (h: object) => budgetPlan({ ...(pcv as object), knowledge: { preferCurrent: true, hits: [h] } } as never).knowledge.hits[0] as { priority: unknown[] | null; unreviewedNotRead?: number };
+      { ...cutAll, key: "SMD-C", kind: "ticket", self: false, unreviewed: null, fromItem: null }, { ...cutAll, key: "SMD-D", kind: "ticket", self: false, unreviewed: null, fromItem: null }],
+      unreviewedUnchecked: [{ kind: "ticket", key: "SMD-B" }, { kind: "ticket", key: "SMD-C" }, { kind: "ticket", key: "SMD-D" }] };
+    const budget = (h: object) => budgetPlan({ ...(pcv as object), knowledge: { preferCurrent: true, hits: [h] } } as never).knowledge.hits[0] as { priority: unknown[] | null; unreviewedUnchecked?: { kind: string; key: string }[] };
     const kept = budget(longHit), keptNone = budget({ ...longHit, priority: [longHit.priority[0], longHit.priority[1], longHit.priority[1], ...longHit.priority.slice(2)] });
     const keptReply = say.renderPlanContext({ ok: true, value: { ...(pcv as object), gaps: [], knowledge: { preferCurrent: true, hits: [{ ...budget(longHit), contentChars: 13 }] } } } as never);
-    assert(HIT_LABELS.priority === 3 && kept.priority?.length === 3 && kept.unreviewedNotRead === 1 && keptNone.unreviewedNotRead === undefined
+    // Review pass 3: a source a failed second read left null, kept, beside a past-reach mark the cut took away: none past
+    // the reach, and the failure said.
+    const failedSrc = { ...outHit, priority: [{ ...cutAll, unreviewed: false, fromItem: { ...cutAll.fromItem!, unreviewed: null } }, { ...cutAll, key: "SMD-A", kind: "ticket", self: false, unreviewed: false, fromItem: null },
+      { ...cutAll, key: "SMD-E", kind: "ticket", self: false, unreviewed: false, fromItem: null }, { ...cutAll, key: "SMD-D", kind: "ticket", self: false, unreviewed: null, fromItem: null }],
+      unreviewedUnchecked: [{ kind: "ticket", key: "SMD-D" }] };
+    const keptFailed = budget(failedSrc);
+    const failedReply = say.renderPlanContext({ ok: true, value: { ...(pcv as object), gaps: [], notes: [], knowledge: { preferCurrent: true, hits: [{ ...keptFailed, contentChars: 13 }] } } } as never);
+    assert(keptFailed.priority?.length === 3 && keptFailed.unreviewedUnchecked === undefined && text(failedReply).split("Whether these priorities are unreviewed could not be read").length === 2 && !text(failedReply).includes("past the read's reach"),
+      `a kept source a failed read left null, beside a past-reach mark the budget cut away: none counted past the reach, the failure said once (${JSON.stringify(keptFailed.unreviewedUnchecked)})`);
+    assert(HIT_LABELS.priority === 3 && kept.priority?.length === 3 && JSON.stringify(kept.unreviewedUnchecked) === '[{"kind":"ticket","key":"SMD-B"}]' && keptNone.unreviewedUnchecked === undefined
         && /\(unreviewed not checked on 1 item: past the read's reach\)\./.test(text(keptReply)) && !text(keptReply).includes("Whether these priorities are unreviewed could not be read"),
-      `a hit cut to its first ${HIT_LABELS.priority} priorities counts only the items not checked among them (1 of 3), none when it shows none, so its text neither overstates nor reads a failure (${kept.unreviewedNotRead} ${keptNone.unreviewedNotRead})`);
+      `a hit cut to its first ${HIT_LABELS.priority} priorities counts only the items not checked among them (1 of 3), none when it shows none, so its text neither overstates nor reads a failure (${JSON.stringify(kept.unreviewedUnchecked)} ${JSON.stringify(keptNone.unreviewedUnchecked)})`);
   }
 
   // The words: the statement named, a source's mark on its term, the key once, the value compact; the notes, once.
@@ -8753,7 +8804,7 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
       && !text(unreadReply).includes(", unreviewed") && unreadList.split(UNREAD).length === 2 && unreadList.includes("stated 75 days ago, unreviewed"),
     `marks a read failed to give: said once in the text, the value's unreviewedRead false once, no null on an item (${JSON.stringify(unreadVal.hits[0]?.priority[0])})`);
   assert(cutRows.length > 0 && !text(cutReply).includes(UNREAD) && /\(unreviewed not checked on 2 items: past the read's reach\)\.\n/.test(text(cutReply))
-      && (cutReply.structuredContent as { hits: { unreviewedNotRead?: number }[] }).hits[0].unreviewedNotRead === 2 && !("unreviewedRead" in cutReply.structuredContent),
+      && (cutReply.structuredContent as { hits: { unreviewedUnchecked?: unknown[] }[] }).hits[0].unreviewedUnchecked?.length === 2 && !("unreviewedRead" in cutReply.structuredContent),
     `a mark past the read's reach: counted on its result and said as not checked, never the grant's hint (${text(cutReply).match(/Priority: .*/)?.[0]})`);
   // The compat pair: the key and the unread note once a reply, beside priorityNote's place.
   const compatOk = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: p1.priority }, { id: "x", title: "t", url: "u", trust: "agent", priority: p2.priority }] } } as never).content[0].text);

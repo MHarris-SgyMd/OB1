@@ -22,8 +22,8 @@ import type { AgendaItem, AgendaOther, AgendaWaiting, ThoughtHybridMatch } from 
 import { TOOLS, unlocks, visibleToolNames, type ToolScope } from "../tools.ts";
 import type { Ctx } from "./context.ts";
 import { loadPlugins } from "./plugins.ts";
-import { knownMarks, labelHits, markItems, runSearch, sqlState, ticketsNamedBy, type MarkOpts, type QueryVectorFailed, type SearchHit } from "./reads.ts";
-import { unreadItems } from "./marks.ts";
+import { knownMarks, labelHitsRead, markItems, runSearch, sqlState, ticketsNamedBy, type MarkOpts, type QueryVectorFailed, type SearchHit } from "./reads.ts";
+import { itemKey, marksOn } from "./marks.ts";
 import type { Unreviewed } from "../store.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
@@ -121,14 +121,15 @@ export function budgetPlan(v: Omit<PlanContextResult, "knowledge"> & { knowledge
       if (printable.length > n) trimmed.labels += printable.length - n;
       metadata[k] = printable.slice(0, n).map((x) => (typeof x === "string" && x.length > HIT_META_ITEM ? `${headOf(x, HIT_META_ITEM - 1)}…` : x));
     }
-    // Marks past the reach counted on what is shown (review pass 2): the distinct unchecked items among the priorities
-    // kept, at most the count the read gave, so a cut list never says, or reads as a failure, more than it shows.
-    const unread = Math.min(h.unreviewedNotRead ?? 0, unreadItems(priority.list ?? []).size);
-    const { unreviewedNotRead: _all, ...rest } = h;
+    // Marks past the reach kept for the priorities shown (review passes 2 and 3): the items the read did not reach that
+    // a kept priority's marks are about, and no other, so every other null still reads as a failed read.
+    const shown = new Set((priority.list ?? []).flatMap(marksOn).map((m) => itemKey(m.item)));
+    const unchecked = (h.unreviewedUnchecked ?? []).filter((i) => shown.has(itemKey(i)));
+    const { unreviewedUnchecked: _all, ...rest } = h;
     return {
       ...rest, metadata, content: headOf(h.content, share), contentChars,
       claimed: claimed.list, claimedMore: claimed.more, relations: relations.list, relationsMore: relations.more, priority: priority.list, priorityMore: priority.more,
-      ...(unread > 0 ? { unreviewedNotRead: unread } : {}),
+      ...(unchecked.length ? { unreviewedUnchecked: unchecked } : {}),
     };
   });
   let board = v.board;
@@ -231,13 +232,14 @@ export type PlanGap =
   | { gap: "tickets_missing"; keys: string[]; more?: number }
   | { gap: "tickets_not_read"; count: number }
   | { gap: "section_unavailable"; section: "board"; reason: BoardNotRead; named: number }
-  /**
-   * Unreviewed marks not read (SMD-3671 PR 3, review passes 1 and 2): the board's, out of the deadline or failed; the
-   * knowledge hits' (a level's sources, read last) out of the knowledge's share of it. Each such mark null. A note, not a
-   * coverage gap.
-   */
-  | { gap: "unreviewed_not_read"; section: "knowledge" | "board"; reason: "deadline" | "failed" }
   | PlanTrimmed;
+
+/**
+ * A note, not a gap (SMD-3671 PR 3, review pass 3: it sat among the gaps, which the words filtered): unreviewed marks
+ * not read — the knowledge hits', in the knowledge's share of the deadline, or the board's, in what is left of it — out
+ * of time, or failed. Each such mark is null.
+ */
+export type PlanNote = { note: "unreviewed_not_read"; section: "knowledge" | "board"; reason: "deadline" | "failed" };
 
 /**
  * What the reply's budget cut (SMD-4191), so nothing is dropped without a word: hits whose text was cut to its head
@@ -267,6 +269,8 @@ export type PlanContextResult = {
   procedures: NotAvailable;
   tools: PlanTools;
   gaps: PlanGap[];
+  /** Notes the reply makes beside its sections (SMD-3671 PR 3 review pass 3): none, usually. */
+  notes: PlanNote[];
   deadlineMs: number;
 };
 
@@ -344,9 +348,10 @@ export function embeddingIdOf(ctx: Partial<Pick<Ctx, "embedConfig">>): string | 
  * keys scope by name), or any other failure, which the server's log names. A failure never fails the read.
  */
 export async function boardOf(ctx: Pick<Ctx, "store">, given: { keys: string[]; notRead: number }, leftMs: number,
-  known: ReadonlyMap<string, Unreviewed | false> = new Map(), clock: () => number = () => performance.now()): Promise<{ board: PlanBoard; gaps: PlanGap[] }> {
+  known: ReadonlyMap<string, Unreviewed | false> = new Map(), clock: () => number = () => performance.now()): Promise<{ board: PlanBoard; gaps: PlanGap[]; notes: PlanNote[] }> {
   const started = clock();
   const gaps: PlanGap[] = [];
+  const notes: PlanNote[] = [];
   let named = given;
   let board: PlanBoard;
   if (named.keys.length === 0) {
@@ -361,12 +366,13 @@ export async function boardOf(ctx: Pick<Ctx, "store">, given: { keys: string[]; 
       });
       // An agenda before 126 refuses a keys scope (below), so an answer without `keyed` is a fault.
       if (a.keyed === null) throw new Error("agenda answered no keyed tickets for a keys scope");
-      // The unreviewed mark (SMD-3671 PR 3), as the agenda's: the tickets the knowledge hits' marks already read are not
-      // asked again (review pass 1: two reads a reply), the rest under what is left of the deadline, its statement
-      // timeout as the agenda's; out of time or failed, every mark not read is null, and a gap says why. It never throws.
-      const marked = await markItems(store, a.items, { known, timeoutMs: leftMs - (clock() - started) });
-      if (marked.failed) gaps.push({ gap: "unreviewed_not_read", section: "board", reason: marked.failed });
-      board = { available: true, tickets: marked.items, others: a.keyed.others, waiting: a.keyed.waiting, claimsRead: a.claimsRead, claimsLive: a.claimsLive, boardSync: a.boardSync };
+      // The unreviewed mark (SMD-3671 PR 3), as the agenda's, for the first BOARD_SHOWN tickets alone, the ones the
+      // reply's budget shows in its order (review pass 3; the rest go by key, unmarked): the tickets the knowledge hits'
+      // marks already read not asked again (review pass 1), the rest under what is left of the deadline, its statement
+      // timeout as the agenda's; out of time or failed, every mark not read is null, and a note says why. It never throws.
+      const marked = await markItems(store, a.items.slice(0, BOARD_SHOWN), { known, timeoutMs: leftMs - (clock() - started) });
+      if (marked.failed) notes.push({ note: "unreviewed_not_read", section: "board", reason: marked.failed });
+      board = { available: true, tickets: [...marked.items, ...a.items.slice(BOARD_SHOWN)], others: a.keyed.others, waiting: a.keyed.waiting, claimsRead: a.claimsRead, claimsLive: a.claimsLive, boardSync: a.boardSync };
       if (a.keyed.missing.length) gaps.push({ gap: "tickets_missing", keys: a.keyed.missing });
       // Open named tickets past the list's 100: in total alone (review pass 2).
       named = { ...named, notRead: named.notRead + Math.max(0, a.total - a.items.length) };
@@ -383,18 +389,19 @@ export async function boardOf(ctx: Pick<Ctx, "store">, given: { keys: string[]; 
   // How many tickets the hits named, so a board not read still says what it would have read (review pass 2).
   if (!board.available) gaps.push({ gap: "section_unavailable", section: "board", reason: board.reason, named: named.keys.length });
   if (named.notRead > 0) gaps.push({ gap: "tickets_not_read", count: named.notRead });
-  return { board, gaps };
+  return { board, gaps, notes };
 }
 
 /** The knowledge read: the shared search and its labels. A seam, so the whole read is tested with a stub (review pass 1). */
 export type PlanSearch = (ctx: Ctx, principal: Principal, q: { query: string; limit: number; signal: AbortSignal; marks?: MarkOpts }) =>
-  Promise<{ refusal: Refusal } | { refusal?: undefined; rows: ThoughtHybridMatch[]; hits: SearchHit[]; vectorFailed?: QueryVectorFailed }>;
+  Promise<{ refusal: Refusal } | { refusal?: undefined; rows: ThoughtHybridMatch[]; hits: SearchHit[]; vectorFailed?: QueryVectorFailed; marksUnread?: "deadline" | "failed" | null }>;
 
 /** The hybrid arm with prefer_current, unlogged (this read logs its own row), its embedding stopped by the signal. */
 export const planSearch: PlanSearch = async (ctx, principal, q) => {
   const r = await runSearch(ctx, principal, { tool: "plan_context", arm: "hybrid", query: q.query, limit: q.limit, threshold: 0, recencyWeight: 0, filter: {}, preferCurrent: true, unlogged: true, signal: q.signal });
   if (r.refusal) return { refusal: r.refusal };
-  return { rows: r.rows, hits: r.rows.length ? await labelHits(ctx, principal, r.rows, undefined, q.marks) : [], ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}) };
+  const labelled = r.rows.length ? await labelHitsRead(ctx, principal, r.rows, undefined, q.marks) : { hits: [], unread: null };
+  return { rows: r.rows, hits: labelled.hits, marksUnread: labelled.unread, ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}) };
 };
 
 export async function planContext(ctx: Ctx, principal: Principal, input: Input<"plan_context">,
@@ -408,26 +415,26 @@ export async function planContext(ctx: Ctx, principal: Principal, input: Input<"
   const stopMs = Math.max(deadlineMs - BOARD_RESERVE_MS, Math.floor(deadlineMs / 2));
   const stop = AbortSignal.timeout(stopMs);
   // The hits' unreviewed marks are read in the knowledge's share too (review pass 2: a level's sources, read last, ate
-  // the board's reserve): out of it, not read, and a note says so.
-  let marksOut = false;
-  const marks: MarkOpts = { leftMs: () => stopMs - (clock() - started), onUnread: (why) => { if (why === "deadline") marksOut = true; } };
+  // the board's reserve): not all read, out of it or failed, a note says which, from what the read returned (pass 3).
+  const marks: MarkOpts = { leftMs: () => stopMs - (clock() - started) };
   const r = await (opts.search ?? planSearch)(ctx, principal, { query: request, limit: input.limit, signal: stop, marks });
   if (r.refusal) return refuse(r.refusal);
   const { rows, hits } = r;
   const gaps = knowledgeGaps(hits, r.vectorFailed, embeddingIdOf(ctx));
-  if (marksOut) gaps.push({ gap: "unreviewed_not_read", section: "knowledge", reason: "deadline" });
+  const notes: PlanNote[] = r.marksUnread ? [{ note: "unreviewed_not_read", section: "knowledge", reason: r.marksUnread }] : [];
 
   // Board: the named tickets, in one agenda call, with what is left of the deadline.
   const named = boardKeysOf(hits);
   // The marks the knowledge's labels read are the board's too, where they name its tickets (SMD-3671 PR 3 review pass 1).
-  const { board, gaps: boardGaps } = await boardOf(ctx, named, deadlineMs - (clock() - started), knownMarks(hits), clock);
+  const { board, gaps: boardGaps, notes: boardNotes } = await boardOf(ctx, named, deadlineMs - (clock() - started), knownMarks(hits), clock);
   gaps.push(...boardGaps);
+  notes.push(...boardNotes);
 
   // Held to the reply's budget (SMD-4191); the log below names every hit and ticket read, cut or not.
   const value = budgetPlan({
     request,
     knowledge: { hits, preferCurrent: true, ...(r.vectorFailed ? { vectorFailed: r.vectorFailed } : {}) },
-    board, specs: SPECS, procedures: PROCEDURES, tools: toolsFor(ctx, principal), gaps, deadlineMs,
+    board, specs: SPECS, procedures: PROCEDURES, tools: toolsFor(ctx, principal), gaps, notes, deadlineMs,
   });
   // A board not read says why in the row's filter, so its empty items are not read as a board that named nothing.
   await ctx.logPlanContext(principal, {
