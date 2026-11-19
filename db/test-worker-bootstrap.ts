@@ -10,13 +10,16 @@
  * refused while a local one proceeds. And the outage slice (SMD-2599): which
  * database errors a follower waits out, and the wait's schedule; a statement
  * run through it, and a worker key's lookup that meets the database down — a
- * closed loopback port, the one URL dialled, refused at once (SMD-2752).
+ * closed loopback port, the one URL dialled, refused at once (SMD-2752). And
+ * db/sleep.ts's re-embed numbers and back-off on an outage that made a thought
+ * a suspect (SMD-4254), pure: the module's import runs nothing.
  */
 
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { DecisionRefused } from "../server-portable/jev.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
+import { REEMBED_THOUGHT_BACKOFF_MAX_MS, REEMBED_THOUGHT_BACKOFF_MS, REEMBED_THOUGHT_PERIOD_MS, REEMBED_THOUGHT_PROBE_MS, REEMBED_THOUGHT_WAIT_MS, ThoughtWaitBackoff } from "./sleep.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeUntil, ProbeRefused, ProviderDown, ProviderOutage, EXTRACT_REQUEST_FIELDS, JUDGE_REQUEST_FIELDS, sameModel, regateMessage, requestShapeRefused, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
@@ -417,6 +420,31 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   iso.begin("500", "F");
   ok(iso.suspected === 2, "an outage begun while isolating keeps the last one's suspect beside its own");
   iso.end();
+  // Whether the outage is a thought's doing (SMD-4254): the sleep scheduler leaves re-embed waiting out such a one, up
+  // to a bound, and sets it down at any other.
+  const by = new ProviderOutage(() => 0, SUSPECT_WINDOW_MS, true);
+  by.begin("503");
+  ok(!by.byThought, "a thought's doing (SMD-4254): not an outage begun by backpressure, no suspect made");
+  by.begin("500", "A");
+  ok(by.byThought, "…but once an error joins it that makes the thought in hand a suspect");
+  by.end();
+  ok(!by.byThought, "…and no outage is anyone's doing");
+  by.begin("429");
+  ok(!by.byThought && by.suspected === 1, "an outage begun while isolating that meets no suspect is not, though it keeps the last one's");
+  by.end();
+  ok(by.blame("A", "500 alone", false) === "outage" && by.byThought, "a suspect's outage alone is");
+  by.end();
+  by.blame("A", "500 alone", false);
+  by.end();
+  ok(by.blame("A", "500 alone", false) === "alone" && !by.byThought, "the third alone begins none by the blame");
+  by.begin("500 alone", undefined, true);
+  by.begin("503");
+  ok(by.byThought && by.suspected === 1, "the outage the caller begins after it, its suspect blamed, is a thought's doing, joined by backpressure or not");
+  by.settled("A");
+  by.end();
+  by.begin("503");
+  ok(!by.byThought, "the next outage begins as no one's doing again");
+  by.end();
   // A blame whose probe ends past the window is an outage as any thought's, its count begun again (review pass 1).
   ok(iso.blame("E", "500", false) === "outage" && iso.aloneAt("E") === 1, "E's first outage alone");
   iso.end();
@@ -848,6 +876,73 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
       });
       ok(/for one token after 160 s and then twice as long each time, up to 5 min \(back within/.test(lines[0] ?? ""), `waitOutProvider: a carry a step short of the cap says its 160 s (${lines[0]})`);
     }
+    // The sleep scheduler's fixed probe on a thought's outage (SMD-4254, review pass 1): an isolation's three waits at
+    // the shipped schedule and re-embed's 15 s poll, the provider back 50 s after each crash, nothing settled between
+    // them. With fixedProbeMs each is probed every 5 s from its own start, nothing carried, so each ends 50 s on; the
+    // schedule carried across them ran 75 s, then 80 s, then 160 s, past the scheduler's 120 s bound.
+    {
+      const iso = new ProviderOutage(() => clock, SUSPECT_WINDOW_MS, true);
+      let downUntil = 0;
+      const sleeps: number[][] = [];
+      const waits: number[] = [];
+      const said: string[] = [];
+      const crashedWait = async (crash: () => unknown) => {
+        crash();
+        downUntil = clock + 50_000;
+        const from = clock, slept: number[] = [];
+        lines.length = 0;
+        const back = await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: iso,
+          probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "500 crashed" }), sleep: async (ms) => { slept.push(ms); clock += ms; }, fixedProbeMs: 5_000 });
+        waits.push(clock - from);
+        sleeps.push(slept);
+        said.push(lines[0] ?? "");
+        clock += 500;
+        return back;
+      };
+      const backs = await onTheClock(async () => [
+        await crashedWait(() => iso.begin("500 crashed", "P")),
+        await crashedWait(() => iso.blame("P", "500 crashed", false)),
+        await crashedWait(() => iso.blame("P", "500 crashed", false)),
+      ]);
+      ok(backs.every((b) => b === "answered") && waits.every((w) => w === 50_000) && sleeps.every((s) => s.length === 10 && s.every((ms) => ms === 5_000))
+          && said.every((l) => /the follower calls e at b every 5 s, an outage that made a thought a suspect$/.test(l)),
+        `waitOutProvider: a thought's outage under a fixed interval probes every 5 s from each wait's start, nothing carried — an isolation's three waits each 50 s on a provider back 50 s after each crash (${waits.map((w) => w / 1000).join(", ")} s; probes after ${sleeps.map((s) => s.map((ms) => ms / 1000).join("+")).join(" | ")}; ${said.map((l) => l.slice(-80)).join(" | ")})`);
+      // An outage no thought's doing — backpressure, no suspect — keeps the doubling and its carry, the interval passed.
+      const busy = new ProviderOutage(() => clock, SUSPECT_WINDOW_MS, true);
+      const busyLines = await onTheClock(async () => {
+        const got: string[] = [];
+        for (let i = 0; i < 2; i++) {
+          busy.begin("503 busy");
+          downUntil = clock + 15_000;
+          lines.length = 0;
+          await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: busy, fixedProbeMs: 5_000,
+            probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "503 busy" }), sleep: async (ms) => { clock += ms; } });
+          got.push(lines[0] ?? "");
+        }
+        return got;
+      });
+      ok(/calls e at b after 5 s and then twice as long each time, up to 5 min$/.test(busyLines[0]) && /calls e at b after 20 s and then twice as long each time, up to 5 min \(back within a minute and a poll of its last answer, no thought settled since, so the last wait's schedule goes on\)$/.test(busyLines[1]),
+        `waitOutProvider: an outage that is no thought's doing keeps the doubling and carries it, a fixed interval passed or not (${busyLines.map((l) => l.slice(-140)).join(" | ")})`);
+      // Nothing carried into a fixed wait, nor out of one: a backpressure wait answered at its third probe, then a
+      // thought's fixed wait (no carried note), then backpressure again, all within the window, nothing settled
+      // between — the last begins at the schedule's first step, the fixed wait having ended at step 0.
+      const mix = new ProviderOutage(() => clock, SUSPECT_WINDOW_MS, true);
+      const mixLines = await onTheClock(async () => {
+        const got: string[] = [];
+        for (const begin of [() => mix.begin("503 busy"), () => mix.begin("500 crashed", "Q"), () => mix.begin("503 busy")]) {
+          begin();
+          downUntil = clock + 30_000;
+          lines.length = 0;
+          await waitOutProvider({ ...base, who: "the embedding provider", calls: "e at b", pausesBefore: false, pollS: 15, settled: () => 0, outage: mix, fixedProbeMs: 5_000,
+            probe: async () => (clock >= downUntil ? { state: "up" } : { state: "out", why: "down" }), sleep: async (ms) => { clock += ms; } });
+          got.push(lines[0] ?? "");
+          clock += 500;
+        }
+        return got;
+      });
+      ok(/calls e at b every 5 s, an outage that made a thought a suspect$/.test(mixLines[1]) && /calls e at b after 5 s and then twice as long each time, up to 5 min$/.test(mixLines[2]),
+        `waitOutProvider: nothing carried into a thought's fixed wait, nor from it to the next (${mixLines.map((l) => l.slice(-140)).join(" | ")})`);
+    }
     // The window's edges: a minute, the poll and — a follower that pauses before an outage — the pauses, read as it
     // runs; strictly within. Each on an outage of its own whose last answer was at step 1, nothing settled since.
     const pausesMs = TRANSIENT_PAUSES_MS.reduce((a, b) => a + b, 0);
@@ -889,6 +984,84 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
     }
   }
   ok(overran.length === 0, `no follower's-waits cell probed past its script (review pass 5; ${overran.join(", ") || "none"})`);
+}
+
+// ---------------------------------------------------------------------------
+// The sleep scheduler's re-embed on an outage that made a thought a suspect (SMD-4254, review pass 2): the shipped
+// numbers, which test-live runs scaled, and the back-off by time (the maintainer's decision of 2026-11-18), on a clock
+// the row passes.
+// ---------------------------------------------------------------------------
+{
+  ok(REEMBED_THOUGHT_WAIT_MS === 120_000 && REEMBED_THOUGHT_PERIOD_MS === 240_000 && REEMBED_THOUGHT_PROBE_MS === 5_000 && REEMBED_THOUGHT_BACKOFF_MS === 240_000 && REEMBED_THOUGHT_BACKOFF_MAX_MS === 3_600_000,
+    `the shipped numbers: 2 min a wait, 4 min of isolation a period, a probe every 5 s, a 4 min back-off at first, an hour at most (${REEMBED_THOUGHT_WAIT_MS}, ${REEMBED_THOUGHT_PERIOD_MS}, ${REEMBED_THOUGHT_PROBE_MS}, ${REEMBED_THOUGHT_BACKOFF_MS}, ${REEMBED_THOUGHT_BACKOFF_MAX_MS})`);
+  // A crash that ends between about 80 and 120 s, on a busy brain: a period every 30 s, each try held to the 240 s cap
+  // and set down there. Backed off by time, the tries fall at 0, 480, 1200 and 2400 s — 4, 8, then 16 min after each
+  // try's limit — whatever the periods between, and the next window 32 min doubled to 64, held at the hour's ceiling
+  // (review pass 4).
+  const b = new ThoughtWaitBackoff();
+  const tries: number[] = [];
+  for (let t = 0; t < 3600;) {
+    if (b.skipping(t * 1000)) {
+      t += 30;
+      continue;
+    }
+    tries.push(t);
+    t += 240;
+    b.limited(t * 1000);
+    t += 30;
+  }
+  const heldS = tries.length * 240;
+  ok(tries.join() === "0,480,1200,2400" && b.windowMs === 3_600_000 && heldS === 960,
+    `the back-off by time: a try ending at a limit backs off 4 min, then 8, 16, 32, a period every 30 s between, the next held at the hour (tries at ${tries.join()} s; next ${b.windowMs / 1000} s; held ${heldS} s of the hour)`);
+  // The ceiling (review pass 4): the window doubles 240, 480, 960, 1920 s, then is held at 3600 s, the hourly rescan's
+  // scale — without it the eleventh window was 68 hours. Each limit at the end of the last window, a try at once.
+  const c = new ThoughtWaitBackoff();
+  const windows: number[] = [];
+  for (let i = 0, t = 0; i < 8; i++) {
+    c.limited(t);
+    const w = (c.state()?.until ?? t) - t;
+    windows.push(w / 1000);
+    t += w;
+  }
+  ok(windows.join() === "240,480,960,1920,3600,3600,3600,3600" && c.windowMs === 3_600_000,
+    `the back-off's ceiling: the window doubles to 1920 s, then is held at 3600 s (windows ${windows.join()} s; next ${c.windowMs / 1000} s)`);
+  // The ceiling a test passes, and a reset back to the base below it.
+  const s = new ThoughtWaitBackoff(10_000, 25_000);
+  s.limited(0);
+  s.limited(10_000);
+  s.limited(30_000);
+  const scaled = JSON.stringify(s.state());
+  s.reset();
+  s.limited(100_000);
+  ok(scaled === JSON.stringify({ until: 55_000, nextMs: 25_000 }) && JSON.stringify(s.state()) === JSON.stringify({ until: 110_000, nextMs: 20_000 }),
+    `a ceiling passed: 10, 20, then 25 s held; a reset backs off the base again (${scaled} | ${JSON.stringify(s.state())})`);
+  // The window's edges and a limit inside it, on a clock.
+  const m = new ThoughtWaitBackoff(10_000);
+  const fresh = m.state();
+  const first = m.limited(1000);
+  const st = JSON.stringify(m.state());
+  const inside = m.skipping(10_999);
+  const atEnd = m.skipping(11_000);
+  const insideLimit = m.limited(5000);
+  const unchanged = JSON.stringify(m.state());
+  const second = m.limited(11_000);
+  ok(fresh === null && first && st === JSON.stringify({ until: 11_000, nextMs: 20_000 }) && inside && !atEnd && !insideLimit && unchanged === st
+      && second && JSON.stringify(m.state()) === JSON.stringify({ until: 31_000, nextMs: 40_000 }),
+    `the window: a limit backs off its window from then and doubles the next; such an outage within it sets down at once, at its end it waits; a limit within it begins none (${fresh} | ${first} ${st} | ${inside} ${atEnd} | ${insideLimit} ${unchanged} | ${second} ${JSON.stringify(m.state())})`);
+  // Reset — re-embed drained, or a suspect recorded failed alone: no state, waits at once, and a limit backs off the base again.
+  for (const when of ["in a window", "after it, a try due"] as const) {
+    const r = new ThoughtWaitBackoff(10_000);
+    r.limited(0);
+    r.limited(10_000);
+    const now = when === "in a window" ? 15_000 : 40_000;
+    const before = r.skipping(now);
+    r.reset();
+    const reset = r.state();
+    const waits = !r.skipping(now);
+    r.limited(now);
+    ok(before === (when === "in a window") && reset === null && waits && JSON.stringify(r.state()) === JSON.stringify({ until: now + 10_000, nextMs: 20_000 }),
+      `reset ${when}: no state, such an outage waited out at once, and a limit backs off the base again (${JSON.stringify(r.state())})`);
+  }
 }
 
 console.log(`\ntest-worker-bootstrap: ${pass} passed, ${fail} failed`);
