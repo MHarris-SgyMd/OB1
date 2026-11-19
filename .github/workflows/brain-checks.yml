@@ -1079,7 +1079,7 @@ jobs:
     # (SMD-3469); sweep began as [38s] alone, the subject sweep under sleep,
     # which no other cell had room for (SMD-3306 PR 6b-2); claims is [10],
     # which with [16] was four fifths of the rest, the run's longest cell by
-    # 110 s, and [38b] from long, the next longest (SMD-4366); rest is [1]
+    # ~110 s, and [38b] from long, the next longest (SMD-4366); rest is [1]
     # and every section SHARDS does not list. One job, not six copies of it,
     # since the ruleset requires "Brain Checks passed" alone and not the
     # cells' names (SMD-3168, SMD-3169).

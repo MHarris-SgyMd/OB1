@@ -128,35 +128,36 @@ at_row() {
 }
 # cut_off RC: what a failing row's verdict adds when limit stopped it.
 cut_off() { [ "$1" -eq 124 ] && printf ', stopped at its %s s limit' "$ROW_LIMIT"; return 0; }
+# marked MARK OUT: how many assertion rows OUT printed under MARK, a ✓ or a ✗
+# after the line's indent, as db/test-support.ts's createAssert prints them
+# and the self-checks do; not a "(doc)" row, which createAssert counts apart.
+marked() { printf '%s\n' "$2" | grep -E "^[[:space:]]*$1[[:space:]]" | grep -cvE "^[[:space:]]*$1[[:space:]]+\(doc\)[[:space:]]"; }
 # reached RC OUT: how far a suite got when limit stopped it (SMD-4366), after
-# cut_off's words: the section it was in, by the last header it printed
+# cut_off's words. A stopped suite prints no tally, so its row said only that
+# it stopped: a shard 30 assertions from its end and one hung at its first
+# read alike. This adds the section it was in, by the last header it printed
 # ("[16] …", a bracketed id beginning a line, as scripts/suite-sections.ts
 # reads one; a long name cut at 40 characters), and the assertions it had
-# passed and failed by then, by the rows it printed, as db/test-support.ts's
-# createAssert prints them and the self-checks do (a ✓ or ✗ after the line's
-# indent; a "(doc)" row is no assertion, createAssert counts it apart). Every
-# row counts, so two that failed under one label are two: test-live's rest
-# has labels that repeat, one seven times, and createAssert prints a failed
-# row on stderr alone, so there is no second copy to drop as excerpt drops
-# one. A suite that printed no ✓ row says what failed alone, never "0
-# passed": test-cli, test-connect, test-slot-relay and others here print
-# nothing for an assertion that held, so none printed is not none passed. A
-# raw line that begins as a header does, a dumped "[0,1,0]" or a child's
-# "[stub] listening", printed after the section's own would be named in its
-# place: test-live prints none today, and suite-sections.ts would read it as
-# a section too. A stopped suite prints no tally, so without this its row
-# said only that it stopped: a shard 30 assertions from its end and one hung
-# at its first read alike. A suite that printed no header says its counts
-# alone, one that printed no row its section alone, and one that printed
-# neither adds nothing.
+# passed and failed by then, by the rows it printed. Every row counts, so two
+# that failed under one label are two: test-live's rest has labels that
+# repeat, one seven times, and createAssert prints a failed row on stderr
+# alone, so there is no second copy to drop as excerpt drops one. A suite
+# that printed no ✓ row says what failed alone, never "0 passed": test-cli,
+# test-connect, test-slot-relay and others here print nothing for an
+# assertion that held, so none printed is not none passed. A suite that
+# printed no header says its counts alone, one that printed no row its
+# section alone, and one that printed neither adds nothing. A raw line that
+# begins as a header does, a dumped "[0,1,0]" or a child's "[stub]
+# listening", printed after the section's own would be named in its place:
+# test-live prints none today, and suite-sections.ts would read it as a
+# section too.
 reached() {
   [ "$1" -eq 124 ] || return 0
   local at passed failed said=''
   at=$(printf '%s\n' "$2" | grep -E '^\[[^][:space:]][^]]*\]([[:space:]]|$)' | tail -1)
   at=${at%%]*}
   [ "${#at}" -le 40 ] || at="$(printf '%s' "$at" | cut -c1-40)…"
-  passed=$(printf '%s\n' "$2" | grep -E '^[[:space:]]*✓[[:space:]]' | grep -cvE '^[[:space:]]*✓[[:space:]]+\(doc\)[[:space:]]')
-  failed=$(printf '%s\n' "$2" | grep -E '^[[:space:]]*✗[[:space:]]' | grep -cvE '^[[:space:]]*✗[[:space:]]+\(doc\)[[:space:]]')
+  passed=$(marked ✓ "$2") failed=$(marked ✗ "$2")
   if [ "$passed" -gt 0 ]; then said=", $passed passed and $failed failed by then"
   elif [ "$failed" -gt 0 ]; then said=", $failed failed by then"; fi
   printf '%s%s' "${at:+ in $at]}" "$said"

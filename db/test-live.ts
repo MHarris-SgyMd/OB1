@@ -28,12 +28,12 @@
  *   OB1_ALLOW_REMOTE_DB=1 DATABASE_URL=... bun test-live.ts   # anything else
  *
  * OB1_LIVE_SHARD=sleep|long|extract|sweep|claims|rest runs one shard of the
- * sections (SHARDS below). Brain Checks runs the six side by side, one matrix cell each,
- * every one on a database of its own (SMD-3048, SMD-3169), and so does
- * db/ci-parity.sh, from one checkout, each on a Postgres of its own under a
- * with-postgres.sh (SMD-3688): [2] edits a copy of the migrations, not the
- * tracked tree (SMD-3639). Never two in one Postgres: each drops the schema,
- * and roles and backends are the cluster's.
+ * sections (SHARDS below). Brain Checks runs the six side by side, one matrix
+ * cell each, every one on a database of its own (SMD-3048, SMD-3169), and so
+ * does db/ci-parity.sh, from one checkout, each on a Postgres of its own
+ * under a with-postgres.sh (SMD-3688): [2] edits a copy of the migrations,
+ * not the tracked tree (SMD-3639). Never two in one Postgres: each drops the
+ * schema, and roles and backends are the cluster's.
  */
 
 import { SQL } from "bun";
