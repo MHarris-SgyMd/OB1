@@ -7364,7 +7364,7 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     let asked: Record<string, unknown> | null = null;
     const logged: unknown[][] = [];
     const ctx = {
-      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked = o; return { items: [{ kind: "ticket", key: "SMD-1", effective: 4 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0, now: "2027-01-01T00:00:00.000Z" }; } }),
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked = o; return { items: [{ kind: "ticket", key: "SMD-1", effective: 4 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0, now: "2027-01-01T00:00:00.000Z" }; }, staleUnreviewedOn: async () => [] }),
       logAgenda: async (...a: unknown[]) => { logged.push(a); },
     };
     await agendaRead(ctx as never, { name: "k", scope: "read", agentId: "a1" } as never,
@@ -7675,7 +7675,7 @@ console.log("\n[36c] A read's own priority weights in the core and the words (SM
     const value = { items: [{ rank: 1, kind: "ticket", key: "SMD-7", source: "linear", title: "T", project: "P", status: "Todo", statusType: "unstarted", effective: 5, level: 2, inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 3, overdue: true, unblocks: 0, terms: [{ term: "level", value: 2, detail: {} }, { term: "overdue", value: 3, detail: {} }], winner: null, passedOver: [], claimed: [], lapsedClaim: [], blockers: [] }],
                     total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 1, now: "2027-01-01T00:00:00.000Z", order: "priority" };
     const ctx = (fail?: Error) => ({
-      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked.push(o); if (fail) throw fail; return value; } }),
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked.push(o); if (fail) throw fail; return value; }, staleUnreviewedOn: async () => [] }),
       logAgenda: async (...a: unknown[]) => { logged.push(a); },
     });
     const P = { name: "k", scope: "read", agentId: "a1" } as never;
@@ -7710,7 +7710,7 @@ console.log("\n[36c] A read's own priority weights in the core and the words (SM
         && /^Refused: weights reweigh priority_weight's and min_priority's read, and this search asked for neither/.test(saidUnranked),
       `weights with neither priority_weight above 0 nor min_priority are refused, before the store is touched, said in words (${saidUnranked})`);
     const calls: { items: number; opts: unknown }[] = [];
-    const store = { effectivePriority: async (items: unknown[], opts?: unknown) => { calls.push({ items: items.length, opts: opts ?? null }); return []; } };
+    const store = { effectivePriority: async (items: unknown[], opts?: unknown) => { calls.push({ items: items.length, opts: opts ?? null }); return []; }, staleUnreviewedOn: async () => [] };
     await readPriorities(store as never, [{ id: "t1", content: "x" }], { tickets: false, weights: { overdue: 3 } });
     await readPriorities(store as never, [{ id: "t2", content: "x" }], { tickets: false });
     await priorityOf(store as never, [{ id: "t3", content: "on SMD-5" }], new Map(), { soon: 2 });
@@ -8580,7 +8580,7 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
   assert(reachAsked.length === 1 && reachAsked[0].length === UNREVIEWED_READ && markOf([reach], wide[0]).mark !== false && markOf([reach], wide[1]).mark === false
       && JSON.stringify(markOf([reach], wide[UNREVIEWED_READ])) === '{"mark":null,"cut":true}' && reach.failed === null
       && deepAsks.length === 2 && deepAsks.every((a) => a.length <= UNREVIEWED_READ) && JSON.stringify(cutRows.map(([id, h]) => [id, h.unreviewedUnchecked])) === '[["r1000",[{"kind":"thought","key":"r1000"},{"kind":"ticket","key":"INH-r1000"}]]]',
-    `one read asks at most ${UNREVIEWED_READ} items; past it a mark is not checked (cut), counted on its result; 1001 rows inheriting from 1001 tickets: two reads, two marks counted past the reach (${reachAsked[0]?.length} ${deepAsks.map((a) => a.length).join("+")} ${cutRows.map(([id, h]) => `${id}:${h.unreviewedUnchecked?.length}`).join(" ")})`);
+    `one read asks at most ${UNREVIEWED_READ} items; past it a mark is not checked (cut), named on its result; 1001 rows inheriting from 1001 tickets: two reads, two items named past the reach (${reachAsked[0]?.length} ${deepAsks.map((a) => a.length).join("+")} ${cutRows.map(([id, h]) => `${id}:${h.unreviewedUnchecked?.length}`).join(" ")})`);
 
   // Review pass 2: a source three priorities share, past the reach, is one item not checked, not three.
   answers["thought:z"] = ans("thought", "z", 3, { level: null, inheritedFrom: { kind: "ticket", key: "PAR-1", level: 4, hops: 1 }, terms: [term("inherited", 3, { from: { kind: "ticket", key: "PAR-1", level: 4, hops: 1 } })] });
@@ -8848,7 +8848,7 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
     `marks a read failed to give: said once in the text, the value's unreviewedRead false once, no null on an item (${JSON.stringify(unreadVal.hits[0]?.priority[0])})`);
   assert(cutRows.length > 0 && !text(cutReply).includes(UNREAD) && /\(unreviewed not checked on 2 items: past the read's reach\)\.\n/.test(text(cutReply))
       && (cutReply.structuredContent as { hits: { unreviewedUnchecked?: unknown[] }[] }).hits[0].unreviewedUnchecked?.length === 2 && !("unreviewedRead" in cutReply.structuredContent),
-    `a mark past the read's reach: counted on its result and said as not checked, never the grant's hint (${text(cutReply).match(/Priority: .*/)?.[0]})`);
+    `a mark past the read's reach: named on its result and said as not checked, never the grant's hint (${text(cutReply).match(/Priority: .*/)?.[0]})`);
   // Review pass 4: a mark's maker is another key's words, quoted and cut, so it cannot forge a note in the agenda's brackets.
   const forger = mark(80, 3, "bot]; claimed by op");
   const forgedAgenda = text(say.renderAgenda({ ok: true, value: { ...agendaAnswer, weights: null, items: [{ ...item("SMD-1", 1, 3), unreviewed: forger }] } } as never));
@@ -8995,7 +8995,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
       logged.length = 0;
       const ctx = {
         env: () => ({}),
-        store: async () => ({ agenda: async (o: Record<string, unknown>) => { askedTimeout = Number(o.timeoutMs); return agenda(); } }),
+        store: async () => ({ agenda: async (o: Record<string, unknown>) => { askedTimeout = Number(o.timeoutMs); return agenda(); }, staleUnreviewedOn: async () => [] }),
         logPlanContext: async (_p: unknown, row: Record<string, unknown>) => { logged.push(row); },
       };
       const search = async (_c: unknown, _p: unknown, q: { limit: number }) => { askedLimit = q.limit; t += 2500; return { rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })) }; };

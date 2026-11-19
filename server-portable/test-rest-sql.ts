@@ -3777,7 +3777,7 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
   await ticket(AG); await ticket(AG2);
   await rest("POST", `/v1/priorities/ticket/${AG}`, { level: 3 });
   await rest("POST", `/v1/priorities/ticket/${AG2}`, { level: 4 });
-  const plan = await rest("POST", "/v1/thoughts", { content: `[27] "quill plan omega" needs ${AG} and ${AG2}` });
+  await rest("POST", "/v1/thoughts", { content: `[27] "quill plan omega" needs ${AG} and ${AG2}` });
   // A level's sources (review pass 1): a note reading its level from the open item opened from it, and a note filed under
   // a ticket of another project, inheriting from it; a pending stale finding on each source, none on the notes.
   const billed = await rest("POST", "/v1/thoughts", { content: "[27] the source's case: the bill" });

@@ -2828,7 +2828,7 @@ const unreviewedWords = (u: UnreviewedMark | undefined): string => { const t = m
 const sourceWords = (u: UnreviewedMark | undefined): string => { const t = markText(u); return t ? ` (${t})` : ""; };
 /** What "unreviewed" means, said once a reply that marks an item (SMD-3671 PR 3), as the claimed line's key is. */
 const UNREVIEWED_KEY = "Unreviewed: sleep's priority review found that statement stale (older than its window, with nothing done on the item since) and no operator has decided the finding yet (list_priority_findings, review_priority_finding). A mark, not a weight: it moves no order. It lags the review, which runs at most every 6 hours, and with sleep off nothing is marked.";
-/** The marks a failed read left, said once a reply (SMD-3671 PR 3), as a failed priorities read is; marks past the read's reach are counted on their result instead. */
+/** The marks a failed read left, said once a reply (SMD-3671 PR 3), as a failed priorities read is; marks past the read's reach are named on their result instead (`unreviewedUnchecked`). */
 const UNREVIEWED_UNREAD_WHY = "Whether these priorities are unreviewed could not be read (for instance, a brain before migration 142, or a server role without SELECT on priority_findings): one not marked unreviewed may still be.";
 const UNREVIEWED_UNREAD = `⚠ ${UNREVIEWED_UNREAD_WHY}`;
 /** A result whose priorities may carry marks: its items', their sources', and the items no read reached. */
@@ -2996,7 +2996,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
   // the knowledge's deadline left unread are its note's to say, in the section, not the grant's hint (review passes 2, 3).
   const noteOf = (section: "knowledge" | "board") => (v.notes ?? []).find((n) => n.note === "unreviewed_not_read" && n.section === section);
   const kNote = noteOf("knowledge"), bNote = noteOf("board");
-  const knownMarks = [...unreviewedNotes({ ...markFacts(hitGroups(k.hits)), ...(kNote?.reason === "deadline" ? { failed: false } : {}) }),
+  const knowledgeMarkNotes = [...unreviewedNotes({ ...markFacts(hitGroups(k.hits)), ...(kNote?.reason === "deadline" ? { failed: false } : {}) }),
     ...(kNote?.reason === "deadline" ? ["Whether the hits' priorities are unreviewed was not all read (out of the knowledge's time), so one not marked unreviewed may still be."] : [])];
   if (k.hits.length) {
     const notes: string[] = [];
@@ -3005,7 +3005,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     if (k.hits.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
     if (k.hits.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
     if (anyStale(k.hits)) notes.push(STALE_KEY);
-    notes.push(...knownMarks);
+    notes.push(...knowledgeMarkNotes);
     // A hit cut to its head says so under its text, and how to read the whole (SMD-4191).
     const blocks = hitBlocks(k.hits, literal).map((b, i) => {
       const h = k.hits[i];
@@ -3040,7 +3040,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     if (b.claimsRead === false) out.push("Claims could not be read (the server's database role lacks the claims group): no holder is named.");
     else if (b.claimsLive === 0) out.push("This brain records no live claim: work claimed through another brain is not seen here.");
     // The board's marks not read are its note's to say (deadline or failed), not the grant's hint.
-    out.push(...unreviewedNotes({ ...markFacts(itemGroups(b.tickets)), failed: false }).filter((n) => !knownMarks.includes(n)));
+    out.push(...unreviewedNotes({ ...markFacts(itemGroups(b.tickets)), failed: false }).filter((n) => !knowledgeMarkNotes.includes(n)));
     if (bNote) out.push(`Whether the board's priorities are unreviewed was not read (${bNote.reason === "deadline" ? "out of the read's time" : "its read failed; the server's log says why"}), so a ticket not marked unreviewed may still be.`);
   }
   out.push(`\n## Specs and deliverables: not available here (${v.specs.reason}; waits on ${v.specs.waitsOn.join(", ")}).`);
@@ -3070,7 +3070,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
         // Counts as the ticket has them, not as the budget listed them (review pass 3).
         tickets: v.board.tickets.map((i) => ({ rank: i.rank, key: i.key, statusType: i.statusType, effective: i.effective, blockers: i.blockers.length + ((v.board.available && v.board.ticketMore?.[i.key]?.blockers) || 0),
                                               claimed: i.claimed.length > 0, lapsedClaim: i.lapsedClaim.length > 0,
-                                              // SMD-3671 PR 3: only a mark present; marks not read are the gap's.
+                                              // SMD-3671 PR 3: only a mark present; marks not read are the board note's.
                                               ...unreviewedField(i.unreviewed), ...uncheckedField(i.unreviewedUnchecked),
                                               // A level's source's mark, present alone, as the compact value carries the item's (review pass 3).
                                               ...sourceFields(i, false) })),

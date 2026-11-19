@@ -1792,7 +1792,7 @@ export function normalisePriorityFinding(r: Record<string, unknown>): PriorityFi
  * The unreviewed mark (SMD-3671 PR 3): a pending stale finding on an item, as a read labels its priority. `statedAt` is
  * the newest `asserted_at` among the finding's statements, so the days never overstate how long the statement has
  * stood; `days` the whole days from it to the database's now (the clock that stamped it), 0 at the least. Both null
- * when the evidence's statements, or any one's time, could not be read: the item is still marked, without a count, as a
+ * when the evidence's statements, or any one's time, could not be read: the item is still marked, without an age, as a
  * finding stands on it. `level` and `maker` are that newest statement's (review pass 1: the statement under review
  * need not be the one setting the level a read shows, as a source's counted High beside an agent's stale Low), null
  * when its time, or they, could not be read. `windowDays` is the scan's window the finding was found under.
@@ -1810,8 +1810,8 @@ const DAY_MS = 86_400_000;
 /**
  * One pending stale finding as the unreviewed mark reads it, from its id, item, evidence, window and the database's now;
  * leniently, as the list reads evidence: a row with no id or item key is skipped (null), never a fault; statements the
- * evidence does not hold readably, or any statement's time not read, leave `statedAt` and `days` null rather than a
- * count from the statements that were (one unread could be the newest, and the count would overstate).
+ * evidence does not hold readably, or any statement's time not read, leave `statedAt` and `days` null rather than an
+ * age from the statements that were (one unread could be the newest, and the age would overstate).
  */
 export function normaliseStaleUnreviewed(r: Record<string, unknown>): { item: { kind: string; key: string }; unreviewed: Unreviewed } | null {
   if (typeof r.id !== "string" || typeof r.item_kind !== "string" || typeof r.item_key !== "string") return null;

@@ -339,7 +339,6 @@ export function embeddingIdOf(ctx: Partial<Pick<Ctx, "embedConfig">>): string | 
   return `${c.embeddingModel}@${c.embeddingDim}`;
 }
 
-
 /**
  * The board section: the named tickets in one agenda call (126's keys scope), every flag on so blocked, claimed and
  * started tickets are listed and say so, under what is left of the deadline as its statement timeout. Its gaps: the

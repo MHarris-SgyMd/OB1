@@ -602,7 +602,7 @@ type PriorityRow = { id: string; content: string; metadata?: Record<string, unkn
  */
 export async function readPriorities(store: Pick<ThoughtStore, "effectivePriority">, rows: readonly PriorityRow[],
   opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority>; weights?: Partial<PriorityWeights>; ask?: ReturnType<typeof priorityAsk> } = {}): Promise<PriorityRead> {
-  // The ask, when the caller already made it (priorityOf's marks read the same keys, review pass 3), is not made again.
+  // The ask, when the caller already made it (priorityRead's marks read the same keys, review pass 3), is not made again.
   const { ids, tickets, keyed } = opts.ask ?? priorityAsk(rows, opts);
   const by = new Map(opts.have ?? []);
   if (ids.length + tickets.length === 0) return { by, keyed };
@@ -619,7 +619,7 @@ export async function readPriorities(store: Pick<ThoughtStore, "effectivePriorit
  * each names, to the reach; per row the tickets asked for it and those it names that were not. Pure: the unreviewed
  * marks' first read asks the same keys beside it (SMD-3671 PR 3 review pass 1).
  */
-export function priorityAsk(rows: readonly PriorityRow[], opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority> } = {}): { ids: string[]; tickets: string[]; keyed: PriorityRead["keyed"] } {
+function priorityAsk(rows: readonly PriorityRow[], opts: { tickets?: boolean; have?: ReadonlyMap<string, EffectivePriority> } = {}): { ids: string[]; tickets: string[]; keyed: PriorityRead["keyed"] } {
   const have = opts.have ?? new Map<string, EffectivePriority>();
   const ids = [...new Set(rows.map((r) => r.id))].filter((id) => !have.has(`thought:${id}`));
   const tickets: string[] = [];
@@ -657,7 +657,7 @@ const priorityOn = (p: EffectivePriority, self: boolean): PriorityOn => {
     kind: as !== null || p.item.kind === "ticket" ? "ticket" : "thought", key: as ?? p.item.key, self, effective: p.effective, level: p.level,
     inheritedFrom: p.inheritedFrom ? { ...p.inheritedFrom, unreviewed: null } : null, fromItem: fromItemTerm(p.terms), dueAt: p.dueAt, urgency: p.urgency, overdue: p.overdue, unblocks: p.unblocks, settled: p.settled,
     notBefore: p.notBefore, waiting: p.waiting, terms: p.terms,
-    // Not read until priorityOf reads the findings, the sources' marks too.
+    // Not read until priorityRead reads the findings, the sources' marks too.
     unreviewed: null,
   };
 };
@@ -748,7 +748,7 @@ export const UNREVIEWED_READ = 1000;
  * each asked item that has one, and why it read nothing, if it did not: out of the reply's time, or failed — then
  * `fault`, its log line, which the caller says (sayFault) unless another failure already speaks for the reply.
  */
-export type UnreviewedRead = { asked: Set<string>; cut: Set<string>; by: Map<string, Unreviewed>; failed: "deadline" | "failed" | null; fault: string | null };
+type UnreviewedRead = { asked: Set<string>; cut: Set<string>; by: Map<string, Unreviewed>; failed: "deadline" | "failed" | null; fault: string | null };
 /** A store error's SQLSTATE, or "" (one reading for the marks' reads and plan_context's board, review pass 2). */
 export const sqlState = (e: unknown) => String((e as { errno?: unknown; code?: unknown })?.errno ?? (e as { code?: unknown })?.code ?? "");
 /** A failed read's log line, said once. */
@@ -797,7 +797,7 @@ export function markOf(reads: readonly UnreviewedRead[], item: MarkItem): { mark
   return { mark: null, cut: reads.some((x) => x.cut.has(k) && !x.failed) };
 }
 
-/** A priority, an agenda item or a board ticket with its mark and its level's sources' marks, the distinct items no read reached added to `cut`. */
+/** A priority, an agenda item or a board ticket with its mark and its level's sources' marks. */
 function marked<T extends Markable>(p: T, mark: (i: MarkItem) => UnreviewedMark): T & { unreviewed: UnreviewedMark } {
   return {
     ...p, unreviewed: mark(p),

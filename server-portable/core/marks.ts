@@ -1,7 +1,7 @@
 // The unreviewed marks' pure helpers (SMD-3671 PR 3, review pass 2): the items a priority's marks are about — the item
 // itself, the open item its level is read from, the item it inherits from — keyed as 142 keys a finding's item. One
-// place for the core's reads (reads.ts), plan_context's budget (plan.ts) and the words (render.ts), which each counted
-// them on their own; a leaf, so the renderer reaches no read.
+// place for the core's reads (reads.ts), plan_context's budget (plan.ts) and the words (render.ts), which each worked
+// them out on their own; a leaf, so the renderer reaches no read.
 
 import type { UnreviewedMark } from "../store.ts";
 
@@ -24,7 +24,7 @@ export const marksOn = (p: Markable): { item: MarkItem; mark: UnreviewedMark | u
 ];
 
 /** The distinct items, by `kind:key`, whose marks among these were not checked (null). */
-export const unreadItems = (ps: readonly Markable[]): Set<string> =>
+const unreadItems = (ps: readonly Markable[]): Set<string> =>
   new Set(ps.flatMap(marksOn).filter((m) => m.mark === null).map((m) => itemKey(m.item)));
 
 /**
