@@ -5353,51 +5353,64 @@ without `EXECUTE` on the function is told once at the start and sweeps
 nothing; the function is `SECURITY INVOKER` over four groups' tables, so a
 role short of one of those grants meets 42501 at the first call, said with
 the grant, and the sweeps end for the process. Then re-embed (SMD-2679),
-alone, so the vectors consolidation judges neighbours by are current —
-within its share (below): a longer backlog, a model switch's, is re-embedded
-across periods, and consolidation judges some neighbours on the old or
-unlabelled vectors meanwhile; `--reembed-share 0` re-embeds it all first — only
+alone, so the vectors consolidation judges neighbours by are current
+(within its share, below: a longer backlog, a model switch's, is re-embedded
+across turns, and consolidation judges some neighbours on the old or
+unlabelled vectors meanwhile; `--reembed-share 0` re-embeds it all first): only
 when its backlog has work (rows pending or in flight under the configured
 model's own key — another process's live lease not counted — thoughts not at
 the model or with no vector, finished rows whose thought has moved;
 `--dry-run` prints it, counting every lease, a hand run's too), so
 a brain with nothing to re-embed starts no pass and calls no embedding
 endpoint at all: re-embed's start is not among those the scheduler checks.
-Until its pool drains, or until it has had its share of the period alone:
+Until its pool drains, or until it has had its share alone:
 `--reembed-share` (`OB1_SLEEP_REEMBED_SHARE`, 120 s; SMD-4384, the
 maintainer's choices of 2026-11-19), on re-embed's clock, which a live
-write's pause stops, its isolation of an outage (below) not counted — that
-has its own cap — and never ended mid-isolation. Under a steady inflow of
-thoughts with no vector (an egress policy that keeps captures from a remote
-embedding provider, a provider too slow for captures, a bulk import) its pool
-never drains, since its follower pools every 15 s, and before the share it
-held extraction and consolidation the whole period: extraction ran 0 of 64
-thoughts in 240 s. At its share it gives way after the thought in hand, said,
-a model switch's backlog too, and the claim passes start; nothing is set down
-or backed off. It gives way only to a claim pass with a claim pending or in
-hand: on a brain with nothing else to do it runs on until its pool drains
-(review pass 1). The next idle poll reads the pools whole, by a read of its
-own — no poll between reads re-embed's claims — so the next period begins
-once the claim passes drain and the brain is quiet, re-embed first again; a
-one-shot run exits 1, its pool left. `0` is no share, alone until its pool
-drains, as before. The turns alternate (review pass 1, the maintainer's
-choice): under an inflow the claim passes' pools never drain either —
-extraction's follower pools every 15 s too — and with a share one way only no
-vector came until the inflow stopped (131-202 s late over a 5-minute inflow,
-main 15 s). So under `--follow`, once the claim passes have run as long as
-the share with re-embed's pool not drained, they stop after the thoughts in
-hand and the period ends ("the claim passes have had their turn"), and the
-next re-embeds first. Each turn is a period — its re-derive sweep, the claim
-passes' start probes and consolidation's join decided again. A one-shot
-run's claim passes run until they drain. Anything else that
-ends it sets it down for that period — refused (a key, credit, the model not served, the egress policy, a
+write's pause stops, its start counted, its isolation of an outage (below)
+not — that has its own cap — and never ended mid-isolation. Under a steady
+inflow of thoughts with no vector (an egress policy that keeps captures from
+a remote embedding provider, a provider too slow for captures, a bulk import)
+its pool never drains, since its follower pools every 15 s, and before the
+share it held extraction and consolidation the whole period: extraction ran
+0 of 64 thoughts in 240 s. At its share it gives way after the thought in
+hand, said ("re-embed has had its share"), a model switch's backlog too, but
+only to a claim pass with a claim pending or in hand: on a brain with
+nothing else to do it runs on until its pool drains (review pass 1); nothing
+is set down or backed off. Then the two take turns in the period (review
+pass 1, the maintainer's choice): under an inflow the claim passes' pools
+never drain either — extraction's follower pools every 15 s too — and with a
+share one way only no vector came until the inflow stopped (131-202 s late
+over a 5-minute inflow, main 15 s). So once the claim passes have run as long
+as the share with re-embed's pool not drained, they wait at a gate of their
+own between thoughts, windows and pairs, as at a live write's pause ("the
+claim passes have had their turn"), and re-embed runs alone again for its
+share; then they go on, consolidation still joined. Either side hands over
+sooner once caught up — re-embed with nothing pending or in hand, only
+thoughts its follower has yet to pool; the claim passes with nothing in hand
+and nothing pending since before the last floor, as each capture is pooled
+for extraction at once — after a turn floor of the followers' own poll (15
+s), so under an inflow both keep up turn by turn and a vector waits about
+that, not the share (review pass 2, the maintainer's choice; "re-embed has
+caught up", "the claim passes have caught up"). The claim passes' work is
+their claims, and on a brain with no extraction key yet — no trigger pools a
+capture until extraction's first pass records it — extraction's pool read
+whole, at most once a turn floor. Each re-embed turn has its own isolation
+cap (below), as a period had, and a re-embed set down in the period is tried
+again at the claim passes' whole turn's end, as a period's start would (review
+pass 2: one set down at a turn's start stayed down while the inflow went on). The period ends as before,
+once the claim passes drain; what re-embed left then begins the next period,
+by the next idle poll's whole read of its own — no poll between reads
+re-embed's claims — re-embed first again; a one-shot run exits 1, its pool
+left. `0` is no share and no turns, re-embed alone until its pool drains, as
+before. Anything else that
+ends re-embed sets it down for that period — refused (a key, credit, the model not served, the egress policy, a
 refusal mid-pass), its provider not answering — said, on the row (`aside`,
 its kind; a thrown error's reason in the log), and the other passes run on;
 the next period tries it again. An outage that made the thought in hand a
 suspect, or a suspect's alone — as when a thought's call crashes the provider —
 is waited out instead, said, the provider probed every 5 s from the wait's
 start (no doubling, nothing carried from the last wait), up to 2 minutes a wait
-and 4 minutes of isolation a period (SMD-4254, the maintainer's choices of
+and 4 minutes of isolation a period — a re-embed turn since SMD-4384 — (SMD-4254, the maintainer's choices of
 2026-11-18) — the isolation counted from its first such wait's start until its
 suspects settle, the retries' calls and probes between the waits included:
 once the provider answers, re-embed retries the outage's suspects one at a
@@ -5486,7 +5499,8 @@ instead means recreating `sleep` (and `api`): the scheduler reads its
 environment once.
 **Unlabelled vectors:** a brain from before migration 021 carries vectors
 with no model, and its first periods re-embed and label them, one embedding
-call a row, up to `--reembed-share` of each before they extract; the start line and `--dry-run` count them
+call a row, `--reembed-share` at a time in turns with extraction while it has work;
+the start line and `--dry-run` count them
 (a later period's line counts only rows not yet claimed, so follow the
 `re-embed pass` row), and `reembed.ts --dry-run` before upgrading says how
 many. Then extraction alone until its

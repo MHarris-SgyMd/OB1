@@ -2469,9 +2469,9 @@ a pass has work and no live call has landed for `OB1_SLEEP_CAPTURE` seconds
 (unset, 20), and runs the re-derive sweep, then re-embed when the brain has
 vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
 on a brain the server embeds at its own model, so no embedding call) — alone
-until its pool drains or for `OB1_SLEEP_REEMBED_SHARE` seconds of the period
-(unset, 120; SMD-4384), what it leaves the next period's, which begins once
-the claim passes drain or have run as long — then
+until its pool drains, or for `OB1_SLEEP_REEMBED_SHARE` seconds while
+extraction or consolidation has work (unset, 120; SMD-4384), the two then
+taking turns in the period as long each — then
 extraction, and
 consolidation beside it once extraction's pool is drained, so the backlog
 order above is built in. Beside consolidation runs the subject sweep
@@ -2528,9 +2528,9 @@ down sets it down for
 that period, said in its log and on `heartbeat:sleep`, and the other passes
 run on; the next period tries again. **Upgrading a
 brain from before migration 021:** its unlabelled vectors are re-embedded and
-labelled by the first periods, one embedding call a row, up to
-`OB1_SLEEP_REEMBED_SHARE` (120 s) of each before extraction (0 re-embeds them
-all first); `bun db/reembed.ts --dry-run` says how many first. A brain recording another
+labelled by the first periods, one embedding call a row,
+`OB1_SLEEP_REEMBED_SHARE` (120 s) at a time in turns with extraction while it
+has work (0 re-embeds them all first); `bun db/reembed.ts --dry-run` says how many first. A brain recording another
 embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
 it can print the model names), and the others run on: run
@@ -2574,7 +2574,13 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 
 The log says `working:` when a period begins, `extraction drained — consolidating
 beside it`, `paused:` with the live call that paused it and `resumed:` once
-the capture has passed, and `the pools drained — the period ends`; `budget:`
+the capture has passed, and `the pools drained — the period ends`; `share:`
+at its start names the turns, `re-embed has had its share — 120 s alone — N
+thought(s) left for its next turn …` when re-embed gives way to extraction,
+and `the claim passes have had their turn — 120 s — with N thought(s) waiting
+for re-embed: they wait between thoughts while re-embed runs alone again`
+when it takes its next turn — `caught up` in place of `had its share` or
+`had their turn` when a side hands over sooner (SMD-4384); `budget:`
 at its start names the session settings in force, and a statement past its
 timeout says `<pass>: a statement passed the pass's statement_timeout (300 s)`
 and `<pass> held until a restart`. Each period begins with the re-derive
@@ -2619,24 +2625,28 @@ its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER`
 (60–86400, unset 60: how long a model call in hand may have run, counted from
 its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
-`OB1_SLEEP_REEMBED_SHARE` (0–86400, unset 120: the most re-embed runs alone
-first in a period before it gives way to extraction and consolidation —
-only when they have work — a pause and its isolation of an outage not
-counted; and they run as long in turn: past it, with re-embed's pool not
-drained, they stop after the thoughts in hand and the period ends — or once
-they drain — and the next begins once the brain is quiet, re-embed first
-again. Under a steady inflow of thoughts with no vector — an egress policy
-keeping captures from a remote embedding provider, a slow provider, a bulk
-import — neither pool drains: without the share nothing was extracted, and
-with a share one way only no vector came until the inflow stopped. Each turn
-is a period, its re-derive sweep and the claim passes' start probes again. A backlog longer than the share, a model switch's, is
-re-embedded across periods, consolidation judging some neighbours on the old
-vectors meanwhile; 0: no share, alone until its pool drains, as before
-SMD-4384), `OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: among the scheduler's own calls
+`OB1_SLEEP_REEMBED_SHARE` (0–86400, unset 120: each turn's length as re-embed
+and extraction with consolidation take turns in a period — re-embed alone
+first, at most this long while they have work, then they as long while
+re-embed has work, waiting between thoughts in its turns as at a live call's
+pause, either side handing over sooner once caught up, after the followers'
+15 s poll — a pause and re-embed's isolation of an outage not counted; a
+re-embed set down in the period is tried again at their turn's end; the period
+ends, as before, once extraction and consolidation drain, and what re-embed
+left begins the next once the brain is quiet. Under a steady inflow of
+thoughts with no vector — an egress policy keeping captures from a remote
+embedding provider, a slow provider, a bulk import — neither pool drains:
+without the share nothing was extracted, and with a share one way only no
+vector came until the inflow stopped. A backlog longer than the share, a
+model switch's, is re-embedded across turns, consolidation judging some
+neighbours on the old vectors meanwhile. Raise it, or set 0 — no share, no
+turns, re-embed alone until its pool drains, as before — to finish a model
+switch before consolidation judges on the new vectors; lower it to start
+extraction sooner under such an inflow; SMD-4384), `OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: among the scheduler's own calls
 waiting for a share of a model server's slots, consolidation's go first, and
 one queued this long goes first at the next turn — as the call ahead of it
 takes its slot — after older ones that go first; not a timeout. It orders, and
-the share is the same; the order matters once the scheduler's calls queue —
+each pass's slots are the same; the order matters once the scheduler's calls queue —
 consolidation's workers two or more past the share hold the other passes to
 about a call a worker a max-wait — and a lower value gives them more turns;
 SMD-3379 PR 2c-2),
@@ -2685,12 +2695,12 @@ its start reading the work whole. An embedding model change
 (`OB1_EMBEDDING_MODEL`) is `reembed.ts --switch-model`'s, run the same way:
 until it records the new model, `sleep` sets its re-embed pass aside and says
 so, and once it has, the periods re-embed whatever the switch left unfinished
-(SMD-2679), up to `OB1_SLEEP_REEMBED_SHARE` (120 s) of each while extraction
-or consolidation has work (SMD-4384), so consolidation judges some neighbours
-on the old model's vectors until the backlog is done —
-`OB1_SLEEP_REEMBED_SHARE=0` re-embeds it all first — unless the new name is one its heartbeat row cannot carry (ASCII
-letters, digits and `. _ : @ / + -`, `<name>@<width>` at most 120 characters),
-which keeps re-embed out of sleep: then `reembed.ts` run by hand finishes it
+(SMD-2679), `OB1_SLEEP_REEMBED_SHARE` (120 s) at a time in turns with
+extraction and consolidation while they have work (SMD-4384), so consolidation judges some neighbours
+on the old model's vectors until the backlog is done;
+`OB1_SLEEP_REEMBED_SHARE=0` re-embeds it all first. A new name its heartbeat
+row cannot carry (ASCII letters, digits and `. _ : @ / + -`, `<name>@<width>`
+at most 120 characters) keeps re-embed out of sleep: then `reembed.ts` run by hand finishes it
 (SMD-3486).
 
 Since SMD-2752 it checks each claim pass's start
