@@ -45,8 +45,6 @@ services:
         target: /broker.ts
       - source: registry
         target: /federation.yaml
-    # The two files' digests, as labels nothing reads, so a changed broker or
-    # registry recreates the container on an `up`.
     # The host's name where Docker gives a container none (Docker Engine on
     # Linux), as the stack's api and coordinator have it (deploy/compose.yaml):
     # the broker reads a model server's loaded models there, where a registry
@@ -54,6 +52,8 @@ services:
     # writes the name itself.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # The two files' digests, as labels nothing reads, so a changed broker or
+    # registry recreates the container on an `up`.
     labels:
       ob1.broker-sha256: ${FEDERATED_BROKER_SHA256:?run deploy/federated/federated.ts}
       ob1.registry-sha256: ${FEDERATED_REGISTRY_SHA256:?run deploy/federated/federated.ts}
