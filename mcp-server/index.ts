@@ -18,6 +18,7 @@ import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.
 import { listenHostFrom, routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
 import { cutOpenRequests, cutTelemetry, flushTelemetry, knowTools, markTelemetry, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
+import { observeListenStreams } from "../server-portable/tracing.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 import { createListenStreams } from "./listen-streams.ts";
 import { createExchanger, exchangeSettings } from "./exchange.ts";
@@ -97,7 +98,11 @@ const app = createMcpApp({ rest, plugins: () => plugins, toolCalls, stop, restUr
 let bunServer: Stoppable | undefined;
 if (import.meta.main) {
   // Spans to a collector, where one is named (OTEL_EXPORTER_OTLP_ENDPOINT), as server-portable's index.ts's were (PR 4c).
-  void startTelemetry(SERVICE_NAME);
+  // …and, on a server that holds listen streams, a gauge of how many are open (SMD-4458), made once the SDK is set
+  // up: before that the API has no meter to make it on. A server that holds none sends no such series.
+  void startTelemetry(SERVICE_NAME).then((set) => {
+    if (set && listenStreams.hold) observeListenStreams(() => listenStreams.count);
+  });
   const grace = drainBoundFrom(env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   // As server-portable's index.ts stopped, and the REST core stops (SMD-2250): the server's own requests in flight, and the tool calls a request no longer counts

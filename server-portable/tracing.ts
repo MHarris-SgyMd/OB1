@@ -40,6 +40,17 @@ export function histogram(name: string, spec: HistogramSpec): otel.Histogram {
   return made;
 }
 
+/**
+ * The gauge of the listen streams the MCP server holds open (SMD-4458), read at each export from the count the
+ * server keeps: the total alone, with no label of its own, since a label for each caller's name would have no bound.
+ * Made on the meter provider the API has now, so it is called once the SDK is set up (startTelemetry's answer); before
+ * that, or where no metrics go anywhere, the API's provider is its no-op and this does nothing. It is here, not in
+ * mcp-server/, because check 37 reads the instruments a dashboard may name from this directory's code.
+ */
+export function observeListenStreams(read: () => number): void {
+  otel.metrics.getMeterProvider().getMeter("ob1").createObservableGauge("ob1.mcp.listen_streams", { unit: "{stream}", description: "The listen streams the MCP server holds open" }).addCallback((reading) => reading.observe(read()));
+}
+
 /** The spans not yet ended, so the stop's cut ends each with its request (cutOpenSpans). */
 const OPEN_SPANS = new Set<WorkSpan>();
 

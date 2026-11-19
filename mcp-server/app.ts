@@ -548,6 +548,17 @@ export function createMcpApp(deps: McpDeps): Hono {
     };
   };
   /**
+   * What keyed /health says of the listen streams, on a server that holds any (SMD-4458): how many are open, the
+   * two bounds a refusal is read against, and each caller's share, the most first. It is shown to whoever may read
+   * the record, and a caller's name is its key's, or for a token its subject and client together.
+   */
+  const listenView = (streams: ListenStreams) => ({
+    open: streams.count,
+    max: streams.max,
+    perCaller: streams.perCaller,
+    callers: [...listening].map(([name, open]) => ({ name, open })).sort((a, b) => b.open - a.open || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+  });
+  /**
    * Whether the stop has cut what is in flight, on a server that holds listen streams. Such a stop closes the
    * streams before the connections, through the SDK's handler, so for a moment (milliseconds as a rule, 200 ms
    * at most) the handler is closed and the connections are not: a tool call's answer must not end in it, and
@@ -828,7 +839,10 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return notCleared(c, traceOf(c.req.raw), null);
     // An answer that is no object is no record (review pass 3: a string's characters were served as its fields).
     if (typeof body !== "object" || Array.isArray(body)) return recordFault(new Error("the REST core answered /health with no record"));
-    return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
+    // Beside the REST core's record, what this server alone knows: its view of the public origin, and, where it holds
+    // listen streams, how many are open as it answers (SMD-4458). A server that holds none says nothing of them.
+    const edgeSeen = await oauth;
+    return c.json({ ...body, oauth: edgeSeen, ...(listen ? { listen: listenView(listen) } : {}) }, 200, corsHeaders);
   });
 
   // The worker-queue status as a keyed GET (SMD-2131), the worker_status tool's REST mirror.

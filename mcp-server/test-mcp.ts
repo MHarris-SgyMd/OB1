@@ -875,12 +875,22 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
 {
   const counted = { total: 3, oldest: "2026-10-01T00:00:00Z", newest: "2026-10-02T00:00:00Z", types: { idea: 3 }, topics: { rest: 2 }, people: {}, aggregated: 3 };
   const restServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => restApp.fetch(req) });
-  // An entry given this collector sends its spans here: the second and third holding entries below, the one whose
-  // drain finishes, with its flush before its streams are closed, and the one that is cut. The first has none, and
-  // the three after them a collector that never answers.
+  // An entry given this collector sends its spans here: today's entry, first below, and the second and third holding
+  // entries, the one whose drain finishes, with its flush before its streams are closed, and the one that is cut. The
+  // first holding entry has none, and the three after them a collector that never answers.
   // The environment's own OTEL_* is set aside, as [8g] does.
   const exported: string[] = [];
-  const collector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => { if (new URL(req.url).pathname === "/v1/traces") exported.push(await req.text()); return Response.json({}); } });
+  // …and its metric exports, for the gauge of open streams (SMD-4458).
+  const metered: string[] = [];
+  const collector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
+    const path = new URL(req.url).pathname;
+    if (path === "/v1/traces") exported.push(await req.text());
+    else if (path === "/v1/metrics") metered.push(await req.text());
+    return Response.json({});
+  } });
+  /** The points of one metric among the exports the collector has had since the `from`th, each export's in turn. */
+  const pointsOf = (name: string, from: number) => metered.slice(from).flatMap((t) => (JSON.parse(t) as { resourceMetrics: { scopeMetrics: { metrics: { name: string; gauge?: { dataPoints: { asDouble?: number; asInt?: number | string }[] } }[] }[] }[] }).resourceMetrics)
+    .flatMap((r) => r.scopeMetrics).flatMap((x) => x.metrics).filter((m) => m.name === name).flatMap((m) => m.gauge?.dataPoints ?? []).map((pt) => Number(pt.asDouble ?? pt.asInt));
   /** The spans the collector has been sent for listen requests, by count. */
   const listenSpans = () => exported.flatMap((t) => (JSON.parse(t) as { resourceSpans: { scopeSpans: { spans: { name: string }[] }[] }[] }).resourceSpans).flatMap((r) => r.scopeSpans).flatMap((x) => x.spans).filter((x) => /subscriptions\/listen/.test(x.name)).length;
   const envOf = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("OTEL_"))), PORT: "0", OB1_LISTEN_HOST: "127.0.0.1", OB1_FORWARDER_KEY: "fwd-raw", OB1_REST_URL: `http://127.0.0.1:${restServer.port}`, OB1_STOP_GRACE: "3", OB1_PLUGINS: "" };
@@ -934,10 +944,13 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
   try {
     // The entry as it is: it says it holds no stream, and its stop says nothing of one.
     answer = () => ok({});
-    const plain = await start(false);
+    const plain = await start(false, collector.port!);
     const plainSays = await capabilityOf(plain);
     const plainStopped = await plain.stop();
     assert(plain.up && plainSays === false && plainStopped.code === 0 && !/held open/.test(plainStopped.out), `the entry as it is holds no listen stream, and stops as before (listChanged ${plainSays}; exit ${plainStopped.code}; ${plainStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
+    // …and it sends no gauge of streams (SMD-4458): its metrics reached the collector, the uptime gauge among them, and no such series.
+    assert(pointsOf("process.uptime", 0).length >= 1 && pointsOf("ob1.mcp.listen_streams", 0).length === 0,
+      `…and its metrics, sent at its stop, hold no gauge of listen streams (${pointsOf("process.uptime", 0).length} uptime point(s); ${JSON.stringify(pointsOf("ob1.mcp.listen_streams", 0))})`);
     // …and its cut is the one it had: the connections go at the bound. A call of each revision whose work ends 300 ms
     // after it is not answered then, though a silent collector holds the process a second longer.
     answer = (n) => (n === "thoughtStats" ? Bun.sleep(1_500).then(() => ok(counted)) : ok({}));
@@ -970,6 +983,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
 
     // A stream open and a call that ends inside the bound: the call is waited on and answered in full, and the stream closed after it.
     answer = (n) => (n === "thoughtStats" ? Bun.sleep(600).then(() => ok(counted)) : ok({}));
+    const meteredBefore = metered.length;
     const both = await start(true);
     const heldStream = toEnd(await both.send("subscriptions/listen", listenParams));
     let callEndedAt = 0;
@@ -988,11 +1002,15 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
       `a stop with a stream open and a call running: the call is waited on and answered in full, then the stream is closed with its frame, exit 0 (exit ${bothStopped.code} in ${Math.round(bothStopped.ms)} ms; call ${answered.status}, total ${total}; the stream ended ${Math.round(heldStream.endedAt() - callEndedAt)} ms after the call; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
     const spansBoth = listenSpans();
     assert(spansBoth === 1 && /; telemetry sent; 1 held stream closed; exit 0/.test(bothStopped.out), `…and with a collector, the stream's span has been sent by the stop's end (${spansBoth} span(s) in all; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
+    // The gauge of open streams (SMD-4458), as the stop's flush read it: one, the stream not yet closed, since a drain that finishes closes its streams after the flush.
+    const gauged = pointsOf("ob1.mcp.listen_streams", meteredBefore);
+    assert(gauged.length >= 1 && gauged.at(-1) === 1, `…and its metrics hold the gauge of listen streams, one open as the stop's flush read it (${JSON.stringify(gauged)} in ${metered.length - meteredBefore} export(s))`);
     assert(both.up && late === "refused", `…and a connection attempted after the signal is refused, not served and not answered by a handler that is closing (${late})`);
 
     // Streams open and a call cut at the bound: the call's line is `cut`, every stream still gets its closing frame, exit 1.
     // Twenty-four of them, under the one name's bound of 32: the frames of many must all have left before the connections are cut.
     answer = (n) => (n === "thoughtStats" ? new Promise(() => {}) : ok({}));
+    const meteredAtCut = metered.length;
     const cutting = await start(true);
     const cutStreams = await Promise.all(Array.from({ length: 24 }, async () => toEnd(await cutting.send("subscriptions/listen", listenParams))));
     const hungCall = cutting.send("tools/call", { name: "thought_stats", arguments: {} }).then(async (r) => (r.status === 599 ? "no answer: dropped" : `${r.status} ` + (await r.text().then((t) => `ended whole (${t.length} bytes)`, () => "dropped"))));
@@ -1011,6 +1029,9 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
       `a stop with 24 streams open and two calls that never end, one of each revision: the calls cut at the bound and counted alone, each line \`cut\`; each stream's line \`ok\` and its closing frame read all the same; exit 1 (exit ${cutStopped.code} in ${Math.round(cutStopped.ms)} ms; ${JSON.stringify(cutCall.map((l) => l.outcome))}; ${cutListen.filter((l) => l.outcome === "ok").length} lines ok; ${framed} of 24 frames read; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")}; ${cutStopped.err.split("\n").filter(Boolean).join(" | ").slice(0, 240)})`);
     const spansCut = listenSpans();
     assert(spansCut === 25 && /; telemetry sent; 24 held streams closed; exit 1/.test(cutStopped.out), `…their spans sent too by the stop's end (${spansCut} span(s) in all; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
+    // The gauge at this stop's flush is 0, where the finished drain's above was the count still open: a cut closes its streams at the bound, before the flush.
+    const gaugedCut = pointsOf("ob1.mcp.listen_streams", meteredAtCut);
+    assert(gaugedCut.length >= 1 && gaugedCut.at(-1) === 0, `…and the gauge of open streams, as this stop's flush read it, is 0: the 24 were closed at the bound, before it (${JSON.stringify(gaugedCut)})`);
     assert(hung.every((x) => x.endsWith("dropped")) && cutStopped.err.split("\n").filter((l) => /cut off by the server's stop/.test(l)).length === 2,
       `…and each cut call's own answer is dropped with its connection, not ended as a whole answer of nothing; one warning for each (${hung.join(", ")}; ${cutStopped.err.split("\n").filter((l) => /cut off/.test(l)).length} warning(s))`);
 
@@ -1581,15 +1602,39 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   const overServerBody = await refusalOf(overServer);
   assert(streams.count === 3 && overServer.status === 200 && overServerBody.error?.code === -32603 && /this server holds no more/.test(overServerBody.error?.message ?? "") && last().outcome === "refused" && last().code === "LISTEN_SERVER_FULL",
     `another name has its own share, to the server's bound of three; a fourth, under a third name, is refused (open ${streams.count}; ${overServer.status} ${JSON.stringify(overServerBody)}; ${JSON.stringify(last())})`);
+  // What keyed /health says of them (SMD-4458): how many are open, the two bounds a refusal is read against, and each
+  // caller's share, the most first. The two refusals above took nothing.
+  const listenOf = async (from: { fetch: (r: Request) => Response | Promise<Response> } = holding) => {
+    answer = () => ({ version: "1.0.0" });
+    try {
+      const r = await from.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "read-raw" } }));
+      return JSON.parse(await r.text()) as { version?: unknown; oauth?: unknown; listen?: unknown };
+    } finally {
+      answer = () => ok({});
+    }
+  };
+  const atBound = await listenOf();
+  assert(atBound.version === "1.0.0" && atBound.oauth !== undefined && same(atBound.listen, { open: 3, max: 3, perCaller: 2, callers: [{ name: "laptop", open: 2 }, { name: "chatgpt", open: 1 }] }),
+    `keyed /health on a server that holds streams: beside the record, three open of three, two a caller, and each caller's share, the most first; a refusal at either bound left the count where it was (${JSON.stringify(atBound.listen)})`);
   // A place given back is a place to take: one stream closed, and the name refused a moment ago is held.
   await a1.close();
   await until(() => streams.count === 2);
+  const afterOne = await listenOf();
+  assert(same(afterOne.listen, { open: 2, max: 3, perCaller: 2, callers: [{ name: "chatgpt", open: 1 }, { name: "laptop", open: 1 }] }),
+    `…and after one stream's client closes it the count has fallen by one, its caller's with it; equal shares are in name order (${JSON.stringify(afterOne.listen)})`);
   const c1 = reading(await ask("cap-raw"));
   const c1Opened = await c1.read(100);
   assert(streams.count === 3 && c1.status === 200 && framesOf(c1Opened.text)[0]?.method === "notifications/subscriptions/acknowledged" && !c1Opened.ended, `a place given back is taken by the next to ask (open ${streams.count}; ${c1.status})`);
   for (const r of [a2, b1, c1]) await r.close();
   const emptied = await until(() => streams.count === 0);
   assert(emptied, `every stream closed, none counted (open ${streams.count})`);
+  // With none open the field is still there, the bounds with it; an app that holds none says nothing of streams,
+  // given its streams' settings as the entry gives them or given none.
+  const noneOpen = await listenOf();
+  const givenAndOff = await listenOf(createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: (l) => said.push(l), listen: createListenStreams() }));
+  const holdsNone = await listenOf(app);
+  assert(same(noneOpen.listen, { open: 0, max: 3, perCaller: 2, callers: [] }) && holdsNone.version === "1.0.0" && holdsNone.oauth !== undefined && !("listen" in holdsNone) && givenAndOff.version === "1.0.0" && !("listen" in givenAndOff),
+    `keyed /health with no stream open says none, and its bounds; an app that holds none has no such field, as the entry is today or with no streams' settings at all (${JSON.stringify(noneOpen.listen)}; ${JSON.stringify(Object.keys(givenAndOff))}; ${JSON.stringify(Object.keys(holdsNone))})`);
 
   // A name's count is its streams still open: with one of its two closed it may open one more, and not two.
   const n1 = reading(await ask("write-raw"));
