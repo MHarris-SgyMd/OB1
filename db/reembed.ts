@@ -2104,7 +2104,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
    * an error, or "vanished" when the thought was deleted after it was claimed.
    */
   /** `setBack`: its call in hand aborted by the pass's caller (abortInHand), the worker sets it back in the queue (SMD-3379 PR 1b-2). */
-  type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; error: string } | { outcome: "vanished" } | { outcome: "abandoned" } | { outcome: "setBack" };
+  /** `blamed`: a suspect retried alone, its failure the isolation's finding (blamedFailure), said once its release lands (SMD-4254 review pass 3). */
+  type Outcome = { outcome: "succeeded"; caveat?: string } | { outcome: "failed"; error: string; blamed?: true } | { outcome: "vanished" } | { outcome: "abandoned" } | { outcome: "setBack" };
 
   async function processRow(row: Row, workerId: string): Promise<Outcome> {
     const call = inCall.get(workerId);
@@ -2347,17 +2348,23 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
                 outageSubject ??= rowSubject;
                 const alone = blamed === "outage" && outage.aloneAt(b.thought_id) > 0 ? ` — alone in flight, the probe after it unanswered (${outage.aloneAt(b.thought_id)} of ${ALONE_OUTAGES} before it is recorded failed)` : "";
                 err(`  ${workerId}: the embedding provider is not answering (${cutMarked(why, 160)}) — ${b.thought_id} goes back to the pool unrecorded${alone}, and the follower waits for the provider`);
-                if (suspect) await backFirst(b.thought_id);
+                if (suspect) {
+                  await backFirst(b.thought_id);
+                  // Said to a caller's stamper: the sleep scheduler moves it behind the pool if it sets re-embed down
+                  // at a limit or backed off (SMD-4254 review pass 3).
+                  stamper?.suspectBack?.(b.thought_id);
+                }
                 return "outage";
               };
               /**
-               * A suspect's blame, recorded as its failure (SMD-2641 PR 2): answered, or at its third outage alone. Said
-               * to a caller's stamper: the sleep scheduler's back-off ends on it (SMD-4254 review pass 2).
+               * A suspect's blame, recorded as its failure (SMD-2641 PR 2): answered, or at its third outage alone.
+               * Said to a caller's stamper once its release lands: the sleep scheduler's back-off ends on it (SMD-4254
+               * review pass 2; review pass 3: said before the release, a lost lease ended it with nothing recorded).
                */
               const blamedFailure = (sent: "answered" | "alone"): Outcome => {
-                stamper?.blamedAlone?.();
                 return {
                   outcome: "failed",
+                  blamed: true,
                   error: sent === "answered"
                     ? `provider error again with this thought alone in flight, and a probe's embedding call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`
                     : `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the probe after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`,
@@ -2518,6 +2525,8 @@ async function reembedWith(sql: SQL, opts: ReembedOptions, settled: { workers: n
         if (outcome.outcome === "failed") {
           failed++;
           err(`  ${b.thought_id}: ${outcome.error}`);
+          // A suspect retried alone recorded failed, its own (SMD-4254 review passes 2 and 3).
+          if (outcome.blamed) stamper?.blamedAlone?.();
         } else {
           done++;
           if (outcome.caveat) err(`  ${b.thought_id}: ${outcome.caveat}`);

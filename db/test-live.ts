@@ -28366,7 +28366,7 @@ if (want("38r")) {
 // waits, and a period set down at a limit backs off the periods after it (review pass 2); each wait is probed on a fixed
 // interval, nothing carried between them. Its body a function's, as [26]'s: the module body is at TS2563's limit for control-flow analysis.
 if (want("38p")) await (async () => {
-  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on; a period set down at a limit backs off 1 period, then 2, setting re-embed down at once at such an outage, until a thought is recorded failed alone or re-embed drains");
+  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated");
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, EMBED_JOB, sw, env, capture, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
   // Every wait probes once a second (the scheduler's fixed probe, reembedThoughtProbeMs, at 1 s, and OUTAGE_MS for the
@@ -28397,10 +28397,14 @@ if (want("38p")) await (async () => {
     const DOWN = /re-embed set down for this period — its provider is not answering/;
     const PAST_BOUND = /re-embed's provider has not answered in ([\d.]+) s from the wait's start, after an outage that made the thought in hand a suspect — set down as at any outage/;
     const PAST_CAP = /re-embed has spent ([\d.]+) s this period isolating outages that made the thought in hand a suspect, its waits and the retries between them — set down as at any outage/;
-    /** A limit's line: the back-off it begins. */
-    const BACKS_OFF = /; backing off: the next (\d+) period\(s\) with re-embed set it down at once at such an outage$/;
-    /** A period the back-off sets down at once at such an outage, and the periods left so after it. */
-    const BACKED_OFF = /re-embed's provider stopped answering after an outage that made the thought in hand a suspect, and an earlier period's wait on such an outage ended at a limit — set down at once, backing off: (\d+) more period\(s\) after this one/;
+    /** A limit's line: the back-off it begins, in seconds (review pass 3: by time). */
+    const BACKS_OFF = /; backing off: such an outage met in the next (\d+) s sets re-embed down at once$/;
+    /** A limit's line after a suspect of its isolation was recorded failed alone: no back-off (review pass 3). */
+    const NO_BACKOFF = /; not backing off: a suspect was recorded failed alone in this isolation$/;
+    /** Such an outage met while the back-off runs: set down at once, and the seconds left of it. */
+    const BACKED_OFF = /re-embed's provider stopped answering after an outage that made the thought in hand a suspect, while re-embed backs off from a try's wait on such an outage that ended at a limit — set down at once, backing off: (\d+) s more, then the first such outage is waited out once more/;
+    /** The outage's suspects moved behind the pool at a limit's set-down or a backed-off one (review pass 3). */
+    const MOVED = /^ {2}(\d+) suspect\(s\) of the outage moved behind re-embed's pool — the next period re-embeds the backlog before claiming them again$/;
 
     // The provider back in seconds: the thought failed at its third outage alone, its fourth crash, the backlog behind
     // it re-embedded, all in the one period — re-embed drained, never set down.
@@ -28486,6 +28490,101 @@ if (want("38p")) await (async () => {
     assert(foxDone && !foxDown && foxLeft >= 1 && foxLeft <= sw.embedCrashes && foxCode === 0,
       `each wait of an isolation its own bound, said once a wait: four short waits past a 6 s bound in all, the thought failed and never set down (failed ${foxDone}; set down ${foxDown}; said ${foxLeft} time(s) for ${sw.embedCrashes} crash(es); exit ${foxCode}${foxDone ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
 
+    // The isolation's end (review pass 3, the cold lane: the count left running past a drain not isolated, and re-embed
+    // not saying its drains isolate, lived every row above). A crash its first probe finds over, the thought failed alone
+    // in a few seconds, then a slow backlog behind it, ten thoughts of 1.5 s each, under a 12 s cap: the backlog is no
+    // isolation, so it drains, never set down. A count that ran on past the isolation's end trips the cap in the backlog,
+    // a healthy call aborted. The backlog's text holds no crash word.
+    sw.embedCrashOn = "wolfsbane";
+    sw.embedCrashProbes = 1;
+    sw.embedCrashes = 0;
+    const rue = await vectorless("A wolfsbane note whose embedding crashes the provider.");
+    const rueBehind: string[] = [];
+    for (let i = 1; i <= 10; i++) rueBehind.push(await vectorless(`A slow note pooled behind the poisonous one, number ${i}.`));
+    await poolFirst(rue, rueBehind);
+    let rueDone = false, rueClaim: Awaited<ReturnType<typeof reClaim>>, rueEmbedded = 0, rueCode = -9;
+    sw.embedSlowMs = 1500;
+    const rueStop = follow({ reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 12_000 });
+    try {
+      rueDone = await pollUntil(async () => (await reClaim(rue))?.status === "failed" && lines.some((l) => /re-embed drained — extracting/.test(l) || DOWN.test(l)), 60_000);
+      rueClaim = await reClaim(rue);
+      rueEmbedded = await allAtEmbed(rueBehind);
+    } finally {
+      sw.embedCrashOn = null;
+      sw.embedCrashLeft = null;
+      sw.embedSlowMs = 0;
+      rueCode = await rueStop();
+    }
+    const rueDown = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+    assert(rueDone && rueClaim?.status === "failed" && rueEmbedded === rueBehind.length && !rueDown && rueCode === 0,
+      `the isolation's count ends at the first drain not isolated: a thought failed alone in seconds, then a slow backlog longer than the cap re-embedded behind it, never set down (failed ${rueDone}; ${JSON.stringify(rueClaim)}; ${rueEmbedded} of ${rueBehind.length} re-embedded; set down ${rueDown}; ${sw.embedCrashes} crash(es); exit ${rueCode}${!rueDown ? "" : `; its lines: ${lines.filter((l) => DOWN.test(l) || PAST_CAP.test(l) || PAST_BOUND.test(l) || LEFT.test(l)).map((l) => l.trim().slice(0, 200)).join(" | ")}`})`);
+
+    // A live write's pause mid-isolation (review pass 3, the cold lane's demo: the cap's count ran on while the gate was
+    // closed, so the resume set re-embed down, "aborted" with nothing in hand, the thought pending after one crash and the
+    // back-off begun). The crash 1.5 s, a 0.5 s probe, a 6 s bound and a 12 s cap — the isolation under 8 s unpaused;
+    // at the first left-running line, live writes every second for 14 s, the pause about 15 s with the 1 s capture. Not
+    // counted: the thought failed, never set down. Counted, the cap is past at the resume (an 8 s pause left the 12 s
+    // cap unreached in a mutant run that counted it).
+    {
+      sw.embedCrashOn = "henbane";
+      sw.embedCrashMs = 1500;
+      sw.embedCrashes = 0;
+      const hen = await vectorless("A henbane note whose embedding crashes the provider for 1.5 s.");
+      const henBehind = await vectorless("A note pooled behind the one a pause interrupts.");
+      await poolFirst(hen, [henBehind]);
+      let henLeft = false, henEnd = false, henClaim: Awaited<ReturnType<typeof reClaim>>, henCode = -9, henBeat: unknown = null;
+      const henStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 12_000 });
+      try {
+        henLeft = await pollUntil(async () => lines.some((l) => LEFT.test(l)), 30_000);
+        for (let i = 0; i < 14; i++) {
+          await liveWrite(sql, `henbane pause ${i}`);
+          await Bun.sleep(1000);
+        }
+        henEnd = await pollUntil(async () => (await reClaim(hen))?.status === "failed" || lines.some((l) => DOWN.test(l)), 30_000);
+        henClaim = await reClaim(hen);
+        henBeat = ((await beat()) as { reembedBackoff?: unknown } | null)?.reembedBackoff ?? null;
+      } finally {
+        sw.embedCrashOn = null;
+        sw.embedCrashMs = 0;
+        sw.embedCrashUntil = 0;
+        henCode = await henStop();
+      }
+      const henDown = lines.some((l) => DOWN.test(l) || PAST_CAP.test(l) || PAST_BOUND.test(l));
+      const henPaused = lines.findIndex((l) => /^ {2}paused: a live write/.test(l)) > lines.findIndex((l) => LEFT.test(l)) && lines.some((l) => /^ {2}resumed: no live write/.test(l));
+      assert(henLeft && henPaused && henEnd && henClaim?.status === "failed" && !henDown && henBeat === null && henCode === 0,
+        `a live write's pause mid-isolation counts toward neither the cap nor the bound: the thought failed, never set down, no back-off (left ${henLeft}; paused mid-isolation ${henPaused}; ended ${henEnd}; ${JSON.stringify(henClaim)}; set down ${henDown}; back-off ${JSON.stringify(henBeat)}; ${sw.embedCrashes} crash(es); exit ${henCode}; its lines: ${lines.filter((l) => /paused|resumed|re-embed (waits|has spent|set down|'s provider)|alone in flight/.test(l)).map((l) => l.trim().slice(0, 200)).join(" | ")})`);
+    }
+
+    // The outage a thought failed alone leaves (review pass 3, the cold lane's demo: that one, the fourth wait, passing
+    // the cap re-armed the back-off the failure had just reset). The crash 4 s, a 0.5 s probe, a 6 s bound and a 15.5 s
+    // cap: the thought failed at about 13 s, the fourth wait running to about 17.5 s — set down at the cap there, said as
+    // beginning no back-off, the row with none.
+    {
+      const restoreScaled = shortenOutage(500, 30_000);
+      sw.embedCrashOn = "yew";
+      sw.embedCrashMs = 4000;
+      sw.embedCrashes = 0;
+      const yew = await vectorless("A yew note whose embedding keeps the provider down 4 s a crash.");
+      const yewBehind = await vectorless("A note pooled behind the one down four seconds.");
+      await poolFirst(yew, [yewBehind]);
+      let yewEnd = false, yewClaim: Awaited<ReturnType<typeof reClaim>>, yewCode = -9, yewBeat: unknown = null;
+      const yewStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 15_500 });
+      try {
+        yewEnd = await pollUntil(async () => (await reClaim(yew))?.status === "failed" && lines.some((l) => DOWN.test(l) || /re-embed drained/.test(l)), 45_000);
+        yewClaim = await reClaim(yew);
+        yewBeat = ((await beat()) as { reembedBackoff?: unknown } | null)?.reembedBackoff ?? null;
+      } finally {
+        sw.embedCrashOn = null;
+        sw.embedCrashMs = 0;
+        sw.embedCrashUntil = 0;
+        yewCode = await yewStop();
+        restoreScaled();
+      }
+      const yewLimits = lines.filter((l) => PAST_CAP.test(l) || PAST_BOUND.test(l)).map((l) => l.trim().slice(0, 300));
+      assert(yewEnd && yewClaim?.status === "failed" && yewLimits.length === 1 && NO_BACKOFF.test(yewLimits[0]) && yewBeat === null && yewCode === 0,
+        `the outage a thought failed alone leaves, passing the cap, begins no back-off: said so, the row with none (ended ${yewEnd}; ${JSON.stringify(yewClaim)}; limit lines ${yewLimits.join(" | ")}; back-off ${JSON.stringify(yewBeat)}; ${sw.embedCrashes} crash(es); exit ${yewCode})`);
+    }
+
     // A thought that brings the provider down for good: left waiting to the bound (3 s here), then set down as at any
     // outage, said; extraction runs on, and the thought stays pending, not failed — the provider's state.
     sw.embedCrashOn = "nightshade";
@@ -28561,14 +28660,20 @@ if (want("38p")) await (async () => {
     // The period's cap (review pass 1: each wait has its own bound, so a provider erring and back within it kept
     // re-embed waiting, and the claim passes behind it, the whole period). The provider down 4 s a crash: each wait
     // about 4 s, under a 6 s bound, and a cap of 6.5 s the second passes, about 2.5 s in — set down at the cap, said as
-    // the cap's, extraction running on, the thought pending. The row carries the left wait meanwhile, its earlierS the
-    // first wait's seconds in the second (the cold lane's), and not once set down.
-    // Then the back-off (review pass 2, the maintainer's decision): the next period sets re-embed down at once at the
-    // thought's outage, said, no wait left running; the one after waits again, the cap begun again, and ends at the cap
-    // again, backing off 2 periods, both set down at once. Then the crash shortened to 0.3 s, a second crashing thought
-    // pooled behind: the next try fails the first alone, which ends the back-off, and the second's crash, 4 s again once
-    // the first is failed, sets re-embed down at the cap backing off 1 period, not 4. That period, the crash gone,
-    // re-embeds the second and drains, which ends the back-off too: the row's mark gone.
+    // the cap's, extraction running on, the thought pending and moved behind the pool. The row carries the left wait
+    // meanwhile, its earlierS the first wait's seconds in the second (the cold lane's), and not once set down. One
+    // worker, so the note pooled behind is no suspect of the first outage and stays pending.
+    // Then the back-off, by time (review pass 3, the maintainer's decision: counted in periods, ~30 s apart on a busy
+    // brain, a crash of 80 s or more still held the claim passes 40-63% of the time, each period backed off claiming the
+    // thought first and crashing the provider again), at a 12 s back-off first (4 min at full scale). Period 2, inside
+    // it: the note pooled behind, ahead of the thought since period 1's move, is re-embedded, then the thought's outage
+    // sets re-embed down at once, said with the time left, the thought moved behind again. The window out, period 3
+    // waits again, a try, the cap begun again, and its limit backs off 24 s, the window doubled. Periods 4, 5 and 6, all
+    // inside it, are set down at once — counted by periods, the third would have waited. The crash shortened to 0.3 s
+    // inside the window, the next period, 7, the first try after the window, fails the thought alone, which ends the
+    // back-off; a second crashing thought behind, its crash 4 s again once the first is failed,
+    // sets re-embed down at the cap backing off 12 s, not 48. Period 8, the crash gone, re-embeds the second and drains,
+    // which ends the back-off too: the row's mark gone.
     sw.embedCrashOn = "belladonna";
     sw.embedCrashMs = 4000;
     sw.embedCrashes = 0;
@@ -28576,12 +28681,14 @@ if (want("38p")) await (async () => {
     const cappedBehind = await vectorless("A note pooled behind the one the cap sets down.");
     await poolFirst(capped, [cappedBehind]);
     const capMeanwhile = await capture("A note extraction takes once re-embed is set down at the cap.", "sync-sleep", 0, 33);
-    type WaitMark = { since: string; earlierS: number; boundS: number; periodS: number };
+    type WaitMark = { since: string; earlierS: number; boundS: number; periodS: number; backoffS: number };
+    type BackoffMark = { until: string; nextS: number; skipped: boolean };
+    const BACKOFF_MS = 12_000;
     let capDown = false, capExtracted = false, capClaim: Awaited<ReturnType<typeof reClaim>>, capWord: unknown, capMark: WaitMark | null = null, markAfter: unknown = null;
-    let capFirst: string[] = [], capCode = -9, maxEarlier = -1, crashesAtDown = -1;
-    /** Each later period's lines once it has said what the case waits for, and whether it said it; and the first one failed alone. */
+    let capFirst: string[] = [], capCode = -9, maxEarlier = -1, crashesAtDown = -1, backoffAfter: BackoffMark | null = null, behindAfterOne = true, behindInTwo = false;
+    /** Each later period's lines once it has said what the case waits for, and whether it said it; and the first one failed alone, and in which period. */
     const later: { n: number; said: boolean; lines: string[] }[] = [];
-    let firstFailed = false, markGone = false;
+    let firstFailed = false, firstFailedIn = -1, markGone = false;
     /** Where each period's "working:" line is. */
     const periodsAt = () => lines.flatMap((l, i) => (/^ {2}working:/.test(l) ? [i] : []));
     /** Period n's lines (1 the first), as far as they go. */
@@ -28597,9 +28704,17 @@ if (want("38p")) await (async () => {
       later.push({ n, said, lines: periodOf(n) });
       return said;
     };
-    const backedOff = (left: string) => (ls: string[]) => ls.some((l) => BACKED_OFF.exec(l)?.[1] === left) && ls.some((l) => DOWN.test(l)) && !ls.some((l) => LEFT.test(l));
+    /** The back-off's end read off the row and waited out, on the database's clock: the next period meets no back-off. */
+    const windowOut = async (): Promise<void> => {
+      const mark = ((await beat()) as { reembedBackoff?: BackoffMark } | null)?.reembedBackoff;
+      if (!mark) return;
+      const [{ s: leftS }] = (await sql`SELECT EXTRACT(EPOCH FROM (${mark.until}::timestamptz - now()))::float8 AS s`) as { s: number }[];
+      await Bun.sleep(Math.max(0, leftS * 1000) + 300);
+    };
+    const backedOff = (ls: string[]) => ls.some((l) => { const left = BACKED_OFF.exec(l)?.[1]; return left !== undefined && Number(left) > 0 && Number(left) <= BACKOFF_MS * 2 / 1000; })
+      && ls.some((l) => MOVED.test(l)) && ls.some((l) => DOWN.test(l)) && !ls.some((l) => LEFT.test(l));
     const cappedBacking = (next: string) => (ls: string[]) => ls.some((l) => LEFT.test(l)) && ls.some((l) => PAST_CAP.test(l) && BACKS_OFF.exec(l)?.[1] === next) && ls.some((l) => DOWN.test(l));
-    const capStop = follow({ reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 6500 });
+    const capStop = follow({ workers: 1, reembedThoughtWaitMs: 6000, reembedThoughtPeriodMs: 6500, reembedThoughtBackoffMs: BACKOFF_MS });
     try {
       for (const until = Date.now() + 30_000; Date.now() < until && !capDown;) {
         const mark = ((await beat()) as { reembedWait?: WaitMark } | null)?.reembedWait;
@@ -28611,30 +28726,49 @@ if (want("38p")) await (async () => {
       }
       capExtracted = await pollUntil(async () => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${capMeanwhile}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status === "succeeded", 20_000);
       capClaim = await reClaim(capped);
-      const capBeat = (await beat()) as { aside?: unknown; reembedWait?: unknown } | null;
+      const capBeat = (await beat()) as { aside?: unknown; reembedWait?: unknown; reembedBackoff?: BackoffMark } | null;
       capWord = capBeat?.aside;
       markAfter = capBeat?.reembedWait ?? null;
+      backoffAfter = capBeat?.reembedBackoff ?? null;
+      behindAfterOne = !(await atEmbed(cappedBehind));
       capFirst = lines.slice();
-      // Period 2 backs off; 3 waits again and ends at the cap, backing off 2; 4 and 5 back off.
-      if (await thenPeriod(2, backedOff("0")) && await thenPeriod(3, cappedBacking("2")) && await thenPeriod(4, backedOff("1")) && await thenPeriod(5, backedOff("0"))) {
-        // Period 6: the crash shortened, a second crashing thought behind the first. The first failed alone, the crash
-        // 4 s again for the second, whose isolation passes the cap: backing off 1 period, the back-off begun again.
-        sw.embedCrashMs = 300;
-        const second = await vectorless("A second belladonna note, pooled behind the first.");
-        await sql`SELECT enqueue_thoughts(${EMBED_JOB}, ${sql.array([second], "TEXT")}::uuid[])`;
-        await afterCrash();
-        firstFailed = (await nextPeriod("A note that begins period 6 of the back-off")) && await pollUntil(async () => (await reClaim(capped))?.status === "failed", 30_000);
-        sw.embedCrashMs = 4000;
-        if (firstFailed) {
-          const six = await pollUntil(async () => cappedBacking("1")(periodOf(6)), 30_000);
-          later.push({ n: 6, said: six, lines: periodOf(6) });
-          // Period 7, the crash gone: backed off, but no outage — the second re-embedded, re-embed drained, the back-off ended.
-          if (six) {
-            sw.embedCrashOn = null;
-            sw.embedCrashMs = 0;
-            sw.embedCrashUntil = 0;
-            if (await thenPeriod(7, (ls) => ls.some((l) => /re-embed drained — extracting/.test(l)))) {
-              markGone = await pollUntil(async () => ((await beat()) as { reembedBackoff?: unknown } | null)?.reembedBackoff === undefined, 10_000);
+      // Period 2 backs off, the note behind re-embedded first; 3, the window out, waits again and ends at the cap,
+      // backing off 24 s; 4, 5 and 6 back off, the crash 1.5 s (the back-off reads none of it); then 0.3 s.
+      if (await thenPeriod(2, backedOff)) {
+        behindInTwo = await atEmbed(cappedBehind);
+        await windowOut();
+        if (await thenPeriod(3, cappedBacking("24"))) {
+          sw.embedCrashMs = 1500;
+          if (await thenPeriod(4, backedOff) && await thenPeriod(5, backedOff)) {
+            if (await thenPeriod(6, backedOff)) {
+              await afterCrash();
+              sw.embedCrashMs = 300;
+              // Period 7, the window out: the first try fails the thought alone; a second crashing thought behind, its
+              // crash 4 s again once the first is failed, whose isolation passes the cap: backing off 12 s, begun again.
+              // Its capture, a sync write, begins period 7 itself, so it is made once the window is out (the first run
+              // of this row made it before, and its period met the back-off).
+              await afterCrash();
+              await windowOut();
+              const ended6 = await pollUntil(async () => periodOf(6).some((l) => /— the period ends/.test(l)), 60_000);
+              const second = await vectorless("A second belladonna note, pooled behind the first.");
+              await sql`SELECT enqueue_thoughts(${EMBED_JOB}, ${sql.array([second], "TEXT")}::uuid[])`;
+              const seventh = ended6 && (await pollUntil(async () => periodsAt().length >= 7, 10_000) || await nextPeriod("A note that begins period 7 of the back-off"));
+              firstFailed = seventh && await pollUntil(async () => (await reClaim(capped))?.status === "failed", 30_000);
+              sw.embedCrashMs = 4000;
+              firstFailedIn = periodsAt().length;
+              if (firstFailed) {
+                const seven = await pollUntil(async () => cappedBacking("12")(periodOf(7)), 30_000);
+                later.push({ n: 7, said: seven, lines: periodOf(7) });
+                // Period 8, the crash gone: backed off, but no outage — the second re-embedded, re-embed drained, the back-off ended.
+                if (seven) {
+                  sw.embedCrashOn = null;
+                  sw.embedCrashMs = 0;
+                  sw.embedCrashUntil = 0;
+                  if (await thenPeriod(8, (ls) => ls.some((l) => /re-embed drained — extracting/.test(l)))) {
+                    markGone = await pollUntil(async () => ((await beat()) as { reembedBackoff?: unknown } | null)?.reembedBackoff === undefined, 10_000);
+                  }
+                }
+              }
             }
           }
         }
@@ -28645,22 +28779,25 @@ if (want("38p")) await (async () => {
       sw.embedCrashUntil = 0;
       capCode = await capStop();
     }
-    assert(capDown && capFirst.some((l) => PAST_CAP.exec(l)?.[1] === "6.5" && BACKS_OFF.exec(l)?.[1] === "1") && !capFirst.some((l) => PAST_BOUND.test(l)) && capFirst.some((l) => LEFT.exec(l)?.[2] === "6.5")
-        && capMark !== null && capMark.boundS === 6 && capMark.periodS === 7 && markAfter === null
+    assert(capDown && capFirst.some((l) => PAST_CAP.exec(l)?.[1] === "6.5" && BACKS_OFF.exec(l)?.[1] === "12") && !capFirst.some((l) => PAST_BOUND.test(l)) && capFirst.some((l) => LEFT.exec(l)?.[2] === "6.5")
+        && capFirst.some((l) => MOVED.exec(l)?.[1] === "1") && capMark !== null && capMark.boundS === 6 && capMark.periodS === 7 && capMark.backoffS === 12 && markAfter === null
+        && backoffAfter !== null && backoffAfter.nextS === 24 && !backoffAfter.skipped && behindAfterOne
         && capExtracted && capClaim?.status === "pending" && JSON.stringify(capWord) === JSON.stringify({ reembed: { kind: "outage" } }) && capCode === 0,
-      `waits each under the bound that together pass the period's cap: re-embed set down at the cap, said as the cap's, backing off 1 period, the row carrying the left wait until then, extraction running on, the thought pending (set down ${capDown}; cap said ${capFirst.some((l) => PAST_CAP.test(l))}; bound said ${capFirst.some((l) => PAST_BOUND.test(l))}; mark ${JSON.stringify(capMark)}, after ${JSON.stringify(markAfter)}; extracted ${capExtracted}; ${JSON.stringify(capClaim)}; row ${JSON.stringify(capWord)}; exit ${capCode}; its lines: ${capFirst.slice(-16).map((l) => l.trim().slice(0, 200)).join(" | ")})`);
+      `waits each under the bound that together pass the period's cap: re-embed set down at the cap, said as the cap's, backing off 12 s, the thought moved behind the pool, the row carrying the left wait until then and the back-off after, extraction running on, the thought pending (set down ${capDown}; cap said ${capFirst.some((l) => PAST_CAP.test(l))}; bound said ${capFirst.some((l) => PAST_BOUND.test(l))}; moved ${capFirst.some((l) => MOVED.test(l))}; mark ${JSON.stringify(capMark)}, after ${JSON.stringify(markAfter)}; back-off ${JSON.stringify(backoffAfter)}; the note behind pending ${behindAfterOne}; extracted ${capExtracted}; ${JSON.stringify(capClaim)}; row ${JSON.stringify(capWord)}; exit ${capCode}; its lines: ${capFirst.slice(-16).map((l) => l.trim().slice(0, 200)).join(" | ")})`);
     // The cap counts the wait in hand with the period's earlier isolation: set down in the second wait, at its second
     // crash, and the row's mark for that wait names the first one's seconds (review pass 2, cold lane: an ended-only sum
     // and earlierS 0 lived).
     assert(crashesAtDown === 2 && maxEarlier >= 3,
       `the cap trips inside the second wait, the wait in hand counted, and the row's earlierS names the first wait (crashes at the set-down ${crashesAtDown}; largest earlierS seen ${maxEarlier})`);
     const saidAt = (n: number) => later.find((p) => p.n === n)?.said === true;
-    /** A period's lines the back-off reads, in short: left waiting, a limit and the periods it backs off, a period backed off and those left, a drain. */
-    const told = (ls: string[]) => ls.flatMap((l) => (LEFT.test(l) ? ["left waiting"] : PAST_CAP.test(l) ? [`cap, backing off ${BACKS_OFF.exec(l)?.[1]}`] : PAST_BOUND.test(l) ? [`bound, backing off ${BACKS_OFF.exec(l)?.[1]}`] : BACKED_OFF.test(l) ? [`backed off, ${BACKED_OFF.exec(l)?.[1]} more`] : /re-embed drained/.test(l) ? ["drained"] : [])).join(", ");
-    assert(saidAt(2) && saidAt(3) && saidAt(4) && saidAt(5),
-      `the back-off: the period after a limit sets re-embed down at once at the thought's outage, said; the next waits again, the cap begun again, and its limit backs off 2 periods, both set down at once (${later.filter((p) => p.n <= 5).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}${saidAt(5) ? "" : `; its last lines: ${lines.slice(-20).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
-    assert(firstFailed && saidAt(6) && saidAt(7) && markGone,
-      `the back-off ends at a thought recorded failed alone — the second thought's cap in the same period backs off 1 period, not 4 — and at a drain, the row's mark gone (first failed ${firstFailed}; ${later.filter((p) => p.n >= 6).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}; mark gone ${markGone})`);
+    /** A period's lines the back-off reads, in short: left waiting, a limit and the back-off it begins, a period backed off and the time left, a move, a drain. */
+    const told = (ls: string[]) => ls.flatMap((l) => (LEFT.test(l) ? ["left waiting"] : PAST_CAP.test(l) ? [`cap, ${NO_BACKOFF.test(l) ? "no back-off" : `backing off ${BACKS_OFF.exec(l)?.[1]} s`}`] : PAST_BOUND.test(l) ? [`bound, backing off ${BACKS_OFF.exec(l)?.[1]} s`] : BACKED_OFF.test(l) ? [`backed off, ${BACKED_OFF.exec(l)?.[1]} s more`] : MOVED.test(l) ? [`${MOVED.exec(l)?.[1]} moved behind`] : /re-embed drained/.test(l) ? ["drained"] : [])).join(", ");
+    assert(saidAt(2) && behindInTwo,
+      `inside the back-off, the thought's outage sets re-embed down at once, said with the time left, and the note pooled behind it — ahead of it since the limit's move — is re-embedded in that period, the thought moved behind again (${later.filter((p) => p.n === 2).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}; re-embedded in it ${behindInTwo}${saidAt(2) ? "" : `; its last lines: ${lines.slice(-20).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    assert(saidAt(3) && saidAt(4) && saidAt(5) && saidAt(6),
+      `the window out, a try waits again, the cap begun again, and its limit backs off 24 s, the window doubled; the three periods inside it set down at once (${later.filter((p) => p.n >= 3 && p.n <= 6).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}${saidAt(6) ? "" : `; its last lines: ${lines.slice(-20).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    assert(firstFailed && firstFailedIn === 7 && saidAt(7) && saidAt(8) && markGone,
+      `the shortened crash failed at the first try after the window, which ends the back-off — the second thought's cap in the same period backs off 12 s, not 48 — and a drain ends it too, the row's mark gone (first failed ${firstFailed} in period ${firstFailedIn}; ${later.filter((p) => p.n >= 7).map((p) => `period ${p.n} ${p.said}: ${told(p.lines)}`).join(" | ")}; mark gone ${markGone}${firstFailed && firstFailedIn === 7 ? "" : `; periods 7 on: ${[7, 8, 9].map((n) => periodOf(n).map((l) => l.trim().slice(0, 220)).join(" / ")).join(" || ")}`})`);
   } finally {
     sw.embedCrashOn = null;
     sw.embedCrashLeft = null;

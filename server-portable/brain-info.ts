@@ -350,16 +350,19 @@ export type SleepAside = { reembed: { kind: "model-switch"; recorded: string; co
  * as the row's other times are: review pass 2); `earlierS`, the period's isolation as the wait began — earlier
  * isolations, and this one's waits and the retries between them before this wait; `boundS`, how long one is left
  * waiting from its start, and `periodS`, how long the period's isolation may run — past either the scheduler sets
- * re-embed down for the period. The time left: min(boundS − waited, periodS − earlierS − waited).
+ * re-embed down for the period. The time left: min(boundS − waited, periodS − earlierS − waited). A live write's pause
+ * counts toward neither (review pass 3): `since` is moved past it. `backoffS`, the back-off a set-down at either limit
+ * begins (review pass 3), 0 when a suspect of the isolation was recorded failed alone, which begins none.
  */
-export type ReembedThoughtWait = { since: string; earlierS: number; boundS: number; periodS: number };
+export type ReembedThoughtWait = { since: string; earlierS: number; boundS: number; periodS: number; backoffS: number };
 /**
  * The sleep scheduler's back-off from leaving re-embed waiting on such outages (WorkerHeartbeat's reembedBackoff,
- * SMD-4254 review pass 2), as db/sleep.ts's ThoughtWaitBackoff writes it: `skipping`, whether this period sets
- * re-embed down at once at one; `left`, the periods after this one that will; `next`, the periods the next try that
- * ends at a limit backs off.
+ * SMD-4254 review pass 2), by time since review pass 3, as db/sleep.ts's ThoughtWaitBackoff writes it: `until`, when
+ * it ends — such an outage met before it sets re-embed down at once, the first met after it is waited out once more
+ * (a UTC instant on the database's clock; past, a try is due); `nextS`, the back-off the next try that ends at a limit
+ * begins; `skipped`, whether the period in hand set re-embed down at once so.
  */
-export type ReembedBackoff = { skipping: boolean; left: number; next: number };
+export type ReembedBackoff = { until: string; nextS: number; skipped: boolean };
 
 /**
  * Who runs re-embed under a key, read from the heartbeat rows and the record
@@ -964,13 +967,13 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     const p = worker === "sleep" && live ? (v!.paused as Record<string, unknown> | undefined) : undefined;
     const paused = p !== null && typeof p === "object" && typeof p.since === "string" && UTC_INSTANT.test(p.since) ? { since: p.since } : undefined;
     const reembedWait = live && rw !== null && typeof rw === "object" && typeof rw.since === "string" && UTC_INSTANT.test(rw.since)
-        && count(rw.earlierS, 86_400) && count(rw.boundS, 86_400) && (rw.boundS as number) > 0 && count(rw.periodS, 86_400) && (rw.periodS as number) > 0
-      ? { since: rw.since, earlierS: rw.earlierS as number, boundS: rw.boundS as number, periodS: rw.periodS as number }
+        && count(rw.earlierS, 86_400) && count(rw.boundS, 86_400) && (rw.boundS as number) > 0 && count(rw.periodS, 86_400) && (rw.periodS as number) > 0 && count(rw.backoffS)
+      ? { since: rw.since, earlierS: rw.earlierS as number, boundS: rw.boundS as number, periodS: rw.periodS as number, backoffS: rw.backoffS as number }
       : undefined;
     // Re-embed's back-off from such waits (SMD-4254 review pass 2): the sleep's, on a live row alone, left off when not of the shape.
     const rb = worker === "sleep" && live ? (v!.reembedBackoff as Record<string, unknown> | undefined) : undefined;
-    const reembedBackoff = rb !== null && typeof rb === "object" && typeof rb.skipping === "boolean" && count(rb.left) && count(rb.next) && (rb.next as number) > 0
-      ? { skipping: rb.skipping, left: rb.left as number, next: rb.next as number }
+    const reembedBackoff = rb !== null && typeof rb === "object" && typeof rb.until === "string" && UTC_INSTANT.test(rb.until) && count(rb.nextS) && (rb.nextS as number) > 0 && typeof rb.skipped === "boolean"
+      ? { until: rb.until, nextS: rb.nextS as number, skipped: rb.skipped }
       : undefined;
     const holds = worker === "sleep" ? parseHolds(v!.holds) : undefined;
     // board-sync's hold on Linear's rate limit (SMD-4133), on a live row alone and left off when not of the shape.

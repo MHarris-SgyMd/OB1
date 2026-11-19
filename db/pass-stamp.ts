@@ -25,7 +25,7 @@
  * provider that stopped answering — the sleep scheduler's by name, a
  * follower's its own (SMD-2905) — and beside it `reembedWait`, the scheduler's re-embed left waiting mid-pass on an
  * outage that made a thought a suspect, the wait's start and the period's isolation before it against their limits
- * (ReembedThoughtWait, SMD-4254), and `reembedBackoff`, the scheduler's back-off from such waits across periods
+ * (ReembedThoughtWait, SMD-4254), and `reembedBackoff`, the scheduler's back-off from such waits, by time
  * (ReembedBackoff, SMD-4254 review pass 2); and `restart`, on a row ended by db/supervise.ts, the compose
  * services' command, which runs the follower again on its own (SMD-3214) — written there, not
  * here; and `models`, the process's model calls by pass since it began — their class, failures and own
@@ -165,9 +165,9 @@ export interface PassStamper {
    * The sleep scheduler's back-off from leaving re-embed waiting on such
    * outages (`reembedBackoff` in the value, left out while it has none, and
    * on an ended row: it lasts the scheduler's life; SMD-4254 review pass 2):
-   * whether this period sets re-embed down at once at one, the periods after
-   * it that will, and the periods the next try ending at a limit backs off.
-   * Only the scheduler sets it.
+   * by time since review pass 3 — until when such an outage sets re-embed
+   * down at once, the back-off the next try ending at a limit begins, and
+   * whether this period set it down so. Only the scheduler sets it.
    */
   reembedBackoff?(b: ReembedBackoff | null): void;
   /**
@@ -182,11 +182,21 @@ export interface PassStamper {
   isolating?(on: boolean): void;
   /**
    * A follower's word that a suspect retried alone was blamed and recorded
-   * failed, its own (SMD-2641's isolation working; SMD-4254 review pass 2):
-   * re-embed's says it, and the sleep scheduler's per-pass stamper ends its
-   * back-off on it. A follower's own stamper has none.
+   * failed, its own (SMD-2641's isolation working; SMD-4254 review pass 2),
+   * once its release has landed (review pass 3): re-embed's says it, and the
+   * sleep scheduler's per-pass stamper ends its back-off on it, and a limit
+   * later in that isolation begins none. A follower's own stamper has none.
    */
   blamedAlone?(): void;
+  /**
+   * A follower's word that it handed a suspect back at the pool's front
+   * (SMD-4254 review pass 3): re-embed's says it, and the sleep scheduler's
+   * per-pass stamper moves the period's such thoughts behind the pool when it
+   * sets re-embed down at a limit or backed off, so the next periods
+   * re-embed the backlog before claiming them again. A follower's own
+   * stamper has none.
+   */
+  suspectBack?(id: string): void;
   /**
    * Which start refusal ended the row (`refused` in the value): one of
    * worker-bootstrap.ts's StartRefusal, set before the end that writes it, so

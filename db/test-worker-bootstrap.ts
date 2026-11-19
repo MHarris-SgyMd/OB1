@@ -19,7 +19,7 @@ import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { DecisionRefused } from "../server-portable/jev.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
-import { REEMBED_THOUGHT_PERIOD_MS, REEMBED_THOUGHT_PROBE_MS, REEMBED_THOUGHT_WAIT_MS, ThoughtWaitBackoff } from "./sleep.ts";
+import { REEMBED_THOUGHT_BACKOFF_MS, REEMBED_THOUGHT_PERIOD_MS, REEMBED_THOUGHT_PROBE_MS, REEMBED_THOUGHT_WAIT_MS, ThoughtWaitBackoff } from "./sleep.ts";
 import { blanketGate, classifyError, databasePermanent, databaseUnavailable, egressDescription, egressRefusal, fault, followClassify, followedPass, isOut, lookupOutage, modelMissing, PERMANENT_REFUSALS, probeRefusal, outageWait, PROBE_PROMPT, missingModelIs, modelListed, probeAtStart, probeChat, probedFault, probeUntil, ProbeRefused, ProviderDown, ProviderOutage, EXTRACT_REQUEST_FIELDS, JUDGE_REQUEST_FIELDS, sameModel, regateMessage, requestShapeRefused, SUSPECT_WINDOW_MS, throughOutage, timedOut, TRANSIENT_PAUSES_MS, Unreturned, waitAtStart, waitForDatabase, waitOut, waitOutProvider, workerIdentity, type Probe } from "./worker-bootstrap.ts";
 
 let pass = 0;
@@ -989,53 +989,57 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
 
 // ---------------------------------------------------------------------------
 // The sleep scheduler's re-embed on an outage that made a thought a suspect (SMD-4254, review pass 2): the shipped
-// numbers, which test-live runs scaled, and the back-off across periods (the maintainer's decision of 2026-11-18).
+// numbers, which test-live runs scaled, and the back-off, by time since review pass 3 (the maintainer's decision of
+// 2026-11-18), on a clock the row passes.
 // ---------------------------------------------------------------------------
 {
-  ok(REEMBED_THOUGHT_WAIT_MS === 120_000 && REEMBED_THOUGHT_PERIOD_MS === 240_000 && REEMBED_THOUGHT_PROBE_MS === 5_000,
-    `the shipped numbers: 2 min a wait, 4 min of isolation a period, a probe every 5 s (${REEMBED_THOUGHT_WAIT_MS}, ${REEMBED_THOUGHT_PERIOD_MS}, ${REEMBED_THOUGHT_PROBE_MS})`);
-  // A crasher that never comes back within the limits: each try ends at a limit. Periods 1 (a try), 2 (backed off),
-  // 3 (a try), 4-5 (backed off), 6 (a try), 7-10 (backed off), 11 (a try).
+  ok(REEMBED_THOUGHT_WAIT_MS === 120_000 && REEMBED_THOUGHT_PERIOD_MS === 240_000 && REEMBED_THOUGHT_PROBE_MS === 5_000 && REEMBED_THOUGHT_BACKOFF_MS === 240_000,
+    `the shipped numbers: 2 min a wait, 4 min of isolation a period, a probe every 5 s, a 4 min back-off at first (${REEMBED_THOUGHT_WAIT_MS}, ${REEMBED_THOUGHT_PERIOD_MS}, ${REEMBED_THOUGHT_PROBE_MS}, ${REEMBED_THOUGHT_BACKOFF_MS})`);
+  // A crasher that never comes back, on a busy brain: a period every 30 s, each try held to the 240 s cap and set down
+  // there. Backed off by time, the tries fall at 0, 480, 1200 and 2400 s — 4, 8, then 16 min after each try's limit —
+  // whatever the periods between; backed off by periods (review pass 2), at 0, 300, 630, 1020 s (each try's limit,
+  // then 1, 2, 4 periods of 30 s), the claim passes held most of the hour.
   const b = new ThoughtWaitBackoff();
   const tries: number[] = [];
-  for (let period = 1; period <= 11; period++) {
-    b.period();
-    if (b.skipping) continue;
-    tries.push(period);
-    b.limited();
+  for (let t = 0; t < 3600;) {
+    if (b.skipping(t * 1000)) {
+      t += 30;
+      continue;
+    }
+    tries.push(t);
+    t += 240;
+    b.limited(t * 1000);
+    t += 30;
   }
-  ok(tries.join() === "1,3,6,11" && b.left === 8 && b.next === 16,
-    `the back-off: a try ending at a limit skips 1 period, then 2, then 4, then 8 (tries at ${tries.join()}; left ${b.left}, next ${b.next})`);
-  ok(new ThoughtWaitBackoff().mark() === null, "no back-off, no mark");
-  const m = new ThoughtWaitBackoff();
-  m.period();
-  m.limited();
-  const afterLimit = JSON.stringify(m.mark());
-  m.period();
-  const skipped = JSON.stringify(m.mark());
-  m.limited();
-  const limitedWhileSkipping = JSON.stringify(m.mark());
-  m.period();
-  const tried = JSON.stringify(m.mark());
-  ok(afterLimit === JSON.stringify({ skipping: false, left: 1, next: 2 }) && skipped === JSON.stringify({ skipping: true, left: 0, next: 2 })
-      && limitedWhileSkipping === skipped && tried === JSON.stringify({ skipping: false, left: 0, next: 2 }),
-    `the mark through a limit, a period backed off (which sets down at no limit) and the try after it (${afterLimit} | ${skipped} | ${limitedWhileSkipping} | ${tried})`);
-  // Reset — re-embed drained, or an isolation's suspects settled (the crasher recorded failed alone): the next
-  // period waits, and a limit after it backs off 1 again.
-  for (const when of ["in a period backed off", "in the try after it"] as const) {
-    const r = new ThoughtWaitBackoff();
-    r.period();
-    r.limited();
-    r.period();
-    if (when === "in the try after it") r.period();
-    const before = r.skipping;
+  const heldS = tries.length * 240;
+  ok(tries.join() === "0,480,1200,2400" && b.windowMs === 3_840_000 && heldS === 960,
+    `the back-off by time: a try ending at a limit backs off 4 min, then 8, 16, 32, a period every 30 s between (tries at ${tries.join()} s; next ${b.windowMs / 1000} s; held ${heldS} s of the hour)`);
+  // The window's edges and a limit inside it, on a clock.
+  const m = new ThoughtWaitBackoff(10_000);
+  const fresh = m.state();
+  const first = m.limited(1000);
+  const st = JSON.stringify(m.state());
+  const inside = m.skipping(10_999);
+  const atEnd = m.skipping(11_000);
+  const insideLimit = m.limited(5000);
+  const unchanged = JSON.stringify(m.state());
+  const second = m.limited(11_000);
+  ok(fresh === null && first && st === JSON.stringify({ until: 11_000, nextMs: 20_000 }) && inside && !atEnd && !insideLimit && unchanged === st
+      && second && JSON.stringify(m.state()) === JSON.stringify({ until: 31_000, nextMs: 40_000 }),
+    `the window: a limit backs off its window from then and doubles the next; such an outage within it sets down at once, at its end it waits; a limit within it begins none (${fresh} | ${first} ${st} | ${inside} ${atEnd} | ${insideLimit} ${unchanged} | ${second} ${JSON.stringify(m.state())})`);
+  // Reset — re-embed drained, or a suspect recorded failed alone: no state, waits at once, and a limit backs off the base again.
+  for (const when of ["in a window", "after it, a try due"] as const) {
+    const r = new ThoughtWaitBackoff(10_000);
+    r.limited(0);
+    r.limited(10_000);
+    const now = when === "in a window" ? 15_000 : 40_000;
+    const before = r.skipping(now);
     r.reset();
-    const reset = r.mark();
-    r.period();
-    const waits = !r.skipping;
-    r.limited();
-    ok(before === (when === "in a period backed off") && reset === null && waits && r.left === 1 && r.next === 2,
-      `reset ${when}: no mark, the next period waits, and its limit backs off 1 again (${JSON.stringify(r.mark())})`);
+    const reset = r.state();
+    const waits = !r.skipping(now);
+    r.limited(now);
+    ok(before === (when === "in a window") && reset === null && waits && JSON.stringify(r.state()) === JSON.stringify({ until: now + 10_000, nextMs: 20_000 }),
+      `reset ${when}: no state, such an outage waited out at once, and a limit backs off the base again (${JSON.stringify(r.state())})`);
   }
 }
 
