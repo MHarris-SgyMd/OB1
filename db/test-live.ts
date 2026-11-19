@@ -4967,9 +4967,9 @@ if (want("9f")) {
       // A one-shot run whose probe the gate skips (SMD-4352, SMD-4143): the first row stands in for the probe. Its
       // call failing as the configuration's would — a 400 to 404, a redirect, a body that is not JSON, a vector of
       // another width, no vector at all — halts the run, and the worker claims no more of its batch: that row
-      // recorded failed, the other three left pending, not failed one by one. Failing as the moment's would, a 429
-      // or a 503, it is the row's alone: no halt, and the run goes on to the other three. Each case's four are the
-      // only thoughts not at the model, so the pool is theirs.
+      // recorded failed, the other three left pending, not failed one by one. Failing as the moment's would, a 408,
+      // a 429, a 500 or a 503, it is the row's alone: no halt, and the run goes on to the other three. Each case's
+      // four are the only thoughts not at the model, so the pool is theirs.
       const haltEnv = { ...env, OB1_LLM_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "type:halt-row" } as Record<string, string>;
       const haltOthers = Number((await sql`SELECT count(*)::int AS n FROM thoughts WHERE embedding IS NULL OR embedding_model IS DISTINCT FROM 'stub-embed'`)[0].n);
       assert(haltOthers === 0, `before the halted runs, no other thought waits to be pooled: an earlier row's left behind would be claimed beside each case's four (${haltOthers} not at the model)`);
@@ -4981,8 +4981,7 @@ if (want("9f")) {
         { what: "answered a vector of another width", answer: () => Response.json({ data: [{ embedding: new Array(DIM + 1).fill(0.5) }] }), halts: true },
         { what: "answered no vector", answer: () => Response.json({ data: [] }), halts: true },
         // The moment's: the first call alone, the rest answered as any.
-        { what: "refused 429, once", answer: refusedAs(429), halts: false, once: true },
-        { what: "refused 503, once", answer: refusedAs(503), halts: false, once: true },
+        ...[408, 429, 500, 503].map((status) => ({ what: `refused ${status}, once`, answer: refusedAs(status), halts: false, once: true })),
       ];
       for (const c of standIns) {
         const haltIds = ((await sql`INSERT INTO thoughts (content, metadata) SELECT 'a thought of four the first row stands in for, number ' || g, ${{ type: "halt-row" }}::jsonb FROM generate_series(1, 4) g RETURNING id::text AS id`) as { id: string }[]).map((r) => r.id);
