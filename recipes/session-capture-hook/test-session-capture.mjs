@@ -3397,7 +3397,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     `a queue a brain no longer in the config left on disk loses the forgotten thought's unsent copies, no forget is held there, and a sent one is named in the first brain's log with the command that follows it (${JSON.stringify(oldLeft)})`);
   // A forget queued while the canary had its key, the key then taken away: a session event marks it held, so its week
   // starts again at its first send once the key is back (review pass 2: given up at its first fault).
-  seedIn(CANARY_ROOT, "000000000000099-000000000000001-1.json", { tool: "forget_thought", args: { id: S(99), confirm: S(99), detach_citations: true }, at: new Date(Date.now() - 8 * 24 * 3600_000).toISOString() });
+  seedIn(CANARY_ROOT, "000000000000099-000000000000001-1.json", { tool: "forget_thought", args: { id: S(99), confirm: S(99), detach_citations: true }, at: weekAgo });
   await runHook({ session_id: "s-fan-end", hook_event_name: "SessionEnd", transcript_path: join(TMP, "no-such-transcript.jsonl"), cwd: TMP }, noKeyEnv);
   const markedHeld = readIn(CANARY_ROOT).find((o) => o.args.id === S(99))?.held;
   away = true;
@@ -3409,24 +3409,26 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     `a forget queued before its brain lost its key is marked held at a session event, and is not given up at its first fault once the key is back (${JSON.stringify({ markedHeld, keptAway })})`);
   // A brain whose queue cannot be written (here stable's, two-way) does not stop the others: the canary still gets its
   // drop and its forget, and the log names the forget lost for stable with the command that redoes it (review pass 2).
-  // Root writes through a mode-500 directory, so the case holds only for another user, as the claims' EACCES case does (review pass 3).
+  // Root writes through a mode-500 directory, so the case holds only for another user, as the claims' EACCES case
+  // does (review pass 3).
   if (process.getuid?.() !== 0) {
-  const STABLE_PEND = join(STATE, "writes", "pending");
-  mkdirSync(STABLE_PEND, { recursive: true });
-  chmodSync(STABLE_PEND, 0o500);
-  calls.length = 0;
-  thoughts.set(uuid(7312), { key: S(79), content: "a secret both brains hold" });
-  seedIn(CANARY_ROOT, "000000000000079-000000000000001-1.json", { tool: "update_thought", args: { id: S(79), content: "a secret edit never sent" } });
-  forgottenIds.add(S(79));
-  const fWrite = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(79), confirm: S(79) }, tool_response: forgot(S(79)) }, twoEnv);
-  chmodSync(STABLE_PEND, 0o700);
-  const stableWriteLog = logOf(STATE);
-  rmSync(join(STATE, "writes"), { recursive: true, force: true });
-  assert(fWrite.code === 1 && forgottenIds.has(uuid(7312)) && !queueIn().length && !calls.some((c) => c.name === "update_thought" && c.args.id === S(79))
-      && new RegExp(`forget_thought of ${S(79)} was not queued for stable; once that is mended, run: bun .*session-capture\\.mjs --copy-forget ${S(79)} --from stable --yes`).test(stableWriteLog),
-    `a brain whose queue cannot be written is named with the command that redoes it, exit 1 under sync; the next brain still gets the drop and the forget (${stableWriteLog.split("\n").filter((l) => l.includes("not queued")).at(-1)?.slice(0, 200)})`);
+    const STABLE_PEND = join(STATE, "writes", "pending");
+    mkdirSync(STABLE_PEND, { recursive: true });
+    chmodSync(STABLE_PEND, 0o500);
+    calls.length = 0;
+    thoughts.set(uuid(7312), { key: S(79), content: "a secret both brains hold" });
+    seedIn(CANARY_ROOT, "000000000000079-000000000000001-1.json", { tool: "update_thought", args: { id: S(79), content: "a secret edit never sent" } });
+    forgottenIds.add(S(79));
+    const fWrite = await runHook({ session_id: "s-fan", hook_event_name: "PostToolUse", tool_name: "mcp__open-brain__forget_thought", tool_input: { id: S(79), confirm: S(79) }, tool_response: forgot(S(79)) }, twoEnv);
+    chmodSync(STABLE_PEND, 0o700);
+    const stableWriteLog = logOf(STATE);
+    rmSync(join(STATE, "writes"), { recursive: true, force: true });
+    assert(fWrite.code === 1 && forgottenIds.has(uuid(7312)) && !queueIn().length && !calls.some((c) => c.name === "update_thought" && c.args.id === S(79))
+        && new RegExp(`forget_thought of ${S(79)} was not queued for stable; once that is mended, run: bun .*session-capture\\.mjs --copy-forget ${S(79)} --from stable --yes`).test(stableWriteLog),
+      `a brain whose queue cannot be written is named with the command that redoes it, exit 1 under sync; the next brain still gets the drop and the forget (${stableWriteLog.split("\n").filter((l) => l.includes("not queued")).at(-1)?.slice(0, 200)})`);
   }
-  // …a brain never copied to (no writes/ of its own) is held nothing: a one-brain-ish config logs the forget not copied.
+  // A brain with no write key never copied to (no writes/ of its own) is held nothing: a one-brain-ish config logs the
+  // forget not copied.
   rmSync(join(CANARY_ROOT, "writes"), { recursive: true, force: true });
   const notCopied = () => (logOf(STATE).match(/fan-out: forget_thought through open-brain: no other brain has a write_key, so nothing is copied/g) ?? []).length;
   const notCopiedBefore = notCopied();
@@ -3437,8 +3439,8 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   // --copy-forget: a forget the hook never queued (its run failed before the queue) copied by hand. The canary forgets
   // its copy; a second run finds nothing there and says so, exit 1 (review pass 1: exit 0 read as success); one the
   // canary knows by the thought's own key alone goes by --client-key; the thought's unsent copy still queued is dropped
-  // first.
-  // Ids with letters, so upper case differs (review pass 3: S(n) and uuid(n) are digits alone, and toUpperCase changed nothing).
+  // first. Ids with letters, so upper case differs (review pass 3: S(n) and uuid(n) are digits alone, and toUpperCase
+  // changed nothing).
   const L84 = "abcdef84-0000-4000-8000-0000000000ab", K85 = "abcdef85-0000-4000-8000-0000000000ab";
   await post("capture_thought", { content: "a secret whose forget's hook run failed" }, captured(L84));
   const copy84 = byName(L84);
@@ -3523,7 +3525,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   const cfTwo = await spawnScript(["--copy-forget", S(92), "--from", "stable", "--yes"], { env: twoEnv });
   const cfTwoForgets = calls.filter((c) => c.name === "forget_thought").length;
   assert(cfTwo.code === 0 && cfTwoForgets === 1 && !/^\[stable\]/m.test(cfTwo.out) && /^\[canary\] copied forget_thought/m.test(cfTwo.out),
-    `--copy-forget sends the brain it was forgotten on no forget, a write key there or not, unless its queue carries a copy (${JSON.stringify({ cfTwoForgets, out: cfTwo.out.trim().slice(0, 160) })})`);
+    `--copy-forget sends the brain it was forgotten on no forget, even with a write key there, unless its queue carries a copy (${JSON.stringify({ cfTwoForgets, out: cfTwo.out.trim().slice(0, 160) })})`);
   // A repeat after the hook's forget, kept for the canary while it was away, lands in the same drain: the forget landing
   // first, the repeat's "nothing was forgotten" is not said (review pass 2).
   await post("capture_thought", { content: "a secret forgotten while the canary was away" }, captured(S(91)));
