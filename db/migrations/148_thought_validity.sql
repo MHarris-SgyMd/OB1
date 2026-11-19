@@ -27,13 +27,16 @@
 --   TOO_MANY, cap, given}); NULL is NO_IDS; an empty array answers no thoughts.
 --   {ok: true, cap: 100, thoughts: [...]} in the order the ids were first given.
 --
---   PER THOUGHT. An id that is no thought answers {id, found: false}, with
---   forgotten: true and forgotten_at when 139's ledger holds it (and no text).
+--   PER THOUGHT. An id that is no thought answers {id, found: false,
+--   forgotten, forgotten_at, unread}: forgotten true when 139's ledger holds it,
+--   false when it does not, null when the ledger could not be read; no text.
 --   A thought answers {id, found: true, version, validity, review, freshness,
 --   unread}:
---     * version: {fingerprint: its text's fingerprint now (016's
---       content_fingerprint_of, as 036 reads it), seq: the newest audit event
---       of any kind (row 7)}.
+--     * version: {fingerprint: its key now as rebuild_derived and the lineage
+--       writers read it (the stored content_fingerprint, else 016's
+--       content_fingerprint_of; 061, 067), seq: the newest audit event of any
+--       kind (row 7)}. A proposal's edit test reads 016's, as 036's
+--       EDITED_SINCE does.
 --     * validity (rows 2 to 4, the states table): superseded (068's projection
 --       names it), contested (a pending proposal names it as the side that
 --       falls, both texts as judged; or a deliverable whose newest
@@ -46,10 +49,12 @@
 --       unresolved), else unchallenged. Precedence in that order. Unknown when
 --       a record kind left unread could have set a state above the one found
 --       (row 2): the pointer projection any, proposals and verifications
---       contested, citations supported.
+--       contested, citations supported; and a corrected verification whose
+--       checkpoint could not be placed for want of the log (contested).
 --     * review (row 5): pending (a pending or stale proposal names it, either
 --       side), decided (a key's or the pass's decision, the newest named),
---       checked (a deliverable with a verification, its status named), unchecked
+--       checked (a deliverable with a verification, every one listed, newest
+--       first, each with its status and its checkpoint's reading), unchecked
 --       (a deliverable still unverified), none; unknown when proposals or
 --       deliverable events were not read.
 --     * freshness (row 6): over the lineage rows that name it among their
@@ -62,20 +67,24 @@
 --       legacy (061's backfill, fingerprints matching), current. A kind is its
 --       worst row; the thought the worst kind (stale, requested, legacy,
 --       current), none with no such row; unknown when lineage, proposals or
---       facets were not read. A stale kind no pool re-runs (metadata, section)
---       says so.
+--       facets were not read. A row 067's test finds orphaned is listed as
+--       orphaned and not read; history (a closed facet, a decided proposal) is
+--       not read. A stale or requested kind no pool re-runs (metadata, section)
+--       says so (no_pool), on its rows and on the kind.
 --     * judges' numbers (row 9) ride under judge with calibrated: false.
 --     * unread: the record kinds the caller's role could not SELECT, by name.
 --
 --   THE CHECKPOINT RULE (the record's, below its states table). A
---   verification's checkpoint is free text. Equal to the fingerprint now:
---   current; equal to the fingerprint of an earlier text, from the log (a
---   capture's content, an update's content before and after, unredacted):
---   earlier; else unmatched, read as applying.
+--   verification's checkpoint is free text. Equal to the key now (stored or
+--   the text's): current; equal to an earlier key from the log (a capture's
+--   content, an update's content and stored key before and after,
+--   unredacted): earlier; else unmatched, read as applying. Without the log,
+--   a checkpoint that is not the key now reads unknown.
 --
 --   Not here: the valid window (SMD-2011), a settled part (SMD-4446), what is
---   fit to act on (SMD-3900). PATCH under the version rules: a new function,
---   nothing existing changed. test-schema [133], test-upgrade [20ck].
+--   fit to act on (SMD-3900). MINOR under the version rules: an additive
+--   migration, a new function, nothing existing changed. test-schema [133],
+--   test-upgrade [20ck].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 029/063/114 (supersession_proposals with
@@ -91,19 +100,35 @@ DO $qc$
 DECLARE
   v_missing text;
 BEGIN
-  SELECT string_agg(name, ', ') INTO v_missing FROM (VALUES
-      ('content_fingerprint_of(text)', to_regprocedure('content_fingerprint_of(text)') IS NULL),
-      ('thought_facet_active(thought_facets)', to_regprocedure('thought_facet_active(thought_facets)') IS NULL),
-      ('ob1_superseded_by', to_regclass('ob1_superseded_by') IS NULL),
-      ('deliverable_events', to_regclass('deliverable_events') IS NULL),
-      ('thought_forgotten', to_regclass('thought_forgotten') IS NULL),
-      ('derivations.stale_since', NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'derivations' AND column_name = 'stale_since')),
-      ('supersession_proposals.reviewed_by_kind', NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'supersession_proposals' AND column_name = 'reviewed_by_kind'))
-    ) AS p(name, missing)
-   WHERE missing;
+  -- Every function, table and column the body reads: plpgsql resolves them
+  -- only at the first call, so a missing one would otherwise make a function
+  -- that fails when called rather than a file refused here.
+  SELECT string_agg(name, ', ' ORDER BY ord) INTO v_missing FROM (
+    SELECT p.name, p.ord FROM (VALUES
+        (1, 'content_fingerprint_of(text)', to_regprocedure('content_fingerprint_of(text)') IS NULL),
+        (2, 'thought_facet_active(thought_facets)', to_regprocedure('thought_facet_active(thought_facets)') IS NULL),
+        (3, 'ob1_superseded_by', to_regclass('ob1_superseded_by') IS NULL),
+        (4, 'thought_chunks', to_regclass('thought_chunks') IS NULL),
+        (5, 'thought_entities', to_regclass('thought_entities') IS NULL),
+        (6, 'ob1_entity_edges', to_regclass('ob1_entity_edges') IS NULL)
+      ) AS p(ord, name, missing)
+     WHERE p.missing
+    UNION ALL
+    SELECT c.tbl || '.' || c.col, 10 + c.ord
+      FROM (VALUES
+        (1, 'thoughts', 'content_fingerprint'), (2, 'thought_audit', 'seq'), (3, 'thought_audit', 'redacted_at'),
+        (4, 'thought_audit', 'canonical_agent_id'), (5, 'thought_audit', 'actor_kind'),
+        (6, 'supersession_proposals', 'older_fingerprint'), (7, 'supersession_proposals', 'pointer_written'),
+        (8, 'supersession_proposals', 'superseding_id'), (9, 'supersession_proposals', 'reviewed_by_kind'),
+        (10, 'derivations', 'recipe'), (11, 'derivations', 'stale_since'),
+        (12, 'deliverable_events', 'checkpoint'), (13, 'thought_forgotten', 'forgotten_at')
+      ) AS c(ord, tbl, col)
+     WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns i
+                        WHERE i.table_schema = current_schema() AND i.table_name = c.tbl AND i.column_name = c.col)
+  ) m;
   IF v_missing IS NOT NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 148 needs 016, 042, 063, 068, 114, 134 and 139; this schema lacks ' || v_missing,
+      MESSAGE = 'migration 148 needs 016, 029, 042, 046, 050, 063, 068, 114, 134 and 139; this schema lacks ' || v_missing,
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -137,7 +162,9 @@ DECLARE
   v_unread    text[];
   v_t         record;
   v_fp        text;
+  v_fp_text   text;
   v_seq       bigint;
+  v_ckpt_unknown boolean;
   v_earlier   text[];
   -- validity
   v_level     int;          -- 5 superseded, 4 contested, 3 unresolved, 2 supported, 1 unchallenged
@@ -165,6 +192,7 @@ DECLARE
   v_fstate    text;
   v_d         record;
   v_row_state text;
+  v_standing  text;
   v_rank      int;
   v_worst     int;
   v_kinds     jsonb;
@@ -190,35 +218,40 @@ BEGIN
     CASE WHEN NOT r_forgotten THEN 'forgotten'    END], NULL);
 
   FOREACH v_id IN ARRAY v_ids LOOP
-    SELECT t.id, t.content INTO v_t FROM thoughts t WHERE t.id = v_id;
+    SELECT t.id, t.content, t.content_fingerprint INTO v_t FROM thoughts t WHERE t.id = v_id;
     IF NOT FOUND THEN
-      IF r_forgotten THEN
-        v_out := v_out || jsonb_build_array(COALESCE(
-          (SELECT jsonb_build_object('id', v_id, 'found', false, 'forgotten', true, 'forgotten_at', max(f.forgotten_at))
-             FROM thought_forgotten f WHERE f.thought_id = v_id HAVING count(*) > 0),
-          jsonb_build_object('id', v_id, 'found', false)));
-      ELSE
-        v_out := v_out || jsonb_build_array(jsonb_build_object('id', v_id, 'found', false, 'unread', to_jsonb(v_unread)));
-      END IF;
+      -- Not a thought: forgotten true (139's ledger holds it), false, or null
+      -- when the ledger could not be read. Every answer carries unread.
+      v_out := v_out || jsonb_build_array(jsonb_build_object('id', v_id, 'found', false,
+        'forgotten', CASE WHEN r_forgotten THEN EXISTS (SELECT 1 FROM thought_forgotten f WHERE f.thought_id = v_id) END,
+        'forgotten_at', CASE WHEN r_forgotten THEN (SELECT max(f.forgotten_at) FROM thought_forgotten f WHERE f.thought_id = v_id) END,
+        'unread', to_jsonb(v_unread)));
       CONTINUE;
     END IF;
 
     -- ---------------------------------------------------------------- version
-    v_fp := content_fingerprint_of(v_t.content);
+    -- The fingerprint now as rebuild_derived and the lineage writers read it
+    -- (061, 067): the stored key, else the text's. The text's own (016) is
+    -- also kept, for a checkpoint written from it.
+    v_fp := COALESCE(v_t.content_fingerprint, content_fingerprint_of(v_t.content));
+    v_fp_text := content_fingerprint_of(v_t.content);
     v_seq := NULL;
     v_earlier := '{}';
     IF r_audit THEN
       SELECT max(a.seq) INTO v_seq FROM thought_audit a WHERE a.thought_id = v_id;
-      -- Every text the log holds for it, unredacted: a capture's content, an
-      -- update's content before and after (055).
-      SELECT COALESCE(array_agg(DISTINCT content_fingerprint_of(x.txt)), '{}') INTO v_earlier
+      -- Every earlier key the log holds for it, unredacted: a capture's
+      -- content, an update's content before and after, and an update's stored
+      -- key before and after (055).
+      SELECT COALESCE(array_agg(DISTINCT x.fp), '{}') INTO v_earlier
         FROM thought_audit a
         CROSS JOIN LATERAL (VALUES
-            (CASE WHEN a.action = 'capture' THEN a.diff->>'content' END),
-            (CASE WHEN a.action = 'update' AND jsonb_typeof(a.diff->'content') = 'object' THEN a.diff->'content'->>'before' END),
-            (CASE WHEN a.action = 'update' AND jsonb_typeof(a.diff->'content') = 'object' THEN a.diff->'content'->>'after' END)) AS x(txt)
-       WHERE a.thought_id = v_id AND a.redacted_at IS NULL AND jsonb_typeof(a.diff) = 'object' AND x.txt IS NOT NULL;
-      v_earlier := array_remove(v_earlier, v_fp);
+            (CASE WHEN a.action = 'capture' THEN content_fingerprint_of(a.diff->>'content') END),
+            (CASE WHEN a.action = 'update' AND jsonb_typeof(a.diff->'content') = 'object' THEN content_fingerprint_of(a.diff->'content'->>'before') END),
+            (CASE WHEN a.action = 'update' AND jsonb_typeof(a.diff->'content') = 'object' THEN content_fingerprint_of(a.diff->'content'->>'after') END),
+            (CASE WHEN a.action = 'update' AND jsonb_typeof(a.diff->'content_fingerprint') = 'object' THEN a.diff->'content_fingerprint'->>'before' END),
+            (CASE WHEN a.action = 'update' AND jsonb_typeof(a.diff->'content_fingerprint') = 'object' THEN a.diff->'content_fingerprint'->>'after' END)) AS x(fp)
+       WHERE a.thought_id = v_id AND a.redacted_at IS NULL AND jsonb_typeof(a.diff) = 'object' AND x.fp IS NOT NULL;
+      v_earlier := array_remove(array_remove(v_earlier, v_fp), v_fp_text);
     END IF;
 
     -- --------------------------------------------------------------- validity
@@ -282,20 +315,26 @@ BEGIN
 
     -- A deliverable whose newest verification is corrected: contested at a
     -- checkpoint that reads current or unmatched, unresolved at one that reads
-    -- earlier (the checkpoint rule).
+    -- earlier (the checkpoint rule). Without the log, a checkpoint that is not
+    -- the text now reads unknown: earlier and unmatched cannot be told apart,
+    -- so the corrected verification sets unresolved at least and the state
+    -- unknown, since contested could stand above it (row 1).
+    v_ckpt_unknown := false;
     IF r_verify THEN
       SELECT e.seq, e.status, e.checkpoint, e.actor_name, e.actor_kind, e.at INTO v_v
         FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'verification'
        ORDER BY e.seq DESC LIMIT 1;
       IF FOUND AND v_v.status = 'corrected' THEN
-        v_reads := CASE WHEN v_v.checkpoint = v_fp THEN 'current'
+        v_reads := CASE WHEN v_v.checkpoint IN (v_fp, v_fp_text) THEN 'current'
+                        WHEN NOT r_audit THEN 'unknown'
                         WHEN v_v.checkpoint = ANY(v_earlier) THEN 'earlier'
                         ELSE 'unmatched' END;
-        v_level := GREATEST(v_level, CASE WHEN v_reads = 'earlier' THEN 3 ELSE 4 END);
+        v_ckpt_unknown := v_reads = 'unknown';
+        v_level := GREATEST(v_level, CASE WHEN v_reads IN ('earlier', 'unknown') THEN 3 ELSE 4 END);
         v_vrecs := v_vrecs || jsonb_build_array(jsonb_build_object(
           'kind', 'verification', 'seq', v_v.seq, 'status', v_v.status, 'checkpoint', v_v.checkpoint, 'checkpoint_reads', v_reads,
           'by', jsonb_build_object('name', v_v.actor_name, 'kind', v_v.actor_kind), 'at', v_v.at,
-          'reads', CASE WHEN v_reads = 'earlier' THEN 'unresolved' ELSE 'contested' END));
+          'reads', CASE v_reads WHEN 'earlier' THEN 'unresolved' WHEN 'unknown' THEN 'unknown' ELSE 'contested' END));
       END IF;
     END IF;
 
@@ -340,7 +379,8 @@ BEGIN
       CASE WHEN NOT r_pointer  THEN 5 ELSE 0 END,
       CASE WHEN NOT r_proposal THEN 4 ELSE 0 END,
       CASE WHEN NOT r_verify   THEN 4 ELSE 0 END,
-      CASE WHEN NOT r_facet    THEN 2 ELSE 0 END);
+      CASE WHEN NOT r_facet    THEN 2 ELSE 0 END,
+      CASE WHEN v_ckpt_unknown THEN 4 ELSE 0 END);
     v_state := CASE WHEN v_ceiling > v_level THEN 'unknown'
                     ELSE (ARRAY['unchallenged', 'supported', 'unresolved', 'contested', 'superseded'])[v_level] END;
 
@@ -366,17 +406,21 @@ BEGIN
       v_decided := EXISTS (SELECT 1 FROM supersession_proposals p
                             WHERE v_id IN (p.older_id, p.newer_id) AND p.status IN ('accepted', 'rejected'));
       v_captured := EXISTS (SELECT 1 FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'captured');
-      SELECT e.seq, e.status, e.checkpoint, e.actor_name, e.actor_kind, e.at INTO v_v
-        FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'verification'
-       ORDER BY e.seq DESC LIMIT 1;
-      v_checked := FOUND;
-      IF v_checked THEN
+      -- Every verification, newest first (row 5: every check is listed).
+      v_checked := false;
+      FOR v_v IN
+        SELECT e.seq, e.status, e.checkpoint, e.actor_name, e.actor_kind, e.at
+          FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'verification'
+         ORDER BY e.seq DESC
+      LOOP
+        v_checked := true;
         v_rrecs := v_rrecs || jsonb_build_array(jsonb_build_object(
           'kind', 'verification', 'seq', v_v.seq, 'status', v_v.status, 'checkpoint', v_v.checkpoint,
-          'checkpoint_reads', CASE WHEN v_v.checkpoint = v_fp THEN 'current'
+          'checkpoint_reads', CASE WHEN v_v.checkpoint IN (v_fp, v_fp_text) THEN 'current'
+                                   WHEN NOT r_audit THEN 'unknown'
                                    WHEN v_v.checkpoint = ANY(v_earlier) THEN 'earlier' ELSE 'unmatched' END,
           'by', jsonb_build_object('name', v_v.actor_name, 'kind', v_v.actor_kind), 'at', v_v.at));
-      END IF;
+      END LOOP;
       v_rstate := CASE WHEN v_pending THEN 'pending'
                        WHEN v_decided THEN 'decided'
                        WHEN v_checked THEN 'checked'
@@ -396,25 +440,36 @@ BEGIN
                (SELECT COALESCE(array_agg(u.id ORDER BY u.ord), '{}')
                   FROM unnest(d.input_ids, d.input_fingerprints) WITH ORDINALITY AS u(id, fp, ord)
                   LEFT JOIN thoughts x ON x.id = u.id
-                 WHERE x.id IS NULL OR content_fingerprint_of(x.content) IS DISTINCT FROM u.fp) AS moved,
+                 WHERE x.id IS NULL OR u.fp IS DISTINCT FROM COALESCE(x.content_fingerprint, content_fingerprint_of(x.content))) AS moved,
                (SELECT p.status FROM supersession_proposals p WHERE d.artifact_kind = 'proposal' AND p.id = d.artifact_id) AS proposal_status
           FROM derivations d
          WHERE d.input_ids @> ARRAY[v_id]
          ORDER BY d.artifact_kind, d.produced_by, d.artifact_id
       LOOP
-        -- The artifact still stands: a standing relation or subject facet, an
-        -- undecided proposal, else 067's orphan test (a section's row is
-        -- dropped with its section, so it stands while it is here).
-        CONTINUE WHEN NOT (CASE v_d.artifact_kind
-          WHEN 'relation' THEN EXISTS (SELECT 1 FROM thought_facets f WHERE f.id = v_d.artifact_id AND f.valid_until IS NULL)
-          WHEN 'subject'  THEN EXISTS (SELECT 1 FROM thought_facets f WHERE f.id = v_d.artifact_id AND f.valid_until IS NULL)
-          WHEN 'proposal' THEN COALESCE(v_d.proposal_status IN ('pending', 'stale'), false)
-          WHEN 'chunks'   THEN EXISTS (SELECT 1 FROM thought_chunks c WHERE c.thought_id = v_d.artifact_id)
-          WHEN 'entities' THEN EXISTS (SELECT 1 FROM thought_entities m WHERE m.thought_id = v_d.artifact_id AND m.extraction_key = v_d.produced_by)
-                            OR EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.thought_id = v_d.artifact_id AND g.extraction_key = v_d.produced_by)
-          WHEN 'vector'   THEN EXISTS (SELECT 1 FROM thoughts t WHERE t.id = v_d.artifact_id AND t.embedding IS NOT NULL)
-          WHEN 'metadata' THEN EXISTS (SELECT 1 FROM thoughts t WHERE t.id = v_d.artifact_id AND (t.metadata ? 'type' OR t.metadata ? 'topics'))
-          ELSE true END);
+        -- Whether the artifact still stands. History — a closed relation or
+        -- subject facet, a decided proposal — is not read (no re-run rewrites
+        -- it). An orphan by 067's test (its artifact gone: a deleted proposal,
+        -- no windows, no mentions or edges under the key, no embedding, no
+        -- tags) is listed as orphaned and not read. A section's row is dropped
+        -- with its section, so it stands while it is here.
+        v_standing := CASE v_d.artifact_kind
+          WHEN 'relation' THEN CASE WHEN EXISTS (SELECT 1 FROM thought_facets f WHERE f.id = v_d.artifact_id AND f.valid_until IS NULL) THEN 'standing' ELSE 'history' END
+          WHEN 'subject'  THEN CASE WHEN EXISTS (SELECT 1 FROM thought_facets f WHERE f.id = v_d.artifact_id AND f.valid_until IS NULL) THEN 'standing' ELSE 'history' END
+          WHEN 'proposal' THEN CASE WHEN v_d.proposal_status IS NULL THEN 'orphaned'
+                                    WHEN v_d.proposal_status IN ('pending', 'stale') THEN 'standing' ELSE 'history' END
+          WHEN 'chunks'   THEN CASE WHEN EXISTS (SELECT 1 FROM thought_chunks c WHERE c.thought_id = v_d.artifact_id) THEN 'standing' ELSE 'orphaned' END
+          WHEN 'entities' THEN CASE WHEN EXISTS (SELECT 1 FROM thought_entities m WHERE m.thought_id = v_d.artifact_id AND m.extraction_key = v_d.produced_by)
+                                      OR EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.thought_id = v_d.artifact_id AND g.extraction_key = v_d.produced_by)
+                                    THEN 'standing' ELSE 'orphaned' END
+          WHEN 'vector'   THEN CASE WHEN EXISTS (SELECT 1 FROM thoughts t WHERE t.id = v_d.artifact_id AND t.embedding IS NOT NULL) THEN 'standing' ELSE 'orphaned' END
+          WHEN 'metadata' THEN CASE WHEN EXISTS (SELECT 1 FROM thoughts t WHERE t.id = v_d.artifact_id AND (t.metadata ? 'type' OR t.metadata ? 'topics')) THEN 'standing' ELSE 'orphaned' END
+          ELSE 'standing' END;
+        CONTINUE WHEN v_standing = 'history';
+        IF v_standing = 'orphaned' THEN
+          v_frecs := v_frecs || jsonb_build_array(jsonb_build_object(
+            'kind', v_d.artifact_kind, 'artifact', v_d.artifact_id, 'produced_by', v_d.produced_by, 'state', 'orphaned'));
+          CONTINUE;
+        END IF;
         v_row_state := CASE
           WHEN v_d.stale_since IS NOT NULL OR (v_d.artifact_kind = 'proposal' AND v_d.proposal_status = 'stale') THEN 'requested'
           WHEN cardinality(v_d.moved) > 0 THEN 'stale'
@@ -422,18 +477,22 @@ BEGIN
           ELSE 'current' END;
         v_rank := CASE v_row_state WHEN 'stale' THEN 4 WHEN 'requested' THEN 3 WHEN 'legacy' THEN 2 ELSE 1 END;
         v_worst := GREATEST(v_worst, v_rank);
+        -- The tags and a generated section have no pool: stale or marked
+        -- (063 and 067 leave them unqueued), only an operator's rebuild clears them.
         v_frecs := v_frecs || jsonb_build_array(jsonb_build_object(
           'kind', v_d.artifact_kind, 'artifact', v_d.artifact_id, 'produced_by', v_d.produced_by, 'state', v_row_state,
           'moved', to_jsonb(v_d.moved), 'requested_for', CASE WHEN v_d.stale_since IS NOT NULL THEN v_d.stale_reason END,
-          'no_pool', v_row_state = 'stale' AND v_d.artifact_kind IN ('metadata', 'section')));
+          'no_pool', v_row_state IN ('stale', 'requested') AND v_d.artifact_kind IN ('metadata', 'section')));
       END LOOP;
       v_fstate := (ARRAY['none', 'current', 'legacy', 'requested', 'stale'])[v_worst + 1];
     END IF;
-    -- A kind's state is its worst row.
-    SELECT COALESCE(jsonb_agg(jsonb_build_object('kind', k.kind, 'state', k.state) ORDER BY k.kind), '[]'::jsonb) INTO v_kinds
+    -- A kind's state is its worst row read (orphans aside), with no_pool when
+    -- any of its rows has it.
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('kind', k.kind, 'state', k.state, 'no_pool', k.no_pool) ORDER BY k.kind), '[]'::jsonb) INTO v_kinds
       FROM (SELECT r->>'kind' AS kind,
-                   (ARRAY['current', 'legacy', 'requested', 'stale'])[max(CASE r->>'state' WHEN 'stale' THEN 4 WHEN 'requested' THEN 3 WHEN 'legacy' THEN 2 ELSE 1 END)] AS state
-              FROM jsonb_array_elements(v_frecs) r GROUP BY r->>'kind') k;
+                   (ARRAY['current', 'legacy', 'requested', 'stale'])[max(CASE r->>'state' WHEN 'stale' THEN 4 WHEN 'requested' THEN 3 WHEN 'legacy' THEN 2 ELSE 1 END)] AS state,
+                   bool_or(COALESCE((r->>'no_pool')::boolean, false)) AS no_pool
+              FROM jsonb_array_elements(v_frecs) r WHERE r->>'state' <> 'orphaned' GROUP BY r->>'kind') k;
 
     v_out := v_out || jsonb_build_array(jsonb_build_object(
       'id', v_id, 'found', true,
@@ -449,4 +508,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_validity(uuid[]) IS
-  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given: {ok, cap, thoughts:[{id, found:false[, forgotten, forgotten_at]} | {id, found:true, version:{fingerprint, seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending or stale proposal on it as the falling side with a text moved since judged, or stale; a corrected verification at an earlier checkpoint), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';
+  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given: {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending or stale proposal on it as the falling side with a text moved since judged, or stale; a corrected verification at an earlier checkpoint), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';

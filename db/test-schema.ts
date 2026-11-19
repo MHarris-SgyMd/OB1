@@ -22350,7 +22350,8 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   const ordered = await read([B, A, B, null, ghost]);
   assert(nulls.ok === false && nulls.error === "NO_IDS" && many.ok === false && many.error === "TOO_MANY" && many.cap === 100 && many.given === 101
          && hundred.ok === true && hundred.thoughts!.length === 100
-         && ordered.ok === true && ordered.thoughts!.map((t) => t.id).join() === [B, A, ghost].join() && ordered.thoughts![2].found === false && ordered.thoughts![2].forgotten === undefined,
+         && ordered.ok === true && ordered.thoughts!.map((t) => t.id).join() === [B, A, ghost].join() && ordered.thoughts![2].found === false
+         && ordered.thoughts![2].forgotten === false && Array.isArray(ordered.thoughts![2].unread) && ordered.thoughts![2].unread.length === 0,
     `NULL NO_IDS, 101 distinct ids TOO_MANY (given 101), 100 distinct and a repeat answered, the order given with a repeat once and a NULL skipped, an unknown id found false (${nulls.error}, ${many.error}/${many.given}, ${hundred.thoughts?.length}, ${ordered.thoughts?.map((t) => t.found).join()})`);
 
   // No record: unchallenged, never supported; review none; freshness none; the version is the fingerprint now and the newest event's seq.
@@ -22435,12 +22436,13 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   await db.query(`SELECT verify_deliverable($1, 'verified', 'review', 'fixed now', $2::jsonb)`, [out2, JSON.stringify(V2)]);
   const lifted = await v(out2);
   const reads = (t: T) => (t.validity.records.find((r) => r.kind === "verification") as { checkpoint_reads?: string } | undefined)?.checkpoint_reads;
+  const checks = (t: T) => t.review.records.filter((r) => r.kind === "verification").map((r) => String(r.status)).join();
   assert(unchecked.review.state === "unchecked" && unchecked.validity.state === "unchallenged"
          && corrNow.validity.state === "contested" && reads(corrNow) === "current" && corrNow.review.state === "checked"
          && corrEarlier.validity.state === "unresolved" && reads(corrEarlier) === "earlier"
          && corrCommit.validity.state === "contested" && reads(corrCommit) === "unmatched"
-         && lifted.validity.state === "unchallenged" && lifted.review.state === "checked",
-    `a deliverable: unverified unchecked; corrected at the current text contested, at an earlier one unresolved, at a commit unmatched and contested; a later verified lifts it (${unchecked.review.state}, ${corrNow.validity.state}/${reads(corrNow)}, ${corrEarlier.validity.state}/${reads(corrEarlier)}, ${corrCommit.validity.state}/${reads(corrCommit)}, ${lifted.validity.state})`);
+         && lifted.validity.state === "unchallenged" && lifted.review.state === "checked" && checks(lifted) === "verified,corrected",
+    `a deliverable: unverified unchecked; corrected at the current text contested, at an earlier one unresolved, at a commit unmatched and contested; a later verified lifts it, every check listed newest first (${unchecked.review.state}, ${corrNow.validity.state}/${reads(corrNow)}, ${corrEarlier.validity.state}/${reads(corrEarlier)}, ${corrCommit.validity.state}/${reads(corrCommit)}, ${lifted.validity.state}, ${checks(lifted)})`);
 
   // Freshness: tags derived from M's text current; M edited, stale with M among the moved; a rebuild's request, requested; the producer writes again, current.
   const M = await thought("[133] M: tags come from this text");
@@ -22452,11 +22454,31 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   const movedRec = moved.freshness.records.find((r) => r.kind === "metadata") as { moved: string[]; no_pool: boolean } | undefined;
   await db.query(`SELECT rebuild_derived($1::uuid, 'operator: edit')`, [M]);
   const asked = await v(M);
+  const askedRec = asked.freshness.records.find((r) => r.kind === "metadata") as { no_pool: boolean } | undefined;
+  const askedKind = asked.freshness.kinds?.find((k) => k.kind === "metadata") as { no_pool?: boolean } | undefined;
   await lineage("metadata", M, [M], [await fp(M)], "[133] tags");
   const again = await v(M);
   assert(kindState(fresh, "metadata") === "current" && kindState(moved, "metadata") === "stale" && movedRec?.moved.join() === M && movedRec?.no_pool === true
-         && kindState(asked, "metadata") === "requested" && kindState(again, "metadata") === "current",
-    `freshness: current, stale once the text moves (M named moved, no pool re-runs tags), requested on a rebuild's request, current once re-derived (${kindState(fresh, "metadata")}, ${kindState(moved, "metadata")}, ${kindState(asked, "metadata")}, ${kindState(again, "metadata")})`);
+         && kindState(asked, "metadata") === "requested" && askedRec?.no_pool === true && askedKind?.no_pool === true && kindState(again, "metadata") === "current",
+    `freshness: current, stale once the text moves (M named moved, no pool re-runs tags), requested on a rebuild's request (no pool, on the row and the kind), current once re-derived (${kindState(fresh, "metadata")}, ${kindState(moved, "metadata")}, ${kindState(asked, "metadata")}/${askedRec?.no_pool}/${askedKind?.no_pool}, ${kindState(again, "metadata")})`);
+
+  // The key now is the stored one, as rebuild_derived reads it (061, 067): a stored key that is not the text's own, lineage made on it, reads current.
+  const K = await thought("[133] K: a stored key that differs");
+  const storedKey = "3887" + "ab".repeat(30);
+  await db.query(`UPDATE thoughts SET content_fingerprint = $2, metadata = metadata || '{"type": "observation"}'::jsonb WHERE id = $1::uuid`, [K, storedKey]);
+  await lineage("metadata", K, [K], [storedKey], "[133] tags");
+  const keyed = await v(K);
+  assert(keyed.version!.fingerprint === storedKey && kindState(keyed, "metadata") === "current",
+    `a stored key that is not the text's own is the version, and lineage made on it reads current, as rebuild_derived reads it (${keyed.version?.fingerprint === storedKey}, ${kindState(keyed, "metadata")})`);
+
+  // An orphaned row (its tags stripped): listed as orphaned, not read — freshness none.
+  const O = await thought("[133] O: its tags will go");
+  await db.query(`UPDATE thoughts SET metadata = metadata || '{"type": "observation"}'::jsonb WHERE id = $1::uuid`, [O]);
+  await lineage("metadata", O, [O], [await fp(O)], "[133] tags");
+  await db.query(`UPDATE thoughts SET metadata = metadata - 'type' WHERE id = $1::uuid`, [O]);
+  const orphan = await v(O);
+  assert(orphan.freshness.state === "none" && orphan.freshness.records.length === 1 && orphan.freshness.records[0].state === "orphaned" && (orphan.freshness.kinds ?? []).length === 0,
+    `an orphaned lineage row is listed as orphaned and not read: freshness none (${orphan.freshness.state}, ${orphan.freshness.records.map((r) => r.state).join()})`);
 
   // The three axes apart: X unchallenged (the challenger side), review pending, freshness stale, all at once.
   const X = await thought("[133] X: the newer claim"), Y = await thought("[133] Y: the older claim");
@@ -22479,11 +22501,15 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   const [eNoPointer] = await asRole([E]);
   await db.exec(`REVOKE SELECT ON derivations FROM ob1_133_reader`);
   const [mNoLineage] = await asRole([M]);
-  await db.exec(`REVOKE ALL ON thoughts, supersession_proposals, deliverable_events, thought_facets, thought_chunks, thought_entities, ob1_entity_edges, thought_audit, thought_forgotten FROM ob1_133_reader; DROP ROLE ob1_133_reader`);
+  // Without the log, everything else readable: a corrected checkpoint that is not the text now cannot be placed — unknown, unresolved found, audit in unread.
+  await db.exec(`GRANT SELECT ON derivations, ob1_superseded_by TO ob1_133_reader; REVOKE SELECT ON thought_audit FROM ob1_133_reader`);
+  const [outNoAudit] = await asRole([out]);
+  await db.exec(`REVOKE ALL ON thoughts, supersession_proposals, deliverable_events, thought_facets, derivations, ob1_superseded_by, thought_chunks, thought_entities, ob1_entity_edges, thought_audit, thought_forgotten FROM ob1_133_reader; DROP ROLE ob1_133_reader`);
   assert(cNoPointer.validity.state === "unknown" && cNoPointer.validity.found === "unchallenged" && cNoPointer.unread.join() === "pointer" && cNoPointer.review.state === "pending"
          && eNoPointer.validity.state === "unknown" && eNoPointer.validity.found === "unresolved"
-         && mNoLineage.freshness.state === "unknown" && mNoLineage.unread.join() === "pointer,lineage",
-    `an unread table: validity unknown with what was found named, pointer in unread, review standing; freshness unknown without lineage (${cNoPointer.validity.state}/${cNoPointer.validity.found}, ${eNoPointer.validity.found}, ${mNoLineage.freshness.state}, ${mNoLineage.unread.join()})`);
+         && mNoLineage.freshness.state === "unknown" && mNoLineage.unread.join() === "pointer,lineage"
+         && outNoAudit.validity.state === "unknown" && outNoAudit.validity.found === "unresolved" && reads(outNoAudit) === "unknown" && outNoAudit.unread.join() === "audit",
+    `an unread table: validity unknown with what was found named, pointer in unread, review standing; freshness unknown without lineage; without the log a corrected checkpoint reads unknown, validity unknown (${cNoPointer.validity.state}/${cNoPointer.validity.found}, ${eNoPointer.validity.found}, ${mNoLineage.freshness.state}, ${mNoLineage.unread.join()}, ${outNoAudit.validity.state}/${reads(outNoAudit)}/${outNoAudit.unread.join()})`);
 
   // Forgotten: found false, forgotten true with its time, no text.
   const gone = await thought("[133] forget me");
