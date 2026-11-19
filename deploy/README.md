@@ -421,21 +421,27 @@ free:
       load while background still runs on a model the load may put out.
     - A load holds the server's other background that long. Past it the
       model is left out of the rule for 120 s, then held to again while its
-      calls still run, turn about, and the log says so each time. So a load
-      waiting on a model that live calls keep busy has the server's
-      background out of its way half the time, and the other models have
-      the other half.
+      calls still run, turn about, and the log says so. So a load waiting
+      on a model that live calls keep busy has the server's background out
+      of its way half the time. The other half is the loaded models': no
+      drain for another model begins while a load is left out.
   - **A model whose calls end without the list ever naming it** is handled
-    by what its calls did to the list, after three reads running:
-    - **The list the same after each call as before it:** it disturbs
-      nothing, so it is left out of the rule until it is listed. This is a
-      model the server lists under another name, or one it doesn't know.
-    - **The list changed:** it may have put models out and loaded nothing.
-      Its next load waits 60 s more each time, up to ten minutes, and such
-      a load begins no stay, so what it put out is loaded again at once.
+    by what each call did to the list, from its grant to the read after
+    its end. A call granted while another model's load was under way
+    says nothing either way.
+    - **A model gone from the list and none come** (but ones some brain
+      asks for by name): the call put a model out and loaded nothing. From the first such call its next load waits
+      60 s more each time, up to ten minutes, and the log says so at the
+      third. None of its asks is granted meanwhile. Such a load begins no
+      stay, and what it put out is asked for next, whatever its asks' age.
+    - **Otherwise, three reads running:** it disturbs nothing, so it is
+      left out of the rule until it is listed. This is a model the server
+      lists under another name, or one it doesn't know. The first call of
+      its that puts a model out brings it back under the rule.
   - **A live call running two minutes or more** holds back no load. A brain
     gives a model call up at `OB1_LLM_TIMEOUT` (120 s unset), so one older
-    is taken for lost.
+    is taken for lost. A brain with that setting raised has its longer
+    live calls taken for lost too.
 
   What this costs:
   - Where the loaded models can't share the server's memory, the next live
@@ -446,8 +452,10 @@ free:
     costs a load.
   - A brain's call to a model that isn't listed pauses the server's other
     background: up to 120 s a load, or until the list's next read where the
-    call ends first. The broker logs this at most once a minute a brain,
-    with the count since, and doesn't cap it, as with a brain's live calls.
+    call ends first. A call that runs on unlisted for longer (one never
+    given back, say) pauses it every other 120 s until `lease_s`. The broker logs each load at most once a minute a
+    brain, with the count since, and doesn't cap it, as with a brain's live
+    calls.
     An ask's age and `max_wait_s` are its brain's own word too: they order
     the loads between brains, and `stay_s` keeps the turns.
   - After one call to a model that put another out, that other's backlog
@@ -459,6 +467,10 @@ free:
     a simulation.
   - While live calls overlap without a gap, no background load begins on
     that server, so a backlog on a model that isn't loaded waits them out.
+  - Background calls longer than two minutes, running back to back on the
+    loaded model, can hold off another model's load for as long as they
+    keep coming: each drain is given up before the call ends. One long
+    call delays the other model by about its own length.
   - A background slot a brain never gives back holds off every drain on
     that server until the broker takes it back at `lease_s` (900 s unset):
     the broker can't tell it from a long call, and never loads a model
@@ -602,9 +614,10 @@ bun --no-env-file deploy/federated/federated.ts down
   each brain's connections, and any server over its slots, at most once a
   minute. For a server with `ps`, it says `its loaded models read (N
   loaded): the residency rule is on` once they read, and each load it
-  drained for, at most once a minute: `not loaded, and granted after N s`
-  for background, `brain <name>'s live call to a model not loaded` for a
-  live call, and `given up` for a drain not done in 120 s. Three lines are
+  drained for, at most once a minute a brain: `not loaded, and granted to
+  brain <name> after N s` for background, `brain <name>'s live call to a
+  model not loaded` for a live call, and `given up` for a drain not done in
+  120 s. Three lines, each at most once a minute a server, are
   worth a look:
   - `left out of the residency rule until it is listed`: the model's name
     in a brain's settings may differ from the server's.
