@@ -2870,7 +2870,7 @@ const holdDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8"
 /**
  * Whether a queued file holds a copy as the hook writes one: an object whose `tool` is one the fan-out copies
  * (FANOUT_TOOLS: a mistyped one was held a week, the log saying to mint a write key that was fine — review pass 2), an
- * object `args`, an `at` that is a date, and the names the drain reads — `args.client_key`, `args.id`, `alt` — each a string or absent.
+ * object `args`, an `at` that parses as a date, and the names the drain reads — `args.client_key`, `args.id`, `alt` — each a string or absent.
  * Anything else, a hand edit or a corrupt file, is given up as one that does not parse: it threw on every drain, ahead
  * of the week's give-up, or, with no date, was never given up once a fault kept it, and every copy behind it waited
  * for good (SMD-4412). A name that is no string (`{"toString":1}`) threw wherever a template or String() met it — the
