@@ -5353,7 +5353,10 @@ without `EXECUTE` on the function is told once at the start and sweeps
 nothing; the function is `SECURITY INVOKER` over four groups' tables, so a
 role short of one of those grants meets 42501 at the first call, said with
 the grant, and the sweeps end for the process. Then re-embed (SMD-2679),
-alone, so the vectors consolidation judges neighbours by are current — only
+alone, so the vectors consolidation judges neighbours by are current —
+within its share (below): a longer backlog, a model switch's, is re-embedded
+across periods, and consolidation judges some neighbours on the old or
+unlabelled vectors meanwhile; `--reembed-share 0` re-embeds it all first — only
 when its backlog has work (rows pending or in flight under the configured
 model's own key — another process's live lease not counted — thoughts not at
 the model or with no vector, finished rows whose thought has moved;
@@ -5371,11 +5374,22 @@ never drains, since its follower pools every 15 s, and before the share it
 held extraction and consolidation the whole period: extraction ran 0 of 64
 thoughts in 240 s. At its share it gives way after the thought in hand, said,
 a model switch's backlog too, and the claim passes start; nothing is set down
-or backed off. The next idle poll reads the pools whole — no poll between
-reads re-embed's claims — so the next period begins as soon as the claim
-passes drain, re-embed first again; a one-shot run exits 1, its pool left.
-`0` is no share, alone until its pool drains, as before. Under an inflow the
-claim passes cannot drain either, re-embed waits for them. Anything else that
+or backed off. It gives way only to a claim pass with a claim pending or in
+hand: on a brain with nothing else to do it runs on until its pool drains
+(review pass 1). The next idle poll reads the pools whole, by a read of its
+own — no poll between reads re-embed's claims — so the next period begins
+once the claim passes drain and the brain is quiet, re-embed first again; a
+one-shot run exits 1, its pool left. `0` is no share, alone until its pool
+drains, as before. The turns alternate (review pass 1, the maintainer's
+choice): under an inflow the claim passes' pools never drain either —
+extraction's follower pools every 15 s too — and with a share one way only no
+vector came until the inflow stopped (131-202 s late over a 5-minute inflow,
+main 15 s). So under `--follow`, once the claim passes have run as long as
+the share with re-embed's pool not drained, they stop after the thoughts in
+hand and the period ends ("the claim passes have had their turn"), and the
+next re-embeds first. Each turn is a period — its re-derive sweep, the claim
+passes' start probes and consolidation's join decided again. A one-shot
+run's claim passes run until they drain. Anything else that
 ends it sets it down for that period — refused (a key, credit, the model not served, the egress policy, a
 refusal mid-pass), its provider not answering — said, on the row (`aside`,
 its kind; a thrown error's reason in the log), and the other passes run on;
@@ -5472,7 +5486,7 @@ instead means recreating `sleep` (and `api`): the scheduler reads its
 environment once.
 **Unlabelled vectors:** a brain from before migration 021 carries vectors
 with no model, and its first periods re-embed and label them, one embedding
-call a row, before they extract; the start line and `--dry-run` count them
+call a row, up to `--reembed-share` of each before they extract; the start line and `--dry-run` count them
 (a later period's line counts only rows not yet claimed, so follow the
 `re-embed pass` row), and `reembed.ts --dry-run` before upgrading says how
 many. Then extraction alone until its

@@ -29099,44 +29099,116 @@ if (want("38p")) await (async () => {
         `a period begun just past the back-off's end, after a pause: a try, left waiting, its limit backing off 60 s — the back-off read on the scheduler's clock, not on re-embed's, which the pause holds behind (${told(manTryLines) || "nothing said"}${manTry ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
     }
 
-    // A steady inflow of thoughts with no vector (SMD-4384): one every 200 ms, each embedding 300 ms, so re-embed's pool
-    // never drains, and before the share it ran alone the whole period, extraction never starting (0 of 64 in 240 s at
-    // the shipped settings). Its share at 3 s: it gives way, extraction takes a note while the inflow goes on, and once
-    // the inflow ends the periods after re-embed every thought, each begun by the whole read the share's end asks for
-    // — re-embed's own claims are read by no idle poll — never set down.
+    // A steady inflow of thoughts with no vector (SMD-4384): one every 300 ms, each embedding 400 ms and each extraction
+    // 400 ms, so neither re-embed's pool nor extraction's ever drains. Before the share re-embed ran alone the whole
+    // period, extraction never starting (0 of 64 in 240 s at the shipped settings); with a one-way share (review pass 1's
+    // run) the claim passes then ran until the inflow stopped, a vector 131-202 s late. A 3 s share, the turns
+    // alternating (the maintainer's choice): re-embed gives way, extraction takes a note, the claim passes' turn ends the
+    // period, and the next re-embeds a thought captured after the first give-way — all while the inflow goes on; once it
+    // ends, every thought gets its vector, never set down.
     {
-      const SHARE = /^ {2}re-embed has had its share of the period — ([\d.]+) s alone(?:, besides \d+ s isolating outages)? — (\d+) thought\(s\) left for the next period, which begins once the claim passes drain — extracting$/;
-      sw.embedSlowMs = 300;
+      const SHARE = /^ {2}re-embed has had its share of the period — ([\d.]+) s alone(?:, besides \d+ s isolating outages)? — (\d+) thought\(s\) left for the next period, which begins once the claim passes drain or have had their turn — extracting$/;
+      const TURN = /^ {2}the claim passes have had their turn — ([\d.]+) s — with (\d+) thought\(s\) waiting for re-embed: the period ends after the thoughts in hand, and the next re-embeds first$/;
+      sw.embedSlowMs = 400;
+      sw.slowExtract = 400;
       const inflow: string[] = [];
       let flowing = true;
       const flow = (async () => {
         for (let i = 0; flowing; i++) {
           inflow.push(await vectorless(`An inflow note with no vector, number ${i}.`));
-          await Bun.sleep(200);
+          await Bun.sleep(300);
         }
       })();
       const shareMeanwhile = await capture("A note extraction takes while vectorless thoughts keep arriving.", "sync-sleep", 0, 33);
-      let gave = false, extractedInFlow = false, flowed = 0, vectored = 0, shareCode = -9, downSaid = false;
+      let gave = false, extractedInFlow = false, turned = false, laterVectored = false, flowed = 0, vectored = 0, shareCode = -9, downSaid = false;
       const shareStop = follow({ reembedShareMs: 3000 });
       try {
         try {
           gave = await pollUntil(async () => lines.some((l) => SHARE.test(l)), 30_000);
+          // The thoughts captured from the first give-way on: one re-embedded while the inflow goes on is a turn back.
+          const after = inflow.length;
           extractedInFlow = gave && await pollUntil(() => exSucceeded(shareMeanwhile), 20_000);
+          turned = extractedInFlow && await pollUntil(async () => lines.some((l) => TURN.test(l)), 30_000);
+          laterVectored = turned && await pollUntil(async () => (await allAtEmbed(inflow.slice(after))) > 0, 30_000);
         } finally {
           flowing = false;
           await flow;
         }
         flowed = inflow.length;
-        await pollUntil(async () => (vectored = await allAtEmbed(inflow)) === inflow.length, 60_000);
+        await pollUntil(async () => (vectored = await allAtEmbed(inflow)) === inflow.length, 120_000);
       } finally {
         sw.embedSlowMs = 0;
+        sw.slowExtract = 0;
         downSaid = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
         shareCode = await shareStop();
       }
-      const periods = lines.filter((l) => /^ {2}working:/.test(l)).length;
       const shareLine = lines.find((l) => SHARE.test(l)) ?? "";
-      assert(gave && SHARE.exec(shareLine)?.[1] === "3" && Number(SHARE.exec(shareLine)?.[2]) > 0 && extractedInFlow && vectored === flowed && periods >= 2 && !downSaid && shareCode === 0,
-        `a steady inflow of thoughts with no vector, re-embed's pool never drained: at its 3 s share it gives way, said with what it leaves, extraction takes a note while the inflow goes on, and the periods after re-embed every thought, never set down (gave way ${gave}: ${shareLine.trim().slice(0, 160)}; extracted during the inflow ${extractedInFlow}; ${vectored} of ${flowed} re-embedded; ${periods} period(s); set down ${downSaid}; exit ${shareCode}${gave && extractedInFlow && vectored === flowed ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      const turnLine = lines.find((l) => TURN.test(l)) ?? "";
+      assert(gave && SHARE.exec(shareLine)?.[1] === "3" && Number(SHARE.exec(shareLine)?.[2]) > 0 && extractedInFlow && turned && TURN.exec(turnLine)?.[1] === "3" && laterVectored && vectored === flowed && !downSaid && shareCode === 0,
+        `a steady inflow of thoughts with no vector, neither re-embed's pool nor extraction's ever drained: the turns alternate — re-embed gives way at its 3 s share, extraction takes a note, the claim passes' 3 s turn ends the period and the next re-embeds a thought captured after the give-way, all while the inflow goes on — and once it ends every thought gets its vector, never set down (gave way ${gave}: ${shareLine.trim().slice(0, 140)}; extracted during the inflow ${extractedInFlow}; turn ${turned}: ${turnLine.trim().slice(0, 140)}; a later thought re-embedded during the inflow ${laterVectored}; ${vectored} of ${flowed} re-embedded; set down ${downSaid}; exit ${shareCode}${gave && turned && laterVectored && vectored === flowed ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+
+      // Review pass 1 (cold read): a share spent with no claim pass's work waiting gives way to nothing — re-embed runs on
+      // until its pool drains. Ten thoughts with no vector at 300 ms each, about 3 s, past a 1 s share, every other
+      // pass's pending claim taken as done — theirs and what the rows above left (thought_work_claims is no audited
+      // table, so nothing pauses): one period, drained, no share.
+      sw.embedSlowMs = 300;
+      const alone: string[] = [];
+      for (let i = 0; i < 10; i++) alone.push(await vectorless(`A note with no vector and nothing else to do, number ${i}.`));
+      await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+      const othersLeft = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type <> ${EMBED_JOB} AND status IN ('pending', 'claimed')`)[0].c);
+      let aloneDone = false, aloneCode = -9;
+      const aloneStop = follow({ reembedShareMs: 1000 });
+      try {
+        aloneDone = await pollUntil(async () => (await allAtEmbed(alone)) === alone.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 30_000);
+      } finally {
+        sw.embedSlowMs = 0;
+        aloneCode = await aloneStop();
+      }
+      const aloneShared = lines.some((l) => SHARE.test(l));
+      assert(othersLeft === 0 && aloneDone && !aloneShared && aloneCode === 0,
+        `a share spent with no claim pass's work waiting: re-embed runs on until its pool drains, never giving way to nothing (${othersLeft} other claim(s) left; drained ${aloneDone}; gave way ${aloneShared}; exit ${aloneCode}${aloneDone && !aloneShared ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+
+      // Review pass 1 (cold read): the share does not count re-embed's isolation of an outage. A thought crashing the
+      // provider 4 s a crash, scaled as the oleander row, four waits of about 4 s, a note waiting for extraction; once
+      // the thought is recorded failed, eight more with no vector at 300 ms each, so re-embed has work past the
+      // isolation's end. Past an 8 s share by its waits alone (about 18 s), not by the rest (about 4 s): re-embed fails
+      // the thought, re-embeds the eleven and drains, the share never spent. Counted, the share was spent at the first
+      // poll after the isolation, the eight left.
+      {
+        const restoreShared = shortenOutage(500, 30_000);
+        sw.embedCrashOn = "hellebore";
+        sw.embedCrashMs = 4000;
+        sw.embedCrashes = 0;
+        const crasher = await vectorless("A hellebore note whose embedding keeps the provider down 4 s a crash.");
+        const crasherBehind: string[] = [];
+        // Neither names the crashing word: an embedding of either would crash the provider too.
+        for (let i = 1; i <= 3; i++) crasherBehind.push(await vectorless(`A note pooled behind the one whose share test crashes, number ${i}.`));
+        await poolFirst(crasher, crasherBehind);
+        await capture("A note extraction waits for while re-embed isolates the crashing one.", "sync-sleep", 0, 35);
+        let isoDone = false, isoClaim: Awaited<ReturnType<typeof reClaim>>, isoCode = -9;
+        const isoAfter: string[] = [];
+        // Slow from the start, so the three behind still hold re-embed when the eight come.
+        sw.embedSlowMs = 300;
+        const isoStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 12_000, reembedThoughtPeriodMs: 24_000, reembedShareMs: 8000 });
+        try {
+          if (await pollUntil(async () => (await reClaim(crasher))?.status === "failed", 60_000)) {
+            for (let i = 1; i <= 8; i++) isoAfter.push(await vectorless(`A note with no vector come after the isolation, number ${i}.`));
+            isoDone = await pollUntil(async () => (await allAtEmbed([...crasherBehind, ...isoAfter])) === crasherBehind.length + isoAfter.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 60_000);
+          }
+          isoClaim = await reClaim(crasher);
+        } finally {
+          sw.embedCrashOn = null;
+          sw.embedCrashMs = 0;
+          sw.embedCrashUntil = 0;
+          sw.embedSlowMs = 0;
+          isoCode = await isoStop();
+          restoreShared();
+        }
+        const isoShared = lines.some((l) => SHARE.test(l));
+        const isoDown = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+        assert(isoDone && isoClaim?.status === "failed" && !isoShared && !isoDown && isoCode === 0,
+          `an isolation longer than the share: its waits and retries not counted, re-embed fails the crashing thought, re-embeds the three behind it and the eight come after the isolation and drains, the share never spent, never set down (done ${isoDone}; ${JSON.stringify(isoClaim)}; gave way ${isoShared}; set down ${isoDown}; ${sw.embedCrashes} crash(es); exit ${isoCode}${isoDone && !isoShared ? "" : `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
     }
   } finally {
     sw.embedCrashOn = null;

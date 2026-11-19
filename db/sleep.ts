@@ -108,7 +108,10 @@
  * those grants meets 42501 at the first call instead, said with the grant,
  * and the sweeps end for the process. Then the passes, in a fixed
  * order. Re-embed first (SMD-2679 PR 4b), alone, so the vectors consolidation
- * judges neighbours by are current: only when its backlog has work — rows
+ * judges neighbours by are current — within its share, below: a backlog
+ * longer than that, a model switch's, is re-embedded across periods, and
+ * consolidation judges some neighbours on the old vectors meanwhile — only
+ * when its backlog has work — rows
  * pending or in flight under the configured model's own key, thoughts not at
  * the model, finished rows whose thought has moved (reembed.ts's
  * reembedBacklog; another process's live lease, which its follower would not
@@ -126,11 +129,21 @@
  * passes the whole period. It gives way after the thought in hand, said, a
  * model switch's backlog too, and the claim passes start; nothing set down,
  * nothing backed off. What it leaves begins the next period: the next idle
- * poll reads the pools whole, where re-embed's own claims are read by no
- * poll between, so the next period begins as soon as the claim passes drain,
+ * poll reads the pools whole, by a read of its own — re-embed's claims are
+ * read by no poll between, and the rescan's clock is left be — so the next
+ * period begins once the claim passes drain and the brain is quiet,
  * re-embed first again. A one-shot run exits 1, its pool left, as at a
- * set-down. 0 is no share: alone until its pool drains, as before. Under an
- * inflow the claim passes cannot drain either, re-embed waits for them. Anything else that ends it sets it down for that period —
+ * set-down. 0 is no share: alone until its pool drains, as before. It gives
+ * way only to a claim pass with a claim pending or in hand, so on a brain
+ * with nothing else to do it runs on until its pool drains (review pass 1).
+ * The turns alternate (review pass 1, the maintainer's choice): under an
+ * inflow the claim passes' pools never drain either — extraction's follower
+ * pools every 15 s too — so under --follow, once they have run as long as the
+ * share with re-embed's pool not drained, they stop after the thoughts in
+ * hand and the period ends, and the next re-embeds first: each side its
+ * share in turn, each turn a new period, its re-derive sweep, its claim
+ * passes' start probes and consolidation's join decided again. A one-shot
+ * run's claim passes run until they drain. Anything else that ends it sets it down for that period —
  * refused at its start (a key, credit, the model not served, the egress
  * policy) or mid-pass (the provider refusing the request itself), its
  * provider not answering (the embedding endpoint can be down while chat
@@ -595,7 +608,11 @@ export const REEMBED_THOUGHT_WAIT_MS = 120_000;
  * the maintainer's choices of 2026-11-19: a share of the period, by time, 120 s, a model switch's backlog included):
  * --reembed-share, OB1_SLEEP_REEMBED_SHARE; 0 for none, alone until its pool drains as before. On re-embed's clock, a
  * live write's pause not counted, nor its isolation of an outage that made a thought a suspect, which
- * REEMBED_THOUGHT_PERIOD_MS caps on its own, so the claim passes are held at most the two together. About 400 vectors
+ * REEMBED_THOUGHT_PERIOD_MS caps on its own, so the claim passes are held about the two together — besides re-embed's
+ * start (its probe, a model loading) and the thought in hand as it gives way. It gives way only to a claim pass with
+ * a claim pending or in hand: with none, re-embed runs on until its pool drains (review pass 1). The claim passes'
+ * turn is as long under --follow: past it with re-embed's pool not drained, the period ends and the next re-embeds
+ * first (review pass 1, the maintainer's choice: alternate turns). About 400 vectors
  * at 0.3 s each; under a steady inflow of thoughts with no vector, re-embed's pool never drains (its follower pools
  * every 15 s), and without a share extraction ran 0 of 64 thoughts in 240 s (SMD-4384's measurement).
  */
@@ -748,7 +765,7 @@ const PASS_STOP_LINE = /^\s*(stopping after the current thought|second signal �
 
 /**
  * The four passes, in their order: re-embed first, so the vectors consolidation judges neighbours by are current
- * (SMD-2679 PR 4b); the subject sweep last, beside consolidation (SMD-3306 PR 6b-2).
+ * (SMD-2679 PR 4b), within its share of a period (SMD-4384); the subject sweep last, beside consolidation (SMD-3306 PR 6b-2).
  */
 const PASSES = ["reembed", "extract", "consolidate", "subjects"] as const;
 type PassName = (typeof PASSES)[number];
@@ -1500,7 +1517,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   if (startedAt === null) { err(STOPPED_EARLY); return 130; }
   out(`  work:   a period begins once a pass has work — a claim pending or in hand, read each poll, or its pools read whole every ${RESCAN} s and once a vector comes — and no live write has landed for ${CAPTURE} s; a live write is one in thought_audit but sync's (actor_kind 'ingested') and the vector mender's (marked background), and a search is none`);
   out(`  pause:  in a period, a live write pauses the passes between thoughts, windows and pairs until ${CAPTURE} s with none, a call in hand past ${ABORT_AFTER_MS / 1000} s aborted meanwhile; the period ends once its pools drain`);
-  if (REEMBED_OK) out(`  share:  re-embed runs alone first in a period, ${REEMBED_SHARE > 0 ? `at most ${REEMBED_SHARE / 1000} s of it — a pause and its isolation of an outage not counted — then gives way to the claim passes, what it leaves the next period's` : "until its pool drains (--reembed-share 0)"}`);
+  if (REEMBED_OK) out(`  share:  re-embed runs alone first in a period, ${REEMBED_SHARE > 0 ? `at most ${REEMBED_SHARE / 1000} s of it — a pause and its isolation of an outage not counted — then gives way to the claim passes while they have work, what it leaves ${FOLLOW ? "the next period's" : "the next run's"}${FOLLOW ? `; they run as long, and with re-embed's pool not drained the period ends and the next re-embeds first` : ""}` : "until its pool drains (--reembed-share 0)"}`);
   out(`  budget: ${budgetWords({ minutes: 0, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: 0 })}${n.statementTimeout ? " — a statement past it holds its pass until a restart" : ""}`);
   if (opts.maxWait !== undefined) out(`  order:  among this process's calls waiting for a share of a model server's slots, consolidation's go first, and a call queued ${opts.maxWait} s goes first at the next turn, after older ones that go first; not a timeout`);
   if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
@@ -2504,6 +2521,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /** When the idle scheduler last read its work whole on the rescan's clock (Date.now()), 0 for never: the rescan counts from it (PR 1c-4b); a read a vector brought forward is not counted (PR 1d). */
   let lastWhole = 0;
   /**
+   * The next idle poll reads the work whole, once, apart from the rescan's clock: re-embed gave way at its share with
+   * its pool left (SMD-4384), which no claim read sees — `workClaimed` skips re-embed — so it would wait for the rescan.
+   */
+  let wholeNext = false;
+  /**
    * Where the last whole read stood on the vectors come (PR 1d), null before
    * the first: an idle poll with one come since reads the work whole, at most
    * once a VECTOR_FLOOR_MS after the end of the last whole read or a period's
@@ -2687,7 +2709,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         ? await reading(() => vectorCome(sql, mark, WAKE_SLACK)) : { came: false, mark };
       if (come === null) return null;
       vectorsAt = come.mark;
-      const whole: boolean = due || come.came;
+      const whole: boolean = due || come.came || wholeNext;
+      wholeNext = false;
       // The mark taken before the whole read, so a vector committed during it is read again at the next poll.
       const read: boolean | null = await reading(whole ? async () => {
         const at = await vectorMark(sql, WAKE_SLACK);
@@ -2897,7 +2920,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   let sleptUntil = new Date(0);
   /**
    * A work period from `since` (SMD-3379 PR 1c-4b): the re-derive sweep, then re-embed
-   * alone while it has work, then extraction alone until its pool drains,
+   * alone while it has work, for its share at most (SMD-4384), then extraction alone until its pool drains,
    * then consolidation beside it and the subject sweep beside that (SMD-3306
    * PR 6b-2), a live write pausing them. Returns one of:
    * "woken" on a live write during the re-derive sweep; "done" once its pools drain, or
@@ -2996,6 +3019,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let reorders = await stoppedLast();
     let consolidating = false;
     /**
+     * When the claim passes began this period, on re-embed's clock (a pause not counted), null until they do; and when
+     * re-embed's pool may next be read for their turn's end (SMD-4384 review pass 1, the maintainer's choice:
+     * alternate turns).
+     */
+    let claimsFrom: number | null = null;
+    let turnReadAt = 0;
+    /**
      * Extraction set aside while consolidation goes first (review pass 5):
      * when extraction holds only stalled thoughts, starting it would claim one
      * at once, and on a one-slot model its window held the slot the judge
@@ -3052,6 +3082,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     };
     /** The claim passes' first start, as each sleep's was before re-embed ran first: false when a stop landed during its read. */
     const startClaims = async (): Promise<boolean> => {
+      // Their turn begins (SMD-4384 review pass 1).
+      claimsFrom ??= reembedClock();
       // Extraction held by a statement past its timeout (N9): consolidation alone, unless held too (PR 1c-4b).
       if (statementHeld.has("extract")) {
         if (!statementHeld.has("consolidate")) {
@@ -3466,7 +3498,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         claimsDue = false;
         if (!(await startClaims())) return stopped();
       }
-      // Re-embed alone first: once its pool drains, or while its provider
+      // Re-embed alone first: once its pool drains, or its share is spent with
+      // a claim pass's work waiting (SMD-4384), or while its provider
       // does not answer — the embedding endpoint can be down while chat
       // serves — it stops after the thought in hand and the claim passes
       // start as they would have; it tries again at the next period. But a
@@ -3501,8 +3534,17 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         // OB1_LLM_TIMEOUT each.
         const capBetween = pastPeriod && !waits;
         // Its share of the period spent (SMD-4384): on re-embed's clock from its start, its isolation not counted, and
-        // never mid-isolation, which its own limits end; it gives way after the thought in hand.
-        const shareSpent = REEMBED_SHARE > 0 && !drained(rp) && !waits && reembedIsolation === null && now - reembedFrom - isolatedMs(now) >= REEMBED_SHARE;
+        // never mid-isolation, which its own limits end; it gives way after the thought in hand — and only to a claim
+        // pass with a claim pending or in hand, one index read a pass (review pass 1: on a brain with nothing else to
+        // do, a model switch's backlog stopped every share for nothing, each round starting the claim passes, their
+        // probes, the period's end reads and the next period's sweep and re-embed start).
+        const shareDue = REEMBED_SHARE > 0 && !drained(rp) && !waits && reembedIsolation === null && now - reembedFrom - isolatedMs(now) >= REEMBED_SHARE;
+        const others = shareDue
+          ? await reading(async () => (!statementHeld.has("extract") && (await claimsBusy("extract"))) || (!statementHeld.has("consolidate") && (await claimsBusy("consolidate")))
+            || (subjectsRuns() && (await claimsBusy("subjects", subjectsBound ?? undefined, since.at))))
+          : false;
+        if (others === null) return stopped();
+        const shareSpent = shareDue && others;
         if (drained(rp) || (waits && !leftWaiting) || capBetween || shareSpent) {
           // The call or probe in hand aborted first, so the set-down does not wait out its timeout (review pass 2), and
           // said aborted only when one was (review pass 3: said with nothing in hand).
@@ -3532,11 +3574,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           } else if (shareSpent) {
             // Its pool left, as at a set-down (a one-shot run exits 1), but nothing set down: the next idle poll reads
             // the pools whole — no poll between reads re-embed's claims — so the next period begins once the claim
-            // passes drain, re-embed first again (SMD-4384).
+            // passes drain, re-embed first again (SMD-4384); by a read of its own, not the rescan's, whose clock and
+            // re-arm of a set-down pass it leaves be (review pass 1). An outage met as it stops — a wait begun after
+            // this poll's reads — leaves its suspects behind the pool, not at its front (review pass 1).
             reembedLeft = true;
-            lastWhole = 0;
+            wholeNext = true;
+            behind = true;
             const isolated = isolatedMs(now);
-            out(`  re-embed has had its share of the period — ${REEMBED_SHARE / 1000} s alone${isolated > 0 ? `, besides ${Math.round(isolated / 1000)} s isolating outages` : ""} — ${rp.pending + rp.claimed + rp.unpooled} thought(s) left for the next period, which begins once the claim passes drain — extracting`);
+            out(`  re-embed has had its share of the period — ${REEMBED_SHARE / 1000} s alone${isolated > 0 ? `, besides ${Math.round(isolated / 1000)} s isolating outages` : ""} — ${rp.pending + rp.claimed + rp.unpooled} thought(s) left for ${FOLLOW ? "the next period, which begins once the claim passes drain or have had their turn" : "the next run: this one runs the claim passes until they drain, then exits 1"} — extracting`);
           }
           if (await endReembed()) return stopped();
           endIsolation();
@@ -3552,6 +3597,27 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         }
         await sleepUnless(POLL * 1000, wake);
         continue;
+      }
+      // The claim passes' turn (SMD-4384 review pass 1, the maintainer's choice of 2026-11-19: alternate turns). Under a
+      // steady inflow their pools never drain either — extraction's follower pools every 15 s too — so the period never
+      // ended, and re-embed, once it had given way, waited for the inflow to stop (review pass 1's run: vectors 131-202
+      // s late over a 5-minute inflow, main 15 s). Once they have run the share on re-embed's clock with re-embed's
+      // pool not drained — read at most once a share — they stop after the thoughts in hand and the period ends; the
+      // next begins at the next idle poll, re-embed first. Under --follow alone: a one-shot run's one period runs its
+      // claim passes until they drain. Not while re-embed is set down, aside or held.
+      if (FOLLOW && REEMBED_SHARE > 0 && claimsFrom !== null && reembedRuns()) {
+        const at = reembedClock();
+        if (at - claimsFrom >= REEMBED_SHARE && at >= turnReadAt) {
+          const rp = await reading(reembedPool);
+          if (rp === null) return stopped();
+          if (!drained(rp)) {
+            out(`  the claim passes have had their turn — ${REEMBED_SHARE / 1000} s — with ${rp.pending + rp.claimed + rp.unpooled} thought(s) waiting for re-embed: the period ends after the thoughts in hand, and the next re-embeds first`);
+            wholeNext = true;
+            await stopPasses(false);
+            return "done";
+          }
+          turnReadAt = at + REEMBED_SHARE;
+        }
       }
       // The pools decide when consolidation joins, when extraction resumes
       // after it, and when one period is done — so a --follow consolidating

@@ -2470,7 +2470,8 @@ a pass has work and no live call has landed for `OB1_SLEEP_CAPTURE` seconds
 vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
 on a brain the server embeds at its own model, so no embedding call) — alone
 until its pool drains or for `OB1_SLEEP_REEMBED_SHARE` seconds of the period
-(unset, 120; SMD-4384), what it leaves the next period's — then
+(unset, 120; SMD-4384), what it leaves the next period's, which begins once
+the claim passes drain or have run as long — then
 extraction, and
 consolidation beside it once extraction's pool is drained, so the backlog
 order above is built in. Beside consolidation runs the subject sweep
@@ -2527,8 +2528,9 @@ down sets it down for
 that period, said in its log and on `heartbeat:sleep`, and the other passes
 run on; the next period tries again. **Upgrading a
 brain from before migration 021:** its unlabelled vectors are re-embedded and
-labelled by the first periods, one embedding call a row, before extraction;
-`bun db/reembed.ts --dry-run` says how many first. A brain recording another
+labelled by the first periods, one embedding call a row, up to
+`OB1_SLEEP_REEMBED_SHARE` (120 s) of each before extraction (0 re-embeds them
+all first); `bun db/reembed.ts --dry-run` says how many first. A brain recording another
 embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
 it can print the model names), and the others run on: run
@@ -2618,12 +2620,18 @@ its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER`
 its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
 `OB1_SLEEP_REEMBED_SHARE` (0–86400, unset 120: the most re-embed runs alone
-first in a period before it gives way to extraction and consolidation, a
-pause and its isolation of an outage not counted; the next period begins once
-they drain, re-embed first again. Under a steady inflow of thoughts with no
-vector — an egress policy keeping captures from a remote embedding provider,
-a slow provider, a bulk import — its pool never drains, and without the share
-nothing was extracted; 0 runs it alone until its pool drains, as before
+first in a period before it gives way to extraction and consolidation —
+only when they have work — a pause and its isolation of an outage not
+counted; and they run as long in turn: past it, with re-embed's pool not
+drained, they stop after the thoughts in hand and the period ends — or once
+they drain — and the next begins once the brain is quiet, re-embed first
+again. Under a steady inflow of thoughts with no vector — an egress policy
+keeping captures from a remote embedding provider, a slow provider, a bulk
+import — neither pool drains: without the share nothing was extracted, and
+with a share one way only no vector came until the inflow stopped. Each turn
+is a period, its re-derive sweep and the claim passes' start probes again. A backlog longer than the share, a model switch's, is
+re-embedded across periods, consolidation judging some neighbours on the old
+vectors meanwhile; 0: no share, alone until its pool drains, as before
 SMD-4384), `OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: among the scheduler's own calls
 waiting for a share of a model server's slots, consolidation's go first, and
 one queued this long goes first at the next turn — as the call ahead of it
@@ -2676,8 +2684,11 @@ new key — is the scheduler's first period once the coordinator is back,
 its start reading the work whole. An embedding model change
 (`OB1_EMBEDDING_MODEL`) is `reembed.ts --switch-model`'s, run the same way:
 until it records the new model, `sleep` sets its re-embed pass aside and says
-so, and once it has, a period re-embeds whatever the switch left unfinished
-(SMD-2679) — unless the new name is one its heartbeat row cannot carry (ASCII
+so, and once it has, the periods re-embed whatever the switch left unfinished
+(SMD-2679), up to `OB1_SLEEP_REEMBED_SHARE` (120 s) of each while extraction
+or consolidation has work (SMD-4384), so consolidation judges some neighbours
+on the old model's vectors until the backlog is done —
+`OB1_SLEEP_REEMBED_SHARE=0` re-embeds it all first — unless the new name is one its heartbeat row cannot carry (ASCII
 letters, digits and `. _ : @ / + -`, `<name>@<width>` at most 120 characters),
 which keeps re-embed out of sleep: then `reembed.ts` run by hand finishes it
 (SMD-3486).
