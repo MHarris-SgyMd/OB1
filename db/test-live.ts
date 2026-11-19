@@ -28596,7 +28596,7 @@ if (want("38r")) {
 // and 3); each wait is probed on a fixed interval, nothing carried between them. Its body a function's, as [26]'s: the
 // module body is at TS2563's limit for control-flow analysis.
 if (want("38p")) await (async () => {
-  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated; under a steady inflow of thoughts with no vector re-embed and the claim passes take turns in the one period, each handing over sooner once caught up, a re-embed set down for an outage tried again at a turn's end, and re-embed's turns re-embed every thought (SMD-4384)");
+  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated; under a steady inflow of thoughts with no vector, re-embed and the claim passes take turns in the one period, each handing over sooner once caught up, a re-embed set down for an outage tried again at a turn's end, and re-embed's turns re-embed every thought (SMD-4384)");
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, EMBED_JOB, modelCalls, sw, env, capture, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
   // Every wait probes once a second (the scheduler's fixed probe, reembedThoughtProbeMs, at 1 s, and OUTAGE_MS for the
@@ -29103,7 +29103,7 @@ if (want("38p")) await (async () => {
     }
 
     // A steady inflow of thoughts with no vector (SMD-4384): one every 300 ms, each embedding 400 ms and each extraction
-    // 400 ms, so neither re-embed's pool nor extraction's ever drains. Before the share re-embed ran alone the whole
+    // 400 ms, so neither re-embed's pool nor extraction's ever drains. Before the share, re-embed ran alone the whole
     // period, extraction never starting (0 of 64 in 240 s at the shipped settings); with a one-way share (review pass 1's
     // run) the claim passes then ran until the inflow stopped, a vector 131-202 s late. A 3 s share, the turns
     // alternating (the maintainer's choice): re-embed gives way, extraction takes a note, the claim passes' turn ends and
@@ -29113,6 +29113,7 @@ if (want("38p")) await (async () => {
     {
       const SHARE = /^ {2}re-embed has had its share — ([\d.]+) s alone(?:, besides \d+ s isolating outages)? — (\d+) thought\(s\) left for its next turn, once the claim passes have had theirs or drained — extracting$/;
       const TURN = /^ {2}the claim passes have had their turn — ([\d.]+) s — with (\d+) thought\(s\) waiting for re-embed: they wait between thoughts while re-embed runs alone again$/;
+      const RETRIED = /^ {2}re-embed, set down earlier in this period \([a-z-]+\), is tried again at the claim passes' turn's end$/;
       sw.embedSlowMs = 400;
       sw.slowExtract = 400;
       const inflow: string[] = [];
@@ -29196,11 +29197,11 @@ if (want("38p")) await (async () => {
         `a share spent with no claim pass's work waiting: re-embed runs on until its pool drains, never giving way to nothing (${othersLeft} other claim(s) left; drained ${aloneDone}; gave way ${aloneShared}; exit ${aloneCode}${aloneDone && !aloneShared ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
 
       // Review pass 1 (cold read): the share does not count re-embed's isolation of an outage. A thought crashing the
-      // provider 4 s a crash, scaled as the oleander row, four waits of about 4 s, a note waiting for extraction; once
-      // the thought is recorded failed, eight more with no vector at 300 ms each, so re-embed has work past the
-      // isolation's end. Past an 8 s share by its waits alone (about 18 s), not by the rest (about 4 s): re-embed fails
-      // the thought, re-embeds the eleven and drains, the share never spent. Counted, the share was spent at the first
-      // poll after the isolation, the eight left.
+      // provider 4 s a crash, three pooled behind it, scaled as the oleander row, four waits of about 4 s, a note
+      // waiting for extraction; once the thought is recorded failed, eight more with no vector at 300 ms each, so
+      // re-embed has work past the isolation's end. Past an 8 s share by its waits alone (about 18 s), not by the rest
+      // (about 4 s): re-embed fails the thought, re-embeds the eleven and drains, the share never spent. Counted, the
+      // share was spent at the first poll after the isolation, the eight left.
       {
         const restoreShared = shortenOutage(500, 30_000);
         sw.embedCrashOn = "hellebore";
@@ -29208,7 +29209,7 @@ if (want("38p")) await (async () => {
         sw.embedCrashes = 0;
         const crasher = await vectorless("A hellebore note whose embedding keeps the provider down 4 s a crash.");
         const crasherBehind: string[] = [];
-        // Neither names the crashing word: an embedding of either would crash the provider too.
+        // None of the three names the crashing word: an embedding of any would crash the provider too.
         for (let i = 1; i <= 3; i++) crasherBehind.push(await vectorless(`A note pooled behind the one whose share test crashes, number ${i}.`));
         await poolFirst(crasher, crasherBehind);
         await capture("A note extraction waits for while re-embed isolates the crashing one.", "sync-sleep", 0, 35);
@@ -29282,12 +29283,11 @@ if (want("38p")) await (async () => {
       }
 
       // Review pass 2's run: a re-embed set down at a turn's start — its endpoint not answering — is tried again at the
-      // claim passes' whole turn's end, as a period's start would, where it stayed down while the inflow went on, the
+      // claim passes' whole turn's end, as a period's start would; before, it stayed down while the inflow went on, the
       // period never ending, and no vector came until the inflow stopped. A thought with no vector every 300 ms,
       // embeddings and extractions 400 ms (neither side keeps up), a 3 s share; the endpoint down from the first
       // give-way until re-embed is set down, then back.
       {
-        const RETRIED = /^ {2}re-embed, set down earlier in this period \([a-z-]+\), is tried again at the claim passes' turn's end$/;
         sw.embedSlowMs = 400;
         sw.slowExtract = 400;
         const flowedB: string[] = [];
@@ -29378,7 +29378,6 @@ if (want("38p")) await (async () => {
       // and not while SMD-4254's back-off sets such an outage down at once — a crashing thought claimed again at each
       // turn crashed the provider every two minutes — nor for a refusal, which the next period or the rescan tries.
       {
-        const RETRY = /^ {2}re-embed, set down earlier in this period \([a-z-]+\), is tried again at the claim passes' turn's end$/;
         /** Fifteen notes for extraction at 500 ms each, about 7.5 s of the claim passes' work, past several 2 s turns. */
         const extractWork = async (word: string) => {
           sw.slowExtract = 500;
@@ -29397,7 +29396,7 @@ if (want("38p")) await (async () => {
         try {
           boLimit = await pollUntil(async () => lines.some((l) => PAST_BOUND.test(l)), 30_000);
           if (boLimit) await Bun.sleep(8000);
-          boTried = lines.some((l) => RETRY.test(l));
+          boTried = lines.some((l) => RETRIED.test(l));
         } finally {
           sw.embedCrashOn = null;
           sw.embedCrashLeft = null;
@@ -29416,7 +29415,7 @@ if (want("38p")) await (async () => {
         try {
           keyLimit = await pollUntil(async () => lines.some((l) => /re-embed set down for this period — the embedding provider refused it/.test(l)), 20_000);
           if (keyLimit) await Bun.sleep(8000);
-          keyTried = lines.some((l) => RETRY.test(l));
+          keyTried = lines.some((l) => RETRIED.test(l));
         } finally {
           sw.embedKeyRefused = false;
           sw.slowExtract = 0;

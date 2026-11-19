@@ -2526,11 +2526,14 @@ at two polls, or the ledger moved — stops its passes and ends it with exit
 re-embed — the embedding key, credit, the model not served — or its endpoint
 down sets it down for
 that period, said in its log and on `heartbeat:sleep`, and the other passes
-run on; the next period tries again. **Upgrading a
+run on; the next period tries again, an outage's sooner at the end of
+extraction and consolidation's turn (`OB1_SLEEP_REEMBED_SHARE`, below).
+**Upgrading a
 brain from before migration 021:** its unlabelled vectors are re-embedded and
 labelled by the first periods, one embedding call a row,
 `OB1_SLEEP_REEMBED_SHARE` (120 s) at a time in turns with extraction while it
-has work (0 re-embeds them all first); `bun db/reembed.ts --dry-run` says how many first. A brain recording another
+has work (0 re-embeds them all first); `bun db/reembed.ts --dry-run` says how
+many first. A brain recording another
 embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
 it can print the model names), and the others run on: run
@@ -2635,7 +2638,7 @@ pause, either side handing over sooner once caught up, after the followers'
 15 s poll — a pause and re-embed's isolation of an outage not counted; a
 re-embed set down in the period for an outage is tried again at their whole
 turn's end; the period ends, as before, once extraction and consolidation
-drain, and what re-embed left, if they drained within a turn floor of its
+drain, and what re-embed left, if they drained within 15 s of its
 giving way, begins the next once the brain is quiet. Under a steady inflow of
 thoughts with no vector — an egress policy keeping captures from a remote
 embedding provider, a slow provider, a bulk import — neither pool drains:
@@ -2645,12 +2648,13 @@ model switch's, is re-embedded across turns, consolidation judging some
 neighbours on the old vectors meanwhile. Raise it, or set 0 — no share, no
 turns, re-embed alone until its pool drains, as before — to finish a model
 switch before consolidation judges on the new vectors; lower it to start
-extraction sooner under such an inflow; SMD-4384), `OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: among the scheduler's own calls
+extraction sooner under such an inflow; SMD-4384), `OB1_SLEEP_MAX_WAIT`
+(1–86400, unset 60: among the scheduler's own calls
 waiting for a share of a model server's slots, consolidation's go first, and
 one queued this long goes first at the next turn — as the call ahead of it
 takes its slot — after older ones that go first; not a timeout. It orders, and
 each pass's slots are the same; the order matters once the scheduler's calls queue —
-consolidation's workers two or more past the share hold the other passes to
+consolidation's workers two or more past its slots hold the other passes to
 about a call a worker a max-wait — and a lower value gives them more turns;
 SMD-3379 PR 2c-2),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
@@ -2699,12 +2703,12 @@ its start reading the work whole. An embedding model change
 until it records the new model, `sleep` sets its re-embed pass aside and says
 so, and once it has, the periods re-embed whatever the switch left unfinished
 (SMD-2679), `OB1_SLEEP_REEMBED_SHARE` (120 s) at a time in turns with
-extraction and consolidation while they have work (SMD-4384), so consolidation judges some neighbours
-on the old model's vectors until the backlog is done;
+extraction and consolidation while they have work (SMD-4384), so consolidation
+judges some neighbours on the old model's vectors until the backlog is done;
 `OB1_SLEEP_REEMBED_SHARE=0` re-embeds it all first. A new name its heartbeat
 row cannot carry (ASCII letters, digits and `. _ : @ / + -`, `<name>@<width>`
-at most 120 characters) keeps re-embed out of sleep: then `reembed.ts` run by hand finishes it
-(SMD-3486).
+at most 120 characters) keeps re-embed out of sleep: then `reembed.ts` run by
+hand finishes it (SMD-3486).
 
 Since SMD-2752 it checks each claim pass's start
 once, before its first period — not re-embed's, which each period with work

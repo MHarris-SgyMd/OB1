@@ -5406,17 +5406,19 @@ the claim passes drain: drained a turn floor or more into their turn,
 re-embed has had a turn first and, with nothing to give way to, drained;
 drained sooner, what re-embed left begins the next period, by the next idle
 poll's whole read of its own — no poll between reads re-embed's claims —
-re-embed first again, and a one-shot run exits 1, its pool left. `0` is no share and no turns, re-embed alone until its pool drains, as
-before. Anything else that
-ends re-embed sets it down for that period — refused (a key, credit, the model not served, the egress policy, a
-refusal mid-pass), its provider not answering — said, on the row (`aside`,
-its kind; a thrown error's reason in the log), and the other passes run on;
-the next period tries it again. An outage that made the thought in hand a
+re-embed first again, and a one-shot run exits 1, its pool left. `0` is no
+share and no turns, re-embed alone until its pool drains, as before. Anything
+else that ends re-embed sets it down for that period — refused (a key, credit,
+the model not served, the egress policy, a refusal mid-pass), its provider not
+answering — said, on the row (`aside`, its kind; a thrown error's reason in the
+log), and the other passes run on; the next period tries it again, or for an
+outage the claim passes' whole turn's end (above). An outage that made the
+thought in hand a
 suspect, or a suspect's alone — as when a thought's call crashes the provider —
 is waited out instead, said, the provider probed every 5 s from the wait's
 start (no doubling, nothing carried from the last wait), up to 2 minutes a wait
-and 4 minutes of isolation a re-embed turn (a period before SMD-4384; SMD-4254, the maintainer's choices of
-2026-11-18) — the isolation counted from its first such wait's start until its
+and 4 minutes of isolation a re-embed turn (a period before SMD-4384;
+SMD-4254, the maintainer's choices of 2026-11-18) — the isolation counted from its first such wait's start until its
 suspects settle, the retries' calls and probes between the waits included:
 once the provider answers, re-embed retries the outage's suspects one at a
 time and fails the thought at its third outage alone, as a `--follow` run by
@@ -5504,8 +5506,8 @@ instead means recreating `sleep` (and `api`): the scheduler reads its
 environment once.
 **Unlabelled vectors:** a brain from before migration 021 carries vectors
 with no model, and its first periods re-embed and label them, one embedding
-call a row, `--reembed-share` at a time in turns with extraction while it has work;
-the start line and `--dry-run` count them
+call a row, `--reembed-share` at a time in turns with extraction while it
+has work; the start line and `--dry-run` count them
 (a later period's line counts only rows not yet claimed, so follow the
 `re-embed pass` row), and `reembed.ts --dry-run` before upgrading says how
 many. Then extraction alone until its
