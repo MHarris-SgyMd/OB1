@@ -6489,20 +6489,25 @@ if (want("10")) {
       }
 
       // A stop ends a probe in flight: after a timeout of 4 s the probe has the
-      // call's whole timeout, and a first stop 1 s into it returns at once,
-      // where the probe would have run 3 s more (review pass 1; 8 s and 2 s into
-      // it before SMD-3196). Timed from the probe's arrival, not the claim: a
+      // call's whole timeout, and a first stop 200 ms into it returns at once,
+      // where the probe would have run some 3.5 s more (review pass 1; 8 s and
+      // 2 s into it before SMD-3196; 1 s into it, under a 2 s bound, before
+      // SMD-4399). The return is 4 to 25 ms, alone or under load, so the bound
+      // is the runner's room, not the path's: a CI runner once took 2,054 ms.
+      // Stopping sooner leaves more of the probe's 4 s for the bound to sit
+      // under, 3 s of it. Timed from the probe's arrival, not the claim: a
       // stop during the hung call takes another path, the call left to time out,
       // no probe after it and the thought recorded failed. The hang begins once
       // the start's probe has answered, so the start never meets it.
       {
         const stopProbe = new AbortController();
-        const probeLines: string[] = [];
+        // Each line with when it came: a return past the bound says what the follower said after the stop, and when (SMD-4399).
+        const probeLines: { at: number; line: string }[] = [];
         let returnedAt = 0;
         // Deleted when the case ends: left pending, it would be the one-shot run's first claim below.
         let slow = "";
         const startProbes = probes;
-        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
+        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push({ at: Date.now(), line: l }), err: (l) => probeLines.push({ at: Date.now(), line: l }) } }).then((c) => { returnedAt = Date.now(); return c; });
         try {
           // Its start's probe answered, then the settle the cases above give it (SMD-3196: a 1 s sleep stood in for both).
           await pollUntil(async () => probes > startProbes, 10_000);
@@ -6513,12 +6518,14 @@ if (want("10")) {
           const claimed = await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
           const askedBefore = probesAsked;
           const probed = await pollUntil(async () => probesAsked > askedBefore, 15_000);
-          await Bun.sleep(1000);
+          await Bun.sleep(200);
           const stoppedAt = Date.now();
           stopProbe.abort();
           const code = await probing;
-          assert(claimed && probed && code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
-                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"})`);
+          const inTime = returnedAt - stoppedAt < 3000;
+          const afterStop = probeLines.filter((l) => l.at >= stoppedAt).map((l) => `+${l.at - stoppedAt} ms ${l.line.trim().slice(0, 110)}`).join(" | ");
+          assert(claimed && probed && code === 0 && inTime && (await claimRow(slow))?.status === "pending",
+                 `a first stop during a probe after a timeout ends it: the follower returns within 3 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"}${inTime ? "" : `; after the stop: ${afterStop || "the follower said nothing"}`})`);
         } finally {
           downUntil = 0;
           stopProbe.abort();
