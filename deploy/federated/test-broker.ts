@@ -1170,7 +1170,7 @@ await withResidency([SMALL], async ({ b, ps, res }) => {
 });
 
 await withResidency([SMALL], async ({ b, lines, move, res }) => {
-  // The bounds (review pass 1). A drain waits HOLD_S on background that never ends, then grants; a load holds the
+  // The bounds (review pass 1). A drain waits HOLD_S on background that never ends, then is given up; a load holds the
   // server's other background HOLD_S, then its model is left out of the rule.
   const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
   askM(s, "stuck", SMALL, "background"); await s.next("go", "stuck");
@@ -1764,6 +1764,19 @@ await withResidency([SMALL], async ({ b, ps, move, res }) => {
   ok(!!(await c.next("go", "f3", SOON)), "and loads at 60 s");
   await c.close();
 }, { stay: 0 });
+
+await withResidency([SMALL], async ({ b, ps, res }) => {
+  // Background's load of a model ended and it never showed: a live call that loads it later begins no stay.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  askM(c, "x1", "x:1", "background"); await c.next("go", "x1");
+  { const h = ps.hits; done(c, "x1"); await until(() => ps.hits > h); await b.refresh(); }
+  askM(s, "L", "x:1", "live"); await s.next("go", "L");
+  ps.models = [SMALL, "x:1"]; await b.refresh();
+  done(s, "L"); await quiet();
+  askM(c, "k", BIG, "background", { max_wait_s: 0 });
+  ok(!!(await c.next("go", "k", SOON)), "a model a live call loaded, background's own load of it having ended unlisted before: no stay, and an ask due is drained for at once", res());
+  await s.close(); await c.close();
+});
 
 await withBroker(registry(), async (b) => {
   const c = await connect(b, KEYS.canary);

@@ -398,10 +398,12 @@ free:
   waited 24 minutes for a model background calls kept busy, and live
   embeddings queued behind it. So, for background calls only:
   - **A call for a loaded model** goes as above.
-  - **A call for a model that isn't loaded** goes at once where the server
-    has no model loaded. Otherwise it first waits out `stay_s` (60 s unset)
-    from the server's last background load, so a model that background
-    loaded stays at least that long, whatever another brain's asks say.
+  - **A call for a model that isn't loaded** is taken at once where the
+    server has no model loaded, and granted once no background runs there.
+    Otherwise it first waits out `stay_s` (60 s unset) from the end of the
+    server's last background load, which is when the list first names that
+    load's model. So a model that background loaded stays at least that
+    long, whatever another brain's asks say.
     After that it goes when either holds:
     - the loaded models are idle: no background call for 5 s and no live
       call for two minutes;
@@ -433,7 +435,7 @@ free:
       asks for by name): the call put a model out and loaded nothing. From the first such call its next load waits
       60 s more each time, up to ten minutes, and the log says so at the
       third. None of its asks is granted meanwhile. Such a load begins no
-      stay, and what it put out is asked for next, whatever its asks' age.
+      stay, and what it put out is taken for due, whatever its asks' age.
     - **Otherwise, three reads running:** it disturbs nothing, so it is
       left out of the rule until it is listed. This is a model the server
       lists under another name, or one it doesn't know. The first call of
@@ -463,8 +465,8 @@ free:
     more work.
   - Models that would all fit still load one per `stay_s`, since the broker
     can't see the server's memory. After a server unloaded three idle
-    models, they came back with work waiting at about 10, 70 and 140 s in
-    a simulation.
+    models, they came back with work waiting at 8, 68 and 136 s in a
+    simulation.
   - While live calls overlap without a gap, no background load begins on
     that server, so a backlog on a model that isn't loaded waits them out.
   - Background calls longer than two minutes, running back to back on the
@@ -613,11 +615,16 @@ bun --no-env-file deploy/federated/federated.ts down
   broker's log (`bun --no-env-file deploy/federated/federated.ts logs`) says
   each brain's connections, and any server over its slots, at most once a
   minute. For a server with `ps`, it says `its loaded models read (N
-  loaded): the residency rule is on` once they read, and each load it
-  drained for, at most once a minute a brain: `not loaded, and granted to
+  loaded): the residency rule is on` once they read (`read again` after a
+  failure, the broker starting before the model server included). It says
+  each load at most once a minute a brain: `not loaded, and granted to
   brain <name> after N s` for background, `brain <name>'s live call to a
-  model not loaded` for a live call, and `given up` for a drain not done in
-  120 s. Three lines, each at most once a minute a server, are
+  model not loaded` for a live call, and `re-registers a call to a model
+  not loaded` for one a brain says it already holds. Once a minute a
+  server it says `given up` for a drain not done in 120 s, and `listed
+  now, and under the residency rule again`. A line said once a minute
+  names the first model and counts the rest (`and N more since the last
+  said`). Three lines are
   worth a look:
   - `left out of the residency rule until it is listed`: the model's name
     in a brain's settings may differ from the server's.

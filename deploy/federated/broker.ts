@@ -83,34 +83,39 @@
 // 3b-3b: a 22 GiB model's load waited 24 minutes for a model background calls kept busy, live embeds queued behind it).
 // So, for background alone — a live call is granted at once, as ever:
 //   loaded       an ask for a model the list names goes as above;
-//   not loaded   it goes at once where the server has no model loaded. Else it waits until the server's last
-//                background load ended `stay_s` ago (the registry's, 60 unset): a model background just loaded
-//                stays that long, whatever another brain's asks say (review pass 1: at the asker's bound alone, a
-//                brain asking with 0 had 74 calls to another's 23; pass 2: nor is it put out sooner for being idle
-//                5 s). Then it goes once the loaded models have had no background call for BG_QUIET_S (5 s) and no
-//                live call for LIVE_QUIET_S (120 s), or once it has waited its `max_wait_s` (decided 2026-11-18:
-//                the ask's own bound) and no live call runs on the server at that moment — no drain begins under
-//                a live call, whose model the load might have to wait for (review pass 1: live calls overlapping
-//                without a gap, the load never came, and the model drained for it was put out);
+//   not loaded   it is chosen at once where the server has no model loaded (and granted once no background runs
+//                there: an unnamed model's, say). Else it waits until the server's last background load ended —
+//                the list naming its model — `stay_s` ago (the registry's, 60 unset): a model background just
+//                loaded stays that long, whatever another brain's asks say (review pass 1: at the asker's bound
+//                alone, a brain asking with 0 had 74 calls to another's 23; pass 2: nor is it put out sooner for
+//                being idle 5 s). Then it goes once the loaded models have had no background call for BG_QUIET_S
+//                (5 s) and the server no live call for LIVE_QUIET_S (120 s), or once it has waited its
+//                `max_wait_s` (decided 2026-11-18: the ask's own bound) and no live call runs on the server at
+//                that moment — no drain begins under a live call, whose model the load might have to wait for
+//                (review pass 1: live calls overlapping without a gap, the load never came, and the model
+//                drained for it was put out);
 //   the drain    then the server's other models are granted no background, and once none of theirs runs the ask
 //                is granted, one load at a time a server, and they stay held until the list names its model or
 //                its calls have ended and the list is next read. A drain not done in HOLD_S (120 s) — a call that
 //                long, or one never given back — is given up, the others going on, and none is begun for another
-//                HOLD_S: no load is granted while background still runs on a model it may put out (review pass 2:
-//                granted at the bound, it was left out of the rule 120 s on, and its asks went by the room beside
-//                the busy model, as before 3c-1). A live call to a model not loaded holds the others the same
-//                way, at once, and background to no model but its own goes while it is under way.
+//                HOLD_S, on a server with no model loaded either: no load is granted while background still runs
+//                on a model it may put out (review pass 2: granted at the bound, it was left out of the rule
+//                120 s on, and its asks went by the room beside the busy model, as before 3c-1). A live call to a
+//                model not loaded holds the others the same way, at once, and background to no model but its own
+//                goes while it is under way.
 // The list unread at the start, or unreadable PS_STALE_S (10 s) — no answer in 2 s, no 200, a redirect, over 1 MiB, not
-// its shape — is no rule at all, each change said once: the rule above the line, as before 3c-1. A model whose
-// calls end with the list never naming it is judged by the list at each call's grant and at the read after its end,
-// where no other load was under way at the grant (one begun after it waits its turn behind this one):
+// its shape — is no rule at all, each change said once: "The rule, per (server, model)" above, as before 3c-1. A model
+// whose calls end with the list never naming it is judged by the list at each call's grant and at the next read to
+// end after the call, where no other load was under way at the grant (one begun after it waits its turn behind this
+// one):
 //   a model gone, none come     it put a model out and did not load — a model come that some brain asks for by
 //   but ones asked for          name is that brain's load, done since. From the first such call its next load waits
-//                               BACKOFF_S (60 s) more each time, ten at most, said at the third (review pass 2: left
-//                               out, its 44 failed loads in 570 s each put out what was idle, and another brain had
-//                               a fifth of its calls), and no call to it is granted meanwhile, its own waiting asks
-//                               among them (pass 3: three asks waiting, the loads came 10 s apart). Such a load
-//                               begins no stay, and what it put out is asked for next, whatever its asks' age;
+//                               BACKOFF_S (60 s) more each time, ten at most, said from the third (review pass 2:
+//                               left out, its 44 failed loads in 570 s each put out what was idle, and another
+//                               brain had a fifth of its calls), and no background ask of its is granted
+//                               meanwhile, those waiting in a load of its own among them (pass 3: three asks
+//                               waiting, the loads came 10 s apart). Such a load begins no stay, and what it put
+//                               out is taken for due, whatever its asks' age;
 //   else, UNLISTED_AFTER (3)    it disturbs nothing — a name the server lists another way, a model it does not know —
 //   reads running               and is left out of the rule until it is listed, or until a call of its puts a
 //                               model out (pass 3: left out while nothing else was loaded, it then failed unpaced
@@ -118,12 +123,13 @@
 // One load that has held the others HOLD_S — a load waiting on a model live calls keep busy, a call never given back
 // — is left out for HOLD_S and held to again, turn about, while it lasts (pass 2: left out until listed, the others'
 // background kept its load waiting 245 s past the live calls' end), and no drain is begun while it is left out: that
-// time is the loaded models' (pass 3: a drain for a third model, waiting on the stuck call, held them through it). A live call running HOLD_S and more — a brain
-// gives its call up at OB1_LLM_TIMEOUT, 120 s unset — holds back no load (pass 2: one never given back, and no background load for lease_s). A
-// model unnamed (`?`) is taken for loaded: no list could name it. So a brain's call of either class to a model not listed holds a server's other background — HOLD_S a
-// load at most, and until the list's next read where it ends unlisted — each load said once a minute a brain with
-// the count since, and not capped, as its live calls are not; and an ask's age (`waited_s`) and `max_wait_s` are its brain's
-// own word, which order the loads across brains while `stay_s` keeps the turns.
+// time is the loaded models' (pass 3: a drain for a third model, waiting on the stuck call, held them through it).
+// A live call running HOLD_S and more — a brain gives its call up at OB1_LLM_TIMEOUT, 120 s unset — holds back no
+// load (pass 2: one never given back, and no background load for lease_s). A model unnamed (`?`) is taken for
+// loaded: no list could name it. So a brain's call of either class to a model not listed holds a server's other
+// background — HOLD_S a load at most, and until the list's next read where it ends unlisted — each load said once a
+// minute a brain with the count since, and not capped, as its live calls are not; and an ask's age (`waited_s`) and
+// `max_wait_s` are its brain's own word, which order the loads across brains while `stay_s` keeps the turns.
 // The trust (SMD-3268, no implicit trust): a key per brain, the registry holding only its hash; a brain sees its own
 // grants and asks, and `hello` names no other brain. A brain can call every call live, or say every call was held:
 // counted and logged, not capped.
@@ -180,7 +186,7 @@ export const PS_MAX_BYTES = 1 << 20;
 export const PS_MAX_MODELS = 256;
 /** A list unreadable this long is no list: the server has no residency rule until it reads again. */
 export const PS_STALE_S = 10;
-/** A loaded model with a live call this lately is not put out for background work, short of the ask's max_wait_s. */
+/** A server with a live call ended this lately has no model put out for background work, short of the ask's max_wait_s. */
 export const LIVE_QUIET_S = 120;
 /** Loaded models with a background call ended this lately are still at work: a pass asking one call at a time has
  *  none running for an instant between two (review pass 1: 18 loads for 10 calls, each put out as its call ended). */
@@ -188,9 +194,9 @@ export const BG_QUIET_S = 5;
 /** A model background loaded stays this long before background loads another, unless the registry says (`stay_s`). */
 export const DEFAULT_STAY_S = 60;
 /** The longest a drain waits on background still running — then given up, and none begun for as long again — and
- *  the longest one load holds a server's other background, its model then left out of the rule (review pass 1: a
- *  grant never given back held every drain to lease_s; a name the list never wrote held the others while its calls
- *  overlapped). */
+ *  the longest one load holds a server's other background, its model then left out of the rule for as long (review
+ *  pass 1: a grant never given back held every drain to lease_s; a name the list never wrote held the others while
+ *  its calls overlapped); and the age past which a live call still running holds back no load. */
 export const HOLD_S = 120;
 /** A model whose calls ended at this many reads running with the list not naming it is left out of the rule, or
  *  said to be backing off. */
@@ -198,9 +204,11 @@ export const UNLISTED_AFTER = 3;
 /** What each load that changed the list and never showed in it adds to the wait before the model's next, and the most. */
 export const BACKOFF_S = 60;
 export const BACKOFF_MOST = 10;
-/** The least time between two reads of a list begun for a call's end (review pass 1: 7,000 a second, a brain's to drive). */
+/** The least time between two reads of a list begun for a call's end (review pass 1: 7,000 a second, a brain's to
+ *  drive), and between two turns of a server for a live call's end. */
 export const PS_GAP_MS = 250;
-/** The most models a server's residency remembers ended calls or misses for: a brain naming a new one each call. */
+/** The most models a server's residency remembers in each of its maps (ended calls, misses, those left out, owed
+ *  or loading): a brain naming a new one each call. Past it the oldest is forgotten. */
 export const MAX_NOTED = 256;
 /** A server of this many pools or fewer is turned at each change; a larger one at the broker's next tick. */
 export const TURN_NOW = 64;
@@ -421,19 +429,19 @@ type Residency = {
   loaded: Set<string> | null;
   /** When the list last read and when a read last began (performance.now), the reads begun, and the one under way. */
   goodAt: number; readAt: number; seq: number; reading: Promise<void> | null;
-  /** Why the list could not be read, as last said; null once it reads. */
+  /** The latest reason the list could not be read (said when it first fails); null once it reads. */
   off: string | null;
   /** A read begun as this one or later must end before background goes on: a call to a model not listed has ended,
    *  and what the server holds now is not known. */
   verifyFrom: number | null;
   pools: Set<Pool>;
   /** The pool of a model not loaded that goes next, the server's other background draining for it since `wantAt`;
-   *  and when a drain was last given up (`restAt`). */
+   *  and when a drain was last given up, or a load last left out at its bound (`restAt`). */
   want: Pool | null; wantAt: number; restAt: number;
   /** Background and live grants running on the server; its pools of a model not loaded with a call running, and
    *  those of them with a live one. */
   bgN: number; liveRun: number; pendN: number; liveN: number;
-  /** On the broker's clock: when a live call on a loaded model last ended (one running is counted, `liveRun`), when
+  /** On the broker's clock: when a live call on the server last ended (one running is counted, `liveRun`), when
    *  a background call last ended, and when a load background began last ended. */
   liveAt: number; bgAt: number; changedAt: number;
   /** The models with a call ended unlisted since the last read, each with the list as it was when that call was
@@ -454,7 +462,7 @@ type Residency = {
 };
 
 /** What a test reads of a server's residency: the models listed (null: no rule), the pool drained for, the pools
- *  loading, the models left out of the rule, and how many models it remembers ended calls or misses for. */
+ *  loading, the models left out of the rule, and the sizes of its ended, misses and left-out maps, summed. */
 export type ResidencyView = Record<string, { loaded: string[] | null; want: string | null; loading: string[]; unlisted: string[]; noted: number }>;
 
 /** What a test reads of the broker: each pool's counts, and each brain's asks waiting and slot time there. */
@@ -778,7 +786,11 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
         let asked: Set<string> | null = null;
         for (const [m, before] of [...r.ended]) {
           r.ended.delete(m);
-          if (loaded.has(m) || before === null) continue;
+          if (loaded.has(m)) continue;
+          // Its calls ended and it never showed: background's load of it is over, and owed no stay (the last read:
+          // a live call that loaded the model later began one).
+          r.bgLoads.delete(m);
+          if (before === null) continue;
           const was = r.misses.get(m) ?? { quiet: 0, loud: 0, until: 0 };
           const gone = [...before].filter((x) => !loaded.has(x));
           // A model come is this one's load done, by whatever name — but one a brain asks for by name: its own
@@ -790,7 +802,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
             note(r.misses, m, { quiet: 0, loud, until: clock() + wait * 1000 });
             for (const x of gone) note(r.owed, x, true);
             if (r.unlisted.get(m) === Infinity) r.unlisted.delete(m);
-            if (loud === UNLISTED_AFTER) sayEvery(`${r.server.name}\nno-load`, `${r.server.name}/${m}: its calls ended ${UNLISTED_AFTER} times with a model gone from the server's loaded models and itself never named — a model that does not load: its next load waits ${wait} s, and ${BACKOFF_S} s more each time`);
+            if (loud >= UNLISTED_AFTER) sayEvery(`${r.server.name}\nno-load`, `${r.server.name}/${m}: its calls ended ${loud} times with a model gone from the server's loaded models and itself never named — a model that does not load: its next load waits ${wait} s, and ${BACKOFF_S} s more each time`);
           } else if (r.unlisted.get(m) === Infinity) continue;
           else if (was.quiet + 1 < UNLISTED_AFTER) note(r.misses, m, { ...was, quiet: was.quiet + 1 });
           else leaveOut(r, m, Infinity, `its calls ended at ${UNLISTED_AFTER} reads running with no model gone from the server's loaded models and itself never named — a name it lists another way, or a model it does not know`);
@@ -899,7 +911,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       x.pool.used[x.conn.brainAt] += Math.max(0, until - x.at);
     }
     if (r) {
-      // A call ended on a model the list does not name: the next read begun says what it did, and is begun
+      // A call ended on a model the list does not name: the next read to end says what it did, and one is begun
       // soon: the model's own asks wait for it. (One granted with no list kept, the rule off then, says
       // nothing; nor one with another model's load under way at its grant: review pass 3, a live call timed out
       // behind another's load was "a model that does not load".) Of several ended before one read, the first
