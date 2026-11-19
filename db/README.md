@@ -2558,8 +2558,11 @@ clears the operator's own statement through `clear_priority`, so the history sho
 the operator's key; rejecting changes nothing; both suppress the same finding for the
 window while its statements are those decided on (a moved deadline, or the source's new
 level, raises it at once). Moot findings past the window are pruned; decided ones stay.
-No finding changes a priority. The operations over REST and MCP, `brain_info`
-and preflight are PR 2; posting to Linear is SMD-4304. Needs 046, 068, 116, 117, 122
+No finding changes a priority. Since PR 2 an operator reads them over REST and MCP
+(`list_priority_findings`, `GET /v1/priority-findings`) and decides each
+(`review_priority_finding`, `POST /v1/priority-findings/{id}/review`;
+server-portable/README.md), `brain_info` counts the pending (`priorityFindings`), and
+preflight's `priority findings` row says them; posting to Linear is SMD-4304. Needs 046, 068, 116, 117, 122
 and 133, refusing by name without them; a re-apply is a no-op. test-schema [128],
 test-upgrade [20cf].
 
@@ -6042,7 +6045,7 @@ comes first, so no timed call loads a model; a warm-up that fails is said.
 OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_EMBEDDING_MODEL=qwen3-embedding:4b OB1_EMBEDDING_DIM=1024 \
 OB1_METADATA_MODEL=qwen2.5:7b OB1_LLM_LOCAL=1 \
   bun bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids-baseline.txt
-bun bench-live.ts --self-check   # the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard; what CI runs
+bun bench-live.ts --self-check   # the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard, a key file's reading, what a refusal says of a file; what CI runs
 ```
 
 The five variables are the canary's model settings. For another brain, they, and
@@ -6054,7 +6057,9 @@ and key are the canary connector's, `open-brain-canary` in `~/.claude.json`,
 which `deploy/canary.sh up --connect` registers at the canary's own port with
 its own key (SMD-2874); the key is the entry's `x-brain-key`, or the `?key=` on
 its url. `--key-from` names another entry; `--mcp` names another endpoint and
-needs `--key-from` beside it, as another brain refuses the canary's key. A
+needs `--key-from` beside it, as another brain refuses the canary's key, or
+`--key-file`, a file holding that brain's key alone (a scratch brain no
+connector names; SMD-3379 PR 3b-3b). A
 stack's own endpoint is `/mcp` on its `SERVER_PORT` (8000 by default). Stable's `/canary/mcp` is no canary's: it is the proxy's
 404 from v2.0.0 (SMD-3101).
 
@@ -6134,6 +6139,138 @@ What the columns are not:
   call ends, its call in hand running on (aborted while paused once 60 s in hand,
   SMD-3379 PR 1c-3b). A search does not pause it at all (SMD-3315). That window was
   not measured here.
+
+### bench-brains.ts
+
+Two brains on one model server: what each one's background work gets of the
+server's slots (SMD-3379 PR 3b-3b). The ticket's Verify asks that, with both
+brains backlogged, neither brain's live captures wait for a slot and their
+background work splits the background slots; and that, with one backlogged, it
+uses its share alone under fixed shares, or every free slot under the host's slot
+broker (`deploy/federated/`). This makes the backlog, reads what each brain's
+sleep held of the slots, and deletes its notes after. `bench-live.ts` times the
+live calls beside it.
+
+```bash
+bun bench-brains.ts load    --brains brains.json --brain canary --arm B --ids ids-canary.txt   # the arm's 150 notes
+bun bench-brains.ts sample  --brains brains.json --arm B --minutes 20 --out samples.jsonl --ollama http://127.0.0.1:11434
+bun bench-brains.ts clean   --brains brains.json --brain canary --ids ids-canary.txt [--arm B]
+bun bench-brains.ts summary --out samples.jsonl --split 12 --live live-B-canary.jsonl --live live-B-scratch.jsonl
+bun bench-brains.ts --self-check   # the notes, the brains file, what a sample keeps, the windows' arithmetic, the summary's table, clean against a brain in memory; what CI runs
+```
+
+`--brains` is a JSON file naming each brain: `{"canary": {"connector":
+"open-brain-canary"}}` takes the url and key from that `~/.claude.json` entry, as
+`bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
+"keyFile": "…"}}` takes a url and a file holding the key alone. An entry gives
+a connector or a key file, not both; a connector's entry may add `mcp` to send
+that key to another url. `load` and `clean` read only the brain they name;
+`sample` reads every entry. No key is printed. A refusal names a flag or a brain
+and, for a file, the file system's code (`ENOENT`): never the path typed, a
+file's text, a connector's name or a parser's words, any of which could be a key
+put in the wrong place. Each subcommand refuses a flag it does not read.
+
+- **load** captures the arm's notes, generated from the arm's name and the index,
+  so every brain gets the same text and no arm's note is another's. Each starts
+  `SMD-3379 measure note (arm <arm> #<i>). ` and is captured with source
+  `smd3379-measure`, two at a time; each id is appended to `--ids` as it lands. As
+  with `bench-live.ts`, only a brain whose `brain_info` says tier `canary` or
+  `working` takes them. A capture that answers no id is counted apart: it was not
+  saved, or the brain already held the note (an arm loaded twice), or it was cut
+  off and may land yet. `load` exits 1 on any of those, or on a note saved
+  without a vector or tags. It appends to `--ids` only where that file is new or
+  holds thought ids alone, so a key file named there by mistake is not written.
+  A last line with no end is ended first, so the first id added does not run on
+  from it.
+- **sample** reads every brain's `brain_info` and `worker_status` each `--every`
+  seconds (15), and, with `--ollama`, the model server's loaded models from
+  Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
+  if a brain never answered. A signal ends the wait; the round in hand is finished
+  and written, and it then exits 128 plus the signal's number, whatever the
+  brains answered. A second signal exits at once, the round in hand unwritten. It
+  appends to `--out` only where that file is new or holds samples alone, each a
+  JSON object with a time, an arm and a brain: not a brains file, nor
+  `bench-live.ts`'s samples, nor a file whose last sample was cut short. A
+  `--brains` file that names no brain is refused, unless `--ollama` names a
+  model server to sample alone.
+- **clean** reads back each listed id, then searches for measure notes whose ids
+  never came back and reads those back too. It deletes a thought only when its
+  whole text is the generator's own for the arm and index its heading names: the
+  arm's alone with `--arm`, else every measure note on the brain, of any arm or
+  run. Like `load`, it runs only on a `canary` or `working` brain. A listed id is
+  trusted no more than a search hit:
+  - one whose text is no measure note's is left and said, and `clean` exits 1;
+  - one that is another arm's note, under `--arm`, is left and counted;
+  - one the brain does not hold, gone already or never an id of its own, is
+    counted as not on the brain, not as deleted. So is a found note gone by the
+    time of its delete;
+  - a line that is no thought id is counted and sent nowhere.
+
+  A thought that starts with a note's heading and then differs, someone's own
+  words after it, is never deleted, listed or found: `clean` says it and exits 1,
+  on every run that meets it. A note written by another version of the generator
+  reads the same way. To clear one, delete that thought by its id. Naming the arm
+  you mean with `--arm` also passes it by, since another arm's search never
+  meets it, but only where `--ids` does not list it: a listed id is always read.
+  A last search finds any note still there. It exits 1 if one is left, or if a
+  delete, a read or that search failed or stopped at 5,000 matches. Run it after
+  `load` has ended: a capture still on its way lands afterwards, and a second
+  run finds it. It deletes the notes alone. The entities extraction drew from
+  them stay until an operator prunes the orphans (`prune_orphan_entities()`),
+  and the audit log keeps each note's text.
+- **summary** prints, for each arm and brain, its sleep's background calls in two
+  windows: before `--split` minutes, with no live load from the harness, and after
+  it, with `bench-live.ts` running. For each window it gives:
+  - `s`, the seconds from the window's first sleep stamp to its last;
+  - the calls, and their time;
+  - the mean number in flight: their time over `s`;
+  - the slot waits, of every model server the sleep asks, its decide tier's
+    included, in all and by pass. A pass reads `extract 51/1322s (51 waited
+    658s)`: its calls, their seconds, and its asks that waited with their seconds.
+
+  It also gives the brain's extraction rows pending or claimed (first, last, most,
+  and when they ran dry), how many of its samples failed, how often the model
+  server's loaded models differed from one sample to the next, and each `--live`
+  file's latencies by label. A brain that never answered in an arm is said so.
+  Two runs of one arm name appended to one `--out` read as one arm. An `--out`
+  with no samples exits 1.
+
+**Reading "in flight".** It is near the slots the sleep held on average, with
+these limits:
+
+- It is the sleep's alone. Board-sync's calls, the api's vector mender's and a
+  detached job's hold slots too and are not in it.
+- A call's time runs from its slot to its answer, failed or not. Its wait inside
+  the model server (a model loading, a call ahead of it) is in that time; its
+  wait for a slot is not. A model server that stalls a call makes it read as held.
+- A call that ran without a slot is counted too: one of a type no share holds,
+  or one let through when the gate could not be asked.
+- A tally is a pass's, over every model and server the pass calls. A brain's
+  figure adds its passes, so it can pass any one server's room.
+- A call counts whole at the stamp after it ends. A window gains the earlier part
+  of the calls ending in it and loses the calls still running at its end, so a
+  long call (a 27B model's, minutes) can put the figure above the workers.
+
+**The windows.** A heartbeat's tallies count since the sleep's process began. It
+stamps them at least once a minute, more often while it works, by the database's
+clock, and a call counts when it ends. So a window's figures are the sum of the
+increases from stamp to stamp, over the time between its first and last stamps.
+That is up to a stamp short of its minutes at each end, and the pair of stamps
+across the split is in neither window. A pair of stamps in which any pass's
+tally falls, or a pass drops out, marks the process begun again: every pass's
+value then is the increase since, and the summary counts the restarts. The calls
+the old process made after its last stamp are lost. A restart whose first stamp
+already passes the old one's on every tally is not seen. Each sample keeps the
+coordinator's children and the time of its stamp, whose `for_s` says when one
+began. A sleep that has made no model call stamps no tallies, nor does a build
+before SMD-3379 PR 2b-2a: for those, the summary gives the share of samples in
+which the sleep was working.
+
+**The extraction rows** are `worker_status`'s pending and claimed rows under
+every `extract:` key. They are thoughts, so `bench-live.ts`'s probes and any
+older backlog are among them. Failed rows are not counted, so "ran dry" does not
+say every note was extracted. A brain whose extraction has never run has no pool
+yet, and its loaded notes show only once its sleep's first pass pools them.
 
 ### bench-querylog.ts
 

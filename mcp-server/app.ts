@@ -352,6 +352,9 @@ const WORDS: Record<ToolName, Words> = {
   clear_priority: { render: (o) => say.renderClearPriority(o), fault: writeFault("clear_priority failed: ") },
   set_priority_weights: { render: (o) => say.renderSetPriorityWeights(o), fault: writeFault("set_priority_weights failed: ", say.setWeightsHint) },
   priority_history: { render: (o) => say.renderPriorityHistory(o), fault: readFault() },
+  // The priority review's findings (SMD-3671 PR 2): a brain before 142 faults, its hint naming the migration.
+  list_priority_findings: { render: (o) => say.renderPriorityFindings(o), fault: readFault(() => say.findingsHint) },
+  review_priority_finding: { render: (o) => say.renderReviewPriorityFinding(o), fault: writeFault("review_priority_finding failed: ", say.findingsHint) },
   // Open items (SMD-3665 PR 2).
   open_item: { render: (o) => say.renderOpenItem(o), fault: writeFault("open_item failed: ") },
   update_item: { render: (o) => say.renderUpdateItem(o), fault: writeFault("update_item failed: ") },

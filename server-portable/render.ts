@@ -25,13 +25,15 @@ import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
-import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor } from "./core/list-cursor.ts";
+import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor, type FindingSelection, type ProposalSelection } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { adviceFor, type EmbeddingProviderError } from "./core/provider-refusal.ts";
 import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
 import type { ClearPriorityCode, ClearPriorityResult, PriorityHistoryCode, PriorityHistoryResult, SetPriorityCode, SetPriorityResult } from "./core/priority.ts";
 import type { AgendaAnswer, AgendaCode } from "./core/agenda.ts";
 import type { WeightsSet, WeightsSetCode } from "./core/weights.ts";
+import type { FindingReviewCode, FindingReviewed, FindingsListed } from "./core/findings.ts";
+import type { FindingItem, FindingStatement, PriorityFinding } from "./store.ts";
 import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemHistoryResult, ListItemsCode, ListItemsResult, OpenItemCode, OpenItemResult, ProposeItemCloseCode, ProposeItemCloseResult, SetItemStatusCode, SetItemStatusResult, UpdateItemCode, UpdateItemResult } from "./core/items.ts";
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
@@ -78,7 +80,7 @@ const EMBEDDING_ID = /^[@A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,119}@[0-9]{1,6}$/;
 const HOLDER = /^[!-~]{1,200}$/;
 /** A field named for a time holds a time; one named for a thought or a row holds a uuid; any other string an enum token. */
 const TIME_KEY = /(?:At|_at)$|^(?:since|oldest|newest|notBefore)$/;
-const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey)$|Ids?$/;
+const ID_KEY = /^(?:id|after|cursor|supersedes|supersededBy|supersedesBefore|supersedesAfter|duplicateOf|fingerprintHeldBy|onto|heldKey|byClientKey|clientKey)$|Ids?$/;
 /** A sha256 in hex, as forget_thought's evidence names the record a thought was ingested as (139): no sentence fits. */
 const SHA256 = /^[0-9a-f]{64}$/;
 
@@ -440,7 +442,7 @@ export { INGESTED_NOTICE, ingestedNotice };
 // 074's rank and SMD-2707's WRITER rule live in standing.ts, which the
 // decision's guard (proposal-review.ts) reads without this file's imports.
 export { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
-import { standingFlags, trustRank, type StandingFlag } from "./standing.ts";
+import { standingFlags, type StandingFlag } from "./standing.ts";
 import { dueText, LEVEL_WORDS } from "./priority-scale.ts";
 
 /** A WRITER flag in words, on one line: the side as it stood, would stand, or might. */
@@ -1219,7 +1221,7 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
     // Review pass 1: a page after a cursor says so — its rows are not the selection's first.
     return `${data.length} ${status === "all" ? "" : status + " "}supersession proposal(s)${onLineage}${pastCursor ? " past the cursor" : ""}, most confident first. The pass proposes; nothing is written to a thought until a proposal is accepted — with review_supersession_proposal (a write key; a flag a pending row's CLI line names is the argument of that name, force as true), or that line.${unread}\n\n${results.join("\n\n")}${next}`;
   }, (r) => r.code === "REFUSED_CURSOR"
-    ? r.reason === "filters" && r.made
+    ? r.reason === "filters" && r.made && r.made.list === undefined
       // Review pass 1: the filters it was made under, so the caller passes them again (a status and lineage token, a pass key).
       ? `Refused: that cursor was made with \`status: ${r.made.status}\`${r.made.lineage === null ? "" : `, \`lineage: ${r.made.lineage}\``}${r.made.judgeKey === null ? "" : `, \`judge_key: ${judgeKeyText(r.made.judgeKey)}\``}${r.made.lineage === null && r.made.judgeKey === null ? " and no other filter" : ""} — pass the same filters with it, or leave out \`after\` to start the list again.`
       : "Refused: `after` is not a list_supersession_proposals cursor — pass the `cursor` a previous page ended with, as it was given, with the same filters, or leave it out for the first page."
@@ -1918,13 +1920,13 @@ export function renderDelete(o: Outcome<Deleted>): Reply {
     mutationRefusalText, (v) => ({ id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), detached: v.detached ?? 0, inactive: v.inactive ?? 0 }));
 }
 
-/** forget_thought's refusals (139, 144; SMD-1723 PR 2). CITED is delete_thought's, its way through the forget's. */
+/** forget_thought's refusals (139, 144; SMD-1723 PR 2 and 3). CITED is delete_thought's, its way through the forget's. */
 function forgetRefusal(r: Refusal): string {
   switch (r.code) {
     case "REFUSED_CONFIRM":
       return `Refused: \`confirm\` must be the \`id\` again, exactly as passed (${r.id}). Forgetting cannot be undone: read the thought first (fetch takes the id), then repeat the call with confirm set to the same id.`;
     case "NOT_FOUND":
-      return `No thought with id ${r.id} was ever in the brain's log, so there is nothing to forget. A client_key names only a thought still standing: a thought deleted earlier is forgotten by its id.`;
+      return `No thought with id ${r.id} was ever in the brain's log, nor deleted keeping it as its client_key — or one was, and was forgotten since, which leaves it no key — so there is nothing to forget.`;
     case "FORGOTTEN":
       return `Refused: ${r.id ?? "this thought"} was forgotten already${r.forgottenAt ? ` on ${r.forgottenAt}` : ""}, and nothing of it is left to remove.`;
     case "REPLAYING":
@@ -1940,16 +1942,19 @@ const removedText = (removed: Record<string, number>): string => {
 };
 
 /**
- * forget_thought's reply (139, 144; SMD-1723 PR 2): what each store gave up, then what the forget could not do
- * mechanically and a person reviews — the thoughts derived from it, the pages, the twins that keep the text, and the
- * copies outside the brain. The values are the database's: ids, counts, and the ingested record's hashed identity.
+ * forget_thought's reply (139, 144; SMD-1723 PR 2 and 3): what each store gave up, the other thoughts under the name
+ * it could not forget and those it forgot with it, then what the forget could not do mechanically and a person
+ * reviews — the thoughts derived from it, the pages, the twins that keep the text, and the copies outside the brain.
+ * The values are the database's: ids, counts, and the ingested record's hashed identity.
  */
 export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
   return render(o, (v) => {
     const lines = [
-      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
+      `Forgot ${v.id}${v.byClientKey ? `, named by its client_key ${v.byClientKey}` : v.clientKey ? `, its client_key ${v.clientKey}` : ""} at ${v.forgottenAt}${v.gone ? " (deleted earlier: what it left behind is removed)" : ""}. Its audit events keep who acted and when, without its text; the ledger records the forgetting${v.twins.length ? "" : ", and the same text is refused if captured again"}.`,
       `Removed or redacted, by store: ${removedText(v.removed)}${v.orphanEntities ? `; ${v.orphanEntities} entit${v.orphanEntities === 1 ? "y" : "ies"} left with no mention` : ""}.`,
     ];
+    if (v.notForgotten?.length) lines.push(`Not forgotten — the same thought under that name, still holding its text here: ${v.notForgotten.map((m) => `${m.id} (${m.code}${m.errno ? ` ${m.errno}` : ""})`).join(", ")}. Call forget_thought with the same id again${v.notForgotten.some((m) => m.code === "REPLAYING") ? " once the replay is done" : ""}${v.notForgotten.some((m) => m.code === "CITED") ? ", with detach_citations true for one CITED (another thought cites it)" : ""}: what is forgotten is not repeated.`);
+    if (v.alsoForgotten?.length) lines.push(`Also forgotten here, the same thought under that name (a copy deleted before, or one keeping it as its client_key): ${v.alsoForgotten.join(", ")}.`);
     if (v.source) lines.push(`The record it was ingested as (${snipText(v.source.system, 40)}) is left out of every sync, until an operator reinstates it.`);
     if (v.irreproducible.length) lines.push(`Derived from it, for you to review — their prose may have absorbed its text: ${v.irreproducible.join(", ")}.`);
     if (v.pages.length) lines.push(`Pages to review — an earlier render may hold its text: ${v.pages.join(", ")}.`);
@@ -1957,7 +1962,9 @@ export function renderForget(o: Outcome<Forgotten, ForgetCode>): Reply {
     if (v.outside.length) lines.push(`Outside the brain's reach: ${v.outside.join("; ")}.`);
     return lines.join("\n");
   }, forgetRefusal, (v) => ({
-    id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
+    id: v.id, ...(v.byClientKey ? { byClientKey: v.byClientKey } : {}), ...(v.clientKey ? { clientKey: v.clientKey } : {}), forgottenAt: v.forgottenAt, gone: v.gone, orphanEntities: v.orphanEntities,
+    ...(v.alsoForgotten?.length ? { alsoForgottenIds: v.alsoForgotten } : {}),
+    ...(v.notForgotten?.length ? { notForgotten: v.notForgotten.map((m) => ({ id: m.id, code: m.code })) } : {}),
     // REST's arrays renamed, the guard holding a key ending in Ids to uuids.
     removed: v.removed, irreproducibleIds: v.irreproducible, pageIds: v.pages, twinIds: v.twins, itemIds: v.itemIds, proposalIds: v.proposalIds,
     ...(v.source ? { source: { system: v.source.system, identitySha256: v.source.identitySha256 } } : {}),
@@ -2501,8 +2508,8 @@ const statementText = (a: PriorityAssertion) =>
  * Where a statement stands, when that is not the item asked about: a ticket and its own rows are one item (migration
  * 133), so a ticket's statements and its rows' answer for either, each on its own item.
  */
-const onOther = (a: PriorityAssertion, asked: PriorityItem) =>
-  a.item.kind === asked.kind && a.item.key === asked.key ? "" : ` on ${itemText(a.item)}`;
+const onOther = (a: PriorityAssertion, asked: PriorityItem | null) =>
+  asked && a.item.kind === asked.kind && a.item.key === asked.key ? "" : ` on ${itemText(a.item)}`;
 /**
  * One statement in a history: the statement, where it stands if not on the item asked, and how its window ended — open,
  * replaced (by which), cleared, or closed when its item was deleted (migration 136).
@@ -2513,7 +2520,7 @@ const historyLine = (a: PriorityAssertion, asked: PriorityItem) =>
     : a.closeReason === "deleted" ? `closed at ${a.closedAt}, when its item was deleted`
     : `cleared at ${a.closedAt}`}`;
 /** The item's winner after a write, to a key shown it: its own statement, another's (and where it stands), or none standing. */
-const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem) =>
+const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean }, mine: string | null, asked: PriorityItem | null) =>
   !v.winnerShown ? ""
   : !v.winner ? " No statement on it stands now: its priority is unknown."
   : v.winner.id === mine ? " Yours is the item's winner."
@@ -2524,7 +2531,7 @@ const winnerText = (v: { winner: PriorityAssertion | null; winnerShown: boolean 
  * two or more between dashes, so the list's end is plain (review pass 2: "…; low (1) (assertion …); they stay" read
  * as one more item).
  */
-const closedList = (closed: PriorityAssertion[], asked: PriorityItem) =>
+const closedList = (closed: PriorityAssertion[], asked: PriorityItem | null) =>
   closed.map((a) => `${levelText(a.level)}${onOther(a, asked)} (assertion ${a.id})`).join("; ");
 const priorityRefusal = (r: Refusal) =>
   r.code === "ITEM_NOT_FOUND"
@@ -2561,6 +2568,123 @@ export const renderPriorityHistory = (o: Outcome<PriorityHistoryResult, Priority
     ...v.history.map((a) => historyLine(a, v.item)),
   ].join("\n"),
   priorityRefusal, AS_JSON);
+
+// ── The priority review's findings (SMD-3671 PR 2, migration 142) ───────────
+// Each reply's value is its JSON (AS_JSON), as the priority replies': a finding's evidence, its makers' names and the
+// operator's note are data a reader of the value needs. In the text they are words a key gave, cut to one line.
+
+/** A statement a finding is about: its level, maker, when it was made and its id. */
+const findingStatementText = (s: FindingStatement) =>
+  `${s.level === null ? "a level" : levelText(s.level)}${s.maker ? ` by ${oneLine(snipText(s.maker, 80))}` : ""}${s.assertedAt ? ` (stated ${s.assertedAt})` : ""} (assertion ${s.id})`;
+/** What a finding found, from its evidence, in its kind's words. */
+function findingWhat(f: PriorityFinding): string {
+  const e = f.evidence;
+  const said = f.statements.map(findingStatementText).join("; ");
+  if (f.kind === "stale") {
+    const last = typeof e.last_activity === "string" ? `its last activity ${e.last_activity}` : "no activity known on it";
+    return `${said || "a statement"}, stated over ${f.windowDays} days ago, ${last}`;
+  }
+  if (f.kind === "overdue") {
+    const level = typeof e.level === "number" ? `, at ${levelText(e.level)}` : "";
+    return `past its due time ${typeof e.due_at === "string" ? dueText(e.due_at) : "(not read)"}${level}${e.due_from === "due_ref" ? " (taken through a due reference to another item)" : ""}`;
+  }
+  if (f.kind === "disagree") {
+    const op = f.statements.find((s) => s.role === "operator"), src = f.statements.find((s) => s.role === "source");
+    return op && src ? `the operator's ${findingStatementText(op)} against the source's ${findingStatementText(src)}`
+      : said || "the operator's level and the source's, two or more levels apart (neither statement read)";
+  }
+  if (f.kind === "settled") return `${said || "a statement"} left on it, though it has settled`;
+  return `a ${oneLine(snipText(f.kind, 40))} finding, a kind this server does not know${said ? `, about ${said}` : ""}`;
+}
+/** What a decided finding's writer wrote, as the list says it: a level stated or re-confirmed, a clear, or its answer unread. */
+const findingOutcome = (f: PriorityFinding) =>
+  f.outcomeUnread ? "; what its writer answered is stored in a shape this server does not read"
+  : f.outcome?.outcome === "asserted" && f.outcome.assertion ? `; stated ${levelText(f.outcome.assertion.level)}`
+  : f.outcome?.outcome === "unchanged" && f.outcome.assertion ? `; re-confirmed ${levelText(f.outcome.assertion.level)}`
+  : f.outcome?.outcome === "cleared" ? "; cleared the operator's statement"
+  : "";
+/** Where a finding's decision stands: pending, moot since when, or decided by whom, when, with what note, holding it back how long. */
+const findingState = (f: PriorityFinding) =>
+  f.status === "pending" ? `pending since ${f.foundAt}`
+  : f.status === "moot" ? `moot since ${f.mootAt ?? "?"} (its condition no longer holds)`
+  : f.statusUnread ? `${oneLine(snipText(f.status, 40))}, a status this server does not know`
+  : `${f.status} by ${oneLine(snipText(f.decidedBy ?? "?", 80))} at ${f.decidedAt ?? "?"}${f.note ? `: ${quoted(f.note)}` : ""}${findingOutcome(f)}${f.suppressedUntil ? `; held back until ${f.suppressedUntil}` : ""}`;
+/** A finding's item in words: as the priority replies name one, or one whose kind this server does not read, as written. */
+const findingItemText = (item: FindingItem | null, unread: boolean | undefined) =>
+  !unread && item ? itemText(item as PriorityItem)
+  : item ? `an item this server does not read (${oneLine(snipText(item.kind, 40))} ${oneLine(snipText(item.key, 80))})` : "an item this server does not read";
+const findingLine = (f: PriorityFinding) => {
+  const state = findingState(f);
+  return `- ${oneLine(snipText(f.kind, 40))} finding ${f.id} on ${findingItemText(f.item, f.itemUnread)}: ${findingWhat(f)}. ${state[0].toUpperCase()}${state.slice(1)}.`;
+};
+
+/** The selection a refused findings cursor was made under, in words: its status and its kind. */
+const madeUnder = (m: ProposalSelection | FindingSelection | undefined) =>
+  m?.list === "findings" ? `status ${m.status} and ${m.kind === null ? "every kind" : `kind ${m.kind}`}` : "another status or kind";
+export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => render(o, (v) => {
+  const which = `${v.status === "all" ? "" : `${v.status} `}priority finding`;
+  const of = v.kind ? ` of kind ${v.kind}` : "";
+  if (v.total === 0) return `No ${which}s${of}.`;
+  const total = `${v.total} ${which}${v.total === 1 ? "" : "s"}${of}`;
+  if (v.findings.length === 0) return `${total}; none after the cursor given.`;
+  // A page that is not every finding names its place in the listing as it stands, and the cursor while more follow.
+  const page = v.findings.length < v.total ? `; findings ${v.before + 1}–${v.before + v.findings.length} of ${v.total}${v.cursor ? `; pass after: ${v.cursor} for more` : ""}` : "";
+  return [
+    `${total}${page}:`,
+    ...v.findings.map(findingLine),
+    ...(v.findings.some((f) => f.status === "pending")
+      ? ["An operator key decides each with review_priority_finding: accept with a level (or clear), or reject. Nothing changes a priority until then."] : []),
+  ].join("\n");
+}, (r) => r.code === "REFUSED_CURSOR"
+  ? r.reason === "filters"
+    ? `Refused: \`after\` was made under ${madeUnder(r.made)} — pass it with the status and kind it came with, or leave it out to start from the first page.`
+    : "Refused: `after` is not a list_priority_findings cursor — pass the `cursor` a previous page ended with, as it was given, or leave it out to start from the first page."
+  : unknownRefusal(r), AS_JSON);
+
+export function renderReviewPriorityFinding(o: Outcome<FindingReviewed, FindingReviewCode>): Reply {
+  return render(o, (v) => {
+    const lead = `${v.status === "accepted" ? "Accepted" : "Rejected"} the ${oneLine(snipText(v.kind, 40))} finding ${v.id}${v.kindUnread ? " (a kind this server does not know)" : ""} on ${findingItemText(v.item, v.itemUnread)}`;
+    // The item the statements are measured against: none when it was not read, so each statement names its own.
+    const asked = v.itemUnread || !v.item ? null : (v.item as PriorityItem);
+    const held = v.suppressedUntil ? ` The same finding is held back until ${v.suppressedUntil} while its statements stand.` : "";
+    if (v.status === "rejected") return `${lead}: no priority was changed.${held}`;
+    if (v.answerUnread) return `${lead}: the decision is recorded, but what its writer answered is in a shape this server does not read — priority_history shows the item's statements.${held}`;
+    const winner = winnerText({ winner: v.winner, winnerShown: true }, v.outcome === "cleared" ? null : v.assertion?.id ?? null, asked);
+    if (v.outcome === "cleared") {
+      return `${lead}: cleared your statement${v.closed.length > 1 ? `s — ${closedList(v.closed, asked)} —` : v.closed.length ? `, ${closedList(v.closed, asked)},` : ""} which stay${v.closed.length > 1 ? "" : "s"} in the history.${winner}${held}`;
+    }
+    const said = v.assertion ? statementText(v.assertion) : "?";
+    return v.outcome === "unchanged"
+      ? `${lead}: your statement already says this — ${said} — so it stands re-confirmed and nothing was written to it.${winner}${held}`
+      : `${lead}: stated ${said}.${v.closed.length ? ` It replaces your earlier statement${v.closed.length === 1 ? "" : "s"}, ${closedList(v.closed, asked)}, which stay${v.closed.length === 1 ? "s" : ""} in the history.` : ""}${winner}${held}`;
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
+      ? `Refused: only a key the operator classified \`operator\` may decide a priority finding, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may decide a priority finding.")
+    : r.code === "PRIORITY_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    : r.code === "WRITE_SCOPE_REQUIRED" ? `Refused: ${oneLine(snipText(r.key, 80))} has no write scope; a priority finding is decided by the operator's write key.`
+    : r.code === "NOT_FOUND" ? `Refused: the brain holds no priority finding ${r.id}; list_priority_findings gives each one's id.`
+    : r.code === "REFUSED_FINDING_INPUT" || r.code === "REFUSED_PRIORITY_INPUT" ? `Refused: ${oneLine(snipText(r.message, 300)).replace(/\.?$/, ".")}`
+    : r.code === "REFUSED_FINDING_DECISION"
+      ? r.problem === "NOT_PENDING"
+        ? r.statusUnread
+          ? `Refused: finding ${r.id} is not pending: its status, ${oneLine(snipText(r.status ?? "?", 40))}, is one this server does not know; list_priority_findings with status all shows it.`
+          : `Refused: finding ${r.id} is ${r.status ?? "decided"} already, not pending${r.status === "moot" ? " (its condition no longer holds)" : ""}; list_priority_findings with status ${r.status ?? "all"} shows it.`
+        : r.problem === "NOTHING_TO_CLEAR"
+        ? `Refused: you hold no statement on the item to clear, so nothing was decided and finding ${r.id} stays pending. State a level instead (0 for none) to outrank another maker's.`
+        : `Refused: the writer refused the outcome${r.writerCode ? ` (${r.writerCode})` : ""}, so nothing was decided and finding ${r.id} stays pending.`
+    : unknownRefusal(r),
+  AS_JSON);
+}
+
+/** The findings' fault: a database before 142 holds neither the table nor the function, or the server's role lacks the grant. */
+export const findingsHint = (msg: string): string =>
+  // The table or the decision's function missing is a brain before 142; a missing column is a drifted brain, not that.
+  /(?<!of )relation "(?:public\.)?priority_findings" does not exist|function (?:public\.)?review_priority_finding\([^)]*\) does not exist/i.test(msg)
+    ? " — migration 142 (db/migrations/142_priority_findings.sql) is not applied"
+    : /permission denied for (?:table priority_findings|function review_priority_finding)/i.test(msg)
+    ? " — the server's role needs the priority group's grants on priority_findings (migration 142; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
 
 
 // ── Open items (SMD-3665 PR 2, migration 117) ────────────────────────────────

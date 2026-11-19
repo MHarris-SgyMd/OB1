@@ -10,7 +10,7 @@ import type { ToolName } from "../tools.ts";
 import { SAID_BY, TRUST } from "./filter.ts";
 import { EVIDENCE_LIMITS, META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal.ts";
 import { PASS_KEY_CHARS } from "../pass-key.ts";
-import { PRIORITY_KINDS } from "../priority-kinds.ts";
+import { FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS } from "../priority-kinds.ts";
 import { VERIFY_STATUSES } from "../deliverables.ts";
 import { AGENDA_ORDERS, RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN, type PriorityWeights } from "../store.ts";
 
@@ -498,7 +498,7 @@ export const SPECS = {
       // brain the write was first made on, kept as metadata.client_key so
       // every brain names the thought by that one id (migration 112).
       client_key: z.string().optional()
-        .describe("An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's, delete_thought's and forget_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it."),
+        .describe("An idempotency key you choose for this thought — a UUID, by convention its id on the brain the write was first made on, when you copy a write to another brain. If a thought already has that id or keeps that key, the capture returns it and writes nothing (no model calls); otherwise the key is kept as metadata.client_key, one thought per key. update_thought's, delete_thought's and forget_thought's `id`, a capture's `supersedes` and `derived_from` and an edit's `supersedes` then accept the key wherever they take an id: the thought with that id, else the one keeping that key; a forget takes every thought the name is (reads such as fetch take ids alone). A key is set once: a thought keeps the first it was given. A copied edit should not carry the first brain's `if_unchanged_since`, which this brain's own updated_at never matches. A key that can read only: a capture-only key is refused it."),
     },
   },
   update_thought: {
@@ -554,7 +554,7 @@ export const SPECS = {
   forget_thought: {
     title: "Forget Thought",
     description:
-      "Forget a thought for good: remove it and every copy of its text or id the brain holds, and say what was removed. Use it only when the user asks for the text to be gone for good (a secret, a password, personal data); to tidy or correct, use delete_thought or update_thought. Read the thought back first (fetch takes the id) to be sure it is the one. Unlike delete_thought, which keeps the removed text in the audit trail so a deletion can be reconstructed, this redacts the thought's audit events (who acted and when stay; the text does not), deletes its entities, search windows and vectors, strips its id from other thoughts' derived_from, deletes the relations and expired or detached citations naming it, the page sections built on it, its priority statements, open items, close proposals and deliverable events, and clears it from the logged searches. It records the forgetting in a ledger, so a later capture or edit of the same text is refused FORGOTTEN, and the record it was ingested as (a Linear ticket, a note) is left out of every sync. Cannot be undone. Pass the same id again as `confirm`. The reply lists what could not be removed mechanically: thoughts derived from it, whose prose may have absorbed its text (`irreproducible`), pages to review, and copies outside the brain. Refused while statements in other thoughts cite it, unless `detach_citations` is true. A thought deleted earlier can still be forgotten: what it left behind is removed.",
+      "Forget a thought for good: remove it and every copy of its text or id the brain holds, and say what was removed. Use it only when the user asks for the text to be gone for good (a secret, a password, personal data); to tidy or correct, use delete_thought or update_thought. Read the thought back first (fetch takes the id) to be sure it is the one. Unlike delete_thought, which keeps the removed text in the audit trail so a deletion can be reconstructed, this redacts the thought's audit events (who acted and when stay; the text does not), deletes its entities, search windows and vectors, strips its id from other thoughts' derived_from, deletes the relations and expired or detached citations naming it, the page sections built on it, its priority statements, open items, close proposals and deliverable events, and clears it from the logged searches. It records the forgetting in a ledger, so a later capture or edit of the same text is refused FORGOTTEN, and the record it was ingested as (a Linear ticket, a note) is left out of every sync. Cannot be undone. Pass the same id again as `confirm`. The reply lists what could not be removed mechanically: thoughts derived from it, whose prose may have absorbed its text (`irreproducible`), pages to review, and copies outside the brain. Refused while statements in other thoughts cite it, unless `detach_citations` is true. A thought deleted earlier can still be forgotten: what it left behind is removed. Every thought here the name is goes with it — the one with that id, the one keeping it as its client_key, and each deleted one that kept it — and the reply lists the others.",
     annotations: {
       readOnlyHint: false,
       openWorldHint: false,
@@ -563,7 +563,7 @@ export const SPECS = {
       idempotentHint: true,
     },
     inputSchema: {
-      id: z.string().describe("UUID of the thought to forget — the id on an `ID:` line of a search or list result, or the one capture_thought reported; or the `client_key` it was captured with, when no thought has that id"),
+      id: z.string().describe("UUID of the thought to forget — the id on an `ID:` line of a search or list result, or the one capture_thought reported; or the `client_key` it was captured with. Every thought here the name is goes: the thought with that id, standing or deleted, the one keeping it as its key, and each deleted one that kept it"),
       confirm: z.string().describe("The `id` again, exactly as you passed it: forgetting cannot be undone, so the call is refused unless the two match"),
       detach_citations: z.boolean().optional().describe(
         "When statements in other thoughts cite this one as their source, the forget is refused and the reply names them. Pass true to forget anyway: the citations are deleted with it, since each one may restate its text; the thoughts that made them stay. Default false.",
@@ -789,6 +789,44 @@ export const SPECS = {
     inputSchema: {
       kind: z.enum(PRIORITY_KINDS).describe("The item's kind: thought, ticket, entity or item"),
       key: PRIORITY_KEY.describe("The item's key: a uuid, or a ticket's key"),
+    },
+  },
+  // The priority review's findings (SMD-3671 PR 2, migration 142): sleep proposes them, an operator decides each.
+  list_priority_findings: {
+    title: "List Priority Findings",
+    description:
+      "List the priority review's findings: statements sleep's scan (ob1_priority_review, migration 142) proposes an operator review — stale (a level the brain's own keys stated over the window ago, 60 days, on an item nobody has touched since), overdue (an unsettled item past its due time), disagree (the operator's level and the source's, Linear's, two or more apart) and settled (a level left on an item that has since settled). Nothing changes a priority until an operator decides one (review_priority_finding). Pending by default, the oldest found first; `status` lists accepted, rejected or moot ones (moot: its condition no longer holds), or all, the pending first, then the rest most recently decided or mooted first; `kind` one kind alone. Each finding names its item (a ticket and its own rows are one item), the statements it is about, its evidence, when it was found, and for a decided one who decided it, the note and what the decision wrote. `total` counts every finding matching; the list is `limit` of them, and while more follow the reply carries a `cursor`: pass it as `after`, with the same status and kind, for the next page, until none is given (null). Every finding that stood in the listing's status when paging began, and still does, is listed: none is skipped. One that changes status, or one a scan adds, while paging can be missing from the pages, and under `all` a decided one can be listed twice. A listing with no cursor shows the current state. Refused: a cursor that is not this tool's (REFUSED_CURSOR, `reason` shape), or made under another status or kind (REFUSED_CURSOR, `reason` filters, `made` naming the status and kind it was made under). A brain before migration 142 faults, naming it.",
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      status: z.enum([...FINDING_STATUSES, "all"]).optional().default("pending").describe("pending (the default), accepted, rejected, moot, or all"),
+      kind: z.enum(FINDING_KINDS).optional().describe("One kind alone: stale, overdue, disagree or settled; omit for every kind"),
+      limit: z.number().int().min(1).max(200).optional().default(20).describe("Findings listed, 1-200 (default 20); `total` counts them all"),
+      after: z.string().max(512).optional().describe("The previous page's `cursor`, given with the same status and kind (one made under others is refused); omit for the first page"),
+    },
+  },
+  // SMD-3671 PR 2 (migration 142): an operator's decision on a finding. The gate past the scope is the database's: the
+  // key's registry kind by its agent id, which the server does not hold.
+  review_priority_finding: {
+    title: "Review Priority Finding",
+    description:
+      "Operator only: a key the operator classified `operator` (set_agent_kind). Decide a pending finding list_priority_findings listed, by its id. `accept` says the outcome: `level` (0 none to 5 critical), optionally with `due_at`, stated as your own statement on the item — the level your own statement there already has re-confirms it, keeping its start (unless it falls after a due time you give); its due reference, unless the finding is overdue or you give a due time; its reason, when you give no note; and its due time while still ahead, unless you give one (one passed is never carried) — any other level is a new statement — or `clear: true`, which closes your own statement there (refused when you hold none: state 0 to outrank another maker's). A settled item's finding is accepted by clearing, or by stating 0. `reject` changes nothing. Either holds the same finding back for its window while its statements are those decided on, and records your key, your `note` and what was written; the statement is yours in the item's history (priority_history). Refused: a key not classified operator (REFUSED_NOT_OPERATOR), or one whose agent id the registry did not give (PRIORITY_UNATTRIBUTED); a key without write scope reaching it through a caller of the core's own (WRITE_SCOPE_REQUIRED); a finding not there (NOT_FOUND); a due time Postgres cannot read, refused after the agent-id check and before 142's operator check (REFUSED_PRIORITY_INPUT); arguments that do not go together (REFUSED_FINDING_INPUT): a level, a due time and clear go with accept alone, a due time with a level, and a settled finding takes clear or 0; a finding decided or moot already, nothing of yours to clear, or the writer refusing the outcome (REFUSED_FINDING_DECISION, the finding left pending).",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      // An accept states or clears the operator's own statement; the one it replaces or closes stays in the history.
+      destructiveHint: false,
+      // A second decision on the same finding is refused: it is no longer pending.
+      idempotentHint: false,
+    },
+    inputSchema: {
+      id: UUID_ARG.describe("The finding's id, as list_priority_findings gives it"),
+      decision: z.enum(["accept", "reject"]).describe("accept: state `level` (with `due_at`), or `clear`; reject: change nothing"),
+      level: z.number().int().min(0).max(5).optional().describe("Accept only: the level to state, 0 none to 5 critical"),
+      due_at: PRIORITY_TIME.optional().describe("Accept with a level only: when it is due, a time with its offset (2027-03-01T17:00:00Z), or a date (by the end of that day: the next day's start in UTC)"),
+      clear: z.boolean().optional().describe("Accept only, instead of a level: true closes your own statement on the item"),
+      // 142 counts the note's characters (length(text): code points). So does zod 4's max on a string (its
+      // codePointLength past the UTF-16 count), so a character past the BMP is one here too: test-rest-sql [26] holds both.
+      note: z.string().trim().min(1).max(2000).refine(NO_NUL, "may not hold a NUL character").optional().describe("Recorded with the decision, up to 2000 characters"),
     },
   },
   // SMD-4193 PR 2 (migration 132): the operator's weights, which every read takes as its defaults. The gate past the

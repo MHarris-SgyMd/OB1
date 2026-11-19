@@ -47,6 +47,8 @@ export const TOOLS = [
   { name: "brain_info", scope: "read" },
   { name: "list_claims", scope: "read" },
   { name: "priority_history", scope: "read" },
+  // The priority review's findings (SMD-3671 PR 2, migration 142): any key that reads lists them.
+  { name: "list_priority_findings", scope: "read" },
   { name: "item_history", scope: "read" },
   { name: "list_items", scope: "read" },
   // Deliverables (SMD-1715 PR 2, migration 134): the read is any key's; the writers below a write key's alone, as 134 refuses any other.
@@ -81,6 +83,8 @@ export const TOOLS = [
   // SMD-3606 PR 1b (migration 140): the operator's per-holder claim cap; past the scope, the database admits an operator key alone.
   { name: "set_work_claim_cap", scope: "write" },
   { name: "release_holder_claims", scope: "write" },
+  // SMD-3671 PR 2 (migration 142): an operator's decision on a priority finding; past the scope, the database admits an operator key alone.
+  { name: "review_priority_finding", scope: "write" },
   { name: "capture_deliverable", scope: "write" },
   { name: "verify_deliverable", scope: "write" },
   { name: "review_supersession_proposal", scope: "write" },
