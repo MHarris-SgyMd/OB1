@@ -44,6 +44,7 @@ import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
+import { marksOn, unreadItems, type Markable } from "./core/marks.ts";
 import type { Captured, Deleted, EvidenceAppended, EvidenceCode, ForgetCode, Forgotten, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
@@ -2812,26 +2813,41 @@ const UNREVIEWED_KEY = "Unreviewed: sleep's priority review found that statement
 /** The marks a failed read left, said once a reply (SMD-3671 PR 3), as a failed priorities read is; marks past the read's reach are counted on their result instead. */
 const UNREVIEWED_UNREAD_WHY = "Whether these priorities are unreviewed could not be read (for instance, a brain before migration 142, or a server role without SELECT on priority_findings): one not marked unreviewed may still be.";
 const UNREVIEWED_UNREAD = `⚠ ${UNREVIEWED_UNREAD_WHY}`;
-/** A result whose priorities may carry marks: its items', their sources', and how many no read reached. */
+/** A result whose priorities may carry marks: its items', their sources', and how many distinct items no read reached. */
 type MarkedResult = { priority?: readonly PriorityOn[] | null; unreviewedNotRead?: number };
-const resultMarks = (h: MarkedResult) => (h.priority ?? []).flatMap((p) => [p.unreviewed, p.fromItem?.unreviewed, p.inheritedFrom?.unreviewed]);
+type MarkFacts = { marked: boolean; failed: boolean };
+/** Each page's facts, worked out once a reply (review pass 2): its text and its value read the same array. */
+const factsOf = new WeakMap<readonly MarkedResult[], MarkFacts>();
 /**
- * A page's marks (review pass 1): whether any is marked, and whether a read failed — a null mark beyond those its
- * result counts past the read's reach (`unreviewedNotRead`), which is no failure and no grant's fault.
+ * A page's marks (review pass 1): whether any is marked, and whether a read failed — a distinct item whose mark is null
+ * beyond those its result counts past the read's reach (`unreviewedNotRead`), which is no failure and no grant's fault.
  */
-const markFacts = (hits: readonly MarkedResult[]) => ({
-  marked: hits.some((h) => resultMarks(h).some((u) => !!u)),
-  failed: hits.some((h) => resultMarks(h).filter((u) => u === null).length > (h.unreviewedNotRead ?? 0)),
-});
-/** The unreviewed lines a reply says once: the key where one is marked, the unread note where a read failed. */
-const unreviewedNotes = (f: { marked: boolean; failed: boolean }): string[] =>
-  [f.marked ? UNREVIEWED_KEY : null, f.failed ? UNREVIEWED_UNREAD : null].filter((x): x is string => x !== null);
+const markFacts = (hits: readonly MarkedResult[]): MarkFacts => {
+  const had = factsOf.get(hits);
+  if (had) return had;
+  const f = {
+    marked: hits.some((h) => (h.priority ?? []).flatMap(marksOn).some((m) => !!m.mark)),
+    failed: hits.some((h) => unreadItems(h.priority ?? []).size > (h.unreviewedNotRead ?? 0)),
+  };
+  factsOf.set(hits, f);
+  return f;
+};
+/** An agenda's or a board's marks, the items' and their sources'. */
+const itemFacts = (items: readonly AgendaItem[]): MarkFacts => {
+  const marks = items.flatMap(marksOn).map((m) => m.mark);
+  return { marked: marks.some((u) => !!u), failed: marks.some((u) => u === null) };
+};
+/** The unreviewed lines a reply says once: the key where one is marked, the unread note, in its surface's words, where a read failed. */
+const unreviewedNotes = (f: MarkFacts, unread = UNREVIEWED_UNREAD): string[] =>
+  [f.marked ? UNREVIEWED_KEY : null, f.failed ? unread : null].filter((x): x is string => x !== null);
 /** The compat pair's (search, fetch) unreviewed lines, once a reply, as `priorityNote` is (review pass 1). */
 const unreviewedCompat = (hits: readonly MarkedResult[]) => {
-  const f = markFacts(hits);
-  const said = [f.marked ? UNREVIEWED_KEY : null, f.failed ? UNREVIEWED_UNREAD_WHY : null].filter(Boolean);
+  const said = unreviewedNotes(markFacts(hits), UNREVIEWED_UNREAD_WHY);
   return said.length ? { unreviewedNote: said.join(" ") } : {};
 };
+/** A term's words with the mark of the source it names (a level read from an open item, or inherited), as search's and the agenda's lines say it. */
+const sourcedTerm = (s: Pick<Markable, "fromItem" | "inheritedFrom">, t: PriorityTerm, words: string) =>
+  `${words}${t.term === "from_items" ? sourceWords(s.fromItem?.unreviewed) : t.term === "inherited" ? sourceWords(s.inheritedFrom?.unreviewed) : ""}`;
 /** Who an item is to the result it labels: the result itself (a ticket's own row said as its ticket), or a ticket it names. */
 const priorityWho = (p: PriorityOn) => (p.self ? (p.kind === "ticket" ? `this ticket's row (${p.key})` : "this thought") : `ticket ${p.key}`);
 /**
@@ -2852,7 +2868,7 @@ function priorityWords(priority: readonly PriorityOn[] | null | undefined, more 
   const stated = (level: number) => `${level === 0 ? "stated " : ""}${levelText(level)}`;
   const term = (t: PriorityTerm) => (t.term === "level" && Number(t.detail.level) === 0 ? `stated ${agendaTerm(t)}` : agendaTerm(t));
   // A level's source carries its own mark, said on the term that names it (SMD-3671 PR 3 review pass 1).
-  const sourced = (p: PriorityOn) => (t: PriorityTerm) => `${term(t)}${t.term === "from_items" ? sourceWords(p.fromItem?.unreviewed) : t.term === "inherited" ? sourceWords(p.inheritedFrom?.unreviewed) : ""}`;
+  const sourced = (p: PriorityOn) => (t: PriorityTerm) => sourcedTerm(p, t, term(t));
   const one = (p: PriorityOn) => {
     if (title) {
       const inherited = p.terms.find((t) => t.term === "inherited");
@@ -2889,7 +2905,8 @@ function agendaLine(i: AgendaItem, more: { blockers: number; claimed: number; la
     // SMD-3671 PR 3: sleep's pending stale finding on it, a mark: its place above is unchanged.
     markText(i.unreviewed),
   ].filter(Boolean);
-  return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map(agendaTerm).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
+  // A level's source carries its own mark (SMD-3671 PR 3 review pass 2), said on the term that names it.
+  return `${i.rank}. ${what} ${quoted(i.title)} — ${i.effective}: ${i.terms.map((t) => sourcedTerm(i, t, agendaTerm(t))).join("; ")}${notes.length ? ` [${notes.join("; ")}]` : ""}`;
 }
 
 /**
@@ -2912,7 +2929,7 @@ export const renderAgenda = (o: Outcome<AgendaAnswer, AgendaCode>): Reply => ren
   const left = [v.leftOut.blocked ? `${v.leftOut.blocked} blocked` : null, v.leftOut.claimed ? `${v.leftOut.claimed} claimed` : null, v.leftOut.started ? `${v.leftOut.started} started (include_started lists them)` : null, v.leftOut.waiting ? `${v.leftOut.waiting} not yet startable` : null].filter(Boolean);
   if (left.length) lines.push(`Left out: ${left.join(", ")}.`);
   if (v.total) lines.push(v.unknown ? `${v.unknown} of ${v.total} carry no priority, stated or inherited (read as medium, not low).` : "Every item listed carries a priority.");
-  lines.push(...unreviewedNotes({ marked: v.items.some((i) => !!i.unreviewed), failed: v.items.some((i) => i.unreviewed === null) }));
+  lines.push(...unreviewedNotes(itemFacts(v.items)));
   // The heartbeat's time is its last stamp (a pass running or idle stamps it too), so its outcome is said beside it.
   lines.push(v.boardSync ? `Board-sync last stamped ${v.boardSync.at}${typeof v.boardSync.outcome === "string" ? `, its last pass ${quoted(v.boardSync.outcome, 40)}` : ""}.` : "No board-sync heartbeat: tickets may be missing or stale.");
   if (!v.claimsRead) lines.push("Claims could not be read (the server's database role lacks the claims group): nothing was left out for a claim, no holder is named, and claimed started work counts as started.");
@@ -2945,7 +2962,9 @@ const gapWords = (g: PlanGap): string => {
       g.titles ? `${g.titles} title${g.titles === 1 ? "" : "s"} shortened or left off` : null,
       g.unlisted ? `${g.unlisted} settled, not yet startable or unknown ticket${g.unlisted === 1 ? "" : "s"} past the lists, counted and not named` : null,
     ].filter(Boolean).join("; ")}.`;
-    case "unreviewed_not_read": return `A note, not a gap: whether the board's priorities are unreviewed was not read (${g.reason === "deadline" ? "out of the read's time" : "its read failed; the server's log says why"}), so a ticket not marked unreviewed may still be.`;
+    case "unreviewed_not_read": return g.section === "knowledge"
+      ? "A note, not a gap: whether the hits' priorities are unreviewed was not all read (out of the knowledge's time), so one not marked unreviewed may still be."
+      : `A note, not a gap: whether the board's priorities are unreviewed was not read (${g.reason === "deadline" ? "out of the read's time" : "its read failed; the server's log says why"}), so a ticket not marked unreviewed may still be.`;
     case "section_unavailable": return `The board could not be read: ${g.reason === "deadline" ? "it ran out of time (the read's deadline, or a stricter statement timeout the database keeps)" : g.reason === "no_keys_scope" ? "this brain's agenda predates migration 126" : "its read failed (the server's log says why)"}; the hits name ${g.named} ticket${g.named === 1 ? "" : "s"}.`;
   }
 };
@@ -2964,7 +2983,9 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
   const order = k.vectorFailed?.matched === "text" ? "newest first, matched as one text" : "current work ranked first";
   out.push(`\n## Knowledge: ${k.hits.length} hit${k.hits.length === 1 ? "" : "s"}, ${order}${literal ? ` (${literal})` : ""}`);
   // The unreviewed lines, said once a reply: the board says only those the knowledge did not (SMD-3671 PR 3).
-  const knownMarks = unreviewedNotes(markFacts(k.hits));
+  // Marks the knowledge's deadline left unread are its gap's to say, not the grant's hint (review pass 2).
+  const outOfTime = v.gaps.some((g) => g.gap === "unreviewed_not_read" && g.section === "knowledge");
+  const knownMarks = unreviewedNotes({ ...markFacts(k.hits), ...(outOfTime ? { failed: false } : {}) });
   if (k.hits.length) {
     const notes: string[] = [];
     if (k.hits.some((t) => (t.claimed?.length ?? 0) > 0)) notes.push(CLAIMED_KEY);
@@ -3007,7 +3028,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     if (b.claimsRead === false) out.push("Claims could not be read (the server's database role lacks the claims group): no holder is named.");
     else if (b.claimsLive === 0) out.push("This brain records no live claim: work claimed through another brain is not seen here.");
     // The board's marks not read are its gap's to say (deadline or failed), not the grant hint.
-    out.push(...unreviewedNotes({ marked: b.tickets.some((i) => !!i.unreviewed), failed: false }).filter((n) => !knownMarks.includes(n)));
+    out.push(...unreviewedNotes({ ...itemFacts(b.tickets), failed: false }).filter((n) => !knownMarks.includes(n)));
   }
   out.push(`\n## Specs and deliverables: not available here (${v.specs.reason}; waits on ${v.specs.waitsOn.join(", ")}).`);
   out.push(`## Procedures: not available here (${v.procedures.reason}; waits on ${v.procedures.waitsOn.join(", ")}).`);

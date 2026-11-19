@@ -592,14 +592,17 @@ still marked). `false` is none; `null` is not checked. A level read from an open
 item or inherited carries its source's mark on `fromItem.unreviewed` and
 `inheritedFrom.unreviewed`: the statement under review is the source's, and the
 item itself is not said stale for it. The agenda's items and `plan_context`'s
-board tickets carry it too.
+board tickets carry it too, on their level's sources as well (`inheritedFrom`, a
+parent ticket's, and `fromItem`).
 
 Not checked is one of two things, kept apart: a read that failed (a brain before
 142, a role without SELECT on the table, one log line naming why), said once a
 reply; or a mark past the read's reach of 1000 items, counted on its result in
-`unreviewedNotRead` and said as not checked. The board's marks, read under
-what is left of `plan_context`'s deadline, out of time or failed, are a gap of
-their own, `unreviewed_not_read`.
+`unreviewedNotRead` (distinct items, not marks, and after `plan_context`'s
+budget cuts a hit's list, those it still shows) and said as not checked.
+`plan_context` reads its knowledge hits' marks in the knowledge's share of the
+deadline and the board's in what is left of it; out of time (or, for the board,
+failed) a gap of their own, `unreviewed_not_read` with its section, says so.
 
 Over MCP a marked item reads `…, medium (2) by codex, stated 75 days ago,
 unreviewed` (`1 day`, `today`, or no statement and no age when not read) in the
@@ -610,10 +613,13 @@ present, never a null; a failed read is the value's top-level
 `unreviewedRead: false`. `search` and `fetch` carry the meaning, or the failed
 read, once in `unreviewedNote`, as `priorityNote`.
 
-At most two reads a reply: the first of the keys the priority read asks, beside
-it; a second only for what its answer names that the first did not ask (a
-level's source, or the board's tickets the knowledge's marks did not cover). By
-142's partial index of the pending, and never failing or nulling the priority.
+The reads a reply makes: `search`, `fetch` and the lists at most two — the first
+of the keys the priority read asks, beside it, and a second only for what its
+answer names that the first did not ask (a level's source, a ticket a row reads
+as), none after a first that failed; the agenda one, its items and their sources
+together; `plan_context` at most three — the knowledge's two, then the board's,
+for the tickets and sources the knowledge's marks did not cover. By 142's
+partial index of the pending, and never failing or nulling the priority.
 It is a mark, never a weight: no order, rank or filter reads it, so a ranked
 search, the agenda and the board order alike with it or without. It lags the
 review, whose scan writes and moots findings at most every six hours, and with

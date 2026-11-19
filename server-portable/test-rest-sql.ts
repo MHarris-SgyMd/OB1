@@ -3743,7 +3743,7 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
   type On = { kind: string; key: string; self?: boolean; effective: number; unreviewed?: Mark; fromItem?: { unreviewed?: Mark } | null; inheritedFrom?: { unreviewed?: Mark } | null };
   type Row = Record<string, unknown> & { id: string; priority?: On[] | null };
   const pick = (rows: unknown, id: string) => (rows as Row[] | undefined)?.find((r) => r.id === id);
-  const STALE = "SMD-99971", MIRROR = "SMD-99972", AG = "SMD-99973", AG2 = "SMD-99974", AG3 = "SMD-99975", P = "Unreviewed rest [27]";
+  const STALE = "SMD-99971", MIRROR = "SMD-99972", AG = "SMD-99973", AG2 = "SMD-99974", AG3 = "SMD-99975", AG4 = "SMD-99976", P = "Unreviewed rest [27]";
   // Backdated statements, written raw: assert_priority stamps its own now, and 116 refuses an update of asserted_at. Two
   // agents' on a ticket no row records (so nothing else is its activity), 90 and 75 days ago; board-sync's, a source's,
   // on another, 90 days ago. The projection made current for each, as the writers do.
@@ -3772,6 +3772,7 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
     const content = `${issue} — [27] ${issue}`;
     const [{ id }] = await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, (${JSON.stringify({ source: "linear", issue, status: "backlog", status_type: "backlog", project })}::text)::jsonb) RETURNING id`;
     await sql`SELECT record_thought_source(${id}::uuid, 'linear', ${issue}, ${content}, 'text/markdown')`;
+    return String(id);
   };
   await ticket(AG); await ticket(AG2);
   await rest("POST", `/v1/priorities/ticket/${AG}`, { level: 3 });
@@ -3787,6 +3788,9 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
   await ticket(AG3, "Unreviewed rest [27] elsewhere");
   await rest("POST", `/v1/priorities/ticket/${AG3}`, { level: 4 });
   const heir = await rest("POST", "/v1/thoughts", { content: "[27] the inheritance case: a note under its ticket", metadata: { ticket: AG3 } });
+  // An agenda ticket with no level of its own, a child of AG3: it inherits AG3's, and the agenda marks AG3 on it (review pass 2).
+  const child = await ticket(AG4);
+  await sql`SELECT record_source_links(${child}::uuid, 'linear', ${JSON.stringify([{ relation: "child_of", target: AG3 }])}::text::jsonb)`;
   const hid = String(heir.body.id);
   const stmt = (days: number, level = 3, maker = "writer") => sql`SELECT jsonb_build_object('id', gen_random_uuid(), 'level', ${level}::int, 'maker', ${maker}::text, 'asserted_at', now() - make_interval(days => ${days}::int)) AS s`.then((r) => r[0].s);
   const [agF] = await sql`
@@ -3818,7 +3822,7 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
       rest("POST", "/v1/plan-context", { request: 'how do I do "quill plan omega"', limit: 20 }), mcp("plan_context", { request: 'how do I do "quill plan omega"', limit: 20 }),
       rest("GET", `/v1/thoughts/${fid}`), mcp("fetch", { id: fid }), rest("GET", `/v1/thoughts/${hid}`), mcp("fetch", { id: hid }),
     ]);
-    const items = (ag.body.items ?? []) as { key: string; rank: number; effective: number; unreviewed?: On["unreviewed"] }[];
+    const items = (ag.body.items ?? []) as { key: string; rank: number; effective: number; unreviewed?: On["unreviewed"]; inheritedFrom?: { key: string; unreviewed?: Mark } | null }[];
     const board = ((pc.body.board as { tickets?: { key: string; effective: number; unreviewed?: On["unreviewed"] }[] } | undefined)?.tickets ?? []);
     return {
       rest: [pick(compat.body.results, tid), pick(st.body.hits, tid), pick(kw.body.hits, tid), pick(list.body.thoughts, tid), fetched.body as Row, pick(ranked.body.hits, tid)],
@@ -3853,11 +3857,13 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
         && [marked.compatTitle, marked.fetchTitle].every((t) => t.startsWith(`[priority: this thought low (1), low (1) by rival, stated 70 days ago, unreviewed; ticket ${STALE} urgent (4), medium (2) by [27] agent b, stated 75 days ago, unreviewed; and 1 more] `))
         && marked.notes.every((n) => typeof n === "string" && n.startsWith("Unreviewed: sleep's priority review found that statement stale")) && marked.scRead.every((x) => x === undefined),
       `the MCP texts, values and titles say it, naming the agents' medium under review beside board-sync's counted urgent: search_thoughts', search_thoughts_keyword's and list_thoughts' lines and the key once, every value (search's and fetch's too), search's and fetch's titles and their note (${(marked.texts[0].match(/Priority: .*/) ?? ["none"])[0].slice(0, 220)} | ${marked.compatTitle.slice(0, 160)})`);
-    assert(marked.items.map((i) => `${i.key}:${days(i.unreviewed)}`).join(" ") === `${AG2}:none ${AG}:80` && marked.agSame
+    assert(marked.items.map((i) => `${i.key}:${days(i.unreviewed)}`).join(" ") === `${AG2}:none ${AG}:80 ${AG4}:none` && marked.agSame
+        && marked.items[2]?.inheritedFrom?.key === AG3 && days(marked.items[2]?.inheritedFrom?.unreviewed) === 65
+        && marked.agText.includes(`inherited 3 from ticket ${AG3} (urgent (4), 1 hop) (urgent (4) by writer, stated 65 days ago, unreviewed)`)
         && marked.agText.includes(`2. ticket ${AG} ("backlog") "${AG} — [27] ${AG}" — 3: high (3) [high (3) by writer, stated 80 days ago, unreviewed]`)
         && days(marked.board.find((t) => t.key === AG)?.unreviewed) === 80 && days(marked.board.find((t) => t.key === AG2)?.unreviewed) === "none"
         && marked.pcText.includes("[high (3) by writer, stated 80 days ago, unreviewed]") && (marked.pcBoard.find((t) => t.key === AG)?.unreviewed as { days?: number } | undefined)?.days === 80,
-      `the agenda's item and plan_context's board ticket marked 80 days (its newer statement's), over both doors, the higher one beside them not (${marked.items.map((i) => `${i.key}:${days(i.unreviewed)}`).join(" ")} | ${(marked.agText.match(/2\. .*/) ?? ["none"])[0]})`);
+      `the agenda's item and plan_context's board ticket marked 80 days (its newer statement's), over both doors, the higher one beside them not; a child ticket's inherited parent marked 65 on the source, the child itself not (${marked.items.map((i) => `${i.key}:${days(i.unreviewed)}`).join(" ")} | ${(marked.agText.match(/2\. .*/) ?? ["none"])[0]})`);
 
     assert(itemLevel.status === 200 && days(marked.bill?.fromItem?.unreviewed) === 85 && days(marked.bill?.unreviewed) === "none"
         && marked.billTitle.startsWith(`[priority: this thought urgent (4) from open item ${itemId} (urgent (4) by writer, stated 85 days ago, unreviewed)] `)
@@ -3872,7 +3878,7 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
     await sql`UPDATE priority_findings SET status = 'moot', moot_at = now() WHERE id = ANY(${sql.array([noteF.id, ...sources.map((r: { id: string }) => r.id)], "UUID")}::uuid[])`;
     const after = await reads();
     assert(rejected.status === 200 && !rejectedM.isError && after.rest.every((r) => days(on(r, STALE)?.unreviewed) === "none" && days(r?.priority?.find((p) => p.self)?.unreviewed) === "none")
-        && after.items.every((i) => i.unreviewed === false) && after.board.every((t) => t.unreviewed === false)
+        && after.items.every((i) => i.unreviewed === false && (i.inheritedFrom?.unreviewed ?? false) === false) && after.board.every((t) => t.unreviewed === false)
         && after.texts.every((t) => !t.includes("unreviewed") && !t.includes("Unreviewed:")) && !after.compatTitle.includes("unreviewed") && !after.agText.includes("unreviewed"),
       `rejected or mooted, a finding marks nothing: every read, the agenda and the board say none (${after.rest.map((r) => days(on(r, STALE)?.unreviewed)).join(" ")} | ${after.items.map((i) => days(i.unreviewed)).join(" ")})`);
     assert(bare(after) === bare(marked) && marked.order[0].includes(tid),
@@ -3882,7 +3888,7 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
     await sql`ALTER TABLE priority_findings RENAME TO priority_findings_away_27`;
     let gone;
     try { gone = await reads(); } finally { await sql`ALTER TABLE priority_findings_away_27 RENAME TO priority_findings`; }
-    assert(bare(gone) === bare(marked) && gone.rest.every((r) => (r?.priority?.length ?? 0) > 0 && r!.priority!.every((p) => p.unreviewed === null)) && gone.items.every((i) => i.unreviewed === null)
+    assert(bare(gone) === bare(marked) && gone.rest.every((r) => (r?.priority?.length ?? 0) > 0 && r!.priority!.every((p) => p.unreviewed === null)) && gone.items.every((i) => i.unreviewed === null && (i.inheritedFrom ? i.inheritedFrom.unreviewed === null : true))
         && gone.texts.every((t) => t.split("Whether these priorities are unreviewed could not be read").length === 2 && t.includes(`ticket ${STALE} at 4 (urgent (4))`))
         && gone.scRead.every((x) => x === false) && gone.sc.slice(0, 3).every((p) => (p ?? []).every((x) => !("unreviewed" in x)))
         && gone.notes.every((n) => typeof n === "string" && n.startsWith("Whether these priorities are unreviewed could not be read")),

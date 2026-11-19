@@ -1566,6 +1566,14 @@ export type PriorityWeights = {
 /** One term of an effective priority, named, with what it read (`detail`: the window and due time, the count, the item inherited from, the open item a thought read its level or due time from: `item`, migration 125). */
 export type PriorityTerm = { term: "level" | "from_items" | "inherited" | "unknown" | "urgency" | "overdue" | "unblocks"; value: number; detail: Record<string, unknown> };
 /**
+ * The open item a level is read from (125's `from_items` term): its id and the level counted on it, its unreviewed mark
+ * not yet read (null); else null. A search result's priority and an agenda item read it alike (SMD-3671 PR 3).
+ */
+export const fromItemTerm = (terms: readonly PriorityTerm[]): { key: string; level: number; unreviewed: UnreviewedMark } | null => {
+  const t = terms.find((x) => x.term === "from_items");
+  return t && typeof t.detail.item === "string" ? { key: t.detail.item, level: t.value, unreviewed: null } : null;
+};
+/**
  * One item's effective priority (migration 122, SMD-3667): the order a ranking read uses and every term that made
  * it. `level` is the counted statement's (null: unknown, inherited, or read from a thought's open items, its first
  * term then `from_items`, migration 125); `inheritedFrom` the item it inherits from, its level and how many hops;
@@ -1992,7 +2000,10 @@ export type AgendaItem = {
   owner: string | null;
   effective: number;
   level: number | null;
-  inheritedFrom: (PriorityItem & { level: number; hops: number }) | null;
+  /** The item it inherits its level from, and (SMD-3671 PR 3 review pass 2) that source's unreviewed mark. */
+  inheritedFrom: (PriorityItem & { level: number; hops: number; unreviewed: UnreviewedMark }) | null;
+  /** The open item its level is read from (125's `from_items` term), and that source's unreviewed mark; else null. */
+  fromItem: { key: string; level: number; unreviewed: UnreviewedMark } | null;
   dueAt: string | null;
   dueFrom: "stated" | "due_ref" | "item" | "from_items" | null;
   urgency: number;
@@ -2079,7 +2090,7 @@ export function normaliseAgenda(r: unknown, what: string): AgendaResult {
       title: typeof i.title === "string" ? i.title : "", project: typeof i.project === "string" ? i.project : null,
       status: typeof i.status === "string" ? i.status : null, statusType: typeof i.status_type === "string" ? i.status_type : null,
       owner: typeof i.owner === "string" ? i.owner : null,
-      effective: e.effective, level: e.level, inheritedFrom: e.inheritedFrom, dueAt: e.dueAt, dueFrom: e.dueFrom, urgency: e.urgency,
+      effective: e.effective, level: e.level, inheritedFrom: e.inheritedFrom && { ...e.inheritedFrom, unreviewed: null }, fromItem: fromItemTerm(e.terms), dueAt: e.dueAt, dueFrom: e.dueFrom, urgency: e.urgency,
       overdue: e.overdue, unblocks: e.unblocks, terms: e.terms, winner: e.winner,
       claimed: claimsOf(i.claimed, what), lapsedClaim: claimsOf(i.lapsed_claim, what), blockers: i.blockers as string[],
       unreviewed: null,
