@@ -607,6 +607,70 @@ console.log("\n[12] forget_thought: refused without the id echoed and while cite
   assert(again.isError && again.sc.code === "FORGOTTEN" && /was forgotten already/.test(again.text) && never.isError && never.sc.code === "NOT_FOUND" && /was ever in the brain's log/.test(never.text),
     `forgotten again is FORGOTTEN; an unknown id NOT_FOUND (${again.text.slice(0, 50)} | ${never.text.slice(0, 50)})`);
 
+  // A thought another brain copied here under its client_key, deleted here by a copied delete, is forgotten by that key:
+  // the tombstone kept it (SMD-1723 PR 3, the fan-out's case). Its text redacted, the ledger written.
+  const KEY = "11111111-2222-4333-8444-555555555555";
+  const keyed = idOf(await writer.call("capture_thought", { content: "[12] a copy another brain made, deleted then forgotten here", client_key: KEY }));
+  await writer.call("delete_thought", { id: KEY });
+  const byKey = await full("forget_thought", { id: KEY, confirm: KEY });
+  const keyedLeft = (await sql`SELECT
+      (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${keyed}::uuid AND (redacted_at IS NULL OR diff::text LIKE '%deleted then forgotten%')) AS open,
+      (SELECT count(*)::int FROM thought_forgotten WHERE thought_id = ${keyed}::uuid) AS led`)[0] as { open: number; led: number };
+  const keyedAgain = await full("forget_thought", { id: KEY, confirm: KEY });
+  assert(!byKey.isError && byKey.sc.id === keyed && byKey.sc.byClientKey === KEY && new RegExp(`^Forgot ${keyed}, named by its client_key ${KEY} at `).test(byKey.text)
+      && /deleted earlier/.test(byKey.text) && keyedLeft.open === 0 && keyedLeft.led === 1 && keyedAgain.isError && keyedAgain.sc.code === "NOT_FOUND",
+    `a deleted thought is forgotten by the client_key its tombstone kept, its events redacted; the key no longer names it once forgotten (${byKey.text.split("\n")[0].slice(0, 90)}; ${JSON.stringify(keyedLeft)}; ${keyedAgain.sc.code})`);
+
+  // Every thought here the name is, one thought across brains: a standing re-capture under a key and the deleted copy
+  // before it; two deleted copies under one key; a deleted thought's id that a standing one keeps as its key. Each
+  // forgotten by the one call, the others listed; and a thought's own client_key named in the reply (review pass 1).
+  const count = async (id: string) => Number((await sql`SELECT count(*)::int AS c FROM thought_audit WHERE thought_id = ${id}::uuid AND redacted_at IS NULL`)[0].c);
+  const KA = "22222222-2222-4222-8222-222222222222", KB = "33333333-3333-4333-8333-333333333333";
+  const a1 = idOf(await writer.call("capture_thought", { content: "[12] key A, first copy", client_key: KA }));
+  await writer.call("delete_thought", { id: KA });
+  const a2 = idOf(await writer.call("capture_thought", { content: "[12] key A, captured again", client_key: KA }));
+  const byA = await full("forget_thought", { id: KA, confirm: KA });
+  const b1 = idOf(await writer.call("capture_thought", { content: "[12] key B, first copy", client_key: KB }));
+  await writer.call("delete_thought", { id: KB });
+  const b2 = idOf(await writer.call("capture_thought", { content: "[12] key B, second copy", client_key: KB }));
+  await writer.call("delete_thought", { id: KB });
+  const byB = await full("forget_thought", { id: KB, confirm: KB });
+  const s1 = idOf(await writer.call("capture_thought", { content: "[12] the thought deleted under its own id" }));
+  await writer.call("delete_thought", { id: s1 });
+  const t1 = idOf(await writer.call("capture_thought", { content: "[12] a thought keeping that id as its key", client_key: s1 }));
+  const byS = await full("forget_thought", { id: s1, confirm: s1 });
+  const KC = "44444444-4444-4444-8444-444444444444";
+  const c1 = idOf(await writer.call("capture_thought", { content: "[12] a keyed thought forgotten by its id", client_key: KC }));
+  const byId = await full("forget_thought", { id: c1, confirm: c1 });
+  // A keyed thought deleted first, then forgotten by its id: the reply still names its key, read from the tombstone, so
+  // a copy of the forget reaches the brain it began on (pass 6's whole-diff mutant).
+  const KE = "66666666-6666-4666-8666-666666666666";
+  const e1 = idOf(await writer.call("capture_thought", { content: "[12] a keyed thought deleted, then forgotten by its id", client_key: KE }));
+  await writer.call("delete_thought", { id: e1 });
+  const byIdGone = await full("forget_thought", { id: e1, confirm: e1 });
+  assert(!byIdGone.isError && byIdGone.sc.clientKey === KE && new RegExp(`^Forgot ${e1}, its client_key ${KE} at `).test(byIdGone.text),
+    `a keyed thought deleted, then forgotten by its id, names its key from the tombstone (${byIdGone.text.split("\n")[0].slice(0, 120)})`);
+  const opens = await Promise.all([a1, a2, b1, b2, s1, t1, c1, e1].map(count));
+  // A name tried again as an id (NOT_FOUND), or a copy forgotten already, is nothing left: never listed as not
+  // forgotten, or every copied forget would be kept and sent again (pass 6's whole-diff mutant).
+  const noneLeft = [byA, byB, byS, byId, byIdGone].every((r) => r.sc.notForgotten === undefined && !/Not forgotten/.test(r.text));
+  assert(noneLeft, `a forget with nothing left names nothing not forgotten (${[byA, byB, byS, byId, byIdGone].map((r) => JSON.stringify(r.sc.notForgotten ?? null)).join(" ")})`);
+  assert(!byA.isError && byA.sc.id === a2 && JSON.stringify(byA.sc.alsoForgottenIds) === JSON.stringify([a1])
+      && !byB.isError && byB.sc.id === b2 && JSON.stringify(byB.sc.alsoForgottenIds) === JSON.stringify([b1])
+      && !byS.isError && byS.sc.id === t1 && JSON.stringify(byS.sc.alsoForgottenIds) === JSON.stringify([s1]) && /Also forgotten here, the same thought under that name/.test(byS.text)
+      && !byId.isError && byId.sc.clientKey === KC && new RegExp(`^Forgot ${c1}, its client_key ${KC} at `).test(byId.text) && opens.every((n) => n === 0),
+    `every thought here a name is goes with one forget — a re-capture and its deleted copy, two deleted copies, a deleted id and the thought keeping it as its key — and a keyed thought's reply names its key (${JSON.stringify({ a: byA.sc.alsoForgottenIds, b: byB.sc.alsoForgottenIds, s: byS.sc.alsoForgottenIds, key: byId.sc.clientKey, opens })})`);
+
+  // A thought standing under the name as its id (an import or a refresh keeps ids) beside one keeping that name as its
+  // key: both go (review pass 2: the keyed one was left).
+  const KD = "55555555-5555-4555-8555-555555555555";
+  const keyedD = idOf(await writer.call("capture_thought", { content: "[12] a copy keeping a name another thought has as its id", client_key: KD }));
+  await sql`INSERT INTO thoughts (id, content, content_fingerprint) VALUES (${KD}::uuid, ${"[12] a thought written under that id"}, content_fingerprint_of(${"[12] a thought written under that id"}))`;
+  const byD = await full("forget_thought", { id: KD, confirm: KD });
+  const standingD = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE id IN (${KD}::uuid, ${keyedD}::uuid)`)[0].c);
+  assert(!byD.isError && byD.sc.id === KD && JSON.stringify(byD.sc.alsoForgottenIds) === JSON.stringify([keyedD]) && standingD === 0,
+    `a name that is one thought's id and another's key takes both (${JSON.stringify(byD.sc.alsoForgottenIds)}; ${standingD} standing)`);
+
   // An edit resending a row's own text is the database's to take, as its trigger does, though the text was forgotten:
   // a row holding it with no fingerprint (an operator's reinstating write) (review pass 3).
   const keyless = String((await sql.begin(async (tx) => {

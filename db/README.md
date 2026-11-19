@@ -331,7 +331,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and forty-six (146) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and forty-seven (147) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -372,7 +372,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -390,7 +390,7 @@ that writes its version as the last file of the range it freezes: 048 writes
 `1.8.0+upstream.9543c29`, the ninth (`084..089`), and 103 writes
 `1.9.0+upstream.9543c29`, the tenth (`090..103`), and 121 writes
 `2.0.0`, the eleventh (`104..121`), the first plain version (SMD-3317), and 146 writes
-`2.1.0`, the twelfth (`122..146`). `preflight` prints the
+`2.1.0`, the twelfth (`122..146`), and 147 writes `2.2.0`, the thirteenth (`147..147`). `preflight` prints the
 value beside the ledger's highest migration and warns when a server is older than
 the brain, or a brain has run past its version's range. Both are introduced by a
 fragment or a cut rather than a hand-numbered change, so they are named here by
@@ -5363,7 +5363,86 @@ Until its pool drains; anything else that ends it sets it down for that
 period — refused (a key, credit, the model not served, the egress policy, a
 refusal mid-pass), its provider not answering — said, on the row (`aside`,
 its kind; a thrown error's reason in the log), and the other passes run on;
-the next period tries it again. A statement past its
+the next period tries it again. An outage that made the thought in hand a
+suspect, or a suspect's alone — as when a thought's call crashes the provider —
+is waited out instead, said, the provider probed every 5 s from the wait's
+start (no doubling, nothing carried from the last wait), up to 2 minutes a wait
+and 4 minutes of isolation a period (SMD-4254, the maintainer's choices of
+2026-11-18) — the isolation counted from its first such wait's start until its
+suspects settle, the retries' calls and probes between the waits included:
+once the provider answers, re-embed retries the outage's suspects one at a
+time and fails the thought at its third outage alone, as a `--follow` run by
+hand does. A crashing thought costs four waits — its batch's outage, two alone,
+and the one it leaves once recorded failed — so it is failed in one period if
+the provider is back under about 80 s after each crash, and the backlog behind
+it re-embedded in that period too under about 60 s; a crash of a few seconds
+costs about 20 s once. Past either limit re-embed is set down as at any outage,
+said (which limit) — past the cap between waits too, a retry's call or probe in
+hand aborted and its thought set back in the queue — so the claim passes are
+held 4 minutes and a poll at most a period from the first wait's start (what
+comes before it, the call that met the outage and its probe, is as before: with
+a provider that hangs, two `OB1_LLM_TIMEOUT`s, 120 s each at the default, so a
+try holds the claim passes about 6 minutes with a provider that hangs for good —
+the two and the bound — and about 8 with one that hangs for about 240-360 s, the
+two and the cap). A live write's pause counts toward
+neither limit: their clock stops while the period's gate is closed. And it
+backs off, by time (the maintainer's decision): a
+set-down at a limit — a try — makes such an outage met in the next 4 minutes set
+re-embed down at once, as before SMD-4254, said ("backing off" and the seconds
+left); the first one met after that is waited out once more, and a try that ends
+at a limit again backs off 8 minutes, then 16, 32, and then an hour at each
+(the ceiling, the hourly rescan's scale; doubling on, the next
+try after ten limits was about 68 hours away), until re-embed drains or a
+suspect retried alone is recorded failed — for the scheduler's life, a restart
+trying at once. A limit in an isolation where a suspect was recorded failed
+alone begins none: that is the outage the failed thought leaves. At a limit's
+set-down and a backed-off one, the outage's suspects — handed back at the
+pool's front, the crashing thought among them — are moved behind the pool
+(`enqueued_at` now, as a set-back's), so the next periods re-embed the backlog
+pooled before the set-down ahead of them; at the front, every period backed off
+claimed the crashing thought first, crashed the provider again, and re-embedded
+nothing. Thoughts captured after the move land behind it, so under a steady
+inflow each period still claims the crashing thought before that period's new
+captures: a new note waits about one crash length (a median 120-228 s measured);
+on an idle brain the move pays at the next rescan. A period is capture-driven on
+a busy brain (a live or sync capture begins one, about 30 s apart under a steady
+inflow) and the hourly rescan on an idle one, so the back-off counts time, not
+periods: counted in periods, the periods after a skipped one met
+the provider still down from the crash it caused, and a crash of 80 s or more
+held the claim passes 40-63% of the time. The tries, by the crash:
+
+- **A crash that ends between about 80 and 120 s**, each time the thought is
+  claimed: each try held to the 4-minute cap, tried at 0, 8, 20, 40, …
+  minutes (each limit's 4, 8, 16, … minutes on from the try's end).
+- **A crash longer than the 2-minute bound, that ends**: each try held to the
+  bound, tried at 0, 6, 16, 34, … minutes, each plus the wait for the
+  provider to come back from the crash a period backed off caused — a period's
+  start finding it down sets re-embed down at once, no try.
+- **A crash that never ends**: one try, held to the bound; every period after
+  finds the provider down at its start and sets re-embed down at once.
+- With a provider that hangs, a try costs about 6 or 8 minutes (above), not
+  2 or 4. Past the ceiling, tries come at most an hour after each try's limit.
+
+The back-off spares the claim passes, not the provider: a crashing thought that
+outlasts the limits crashes it again every crash length, each period claiming it
+once the provider is back — as before SMD-4254, about 24 times an hour
+at 150 s a crash and 40 at 90 s. Measured at the shipped settings with a steady
+sync capture every 30 s for 60 minutes, the claim passes were
+held 27.4% of the time with a crash of 150 s (48, 33, 17, 33, 17 and 17% by
+10-minute slice) and 38.4% with one of 90 s (57, 42, 49, 17, 49 and 17%),
+against 16.7% throughout before SMD-4254, 5 s a period otherwise; the share falls
+as the back-off doubles. Meanwhile the backlog is re-embedded (none before SMD-4254). On
+an idle brain, with no capture to begin a period, a try comes only with the
+hourly rescan: 5.5-10.7% held. A crash shortened meanwhile is failed at the
+first try after the back-off in hand ends.
+An embedding endpoint
+simply down that a call first meets mid-pass with a 500, 502 or 504, a refused
+or reset connection or a timeout makes the thought in hand a suspect too, so
+it costs up to the 2 minutes once, before the next period's start finds it down
+and sets re-embed down at once. An outage with no suspect (a 429, a 503, the
+model loading), or its provider down at its start, sets it down at once.
+While re-embed is left waiting the row carries `reembedWait`, and while it
+backs off `reembedBackoff` (below), and preflight's fix says so. A statement past its
 timeout holds it until a restart, as it holds any pass (**Its budget**).
 A model switch it will not make —
 the brain recording an embedding model other than the stack's
@@ -5660,7 +5739,29 @@ provider answering clears it, and so does a period's end. A follower's own row
 (`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`) carries the word with its
 own name while it waits, and the `workers` and `consolidate pass` rows say
 it. A follower's start wait stays unsaid: its row does not exist until its
-first pass begins.
+first pass begins. Since SMD-4254 the sleep's row carries, beside
+`waitingMidPass` naming `reembed`, `reembedWait` while the scheduler leaves
+re-embed waiting on an outage that made a thought a suspect: `since`, the
+wait's start, on the database's clock as the row's other times are;
+`earlierS`, the period's isolation as the wait began — earlier isolations, and
+this one's waits and the retries between them; `boundS` and `periodS`, the
+limits a wait and the period's isolation past which it sets re-embed down.
+Preflight's fix then says re-embed is left waiting and how long it may wait yet,
+in seconds — min(`boundS` − waited, `periodS` − `earlierS` − waited) and a poll
+— where it said the next poll sets it down, and once `earlierS` is above 0 the
+log line that names a crashing thought, unless `backoffS` is 0 (that thought
+found); the wait's end, a period's end and an ended row
+(db/supervise.ts's too) drop it. `reembedWait.backoffS` is the
+back-off a set-down at either limit begins, 0 once a suspect of the isolation
+was recorded failed alone, and a pause moves `since` past it. Beside
+it, `reembedBackoff` while the scheduler backs off from such waits, or has since
+its last reset: `until`, when it
+ends, on the database's clock — such an outage met before it sets re-embed down
+at once, and past it a try is due; `nextS`, the back-off the next try ending at
+a limit begins, at most 3600; `skipped`, whether the period in
+hand was set down at once so. It lasts the scheduler's life, so an ended row
+drops it; preflight says it with an outage's set-down and with a wait left
+running.
 
 Since SMD-2679 it carries `budget`, the budget in force — since 2.0.0 its
 `minutes` 0 and its `stops` the passes a statement holds, which the row says
@@ -6016,7 +6117,7 @@ comes first, so no timed call loads a model; a warm-up that fails is said.
 OB1_LLM_BASE_URL=http://127.0.0.1:11434/v1 OB1_EMBEDDING_MODEL=qwen3-embedding:4b OB1_EMBEDDING_DIM=1024 \
 OB1_METADATA_MODEL=qwen2.5:7b OB1_LLM_LOCAL=1 \
   bun bench-live.ts --label baseline --out /tmp/live.jsonl --ids /tmp/probe-ids-baseline.txt
-bun bench-live.ts --self-check   # the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard; what CI runs
+bun bench-live.ts --self-check   # the answer reader, the ok rule against the server's own replies, the probe match, the schedule, the tier guard, a key file's reading, what a refusal says of a file; what CI runs
 ```
 
 The five variables are the canary's model settings. For another brain, they, and
@@ -6028,7 +6129,9 @@ and key are the canary connector's, `open-brain-canary` in `~/.claude.json`,
 which `deploy/canary.sh up --connect` registers at the canary's own port with
 its own key (SMD-2874); the key is the entry's `x-brain-key`, or the `?key=` on
 its url. `--key-from` names another entry; `--mcp` names another endpoint and
-needs `--key-from` beside it, as another brain refuses the canary's key. A
+needs `--key-from` beside it, as another brain refuses the canary's key, or
+`--key-file`, a file holding that brain's key alone (a scratch brain no
+connector names; SMD-3379 PR 3b-3b). A
 stack's own endpoint is `/mcp` on its `SERVER_PORT` (8000 by default). Stable's `/canary/mcp` is no canary's: it is the proxy's
 404 from v2.0.0 (SMD-3101).
 
@@ -6108,6 +6211,138 @@ What the columns are not:
   call ends, its call in hand running on (aborted while paused once 60 s in hand,
   SMD-3379 PR 1c-3b). A search does not pause it at all (SMD-3315). That window was
   not measured here.
+
+### bench-brains.ts
+
+Two brains on one model server: what each one's background work gets of the
+server's slots (SMD-3379 PR 3b-3b). The ticket's Verify asks that, with both
+brains backlogged, neither brain's live captures wait for a slot and their
+background work splits the background slots; and that, with one backlogged, it
+uses its share alone under fixed shares, or every free slot under the host's slot
+broker (`deploy/federated/`). This makes the backlog, reads what each brain's
+sleep held of the slots, and deletes its notes after. `bench-live.ts` times the
+live calls beside it.
+
+```bash
+bun bench-brains.ts load    --brains brains.json --brain canary --arm B --ids ids-canary.txt   # the arm's 150 notes
+bun bench-brains.ts sample  --brains brains.json --arm B --minutes 20 --out samples.jsonl --ollama http://127.0.0.1:11434
+bun bench-brains.ts clean   --brains brains.json --brain canary --ids ids-canary.txt [--arm B]
+bun bench-brains.ts summary --out samples.jsonl --split 12 --live live-B-canary.jsonl --live live-B-scratch.jsonl
+bun bench-brains.ts --self-check   # the notes, the brains file, what a sample keeps, the windows' arithmetic, the summary's table, clean against a brain in memory; what CI runs
+```
+
+`--brains` is a JSON file naming each brain: `{"canary": {"connector":
+"open-brain-canary"}}` takes the url and key from that `~/.claude.json` entry, as
+`bench-live.ts` does; `{"scratch": {"mcp": "http://127.0.0.1:18379/mcp",
+"keyFile": "…"}}` takes a url and a file holding the key alone. An entry gives
+a connector or a key file, not both; a connector's entry may add `mcp` to send
+that key to another url. `load` and `clean` read only the brain they name;
+`sample` reads every entry. No key is printed. A refusal names a flag or a brain
+and, for a file, the file system's code (`ENOENT`): never the path typed, a
+file's text, a connector's name or a parser's words, any of which could be a key
+put in the wrong place. Each subcommand refuses a flag it does not read.
+
+- **load** captures the arm's notes, generated from the arm's name and the index,
+  so every brain gets the same text and no arm's note is another's. Each starts
+  `SMD-3379 measure note (arm <arm> #<i>). ` and is captured with source
+  `smd3379-measure`, two at a time; each id is appended to `--ids` as it lands. As
+  with `bench-live.ts`, only a brain whose `brain_info` says tier `canary` or
+  `working` takes them. A capture that answers no id is counted apart: it was not
+  saved, or the brain already held the note (an arm loaded twice), or it was cut
+  off and may land yet. `load` exits 1 on any of those, or on a note saved
+  without a vector or tags. It appends to `--ids` only where that file is new or
+  holds thought ids alone, so a key file named there by mistake is not written.
+  A last line with no end is ended first, so the first id added does not run on
+  from it.
+- **sample** reads every brain's `brain_info` and `worker_status` each `--every`
+  seconds (15), and, with `--ollama`, the model server's loaded models from
+  Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
+  if a brain never answered. A signal ends the wait; the round in hand is finished
+  and written, and it then exits 128 plus the signal's number, whatever the
+  brains answered. A second signal exits at once, the round in hand unwritten. It
+  appends to `--out` only where that file is new or holds samples alone, each a
+  JSON object with a time, an arm and a brain: not a brains file, nor
+  `bench-live.ts`'s samples, nor a file whose last sample was cut short. A
+  `--brains` file that names no brain is refused, unless `--ollama` names a
+  model server to sample alone.
+- **clean** reads back each listed id, then searches for measure notes whose ids
+  never came back and reads those back too. It deletes a thought only when its
+  whole text is the generator's own for the arm and index its heading names: the
+  arm's alone with `--arm`, else every measure note on the brain, of any arm or
+  run. Like `load`, it runs only on a `canary` or `working` brain. A listed id is
+  trusted no more than a search hit:
+  - one whose text is no measure note's is left and said, and `clean` exits 1;
+  - one that is another arm's note, under `--arm`, is left and counted;
+  - one the brain does not hold, gone already or never an id of its own, is
+    counted as not on the brain, not as deleted. So is a found note gone by the
+    time of its delete;
+  - a line that is no thought id is counted and sent nowhere.
+
+  A thought that starts with a note's heading and then differs, someone's own
+  words after it, is never deleted, listed or found: `clean` says it and exits 1,
+  on every run that meets it. A note written by another version of the generator
+  reads the same way. To clear one, delete that thought by its id. Naming the arm
+  you mean with `--arm` also passes it by, since another arm's search never
+  meets it, but only where `--ids` does not list it: a listed id is always read.
+  A last search finds any note still there. It exits 1 if one is left, or if a
+  delete, a read or that search failed or stopped at 5,000 matches. Run it after
+  `load` has ended: a capture still on its way lands afterwards, and a second
+  run finds it. It deletes the notes alone. The entities extraction drew from
+  them stay until an operator prunes the orphans (`prune_orphan_entities()`),
+  and the audit log keeps each note's text.
+- **summary** prints, for each arm and brain, its sleep's background calls in two
+  windows: before `--split` minutes, with no live load from the harness, and after
+  it, with `bench-live.ts` running. For each window it gives:
+  - `s`, the seconds from the window's first sleep stamp to its last;
+  - the calls, and their time;
+  - the mean number in flight: their time over `s`;
+  - the slot waits, of every model server the sleep asks, its decide tier's
+    included, in all and by pass. A pass reads `extract 51/1322s (51 waited
+    658s)`: its calls, their seconds, and its asks that waited with their seconds.
+
+  It also gives the brain's extraction rows pending or claimed (first, last, most,
+  and when they ran dry), how many of its samples failed, how often the model
+  server's loaded models differed from one sample to the next, and each `--live`
+  file's latencies by label. A brain that never answered in an arm is said so.
+  Two runs of one arm name appended to one `--out` read as one arm. An `--out`
+  with no samples exits 1.
+
+**Reading "in flight".** It is near the slots the sleep held on average, with
+these limits:
+
+- It is the sleep's alone. Board-sync's calls, the api's vector mender's and a
+  detached job's hold slots too and are not in it.
+- A call's time runs from its slot to its answer, failed or not. Its wait inside
+  the model server (a model loading, a call ahead of it) is in that time; its
+  wait for a slot is not. A model server that stalls a call makes it read as held.
+- A call that ran without a slot is counted too: one of a type no share holds,
+  or one let through when the gate could not be asked.
+- A tally is a pass's, over every model and server the pass calls. A brain's
+  figure adds its passes, so it can pass any one server's room.
+- A call counts whole at the stamp after it ends. A window gains the earlier part
+  of the calls ending in it and loses the calls still running at its end, so a
+  long call (a 27B model's, minutes) can put the figure above the workers.
+
+**The windows.** A heartbeat's tallies count since the sleep's process began. It
+stamps them at least once a minute, more often while it works, by the database's
+clock, and a call counts when it ends. So a window's figures are the sum of the
+increases from stamp to stamp, over the time between its first and last stamps.
+That is up to a stamp short of its minutes at each end, and the pair of stamps
+across the split is in neither window. A pair of stamps in which any pass's
+tally falls, or a pass drops out, marks the process begun again: every pass's
+value then is the increase since, and the summary counts the restarts. The calls
+the old process made after its last stamp are lost. A restart whose first stamp
+already passes the old one's on every tally is not seen. Each sample keeps the
+coordinator's children and the time of its stamp, whose `for_s` says when one
+began. A sleep that has made no model call stamps no tallies, nor does a build
+before SMD-3379 PR 2b-2a: for those, the summary gives the share of samples in
+which the sleep was working.
+
+**The extraction rows** are `worker_status`'s pending and claimed rows under
+every `extract:` key. They are thoughts, so `bench-live.ts`'s probes and any
+older backlog are among them. Failed rows are not counted, so "ran dry" does not
+say every note was extracted. A brain whose extraction has never run has no pool
+yet, and its loaded notes show only once its sleep's first pass pools them.
 
 ### bench-querylog.ts
 
@@ -7669,8 +7904,8 @@ warned about. The sleep scheduler's own reads go through `throughOutage` too. It
 out the same way.
 - **Outages:** a transient error past the pauses (a 408 among them, read through `followClassify`, where a one-shot run reads it as the request's: `fault`, SMD-3311, SMD-2636 PR 3a), the model missing (`modelMissing`: a 404 that names the model, as while Ollama pulls it), and a timeout after which the probe gets no answer either.
 - **The probe decides** (extract's and consolidate's since SMD-2636 PR 3a; re-embed's for the 4xx since SMD-2679, for its deadline since PR 3b): a deadline with no answer, and a 4xx or a redirect no rule reads — a 401, 402 or 403, a 404 naming no model, a 400 neither the thought's length nor the request's shape. Answered, the thought's, recorded failed and the follower running on; refused, the request's, every worker stopped, exit 2; no answer, the provider's outage, waited out. A 400 naming a field the worker sends and the probe does not (`requestFault`: extract's answer budget, response_format, reasoning_effort, frequency_penalty; consolidate's response_format and reasoning_effort, not an answer budget, which the judge never sends) is the request's at once, unprobed, as the probe would answer it and fail the pool a thought at a time; so is a 402 saying the call asks more than the account affords. A deadline whose probe is refused is the request's in every worker. Re-embed sends no field its probe does not, so it has no `requestFault`: a 400 about its request's shape meets its probe too, refused. The probe asks the model whose call was refused: extract's escalation model's refusal is its own, its remedy naming `OB1_EXTRACT_ESCALATE_MODEL`; a deadline names no model and is probed on the metadata model (re-embed's on its embedding model, the only one it calls).
-- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not; re-embed's is one embedding of its probe text. The wait (`waitOutProvider`, SMD-2636 PR 2) carries its schedule on: a wait beginning within a minute and a poll of the last one's answer, nothing having got past the provider since, goes on from the last one's step. Extract's and consolidate's followers, which spend the pauses before an outage begins, add them to that window. What got past is re-embed's thoughts finished or recorded failed; extract's too, and its windows of a long thought answered and kept; consolidate's thoughts finished having asked the judge, and recorded failed. A probe answered with a refusal — a chat probe's 401, 402, 403 or 404 (a key revoked or credit run out while the provider was away, or a proxy answering 404 before its route is back), or a redirect, which no call follows (SMD-2908), the decision tier's probe refused, or re-embed's meeting any error neither an outage nor a missing model — ends the follower with 2, nothing marked failed, its remedy naming the tier's or the escalation model's setting when the refused probe was theirs. After an answer, the follower polls again at once.
-- **The thought's own fault:** a thought in hand at an outage is its suspect, but not on a 429, a 503 or the model not served, which make none (`followClassify`'s backpressure; extract's and consolidate's since SMD-3311), and a probe tells a thought's 400 (answered) from the request's (refused) — re-embed's since SMD-2679, extract's and consolidate's since SMD-2636 PR 3a. Every claim follower — extract's and consolidate's since SMD-2641 PR 1, re-embed's since PR 2, on the maintainer's rules of 2026-11-10; the subject sweep keeps its own — once a probe answers, retries the outage's suspects one at a time — one worker, one thought a claim, each suspect handed back at the pool's front (`setFront`), said — until each has settled, the isolated pass (re-embed's drain) claims a thought none of them (those left are behind the backlog — edited (extraction's), set back by the sleep scheduler — or elsewhere; re-embed dates a succeeded row it moves back to the pool behind them while it isolates), or the window passes (15 minutes; consolidate's grows with its limit beside the subject sweep); an outage meanwhile keeps those not yet retried. Extract's and consolidate's also make a suspect of a thought whose pauses another worker's outage cut short; re-embed has no pauses, so each worker whose call fails at a crash joins the outage itself. Before, a suspect that failed again within 15 minutes of a probe answering was its own: with several workers, which co-held thought that blamed for a provider crash was a race, and a provider crashing again within the window failed re-claimed thoughts. A suspect that errs again alone is blamed only on a probe made at once: answered, it is its own, recorded failed; no answer, an outage it was alone at, and at the third (`ALONE_OUTAGES`) its own. A thought that crashes the provider is failed the fourth time it does, the second before; one the provider errs on while it answers, still the second. A provider crashing on a timer must land on the same lone suspect three times to fail it. Alone means alone in this follower: under the sleep scheduler extraction, consolidation and the subject sweep share the chat endpoint, and the API's capture and search embeddings share re-embed's, so another caller can still crash the provider under a suspect alone; and the suspects, like their counts, are a run's own, so a scheduler period that ends forgets them. Re-embed under the scheduler forgets them sooner: it is set down for the period once it waits on an outage its next poll sees, so a thought that crashes the embedding provider is retried at each period's first claim, never failed, and the period re-embeds nothing behind it — a set-down "its provider is not answering" that comes back every period can be such a thought. A `--follow` run of re-embed by hand isolates it and fails it at its third outage alone (the scheduler's case is SMD-4254).
+- **What happens:** the thought in hand goes back to the pool unrecorded, and the follower probes until the provider answers. The probe (`probeChat`) is a one-token chat call to the pass's model, not GET `/models`, which Ollama answers while chat does not; re-embed's is one embedding of its probe text. The wait (`waitOutProvider`, SMD-2636 PR 2) carries its schedule on: a wait beginning within a minute and a poll of the last one's answer, nothing having got past the provider since, goes on from the last one's step. Extract's and consolidate's followers, which spend the pauses before an outage begins, add them to that window. Re-embed's under the sleep scheduler is the one exception (SMD-4254): a wait on an outage that made a thought a suspect probes every 5 s from its start, carrying nothing from the last wait and nothing to the next, so each of an isolation's waits fits the scheduler's bound. What got past is re-embed's thoughts finished or recorded failed; extract's too, and its windows of a long thought answered and kept; consolidate's thoughts finished having asked the judge, and recorded failed. A probe answered with a refusal — a chat probe's 401, 402, 403 or 404 (a key revoked or credit run out while the provider was away, or a proxy answering 404 before its route is back), or a redirect, which no call follows (SMD-2908), the decision tier's probe refused, or re-embed's meeting any error neither an outage nor a missing model — ends the follower with 2, nothing marked failed, its remedy naming the tier's or the escalation model's setting when the refused probe was theirs. After an answer, the follower polls again at once.
+- **The thought's own fault:** a thought in hand at an outage is its suspect, but not on a 429, a 503 or the model not served, which make none (`followClassify`'s backpressure; extract's and consolidate's since SMD-3311), and a probe tells a thought's 400 (answered) from the request's (refused) — re-embed's since SMD-2679, extract's and consolidate's since SMD-2636 PR 3a. Every claim follower — extract's and consolidate's since SMD-2641 PR 1, re-embed's since PR 2, on the maintainer's rules of 2026-11-10; the subject sweep keeps its own — once a probe answers, retries the outage's suspects one at a time — one worker, one thought a claim, each suspect handed back at the pool's front (`setFront`), said — until each has settled, the isolated pass (re-embed's drain) claims a thought none of them (those left are behind the backlog — edited (extraction's), set back by the sleep scheduler — or elsewhere; re-embed dates a succeeded row it moves back to the pool behind them while it isolates), or the window passes (15 minutes; consolidate's grows with its limit beside the subject sweep); an outage meanwhile keeps those not yet retried. Extract's and consolidate's also make a suspect of a thought whose pauses another worker's outage cut short; re-embed has no pauses, so each worker whose call fails at a crash joins the outage itself. Before, a suspect that failed again within 15 minutes of a probe answering was its own: with several workers, which co-held thought that blamed for a provider crash was a race, and a provider crashing again within the window failed re-claimed thoughts. A suspect that errs again alone is blamed only on a probe made at once: answered, it is its own, recorded failed; no answer, an outage it was alone at, and at the third (`ALONE_OUTAGES`) its own. A thought that crashes the provider is failed the fourth time it does, the second before; one the provider errs on while it answers, still the second. A provider crashing on a timer must land on the same lone suspect three times to fail it. Alone means alone in this follower: under the sleep scheduler extraction, consolidation and the subject sweep share the chat endpoint, and the API's capture and search embeddings share re-embed's, so another caller can still crash the provider under a suspect alone; and the suspects, like their counts, are a run's own, so a scheduler period that ends forgets them. Re-embed under the scheduler, which sets it down for the period at an outage its poll sees, waits out one that made the thought in hand a suspect instead — or a suspect's alone — probing every 5 s from each wait's start, up to 2 minutes a wait and 4 minutes of isolation a period, the retries between the waits counted (SMD-4254). A crashing thought costs four waits (its batch's outage, two alone, the one it leaves once recorded failed), so one that lets the provider back under about 80 s after each crash is failed at its third outage alone, in one period, and under about 60 s the backlog behind it is re-embedded in that period too. Before, it was set down at the first poll that saw the wait, the suspects forgotten, so the thought was retried at each period's first claim, never failed, and the period re-embedded nothing behind it. One that keeps the provider down longer still sets re-embed down at the cap, and the scheduler then backs off by time — such an outage set down at once for 4 minutes, then 8, 16, 32, then an hour at each between tries, its suspects moved behind the pool so the backlog pooled before is re-embedded meanwhile, until re-embed drains or a suspect is recorded failed alone: a set-down "its provider is not answering" that comes back every period can be such a thought, the sleep log's "goes back to the pool unrecorded" line naming the same thought at each period's start. An endpoint simply down, first met mid-pass with a 5xx, a refused or reset connection or a timeout, makes a suspect too, and costs up to the 2 minutes once, before the next period's start finds it down.
 - **At start:** a follower probes once before it writes anything, the worker key's registration included, and waits for a provider that does not answer only after every other refusal. A model the provider does not serve, a refused key or a wrong base URL exits 2; an unreachable provider is waited for. Extract's escalation model is checked by GET `/models`, which loads nothing, and refused only where the list names models as chat does; one the start could not confirm draws exit 2 at its first 404, and one it saw that goes missing is waited for by name.
 - **A database error at the write** is read by `followClassify` in every follower (re-embed's since SMD-2679; extract's and consolidate's since SMD-2636 PR 4, where each was recorded the thought's): not answering, waited out; the end — a privilege or a function gone, a statement cancelled or past its statement_timeout — ends the follower, its row failed, the error thrown for the sleep scheduler's budget; a moment's — a deadlock, a lock not available, resources, a read-only transaction — sends the thought back unrecorded and stops that worker; any other — a function's own guard, the thought's data — is the thought's, recorded failed. At a claim the end ends the follower too (extract's and consolidate's since PR 4, where a timeout there cost the poll, every poll). The costs, the maintainer's rule kept (2026-11-09): a thought whose own write always times out holds its pass at every restart, never recorded; a moment that recurs sends the thought back every poll, a model call each time, with nothing but the per-poll line to say so; a privilege revoked on the write ends the follower, and a restart meets it again (follow-ups SMD-4196, SMD-4197, SMD-4198).
 - **Re-embed's follower** reads a database error by `followClassify`: the database's state (wait, a moment's — the thought back unrecorded — or the end: a privilege, a function gone, a statement timeout) or the thought's (its data, a guard). It reads a provider error by `fault`, as extract and consolidate do (SMD-2636 PR 3b): the thought's when it names the thought (its length, the egress gate) or the provider answers the probe's text right after; else the provider's (backpressure — 429, 503, the model loading — making no suspect, any other outage making the thought one), each said as the provider "is not answering", or the request's (the probe refused, a 402 saying the call asks more than the account affords: every worker stops, exit 2). Its probe after a call the probe decides is part of the call in hand: the sleep scheduler aborting that call sets the thought back (extract's and consolidate's probe does not yet hear it, SMD-4166). It has no pauses: one 5xx, 408 or 429 is an outage, one coming back within a minute and a poll interval of the probe answering, no thought finished or recorded failed since, carrying on the last one's schedule; a 429, a 503 or the model not served makes no suspect. A stop during a database wait exits 0 at a poll; at its start run() returns 130 and the CLI, its handlers not yet installed, is ended by the signal.

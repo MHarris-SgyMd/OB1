@@ -119,6 +119,17 @@ function asMemory(m: Row, artifacts: Map<string, z.output<typeof Artifact>[]>): 
 
 /** What a key that can only capture is answered for each memory of its write-back: ids alone, as the core answers its capture. */
 const Written = z.object({ memory_id: z.string(), thought_id: z.string().nullable() });
+/**
+ * A memory whose capture in this request made no vector (SMD-3984): the egress policy kept its text in (`refused`, which
+ * no retry changes) or the embedding provider did not answer (`provider_down`, which the vector mender mends) — the core's
+ * capture tells them apart (`embeddings.allowed`, `vectorFailed`), and core/deliverables.ts's noVector and render.ts's
+ * structured safeCapture say them by this word alone, for every key, as the gate's words name the provider's host. It says
+ * what this capture did, not what the thought holds: a text already a thought keeps any vector it had (as rest/app.ts says
+ * of its own field). A refusal part way (CORE_REFUSED, IDEMPOTENCY_KEY_REUSED) answers no no_vector for the memories kept
+ * before it, nor does their resend.
+ */
+const NoVector = z.object({ memory_id: z.string(), why: z.enum(["refused", "provider_down"]) });
+type NoVectorWhy = z.output<typeof NoVector>["why"];
 /** The thought a memory's write-back captured (kept in metadata.written; the README's copy block writes it for a migrated memory). */
 const writtenThought = (r: Row) => {
   const t = (r.metadata?.written as { thought_id?: unknown } | undefined)?.thought_id;
@@ -394,13 +405,13 @@ export default definePlugin({
     }),
     writeback: operation({
       title: "Write back agent memories",
-      description: "Keeps what a task decided, produced, learnt, was constrained by, left open, means to do next, failed at and made (memory_payload): each item one memory, its text captured as a thought (source agent-memory, trust as given, never above your key's) and its provenance, scope and review kept beside it. A memory is confirmed at once, usable as an instruction, only when your key can write and provenance.default_status is user_confirmed or imported with requires_review false; any other waits for review, usable as evidence. A key that can only capture never confirms one (its user_confirmed or imported is recorded as generated) and is answered each memory's memory_id and thought_id alone. Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing. Each memory is a capture with its model calls, one after another in this request: a write-back cut off by the connection keeps the memories written, and sent again finishes. Refused: no memory in the payload (NO_MEMORIES), more than 50 (TOO_MANY_MEMORIES), a memory that looks like a private key, an API key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK, which lists why, and writes nothing), and an idempotency key already holding other text (IDEMPOTENCY_KEY_REUSED). While the brain's embedding provider does not answer, a memory is kept all the same, and recall finds it once the brain's vector mender has filled its thought's vector in.",
+      description: "Keeps what a task decided, produced, learnt, was constrained by, left open, means to do next, failed at and made (memory_payload): each item one memory, its text captured as a thought (source agent-memory, trust as given, never above your key's) and its provenance, scope and review kept beside it. A memory is confirmed at once, usable as an instruction, only when your key can write and provenance.default_status is user_confirmed or imported with requires_review false; any other waits for review, usable as evidence. A key that can only capture never confirms one (its user_confirmed or imported is recorded as generated) and is answered each memory's memory_id and thought_id alone. Each memory has an idempotency key, its workspace's own, so the same write-back sent again answers the memories it wrote and writes nothing. Each memory is a capture with its model calls, one after another in this request: a write-back cut off by the connection keeps the memories written, and sent again finishes. Refused: no memory in the payload (NO_MEMORIES), more than 50 (TOO_MANY_MEMORIES), a memory that looks like a private key, an API key, a credential, a large code block or a transcript (UNSAFE_WRITEBACK, which lists why, and writes nothing), and an idempotency key already holding other text (IDEMPOTENCY_KEY_REUSED). While the brain's embedding provider does not answer, a memory is kept all the same, and recall finds it once the brain's vector mender has filled its thought's vector in; so is one whose text the brain's egress policy keeps from a provider that is not local. no_vector names each memory whose capture in this request made no vector, and why: refused (the egress policy, which no retry changes: under OB1_EGRESS_POLICY=deny an OB1_EGRESS_ALLOW term actor:<the access key's name> lets it out, and the brain's vector mender then fills in the memories already kept, so don't send them again; under allow, a matching OB1_EGRESS_DENY term, the key or a marker in the text, keeps it in by design) or provider_down (filled in once the provider answers). It says what this request's capture did: a text already a thought keeps any vector it had, a memory a write-back sent earlier answers from its idempotency key is not in it, and a write-back refused part way names none of the memories it kept.",
       scope: "capture",
       annotations: ADDS,
       method: "POST",
       path: "/writeback",
       input: WritebackInput,
-      output: { schema_version: z.string(), memories: z.array(z.union([Memory, Written])) },
+      output: { schema_version: z.string(), memories: z.array(z.union([Memory, Written])), no_vector: z.array(NoVector).optional() },
       async handler(ctx, req) {
         const rows = memoryRows(req);
         if (rows.length === 0) return refuse(400, "NO_MEMORIES", { message: "memory_payload holds no memory" });
@@ -422,6 +433,10 @@ export default definePlugin({
         const createdBy = createdByOf(status);
         const staleAfter = req.retention.stale_after_days ? new Date(Date.now() + req.retention.stale_after_days * 86_400_000).toISOString() : null;
         const ids: string[] = [];
+        // The memories whose own capture in this request made no vector, by memory id, not by thought: two memories of one
+        // text share a thought, and one answered from its idempotency key had no capture here. A concurrent write-back's
+        // race loser is answered the winner's memory and names it by its own capture.
+        const unembedded = new Map<string, NoVectorWhy>();
         for (const [index, row] of rows.entries()) {
           const contentHash = await sha256Hex(`${row.memory_type}:${row.content}`);
           const base = req.idempotency_key || [req.workspace_id, req.runtime.name, req.task_id || "taskless", req.step_id || "step"].map(keyPart).concat(contentHash).join(":");
@@ -440,8 +455,11 @@ export default definePlugin({
           const captured = await ctx.call("capture_thought", { content: row.content, source: "agent-memory", metadata, ...(req.trust ? { trust: req.trust } : {}) });
           if (!captured.ok) return coreRefused(captured.refusal);
           // A thought saved with no vector (the provider down, or the egress policy keeping the text in) is still kept, and
-          // its memory with it: the brain's vector mender fills the vector in, and recall finds it from then on.
+          // its memory with it: the brain's vector mender fills the vector in, and recall finds it from then on. The reply
+          // says which (SMD-3984): a refused call is the policy's, and no retry changes it.
           const thoughtId = captured.value.id;
+          const { embeddings, vectorFailed } = captured.value;
+          const missed = !embeddings.allowed ? ("refused" as const) : vectorFailed ? ("provider_down" as const) : null;
           const id = await ctx.db.tx(async (sql): Promise<string | null> => {
             const [made] = await sql<{ id: string }>`
               INSERT INTO memories (thought_id, workspace_id, project_id, channel_kind, channel_id, channel_thread_id, visibility, memory_type, summary, content,
@@ -481,18 +499,25 @@ export default definePlugin({
           // The race's loser with other text: its thought stays, as any captured thought does, and no memory names it.
           if (id === null) return keyReused(key);
           ids.push(id);
+          if (missed) unembedded.set(id, missed);
         }
         return ctx.db.tx(async (sql) => {
           const stored = await memoriesOf(sql, ids);
+          const noVector = stored.flatMap((r) => {
+            const why = unembedded.get(r.id);
+            return why ? [{ memory_id: r.id, why }] : [];
+          });
+          const said = noVector.length ? { no_vector: noVector } : {};
           // A key that can only capture reads no memory: it is answered each memory's id and the thought its write-back
           // captured, as the core answers its capture, never the memory or a reviewer's change to it.
           if (!person) {
             return ok({
               schema_version: writebackAnswerVersion(req.schema_version),
               memories: stored.map((r) => ({ memory_id: r.id, thought_id: writtenThought(r) })),
+              ...said,
             });
           }
-          return ok({ schema_version: writebackAnswerVersion(req.schema_version), memories: await asMemories(sql, stored) });
+          return ok({ schema_version: writebackAnswerVersion(req.schema_version), memories: await asMemories(sql, stored), ...said });
         });
       },
     }),

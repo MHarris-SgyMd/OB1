@@ -5312,6 +5312,68 @@ console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids
   const fnHint = forgetHint("permission denied for function forget_thought");
   assert(/apply migration 144/.test(tableHint) && /--url <the owner's connection string> --grant <role> --groups server/.test(fnHint) && forgetHint("connection refused") === "",
     `a forget refused a store's privilege names 144; one refused the function names the owner's grant; another fault no hint (${tableHint.slice(0, 60)} | ${fnHint.slice(0, 60)})`);
+  // A forget whose name is three thoughts: the first forgotten, the second refused REPLAYING, the third a fault — each
+  // its own transaction, so the first stays forgotten and the other two are named, not lost (review pass 2).
+  const { createCore } = await import("./core/index.ts");
+  const N = "00000000-0000-4000-8000-0000000017d1", D2 = "00000000-0000-4000-8000-0000000017d2", D3 = "00000000-0000-4000-8000-0000000017d3";
+  const tried: string[] = [];
+  const store = {
+    thoughtsNamed: async () => new Map([[N, N]]),
+    thoughtsKeyed: async () => [D2, D3],
+    clientKeyOf: async () => null,
+    forgetThought: async ({ id }: { id: string }) => {
+      tried.push(id);
+      if (id === N) return { ok: true, ...evidence, id: N, itemIds: [], proposalIds: [] };
+      if (id === D2) return { ok: false, error: "REPLAYING" };
+      throw Object.assign(new Error("the store went away"), { errno: "57P01" });
+    },
+  };
+  const core = createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
+  const partial = await core.forgetThought({ name: "op", scope: "write", keyHash: "h" } as never, { id: N, confirm: N } as never);
+  const partialReply = renderForget(partial as never);
+  const scMissed = (partialReply.structuredContent as { notForgotten?: { id: string; code: string }[] }).notForgotten;
+  assert(partial.ok && JSON.stringify(partial.value.notForgotten) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "FAILED", errno: "57P01" }]) && tried.join() === [N, D2, D3].join()
+      && /Not forgotten — the same thought under that name, still holding its text here: .*REPLAYING.*\(FAILED 57P01\)/.test(partialReply.content[0].text)
+      && JSON.stringify(scMissed) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "FAILED" }]),
+    `a refusal or a fault after the first thought is named, not lost, the first staying forgotten (${JSON.stringify(partial.ok ? partial.value.notForgotten : partial)})`);
+  // The same call sent again: its first thought forgotten already, a later one still refused. The answer is the
+  // refusal that leaves the text, not FORGOTTEN's "nothing is left" (review pass 4), whichever order they come in.
+  const who = (id?: string) => (id === N ? "N" : id === D2 ? "D2" : "?");
+  const resendTried: string[] = [];
+  const resend = async (answers: Record<string, string>) => {
+    const again = {
+      ...store,
+      thoughtsKeyed: async () => Object.keys(answers).filter((id) => id !== N),
+      forgetThought: async ({ id }: { id: string }) => {
+        resendTried.push(who(id));
+        return answers[id] === "ok" ? { ok: true, ...evidence, id, itemIds: [], proposalIds: [] } : { ok: false, error: answers[id] };
+      },
+    };
+    const c = createCore({ env: () => ({}) as never, store: async () => again as never, door: "test" });
+    const r = await c.forgetThought({ name: "op", scope: "write", keyHash: "h" } as never, { id: N, confirm: N } as never);
+    return r.ok ? `ok:${who(r.value.id)}[${(r.value.notForgotten ?? []).map((m) => `${who(m.id)} ${m.code}`).join()}]` : `${r.refusal.code}:${who((r.refusal as { id?: string }).id)}`;
+  };
+  const resent = [
+    await resend({ [N]: "FORGOTTEN", [D2]: "REPLAYING" }),
+    await resend({ [N]: "FORGOTTEN", [D2]: "CITED" }),
+    await resend({ [N]: "FORGOTTEN", [D2]: "NOT_FOUND" }),
+    await resend({ [N]: "NOT_FOUND", [D2]: "FORGOTTEN" }),
+  ];
+  // A refusal before the first thought forgotten is named when a later one is; a CITED stops the rest (review pass 5).
+  resendTried.length = 0;
+  const heldFirst = await resend({ [N]: "REPLAYING", [D2]: "ok" });
+  const citedStops = await resend({ [N]: "CITED", [D2]: "ok" });
+  assert(heldFirst === "ok:D2[N REPLAYING]" && citedStops === "REFUSED_CITED:N" && resendTried.join() === "N,D2,N",
+    `a refusal before the first thought forgotten is named, not dropped; a CITED stops the rest, the later thought not tried (${heldFirst} | ${citedStops} | ${resendTried.join()})`);
+  // One forgotten already, before or after the first forgotten now, holds no text: never named not forgotten (pass 6).
+  const forgottenBefore = await resend({ [N]: "FORGOTTEN", [D2]: "ok" });
+  const forgottenAfter = await resend({ [N]: "ok", [D2]: "FORGOTTEN" });
+  assert(forgottenBefore === "ok:D2[]" && forgottenAfter === "ok:N[]",
+    `a thought forgotten already, before or after the first forgotten now, is not named not forgotten (${forgottenBefore} | ${forgottenAfter})`);
+  const citedReply = renderForget({ ok: true, value: { ...(partial.ok ? partial.value : {}), notForgotten: [{ id: D2, code: "CITED" }] } } as never).content[0].text;
+  assert(resent.join() === "REPLAYING:D2,REFUSED_CITED:D2,FORGOTTEN:N,FORGOTTEN:D2"
+      && /again, with detach_citations true for one CITED \(another thought cites it\)/.test(citedReply) && /again once the replay is done:/.test(partialReply.content[0].text) && !/detach_citations/.test(partialReply.content[0].text),
+    `a partial forget sent again answers what still holds the text, not "forgotten already"; a cited one left is told to detach, a replaying one to wait (${resent.join()})`);
   const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
   const noWord = thrown({ ok: false });
   const noTime = thrown({ ok: true, id: T, removed: {} });
