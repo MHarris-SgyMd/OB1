@@ -300,6 +300,35 @@ export async function providerCall<T>(cfg: EmbedConfig, path: "/embeddings" | "/
 }
 
 /**
+ * providerCall with its request made inside the model-call seam: `prepare` runs once the hook lets the call run (a slot
+ * taken, any wait for it over) and returns the body and the subject of every row it carries, each gated then, or null
+ * for nothing to send (the call ends with null, dialling nothing). A caller whose rows can change while the call waits
+ * for a slot (a thought deleted, restricted or edited meanwhile) reads them in `prepare`: lint-sweep's Tier 3 (SMD-3318
+ * PR 2b, review pass 5, which found its rows read before a wait of minutes). An empty subject list is refused.
+ */
+export async function providerCallPrepared<T>(
+  cfg: EmbedConfig, path: "/embeddings" | "/chat/completions", model: string, purpose: EgressSubject["kind"],
+  prepare: () => Promise<{ body: unknown; subjects: readonly EgressSubject[] } | null>, signal?: AbortSignal,
+): Promise<T | null> {
+  const what = path === "/embeddings" ? "Embeddings" : "Chat completion";
+  const at = endpointFor(cfg, path);
+  return modelCall({ type: path === "/embeddings" ? "embed" : "chat", model, base: at.base, local: at.local, purpose, ...(signal ? { signal } : {}) }, async () => {
+    const prepared = await prepare();
+    if (prepared === null) return null;
+    if (prepared.subjects.length === 0) throw new Error(`${what}: no subject for the egress gate to judge; the text was not sent to ${hostOf(at.base)}`);
+    for (const one of prepared.subjects) {
+      const gate = mayLeaveBox(one, at, cfg.egress);
+      if (!gate.allowed) throw refuseEgress(what, at.base, gate);
+    }
+    return withProviderSpan(path === "/embeddings" ? "embeddings" : "chat", model, at.base, async (span) => {
+      const answer = await exchange<T>(cfg, path, prepared.body, at, what, signal);
+      span.set(usageOf(answer));
+      return answer;
+    }, providerErrorType, { "ob1.call.class": currentCallClass() });
+  });
+}
+
+/**
  * How a provider call failed, for its span and its point: `timeout`, the
  * provider's status (spans.ts statusType: 300 to 599, else `_OTHER`),
  * `invalid_body`; undefined for the runtime's own error, read by its code or

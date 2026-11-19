@@ -5905,7 +5905,8 @@ carries (`providerCall` gates each). The sample is read through one cursor in
 `created_at` order until as many as the calls can send are found (at most
 10,000 rows), and each batch is read and judged again just before its call; a
 Tier 3 that fails leaves the report written with the other tiers, exit 1.
-Each retry of a call reads its batch again; with `OB1_METADATA_REASONING` on
+Each retry of a call reads its batch again, inside the model-call seam once any
+wait for a slot is over; with `OB1_METADATA_REASONING` on
 the call has no answer budget (4096 tokens off); each finding names its
 thoughts by id and date. Before that,
 weekly-digest's hold-back (`db/sensitivity.ts`): a `restricted` thought, or a

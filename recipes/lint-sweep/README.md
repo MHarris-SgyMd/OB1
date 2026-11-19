@@ -134,7 +134,9 @@ cd ~/lint && bun /path/to/checkout/db/lint-sweep.ts --max-llm-calls 0   # tiers 
   as a ref (`t1`…), its date, type, first 400 characters and five topics and
   tags (each cut to 100 characters), with today's date. Each finding's line
   names its thoughts by id and date; a ref the model writes in its own words
-  shows as the thought's id cut to 8 characters. With
+  shows as the thought's id cut to 8 characters, that thought among the
+  line's, and words that read as a secret are withheld. A provider's failure
+  is reported by its host and status, never its error text. With
   `OB1_METADATA_REASONING` on, the call has no answer budget (a thinking
   model otherwise spends it on its thinking and answers nothing); an answer cut
   at the budget is counted as cut. The model names contradictions, stale facts, superseded
