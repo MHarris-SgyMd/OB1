@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-4308]
-migrations: []
----
-
-## Changelog
-
-Re-embed runs its workers on the claim loop the entity extractor and the consolidation pass share, `db/claim-loop.ts` (SMD-4308, PR 3). No behaviour changes: each worker claims, beats, stops and returns its leases as it did.
-
-## Record
-
-Re-embed on the claim loop, and no further: its reading of an embedding call's error and its release stay its own, the ticket's PR 3 (SMD-4308)
+# 537. Re-embed on the claim loop, and no further: its reading of an embedding call's error and its release stay its own, the ticket's PR 3 (SMD-4308)
 
 **The ticket's question.** Work 3 moves reembed.ts onto the driver "with its batch embedding and drain as hooks", and says to drop the PR if the hooks cost more than the copy. Read against what PRs 2a to 2c made (change 531, released in v2.1.0), the answer differs by part.
 

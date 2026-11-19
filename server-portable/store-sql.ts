@@ -24,10 +24,11 @@ import { readDatabaseFacts, readHeartbeats, type DatabaseFacts, type ReadOptions
 import { RESOLVE_LOCK_TIMEOUT_MS } from "./agents.ts";
 import { HUNG_MARK, PLUGIN_NAME_RE, pluginIdents, pluginLoginUrl, quoteIdent, SUBJECT_POOL_PREFIX } from "../db/config.mjs";
 import type { Lineage } from "./lineage.ts";
+import type { FindingKind, FindingStatus } from "./priority-kinds.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -51,7 +52,6 @@ import type {
   QueryAgendaLog,
   QueryPlanContextLog,
   QuerySearchLog,
-  SupersessionProposal,
   ThoughtHybridMatch,
   ThoughtKeywordMatch,
   LoggedSearchPage,
@@ -63,7 +63,6 @@ import type {
   DryRunClaimResult,
   ThoughtIdPage,
   VectorlessRow,
-  ThoughtListItem,
   ThoughtMatch,
   RecencyOpts,
   ThoughtMeta,
@@ -109,11 +108,12 @@ const SERVER_RAISE = /^[a-z_]+(?:\(\))?(?: needs a maker:|: p_actor must be a JS
  * 22009: a year 0000, an offset out of range) as one too, problem `time` (review pass 2: a 500); any other raise as it
  * was, the store's fault.
  */
-function priorityRefusedOr(e: unknown): unknown {
+function priorityRefusedOr(e: unknown, times = "due_at or not_before"): unknown {
   const message = String((e as Error)?.message ?? "");
   // The server's own envelope refused is its fault, as for the item calls (review pass 3).
   if (SERVER_RAISE.test(message)) return e;
-  if (timeCastFailed(e)) return new PriorityRefused("time", `due_at or not_before is no time Postgres can read: ${message}`);
+  // `times`: the time arguments the call takes, so the words name no argument it has not (review_priority_finding: due_at).
+  if (timeCastFailed(e)) return new PriorityRefused("time", `${times} is no time Postgres can read: ${message}`);
   return String((e as { errno?: unknown }).errno ?? "") === "22023" ? new PriorityRefused(priorityProblemOf(message), message) : e;
 }
 
@@ -132,10 +132,11 @@ async function priorityCall(what: string, run: () => Promise<Record<string, unkn
  * The maker's envelope for 116's and 117's calls: the actor's own, its scope stated, and the plugin a call came
  * through (SMD-3665 PR 2: a plugin's ctx.call names it, and 117 reads it there alone — a plugin row's item is the
  * plugin's — never from an argument). Only here: the actor's `scope` is otherwise a capture key's alone, which 082
- * reads off an audit row, and a write key's envelope on a thought write states none.
+ * reads off an audit row, and a write key's envelope on a thought write states none. A read key's states none either
+ * (review_priority_finding's caller of the core's own, SMD-3671 PR 2), which the writers refuse.
  */
-const itemEnvelope = (actor: Actor | undefined, scope: "write" | "capture", plugin: string | undefined) =>
-  (actor ? { ...actorPayload(actor), scope, ...(plugin !== undefined ? { plugin } : {}) } : null);
+const itemEnvelope = (actor: Actor | undefined, scope: "write" | "capture" | undefined, plugin: string | undefined) =>
+  (actor ? { ...actorPayload(actor), ...(scope !== undefined ? { scope } : {}), ...(plugin !== undefined ? { plugin } : {}) } : null);
 
 /** A raise 117 means as a refused argument: its 22023, or a uuid Postgres could not cast (22P02); any other, the store's fault. */
 function itemRefusedOr(e: unknown): unknown {
@@ -1022,6 +1023,37 @@ export class SqlStore implements ThoughtStore {
     }
   }
 
+  async thoughtsKeyed(key: string): Promise<string[]> {
+    if (!UUID_RE.test(key)) return [];
+    const k = key.toLowerCase();
+    // The standing thought keeping the key (112's unique index), then every thought a delete event's previous metadata
+    // kept it for, not standing again, newest first — never the thought whose id it is. The deleted arm scans the
+    // delete events (no index on the path): only a forget asks, and only by a name (review pass 1 measured 0.5 s at a
+    // million deletes).
+    const rows = await this.sql`
+      SELECT id FROM (
+        SELECT t.id::text AS id, 0 AS arm, now() AS at FROM thoughts t
+         WHERE t.metadata->>'client_key' = ${k}::text AND t.id::text <> ${k}::text
+        UNION ALL
+        SELECT a.thought_id::text, 1, max(a.created_at) FROM thought_audit a
+         WHERE a.action = 'delete' AND a.diff->'previous_metadata'->>'client_key' = ${k}::text AND a.thought_id::text <> ${k}::text
+           AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = a.thought_id)
+         GROUP BY a.thought_id) x
+      ORDER BY arm, at DESC`;
+    return (rows as { id: string }[]).map((r) => String(r.id).toLowerCase());
+  }
+
+  async clientKeyOf(id: string): Promise<string | null> {
+    if (!UUID_RE.test(id)) return null;
+    const rows = await this.sql`
+      SELECT COALESCE(
+        (SELECT t.metadata->>'client_key' FROM thoughts t WHERE t.id = ${id}::uuid),
+        (SELECT a.diff->'previous_metadata'->>'client_key' FROM thought_audit a
+          WHERE a.thought_id = ${id}::uuid AND a.action = 'delete' ORDER BY a.created_at DESC LIMIT 1)) AS k`;
+    const k = (rows[0] as { k: string | null } | undefined)?.k;
+    return typeof k === "string" && UUID_RE.test(k) ? k.toLowerCase() : null;
+  }
+
   async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
     // 086: one statement, as the note and the restamp are made; the function
     // decides who may, and names the actor in the event it appends.
@@ -1265,6 +1297,64 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT release_holder_claims(${opts.holder}, ${opts.reason}, ${actorPayload(opts.actor)}::jsonb) AS r`;
     return normaliseReleaseHolder(rows[0]?.r);
+  }
+
+  // SMD-3671 PR 2: 142's findings, one statement. The matching rows are read narrow — the id and the order's keys
+  // (FindingPosition) — for `total`, `before` (those at or ahead of the cursor) and the page, one more than `limit` so
+  // `next` is read rather than guessed; the wide columns (evidence and outcome jsonb) are read for the page's rows alone.
+  // The order is a strict total order: a group, a numeric key, the id. The selection is a fragment, not `($1 IS NULL OR
+  // …)`: the pending listing says `status = 'pending'` in its text, so a cached generic plan can still use 142's partial
+  // index on the pending (a parameter proves no partial index's predicate); each selection is a statement of its own.
+  // The cursor is bound once, a one-row CTE.
+  async listPriorityFindings(opts: { status: FindingStatus | null; kind: FindingKind | null; limit: number; after?: FindingPosition }): Promise<{ total: number; before: number; findings: PriorityFinding[]; next: FindingPosition | null }> {
+    const a = opts.after;
+    const status = opts.status === null ? this.sql`true` : opts.status === "pending" ? this.sql`f.status = 'pending'` : this.sql`f.status = ${opts.status}::text`;
+    const kind = opts.kind === null ? this.sql`true` : this.sql`f.kind = ${opts.kind}::text`;
+    const rows = await this.sql`
+      WITH cur AS (SELECT ${a?.grp ?? null}::int AS grp, ${a?.sk ?? null}::numeric AS sk, ${a?.id ?? null}::uuid AS id),
+      m AS (
+        SELECT f.id, CASE WHEN f.status = 'pending' THEN 0 ELSE 1 END AS grp,
+               CASE WHEN f.status = 'pending' THEN extract(epoch FROM f.found_at) ELSE -extract(epoch FROM COALESCE(f.decided_at, f.moot_at)) END AS sk
+          FROM priority_findings f
+         WHERE ${status} AND ${kind}),
+      c AS (
+        SELECT count(*)::int AS total, count(*) FILTER (WHERE cur.grp IS NOT NULL AND (m.grp, m.sk, m.id) <= (cur.grp, cur.sk, cur.id))::int AS before
+          FROM m CROSS JOIN cur),
+      p AS (
+        SELECT m.id, m.grp, m.sk FROM m CROSS JOIN cur
+         WHERE cur.grp IS NULL OR (m.grp, m.sk, m.id) > (cur.grp, cur.sk, cur.id)
+         ORDER BY m.grp, m.sk, m.id
+         LIMIT ${opts.limit + 1}::int)
+      SELECT c.total, c.before, p.grp, p.sk::text AS sk, f.id::text AS id, f.kind, f.item_kind, f.item_key, f.status, f.evidence, f.window_days,
+             f.found_at, f.refreshed_at, f.moot_at, f.decided_at, f.decided_by, f.decision_note, f.outcome, f.suppressed_until
+        FROM c
+        LEFT JOIN p ON true
+        LEFT JOIN priority_findings f ON f.id = p.id
+       ORDER BY p.grp, p.sk, p.id` as Record<string, unknown>[];
+    const listed = rows.filter((r) => r.id != null);
+    const page = listed.slice(0, opts.limit);
+    const last = listed.length > opts.limit ? page[page.length - 1] : undefined;
+    return {
+      total: Number(rows[0]?.total ?? 0), before: Number(rows[0]?.before ?? 0), findings: page.map(normalisePriorityFinding),
+      next: last ? { grp: Number(last.grp) === 0 ? 0 : 1, sk: String(last.sk), id: String(last.id) } : null,
+    };
+  }
+
+  // SMD-3671 PR 2: 142's operator decision, one statement. The envelope states the key's scope (116's rule, which 142
+  // reads: write scope alone decides), every value a bind parameter.
+  async reviewPriorityFinding(opts: { id: string; decision: "accept" | "reject"; level?: number; dueAt?: string; clear?: boolean; note?: string; actor?: Actor; scope: "write" | "capture" | undefined }): Promise<ReviewFindingResult> {
+    const envelope = itemEnvelope(opts.actor, opts.scope, undefined);
+    // A due time Postgres cannot read, or a 22023 the writer inside raises, is set_priority's refusal (PriorityRefused),
+    // not the store's fault: the same input answers the same through both.
+    let rows: Record<string, unknown>[];
+    try {
+      rows = await this.sql`
+        SELECT review_priority_finding(${opts.id}::uuid, ${opts.decision}::text, ${opts.level ?? null}::int, ${opts.dueAt ?? null}::timestamptz,
+                                       ${opts.clear === true}::boolean, ${opts.note ?? null}::text, ${envelope}::jsonb) AS r` as Record<string, unknown>[];
+    } catch (e) {
+      throw priorityRefusedOr(e, "due_at");
+    }
+    return normaliseReviewFinding(rows[0]?.r);
   }
 
   // SMD-3669, SMD-4162, SMD-4192: the agenda (nine arguments, or 129's ten for due), one statement. The scope, the

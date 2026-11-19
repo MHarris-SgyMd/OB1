@@ -1,0 +1,58 @@
+# 541. Ten rows for the three engines' own lines in the claim workers' loop and error handling, each failed by the mutant that lived, the ticket's PRs 1 to 3 (SMD-4352)
+
+**Problem.** SMD-4308 moved the claim workers' loop and error handling into `db/claim-loop.ts`, each engine passing where it differs. A mutant of each thing passed was run against test-live, and nine lived through every shard that runs the engines: rows main lacked before the move. Five are consolidation's.
+
+**Change.** Five rows in test-live's [16], all in the rest shard. None changes an engine.
+
+| Row | What it drives | The mutant it now fails |
+|---|---|---|
+| A suspect retried alone whose pair times out, the one-token call after it unanswered | Four scripted 500s make the thought an outage's suspect; retried alone, its call hangs to the 5 s timeout, and the stub answers the next probe 503. It is an outage the thought was alone at, and the thought is judged once the judge is back. | `probedOut` never true: a second probe is made, the judge answers it, and the thought is failed as its own. |
+| A follower's writer call refused mid-pass, the probe after it finding the tier's address no tier | Decide mode: the writer answers a proposal call 401, and the tier's address answers 404 from then on. The follower ends, exit 2, its remedy naming `OB1_JEV_BASE_URL`. | `onProbeRefused` doing nothing: the remedy says "Check the chat endpoint". |
+| A thought deleted while its pair is judged | The stub judge's hook deletes the thought during the call. The line says "deleted while it was being judged". | The pass's word replaced. |
+| abortInHand, the set-back refused by the database | A trigger of the row's own raises on the set-back's write, which alone moves `enqueued_at`. The worker stops, naming the judge call, and returns the thought with its leases; nothing is counted set back. | "judge call" replaced. |
+| The database cut at the record of a failure | A poison pair's thought is failed at its third outage alone, the one failure a follower records and stops after. The first write to `failed` ends its own session, once: a trigger reads a sequence, which counts across the rolled-back write. Nothing is recorded, the thought is judged again and failed, and the closing ratio is one pair over the thoughts the summary says finished. | `unrecorded` doing nothing: one pair over one thought more. |
+
+Four things the rows found out.
+
+- **A tier serving another model mid-run is no refusal.** The first draft of the second row had the tier change its model. `probeTier` reads that as `missing`, an outage waited out, and the follower waited. A tier refuses only when its address answers as something else: a 4xx that is no 408 or 429, a redirect, a body that is not ob1-jev/1.
+- **`onProbeRefused` matters only when the call that erred was not the tier's.** The `fatal` branch already notes the tier when the error's own words are a `Decision` or `Info` request's. So the hook is for the writer's call erring while the tier is what refuses.
+- **The count `unrecorded` takes back is not "N thought(s) judged".** That figure counts thoughts finished. The hook's count is the divisor of the closing "pairs per thought judged" ratio alone. The row's first draft, with no pair judged, read 0.00 either way and its mutant lived; an innocent pair judged beside the poison makes it differ, 0.25 against 0.20 when four thoughts finish.
+- **The pool's order is not the seeding's.** The row's second draft asserted 0.25 outright, and failed once in parity at 0.50: the four thoughts are pooled in one statement, their dates tie, and that run claimed the two newer first and was stopped before the two older seeds. The row now reads how many finished from the summary's own "N thought(s) judged, F failed" and holds the ratio to one pair over N + F (caught: run-it).
+
+The second and the fourth are the first rows to reach their paths at all: a probe's tier refusal met mid-pass, and a set-back the database refuses.
+
+**Verify.** test-live's rest shard, alone: 1,434 assertions, 1,434 passed, where main had 1,429; after OB1 PR 792 moved rows out of that shard, 1,428 on this branch with main merged, five more than main. Each of the five mutants, run against the rest shard, fails one row, and it is the row written for it (caught: mutant).
+
+The rows add about 35 s to the rest shard: 5 s is the first row's judge timeout, and the last waits out three outages.
+
+**PR 2: the extractor's two.** Two rows in test-live's [10], in the rest shard, beside the admit gate's rows. Neither changes the engine.
+
+| Row | What it drives | The mutant it now fails |
+|---|---|---|
+| A hard stop on the call after a pause on the provider | A note's first call answers 503, and the worker pauses 3 s. As its second call is in hand, the pass is stopped hard, under a 2.5 s stall floor. The stop is counted, and not as a stall: the thought's time held starts again at the pause's end. | `onPaused` doing nothing: the pause counts as time held, and the stop is a stall. |
+| A claim taken from under the worker mid-call | The claim's row is given another holder, its lease far ahead, while the call is in hand. The release is refused, and the line gives the extractor's three reasons: an edit, a lapsed lease, a return by hand. The thought is counted lost, not extracted. | `lapsedWhy` cut to the lease alone. |
+
+The second is the first row to reach the extractor's lapse line at all: every other row that names it asserts its absence. Re-embed's line has a row of its own, in [9].
+
+**Verify, PR 2.** test-live's rest shard, alone: 1,430 assertions, 1,430 passed, two more than main. The rows add about 5 s to the shard: 3 s is the first row's pause. Each of the two mutants, run against the rest shard, fails one row, and it is the row written for it (caught: mutant).
+
+**PR 3: re-embed's three.** Three rows in test-live's [9f], in the long shard, and a fourth assertion that holds the first row's precondition. None changes the engine. Two mutants lived, and one of them hid two rules: the workers' stop condition has a term for a one-shot run's halt and a term for a follower's refusal, so it has a row for each.
+
+| Row | What it drives | The mutant it now fails |
+|---|---|---|
+| A one-shot run halted by its first row | The gate skips the probe, so the first row stands in for it, and its call is refused 401. The run halts: that row is recorded failed, and the other three of the worker's batch stay pending. | The halt's term out of the stop condition: all four are failed, row by row. |
+| One of two workers' calls refused as the request's | A follower with two workers and five thoughts. The first call to arrive answers a 402 the account cannot afford, 300 ms late, and every other call takes 800 ms, so the other worker's call is in flight when the refusal lands. The follower ends 2 with no call made after the two, at most one thought re-embedded and the rest pending. | The refusal's term out: the other worker drains the pool, six calls in all. |
+| A worker through the admit gate after the record moved | Since SMD-4401, under the scheduler's own gate, open throughout. One worker reads the record moved while the other's call is in flight, and ends the drain. The record is moved back. The other worker's thought lands, and it claims nothing more. | `afterGate` never true: the worker reads the record, finds its own model, and re-embeds what is left. |
+
+Four things the rows found out.
+
+- **A refusal answered at once never meets a call in flight.** The second row's first draft answered its 402 at once. The refusal then landed between the other worker's claim and its call: one call in all, the thought handed back unsent, in every run. The row said the other worker finished the thought it held, and no run showed it. The 402 is 300 ms late now, and the row counts the calls: two (caught: cold-read).
+- **The halt had no row at all, and a ticket already said so.** Nothing in test-live ran a one-shot pass with its probe skipped and its first call refused. SMD-4143 asks for that case: this row is its first, a 401. Its other configuration-shaped failures, the transient first failure that lets the run go on, and its two mutants are still that ticket's. The row was written before the ticket was found (caught: cold-read).
+- **`afterGate` decides one case: the record moved and moved back.** The follower's read of the record before each claim catches a record still moved. This PR's row reached the case past a gate that held the worker and resolved after its signal aborted, which `Admit`'s contract forbids, and its record said the rule was reached only so. Both were wrong: the loop reads the rule after every pass of a gate, an open one's too. SMD-4401 corrected the row and this entry.
+- **test-live.ts's module body is at the size TypeScript's flow analysis stops at.** The three rows, added at the section's own level, drew TS2563. They sit in a function of their own.
+
+**Verify, PR 3.** test-live's long shard, in parity: 373 assertions, 373 passed, four more than main. Each of the three mutants, run against the long shard, fails the row written for it (caught: mutant).
+
+[9]'s "one SIGINT stops reembed's CLI" row failed in two of the eleven runs of the long shard made here, its row in hand not finished. Both were the `afterGate` mutant's and both the third run of three in a row. That mutant run alone fails its own row and no other, and no gate reaches the row: a one-shot run has none. So it is the row's own flake, under load.
+
+The rows add a few seconds to the long shard, not measured apart: it ran 446 s in parity with them and 444 s without.

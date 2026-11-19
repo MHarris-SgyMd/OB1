@@ -70,6 +70,10 @@
       "scope": "read"
     },
     {
+      "name": "list_priority_findings",
+      "scope": "read"
+    },
+    {
       "name": "item_history",
       "scope": "read"
     },
@@ -159,6 +163,10 @@
     },
     {
       "name": "release_holder_claims",
+      "scope": "write"
+    },
+    {
+      "name": "review_priority_finding",
       "scope": "write"
     },
     {
