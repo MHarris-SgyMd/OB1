@@ -1,17 +1,4 @@
----
-type: changed
-bump: patch
-tickets: [SMD-4352]
-migrations: []
----
-
-## Changelog
-
-The suite holds ten more of the claim workers' rules, five of consolidation's, two of extraction's and three of re-embed's, each found by a mutant that no row caught (SMD-4352, PRs 1 to 3). No behaviour changes: the rows are tests.
-
-## Record
-
-Ten rows for the three engines' own lines in the claim workers' loop and error handling, each failed by the mutant that lived, the ticket's PRs 1 to 3 (SMD-4352)
+# 541. Ten rows for the three engines' own lines in the claim workers' loop and error handling, each failed by the mutant that lived, the ticket's PRs 1 to 3 (SMD-4352)
 
 **Problem.** SMD-4308 moved the claim workers' loop and error handling into `db/claim-loop.ts`, each engine passing where it differs. A mutant of each thing passed was run against test-live, and nine lived through every shard that runs the engines: rows main lacked before the move. Five are consolidation's.
 
