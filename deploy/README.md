@@ -1650,29 +1650,29 @@ does a key revoked since.
 As a metric, `ob1.mcp.listen_streams`: the total, with no label of its own, an
 up-down counter, `ob1_mcp_listen_streams` in the profile's Prometheus (measured
 on its image). It carries neither bound: `listen`, below, says both. It is a
-sample: the first one export interval after the start,
-then at each export (every 60 s unless `OTEL_METRIC_EXPORT_INTERVAL` says), and
-once more at the stop's flush. From the end of the stop's drain it reads 0, so
-that the series ends on 0: the stop then serves nothing new and is about to
-close every stream, after its flush where the drain finished, which a collector
-that is slow to answer can make 5 s. Each start is a new series, told from the
-last by `service.instance.id` (and, across an upgrade, the version). Three
-things follow. After a restart a sum over servers reads 0 until the new
-server's first export, though its clients may be back in seconds. A server that
-stops inside its first interval sends that 0 and nothing else, so one that
-restarts more often than it exports reads 0, or nothing, however many streams
-each life held. And a stop whose flush does not get its last export out (a
-collector that does not answer, or is still answering the export before it
-when the flush's bound runs out; a kill) leaves the count before it as its
-series' last. Prometheus goes on reading that for its lookback, five minutes
-unless set otherwise, and a sum over servers is too high for as long (measured
-on the image: three streams open at a kill were still counted beside the next
-server's one 286 s on, and no longer at 302 s).
+sample: the first one export interval after the start, then at each export
+(every 60 s unless `OTEL_METRIC_EXPORT_INTERVAL` says), and once more at the
+stop's flush. From the end of the stop's drain it reads 0, so that the series
+ends on 0: the stop then serves nothing new and is about to close every stream,
+after its flush where the drain finished, which a collector that is slow to
+answer can make 5 s. Each start is a new series, told from the last by
+`service.instance.id` (and, across an upgrade, the version). Three things
+follow. After a restart a sum over servers reads 0 until the new server's first
+export, though its clients may be back in seconds. A server that stops inside
+its first interval sends that 0 and nothing else, so one that restarts more
+often than it exports reads 0, or nothing, however many streams each life held.
+And a stop whose flush does not get its last export out (a collector that does
+not answer, or is still answering the export before it when the flush's bound
+runs out; a kill) leaves the count before it as its series' last. Prometheus
+goes on reading that for its lookback, five minutes unless set otherwise, and a
+sum over servers is too high for as long (measured on the image: three streams
+open at a kill were still counted beside the next server's one 286 s on, and no
+longer at 302 s).
 
 On its keyed `/health`, as `listen`, read as the route answers: `open`, the two
 bounds (`max` for the server and `perCaller` for one caller) and `callers`, one
-`{ "name", "open" }` for each caller that holds a stream, the most first and
-equal counts in name order; `open` is their sum. It rides on the brain's record,
+`{ name, open }` for each caller that holds a stream, the most first and equal
+counts in name order; `open` is their sum. It rides on the brain's record,
 so where the route answers `ok` there is no count, and the metric is the only
 reading: with the REST core away (that request's line is `error`, `FAILED`),
 with the key not cleared within the deadline, and for a key that may not read

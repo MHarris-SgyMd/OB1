@@ -99,7 +99,8 @@ let bunServer: Stoppable | undefined;
 if (import.meta.main) {
   // Spans to a collector, where one is named (OTEL_EXPORTER_OTLP_ENDPOINT), as server-portable's index.ts's were (PR 4c).
   // …and, on a server that holds listen streams, a count of how many are open (SMD-4458), asked for once the SDK is
-  // set up: before that the API has no meter to make it on. A server that holds none sends no such series.
+  // set up: before that the API's meter provider is its no-op, and a count made on it is never sent. A server that
+  // holds none sends no such series.
   // Once the stop's drain has ended it reads 0. The stop is then about to close every stream, after its flush where
   // the drain finished, and the flush reads the count a last time: left at the streams still open, that would be the
   // last point of a series that never reports again, and a panel that sums the servers would count those streams

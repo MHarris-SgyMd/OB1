@@ -1,7 +1,8 @@
 // The OpenTelemetry API's side of spans.ts (SMD-1849 PR 2d): the spans a
 // provider call, a store operation, a job's body and a webhook's deferred work
-// run under, the points their histograms get, the count of the listen streams
-// the MCP server holds open, and the stop's cut of whatever is still open. telemetry.ts installs it (useTracing) as a server, or
+// run under, the points their histograms get, the count of the listen
+// streams the MCP server holds open, and the stop's cut of whatever
+// is still open. telemetry.ts installs it (useTracing) as a server, or
 // preflight under --deep, loads it, and builds its tool spans on it. Only the API comes in here;
 // the SDK is otel-setup.ts's, loaded by startTelemetry, and until then every
 // span and point here is the API's no-op.
@@ -43,16 +44,15 @@ export function histogram(name: string, spec: HistogramSpec): otel.Histogram {
 /**
  * The count of the listen streams the MCP server holds open (SMD-4458), read at each export from the count the
  * server keeps: the total alone, with no label of its own, since a label for each caller's name would have no bound.
- * An up-down counter, read when asked: the conventions' instrument for a count of open things that is summed over
- * servers, as `http.server.active_requests` is (review pass 1: it was a gauge, their instrument for what is not
- * summed). The profile's Prometheus has it as `ob1_mcp_listen_streams`, with no suffix (measured on its image).
+ * An up-down counter: the conventions' instrument for a count of open things that is summed over servers, as
+ * `http.server.active_requests` is (review pass 1: it was a gauge, their instrument for what is not summed). The
+ * profile's Prometheus has it as `ob1_mcp_listen_streams`, with no suffix (measured on its image).
  * Made on the meter provider the API has now, so it is called once the SDK is set up (startTelemetry's answer); before
  * that, or where no metrics go anywhere, the API's provider is its no-op and this does nothing. It is here, not in
  * mcp-server/, because this is the module that holds the OpenTelemetry API, which mcp-server/ has no dependency of
- * its own on. Answers false where making it threw, and true otherwise,
- * the no-op provider's nothing included: a meter that throws loses the count and nothing else, as a failed start of
- * the SDK loses its signals and not the server (review pass 1: asked for in a start's continuation, a throw here
- * ended the process).
+ * its own on. Answers false where making it threw, and true otherwise, the no-op provider's nothing included: a meter
+ * that throws loses the count and nothing else, as a failed start of the SDK loses its signals and not the server
+ * (review pass 1: asked for in a start's continuation, a throw here ended the process).
  */
 export function observeListenStreams(read: () => number, provider: otel.MeterProvider = otel.metrics.getMeterProvider()): boolean {
   try {

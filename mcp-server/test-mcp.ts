@@ -1620,7 +1620,7 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
     `another name has its own share, to the server's bound of three; a fourth, under a third name, is refused (open ${streams.count}; ${overServer.status} ${JSON.stringify(overServerBody)}; ${JSON.stringify(last())})`);
   // What keyed /health says of them (SMD-4458): how many are open, the two bounds a refusal is read against, and each
   // caller's share, the most first. The two refusals above took nothing.
-  const listenOf = async (from: { fetch: (r: Request) => Response | Promise<Response> } = holding) => {
+  const healthOf = async (from: { fetch: (r: Request) => Response | Promise<Response> } = holding) => {
     answer = () => ({ version: "1.0.0" });
     try {
       const r = await from.fetch(new Request("http://mcp/mcp/health", { headers: { "x-brain-key": "read-raw" } }));
@@ -1635,13 +1635,13 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
       answer = () => ok({});
     }
   };
-  const atBound = await listenOf();
+  const atBound = await healthOf();
   assert(atBound.version === "1.0.0" && atBound.oauth !== undefined && same(atBound.listen, { open: 3, max: 3, perCaller: 2, callers: [{ name: "laptop", open: 2 }, { name: "chatgpt", open: 1 }] }),
     `keyed /health on a server that holds streams: beside the record, three open of three, two a caller, and each caller's share, the most first; a refusal at either bound left the count where it was (${JSON.stringify(atBound.listen)})`);
   // A place given back is a place to take: one stream closed, and the name refused a moment ago is held.
   await a1.close();
   await until(() => streams.count === 2);
-  const afterOne = await listenOf();
+  const afterOne = await healthOf();
   assert(same(afterOne.listen, { open: 2, max: 3, perCaller: 2, callers: [{ name: "chatgpt", open: 1 }, { name: "laptop", open: 1 }] }),
     `…and after one stream's client closes it the count has fallen by one, its caller's with it; equal shares are in name order (${JSON.stringify(afterOne.listen)})`);
   const c1 = reading(await ask("cap-raw"));
@@ -1652,9 +1652,9 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   assert(emptied, `every stream closed, none counted (open ${streams.count})`);
   // With none open the field is still there, the bounds with it; an app that holds none says nothing of streams,
   // given its streams' settings as the entry gives them or given none.
-  const noneOpen = await listenOf();
-  const givenAndOff = await listenOf(createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: (l) => said.push(l), listen: createListenStreams() }));
-  const holdsNone = await listenOf(app);
+  const noneOpen = await healthOf();
+  const givenAndOff = await healthOf(createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: (l) => said.push(l), listen: createListenStreams() }));
+  const holdsNone = await healthOf(app);
   assert(same(noneOpen.listen, { open: 0, max: 3, perCaller: 2, callers: [] }) && holdsNone.version === "1.0.0" && holdsNone.oauth !== undefined && !("listen" in holdsNone) && givenAndOff.version === "1.0.0" && !("listen" in givenAndOff),
     `keyed /health with no stream open says none, and its bounds; an app that holds none has no such field, as the entry is today or with no streams' settings at all (${JSON.stringify(noneOpen.listen)}; ${JSON.stringify(Object.keys(givenAndOff))}; ${JSON.stringify(Object.keys(holdsNone))})`);
 

@@ -5217,9 +5217,9 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
       countThrew = (e as Error).message;
     }
     assert(countMade === false && countThrew === "", `a meter that throws: the count is not made, said by the answer, and nothing is thrown (made ${countMade}; threw ${JSON.stringify(countThrew)})`);
-    assert(countsBefore === 0 && countAsked === true && heldThree.length === 1 && heldThree[0].dataPointType === DataPointType.SUM && (heldThree[0] as { isMonotonic?: boolean }).isMonotonic === false && heldThree[0].descriptor.unit === "{stream}" && heldThree[0].dataPoints.length === 1 && threePoint?.value === 3 && Object.keys(threePoint.attributes).length === 0
-      && heldOne.length === 1 && (heldOne[0].dataPoints[0] as { value: number } | undefined)?.value === 1,
-      `the listen streams' count: none until it is asked for, then, answered as made (${countAsked}), ob1.mcp.listen_streams, a sum of streams that may fall, one point with no labels, the count as each export reads it (${countsBefore} before; ${JSON.stringify(heldThree.map((m) => [m.descriptor.unit, m.dataPoints]))}; then ${JSON.stringify(heldOne.map((m) => m.dataPoints.map((pt) => (pt as { value: number }).value)))})`);
+    assert(countsBefore === 0 && countAsked === true && heldThree.length === 1 && heldThree[0].dataPointType === DataPointType.SUM && heldThree[0].isMonotonic === false && heldThree[0].descriptor.unit === "{stream}" && heldThree[0].dataPoints.length === 1 && threePoint?.value === 3 && Object.keys(threePoint.attributes).length === 0
+      && heldOne.length === 1 && heldOne[0].dataPoints[0]?.value === 1,
+      `the listen streams' count: none until it is asked for, then, answered as made (${countAsked}), ob1.mcp.listen_streams, a sum of streams that may fall, one point with no labels, the count as each export reads it (${countsBefore} before; ${JSON.stringify(heldThree.map((m) => [m.descriptor.unit, m.dataPoints]))}; then ${JSON.stringify(heldOne.map((m) => m.dataPoints.map((pt) => pt.value)))})`);
     // …and a key the registry did not clear (revoked) is refused at its key too (review pass 4).
     const { agents: mirrorRegistryOf } = await import("./root.ts");
     const mirrorRegistry = mirrorRegistryOf();
