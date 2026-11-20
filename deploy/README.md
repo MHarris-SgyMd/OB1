@@ -2473,31 +2473,32 @@ until its pool drains, or for `OB1_SLEEP_REEMBED_SHARE` seconds while
 extraction or consolidation has work (unset, 120; SMD-4384), the two then
 taking turns in the period as long each — then
 extraction, and
-consolidation beside it once the thoughts captured before the period began
-are extracted, so the backlog order above is built in: a thought captured
-since is judged against neighbours captured on an earlier UTC date, and
-every one of them not yet extracted is in that backlog, except across 00:00
-UTC. Writes that pause nothing (an `ingested` key's, board-sync's among
-them) no longer keep consolidation out of a period for as long as they
-come, as they did while it waited for extraction's whole pool to drain
-(SMD-4468). Board-sync's observation of the day, dated 00:00 UTC, and a
-ticket it re-renders (which keeps its entities until it is extracted again)
-hold nothing back. A ticket created on an earlier day that it first writes
-during the period is backlog until extracted, as it should be — if it lands
-before consolidation joins; one landing after is judged without a wait, and
-a thought judged before it misses its pair with it. A backlog thought a
-pause has taken goes behind the newer writes, and the join waits until
-extraction reaches it, which, while writes outpace extraction, comes only
-once they slow, as before. A thought whose entities are only an older
-extraction key's, after a model's switch, holds the join too, until
-extraction re-extracts it. Consolidation's judge calls now run while such writes
-arrive: on a model server of one slot they share it with extraction. Under
-a steady inflow the period can run on until the writes stop. Beside consolidation runs the subject sweep
+consolidation beside it once the thoughts captured before the period began are
+extracted, so the backlog order above is built in: a thought captured since is
+judged against neighbours captured on an earlier UTC date, and every one of
+them not yet extracted is in that backlog, except across 00:00 UTC. Writes
+that pause nothing (an `ingested` key's, board-sync's among them) no longer
+keep consolidation out of a period for as long as they come, as they did while
+it waited for extraction's whole pool to drain (SMD-4468). Board-sync's
+observation of the day, dated 00:00 UTC, and a ticket it re-renders (which
+keeps its entities until it is extracted again) hold nothing back. A ticket
+created on an earlier day that it first writes during the period is backlog
+until extracted, as it should be — if it lands before consolidation joins; one
+landing after is judged without a wait, and a thought judged before it misses
+its pair with it. A backlog thought a pause has taken goes behind the newer
+writes, and the join waits until extraction reaches it, which, while writes
+outpace extraction, comes only once they slow, as before. A thought whose
+entities are only an older extraction key's, after a model's switch, holds the
+join too, until extraction re-extracts it. Consolidation's judge calls now run
+while such writes arrive: on a model server of one slot they share it with
+extraction. Under a steady inflow the period can run on until the writes stop.
+Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
 model's: started once a period, once extraction's whole pool has drained or
-been joined past (not the backlog consolidation joins on, SMD-4468), its claims bounded by the period's start plus
-30 days, so a thought it sets back waits for a later period. On a brain with
+been joined past (not the backlog consolidation joins on, SMD-4468), its
+claims bounded by the period's start plus 30 days, so a thought it sets back
+waits for a later period. On a brain with
 no pool named, the first period names one and pools every thought with no
 current subject, the rules keying what they can and the judge model asked the
 rest, one call at a time — a median of 71 s for the 27B with its reasoning
@@ -2597,8 +2598,9 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 The log says `working:` when a period begins, `extraction drained — consolidating
 beside it` (or `extraction has done the thoughts captured before the period
 began — consolidating beside it while it extracts the writes since` while
-newer writes keep coming, SMD-4468), `paused:` with the live call that paused it and `resumed:` once
-the capture has passed, and `the pools drained — the period ends`; `share:`
+newer writes keep coming, SMD-4468), `paused:` with the live call that paused
+it and `resumed:` once the capture has passed, and
+`the pools drained — the period ends`; `share:`
 at its start names the turns, `re-embed has had its share — 120 s alone — N
 thought(s) left for its next turn …` when re-embed gives way to extraction,
 and `the claim passes have had their turn — 120 s — with N thought(s) waiting

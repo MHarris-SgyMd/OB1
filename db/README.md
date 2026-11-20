@@ -5511,39 +5511,37 @@ has work; the start line and `--dry-run` count them
 (a later period's line counts only rows not yet claimed, so follow the
 `re-embed pass` row), and `reembed.ts --dry-run` before upgrading says how
 many. Then extraction alone until the thoughts captured before the period
-began are extracted, then consolidation beside it — the order "Start
-`extract` alone on a backlog" asks of an operator (SMD-4468). A thought
-captured since is judged against neighbours captured on an earlier UTC date
-(029), and every one of them not yet extracted is in that backlog — except
-across 00:00 UTC, as beside any running `extract`, and except a write dated
-an earlier day that lands after the join, which no read waits for. A write
-during the period dated today (board-sync's observation of the day, dated
-00:00 UTC) is no neighbour of one, and holds nothing back; one dated an
-earlier day (a ticket created then, an import carrying its dates) is, and
-holds the join until extracted, if it lands before the join. A thought
-already extracted that an edit pools again (board-sync re-rendering a
-ticket) keeps its entities until it is extracted again, so it holds nothing
-back, whenever the edit came; one whose extraction found no entity counts,
-and so does one whose entities are another extraction key's, as after a
-model's switch, which drains first, as the backlog exception above asks, and
-one whose extracted entities are all ones a sync names structurally (053's
-`source:` rows win the pair), which holds the join at each re-render until
-extracted again, as before. A thought
-captured today before the period that the period itself first pools (a
-fresh brain, a key's switch) counts as a write since: no one's neighbour,
-but consolidation may then start beside it. Until SMD-4468 the join waited
-for extraction's whole pool, which a steady inflow of writes that pause
-nothing (an `ingested` key's, board-sync's among them) seldom let drain: the
-capture trigger pools each one as it is written, so one was pending or in
-hand at nearly every poll, and consolidation joined mostly once they
-stopped. The subject sweep still waits
+began are extracted, then consolidation beside it — the order "Start `extract`
+alone on a backlog" asks of an operator (SMD-4468). A thought captured since
+is judged against neighbours captured on an earlier UTC date (029), and every
+one of them not yet extracted is in that backlog — except across 00:00 UTC, as
+beside any running `extract`, and except a write dated an earlier day that
+lands after the join, which no read waits for. A write during the period dated
+today (board-sync's observation of the day, dated 00:00 UTC) is no neighbour
+of one, and holds nothing back; one dated an earlier day (a ticket created
+then, an import carrying its dates) is, and holds the join until extracted, if
+it lands before the join. A thought already extracted that an edit pools again
+(board-sync re-rendering a ticket) keeps its entities until it is extracted
+again, so it holds nothing back, whenever the edit came. One whose extraction
+found no entity counts. So does one whose entities are another extraction
+key's, as after a model's switch: that backlog drains first, as the backlog
+exception above asks. So does one whose extracted entities are all ones a sync
+names structurally (053's `source:` rows win the pair): it holds the join at
+each re-render until extracted again, as before. A thought captured today
+before the period that the period itself first pools (a fresh brain, a key's
+switch) counts as a write since: no one's neighbour, but consolidation may
+then start beside it. Until SMD-4468 the join waited for extraction's whole
+pool, which a steady inflow of writes that pause nothing (an `ingested` key's,
+board-sync's among them) seldom let drain: the capture trigger pools each one
+as it is written, so one was pending or in hand at nearly every poll, and
+consolidation joined mostly once they stopped. The subject sweep still waits
 for the whole pool (below): beside consolidation, its judge calls slowed
-extraction on a model server of one slot. A limit stands: a backlog thought
-a pause has taken goes behind the newer writes (below), so while they come
+extraction on a model server of one slot. A limit stands: a backlog thought a
+pause has taken goes behind the newer writes (below), so while they come
 faster than extraction takes them it is not reached, and the join waits for
-it, as before; a stalled one is joined past only once extraction holds
-nothing else. Under a steady inflow the period can run on until the writes
-stop. A live write pauses the passes (above),
+it, as before; a stalled one is joined past only once extraction holds nothing
+else. Under a steady inflow the period can run on until the writes stop. A
+live write pauses the passes (above),
 a call in hand a minute old aborted while paused and its thought set back. A
 long thought's answered windows are kept (093, [Long thoughts
 resume](#extract-entitiests)), so one longer than every pause's bound advances
@@ -5597,15 +5595,16 @@ judge model missing at the start is refused, as before. Each period's move
 also dates now a forward-dated row that is no longer a stopped thought (one
 finished, then put back by a retry).
 A brain before 093, or a role that cannot read its table (the
-extraction group's), joins once the backlog is extracted, never past a stalled thought, and the start says
-so; granted later, the scheduler takes it up once restarted. `--dry-run`
-names the held thoughts. A failed row stays failed: `--retry-failed` is the operator's.
+extraction group's), joins once the backlog is extracted, never past a stalled
+thought, and the start says so; granted later, the scheduler takes it up once
+restarted. `--dry-run` names the held thoughts. A failed row stays failed:
+`--retry-failed` is the operator's.
 
 **The subject sweep** (SMD-3306 PR 6b-2). `extract-entities.ts --subjects`'s
 following run ([the subject pool](#extract-entitiests), above) starts beside
 consolidation, once extraction's whole pool has drained or been joined past —
-not the backlog consolidation joins on (SMD-4468) — once a
-period, and runs until the period ends (the maintainer's choice). Its claims
+not the backlog consolidation joins on (SMD-4468) — once a period, and runs
+until the period ends (the maintainer's choice). Its claims
 are bounded by the period's start plus 30 days: it asks the thoughts pooled
 since and, once each, those it set back before the period — 30 days ahead,
 after an outage they did not make, or a hang — then waits as at an empty

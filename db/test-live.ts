@@ -30057,8 +30057,7 @@ if (want("38p")) await (async () => {
 // once it did — never while the inflow lasted (SMD-4384's review measured a judgement 158 s late at the median, 306 s
 // at most, at the shipped settings). It now joins once the thoughts captured before the period began are extracted,
 // a write since dated today aside: a thought captured since is judged against neighbours captured on an earlier UTC
-// date (029). Its body a function's, as
-// [38p]'s: the module body is at TS2563's limit for control-flow analysis.
+// date (029). Its body a function's, as [38p]'s: the module body is at TS2563's limit for control-flow analysis.
 if (want("38c")) await (async () => {
   console.log("\n[38c] db/sleep.ts: consolidation under a steady inflow of writes that pause nothing (SMD-4468) — extraction's pool never drains while they come faster than it takes them, and consolidation joins once the thoughts captured before the period began are extracted, judging the inflow's notes while it goes on, none claimed before that backlog is extracted, the subject sweep waiting for the whole pool; writes since dated today and edits of thoughts already extracted hold nothing back (board-sync's); a backlog thought a pause has taken holds the join while the writes outpace extraction, a limit named, and no join past comes meanwhile; after an extraction model's switch, thoughts carrying only the old key's entities hold it too");
   const sql = new SQL({ url: URL_, max: 4 });
@@ -30069,17 +30068,19 @@ if (want("38c")) await (async () => {
   };
   /** Of `ids`, those consolidation has judged: their claims under its key finished. */
   const judgedOf = async (ids: string[]) => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${CO} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...ids], "TEXT")}::uuid[])`)[0].c);
+  /** Extraction's claim on `id`: its status, undefined when it has none. */
+  const exStatus = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
   const JOINED = /^ {2}extraction has done the thoughts captured before the period began — consolidating beside it while it extracts the writes since$/;
   const DRAINED = /^ {2}extraction drained — consolidating beside it$/;
   const ANY_JOIN = /consolidating beside it|consolidating first/;
   const SWEEP = /^ {2}the subject sweep starts beside consolidation/;
   /**
    * One --follow run (poll 250 ms, one extraction worker at 400 ms a call) under a capture every 300 ms on `axis`, each
-   * passed to `stamp` once written. The inflow and `first` begin before the run, its first two notes written and
-   * `first` done, so no poll finds the pool drained and joins on it; `during` runs while the inflow goes on, then it stops, every note is
-   * waited to be judged (60 s) and `after` runs before the run is stopped.
+   * passed to `stamp` once written. The inflow begins before the run, its first two notes written, so no poll finds the
+   * pool drained and joins on it; `during` runs while the inflow goes on, then it stops, every note is waited to be
+   * judged (60 s) and `after` runs before the run is stopped.
    */
-  const underInflow = async (label: string, axis: number, during: (inflow: string[]) => Promise<void>, o: { subjects?: boolean; stamp?: (id: string) => Promise<void>; first?: (inflow: string[]) => Promise<void>; after?: () => Promise<void> } = {}) => {
+  const underInflow = async (label: string, axis: number, during: (inflow: string[]) => Promise<void>, o: { subjects?: boolean; stamp?: (id: string) => Promise<void>; after?: () => Promise<void> } = {}) => {
     sw.slowExtract = 400;
     lines.length = 0;
     const inflow: string[] = [];
@@ -30092,9 +30093,7 @@ if (want("38c")) await (async () => {
         await Bun.sleep(300);
       }
     })();
-    const first = o.first?.(inflow);
     await pollUntil(async () => inflow.length >= 2, 10_000);
-    await first;
     const ac = new AbortController();
     const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, workers: 1, signal: ac.signal, ...(o.subjects ? { subjects: true } : {}) });
     let allJudged = false, code = -9;
@@ -30146,10 +30145,10 @@ if (want("38c")) await (async () => {
       `…and the subject sweep waits for extraction's whole pool, not the backlog's join, starting here once the inflow has ended (review pass 2, the maintainer's choice) (started during it ${sweptInFlow}; after ${sweptAfter}${sweptAfter ? "" : lastLines()})`);
     await unpoolSubjects();
 
-    // A limit the maintainer chose to name (review passes 1 and 2): a backlog thought a pause has taken — one stalled,
-    // three long stops with no window gained, and one a single pause stopped — is dated behind the captures since, so
-    // while they come faster than extraction takes them it is not reached, and the join waits for it, as before. No
-    // join past meanwhile: past a stalled backlog thought it cut the capture in hand and set the inflow aside for
+    // A limit the maintainer chose to name (review passes 1 and 2): a backlog thought a pause has taken — one stalled
+    // by three long stops with no window gained, and one a single pause stopped — is dated behind the captures since,
+    // so while they come faster than extraction takes them it is not reached, and the join waits for it, as before.
+    // No join past meanwhile: past a stalled backlog thought it cut the capture in hand and set the inflow aside for
     // consolidation's whole drain (review pass 2, run-it: 215 s). Once the inflow ends, consolidation joins.
     await sql`DELETE FROM thoughts`;
     await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
@@ -30170,7 +30169,7 @@ if (want("38c")) await (async () => {
       begun = await pollUntil(async () => lines.some((l) => /^ {2}working:/.test(l)), 20_000);
       await Bun.sleep(8000);
       joinedInFlowB = lines.some((l) => ANY_JOIN.test(l));
-      heldAtEnd = await Promise.all(held.map(async (id) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status));
+      heldAtEnd = await Promise.all(held.map((id) => exStatus(id)));
     });
     assert(begun && !joinedInFlowB && heldAtEnd.every((st) => st === "pending") && b.allJudged && b.code === 0,
       `…and backlog thoughts a pause has taken, one stalled and one stopped once, dated behind the captures since, hold the join while they come faster than extraction takes them — no join past meanwhile — and consolidation judges every note once the inflow ends (joined during it ${joinedInFlowB}; held thoughts ${heldAtEnd.join(",")} at its end; ${b.inflow.length} captured, all judged after ${b.allJudged}; exit ${b.code}${!joinedInFlowB && b.allJudged ? "" : lastLines()})`);
@@ -30201,7 +30200,7 @@ if (want("38c")) await (async () => {
         })();
         joinedD = await pollUntil(async () => lines.some((l) => JOINED.test(l)), 30_000);
         editsAtJoin = edits;
-        editedAtJoin = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${edited}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
+        editedAtJoin = await exStatus(edited);
         if (!joinedD) heldBack = ((await sql`SELECT t.content, c.status, (SELECT count(*)::int FROM thought_entities te WHERE te.thought_id = t.id) AS ents, t.created_at FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE c.work_type = ${EX} AND c.status IN ('pending', 'claimed') AND t.created_at < ${startedD}::timestamptz`) as { content: string; status: string; ents: number; created_at: Date }[]).map((r) => `${r.content.slice(0, 40)} ${r.status} ${r.ents} ${new Date(r.created_at).toISOString()}`).join(" / ");
         if (joinedD) await pollUntil(async () => (judgedD = await judgedOf(inflow)) > 0, 30_000);
       } finally {
@@ -30210,12 +30209,12 @@ if (want("38c")) await (async () => {
       }
     }, { stamp: async (id) => { await sql`UPDATE thoughts SET created_at = date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' WHERE id = ${id}::uuid`; } });
     assert(joinedD && judgedD > 0 && editsAtJoin > 0 && editedAtJoin !== "succeeded" && d.allJudged && d.code === 0,
-      `…and writes dated 00:00 UTC today, as board-sync's observations, beside an older thought already extracted that an edit pools again every 2 s, as a re-rendered ticket: neither holds the join, and an inflow note is judged while the writes go on (joined ${joinedD}; ${judgedD} judged during it; ${editsAtJoin} edit(s) before the join, ${edits} in all, the edited thought ${editedAtJoin ?? "unclaimed"} at it; older ones pending then: ${heldBack || "none"}; its joins: ${lines.filter((l) => ANY_JOIN.test(l)).map((l) => l.trim().slice(0, 120)).join(" | ") || "none"}; ${d.inflow.length} captured, all judged after ${d.allJudged}; exit ${d.code}${joinedD ? "" : lastLines()})`);
+      `…and writes dated 00:00 UTC today, as board-sync's observations, beside an older thought already extracted that an edit pools again every 2 s, as a re-rendered ticket: neither holds the join, and an inflow note is judged while the writes go on (joined ${joinedD}; ${judgedD} judged during it; ${editsAtJoin} edit(s) before the join, ${edits} in all, the edited thought ${editedAtJoin ?? "unclaimed"} at it; older ones pending or in hand then: ${heldBack || "none"}; its joins: ${lines.filter((l) => ANY_JOIN.test(l)).map((l) => l.trim().slice(0, 120)).join(" | ") || "none"}; ${d.inflow.length} captured, all judged after ${d.allJudged}; exit ${d.code}${joinedD ? "" : lastLines()})`);
 
     // An extraction model's switch (review pass 4): every thought keeps the old key's entities until re-extracted,
     // which consolidate.ts asks to drain before consolidating. Sixteen older notes carry only a retired key's entity;
     // once the period has begun they are pooled again, as a switch's first pool leaves them, and dated a day ahead so
-    // that extraction leaves them while the inflow lasts. They hold the join meanwhile: read by any entity they were
+    // that extraction leaves them while the inflow lasts. They hold the join meanwhile: read by any entity, they were
     // extracted already, and the join came at once, judging inflow notes against the old model's.
     const archive: string[] = [];
     for (let i = 0; i < 16; i++) archive.push(await capture(`An older note on the archive, number ${i}.`, "sync-sleep", 2 + (i % 5), 62));
