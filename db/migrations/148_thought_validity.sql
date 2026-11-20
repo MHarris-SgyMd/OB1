@@ -43,8 +43,8 @@
 --       names it), contested (a pending proposal names it as the side that
 --       falls, both texts as judged; or a deliverable whose newest
 --       verification is corrected at a checkpoint that reads current or
---       unmatched), unresolved (a pending or stale proposal on it as the
---       falling side whose text moved since judged, or a stale one; or a
+--       unmatched), unresolved (a pending proposal on it as the falling
+--       side once either text moved since judged, or a stale one; or a
 --       corrected verification whose checkpoint reads earlier), supported (an
 --       active citation whose source stands and, read one level deep from its
 --       own pointer and proposals, is neither superseded, contested nor
@@ -54,14 +54,15 @@
 --       contested, citations supported; and a corrected verification whose
 --       checkpoint could not be placed for want of the log (contested).
 --     * review (row 5): pending (a pending or stale proposal names it, either
---       side), decided (a key's or the pass's decision, the newest named),
+--       side), decided (an accepted or rejected proposal, a key's or the pass's;
+--       every proposal listed with its reviewer, the newest decision first),
 --       checked (a deliverable with a verification, every one listed, newest
 --       first, each with its status and its checkpoint's reading), unchecked
 --       (a deliverable still unverified), none; unknown when proposals or
 --       deliverable events were not read.
 --     * freshness (row 6): over the lineage rows that name it among their
 --       inputs and whose artifact still stands — a standing relation or subject
---       facet, a pending or stale proposal, and a row of another kind whose
+--       facet, a pending or stale proposal or one the pass rejected, and a row of another kind whose
 --       artifact exists by 067's orphan test (chunks, entities, vector,
 --       metadata, proposal; a section's row is dropped with it). Each row reads
 --       stale (an input's fingerprint moved and no re-run asked), requested (a
@@ -76,8 +77,8 @@
 --       (entities produced by source:<system>) is not keyed on the text, and
 --       067 keeps it: a moved text leaves it current. A relation row carries
 --       its judge's number. A kind carries its producers and what moved under
---       its stale rows. A stale or requested kind no pool re-runs (metadata, section)
---       says so (no_pool), on its rows and on the kind.
+--       its stale rows. A stale or requested kind no pool re-runs (metadata,
+--       section) says so (no_pool), on its rows and on the kind.
 --     * judges' numbers (row 9) ride under judge with calibrated: false.
 --     * unread: the record kinds the caller's role could not SELECT, by name.
 --
@@ -215,7 +216,7 @@ BEGIN
   IF p_ids IS NULL THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NO_IDS', 'cap', c_cap);
   END IF;
-  -- The cap bounds the work: a list ten times the cap is refused before it
+  -- The cap bounds the work: a list over ten times the cap is refused before it
   -- is de-duplicated.
   IF cardinality(p_ids) > 10 * c_cap THEN
     RETURN jsonb_build_object('ok', false, 'error', 'TOO_MANY', 'cap', c_cap, 'given', cardinality(p_ids));
@@ -356,10 +357,10 @@ BEGIN
 
     -- A deliverable whose newest verification is corrected: contested at a
     -- checkpoint that reads current or unmatched, unresolved at one that reads
-    -- earlier (the checkpoint rule). Without the log, a checkpoint that is not
-    -- the text now reads unknown: earlier and unmatched cannot be told apart,
+    -- earlier (the checkpoint rule). Without the log, a checkpoint that is neither
+    -- the text's key nor a stale stored key reads unknown: earlier and unmatched cannot be told apart,
     -- so the corrected verification sets unresolved at least and the state
-    -- unknown, since contested could stand above it (row 1).
+    -- unknown, since contested could stand above it (row 2).
     v_ckpt_unknown := false;
     IF r_verify THEN
       SELECT e.seq, e.status, e.checkpoint, e.actor_name, e.actor_kind, e.at INTO v_v
@@ -427,7 +428,6 @@ BEGIN
 
     -- ----------------------------------------------------------------- review
     v_rrecs := '[]'::jsonb;
-    v_rstate := 'none';
     IF NOT r_proposal OR NOT r_verify THEN
       v_rstate := 'unknown';
     ELSE
@@ -527,7 +527,7 @@ BEGIN
           ELSE 'current' END;
         v_rank := CASE v_row_state WHEN 'stale' THEN 4 WHEN 'requested' THEN 3 WHEN 'legacy' THEN 2 ELSE 1 END;
         v_worst := GREATEST(v_worst, v_rank);
-        -- The tags and a generated section have no pool: stale or marked
+        -- The tags and a generated section have no pool: stale or requested
         -- (063 and 067 leave them unqueued), only an operator's rebuild clears
         -- them. (A vector or windows row on a brain with no embedding settings
         -- is unqueued too; this read does not name that case.) A relation
@@ -541,7 +541,7 @@ BEGIN
       v_fstate := (ARRAY['none', 'current', 'legacy', 'requested', 'stale'])[v_worst + 1];
     END IF;
     -- A kind's state is its worst row read (orphans aside), with its
-    -- producers, what moved under any of its rows, and no_pool when any row
+    -- producers, what moved under its stale rows, and no_pool when any row
     -- has it (the record's shape).
     SELECT COALESCE(jsonb_agg(jsonb_build_object('kind', k.kind, 'state', k.state, 'produced_by', k.produced_by,
              'moved', COALESCE((SELECT to_jsonb(array_agg(DISTINCT m)) FROM jsonb_array_elements(v_frecs) r2, jsonb_array_elements_text(r2->'moved') m
@@ -567,4 +567,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_validity(uuid[]) IS
-  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given (a list over ten times the cap refused before de-duplication; a role that cannot read thoughts NOT_READABLE): {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending or stale proposal on it as the falling side with a text moved since judged, or stale; a corrected verification at an earlier checkpoint), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; a pass-settled rejection read, a key''s decision not; a source: pass''s extraction kept on a moved text, as 067''s entities arm keeps it; a kind''s moved from its stale rows; a checkpoint current only at the text''s own key, a stale stored key earlier; a relation''s judge number carried; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';
+  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given (a list over ten times the cap refused before de-duplication; a role that cannot read thoughts NOT_READABLE): {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending proposal on it as the falling side with a text moved since judged, or a stale one; a corrected verification at an earlier checkpoint, a stale stored key among them; a checkpoint is current only at the text''s own key), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found, or a corrected checkpoint could not be placed without the log. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; a pass-settled rejection read, a key''s decision not; a source: pass''s extraction kept on a moved text, as 067''s entities arm keeps it; a kind''s moved from its stale rows; a relation''s judge number carried; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';

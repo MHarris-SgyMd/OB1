@@ -22309,7 +22309,7 @@ console.log("\n[132] Migration 145: release every live claim one holder holds �
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('[132] op', '[132] h', '[132] h2', '[132] plain')`);
 }
 
-console.log("\n[133] Migration 148: thought_validity — a thought's state on three axes read from the records that exist (SMD-3887's claim-validity record): NULL NO_IDS, over 100 distinct ids TOO_MANY whole, a repeat answered once, in the order given, an unknown id found false and a forgotten one forgotten; validity unchallenged with no record (never supported), superseded by a pointer set (its writer named) and back when cleared, contested by a pending proposal on the falling side, unresolved once its text moves or the row goes stale, superseded on an accept and back on a reject (the review decided, the reviewer named), supported by a citation whose source stands and not once the source is superseded or deleted, contested and unresolved by a corrected verification by the checkpoint rule (current, earlier, unmatched) and back on a later verified; review pending, decided, checked, unchecked, none; freshness stale on a moved input, requested on a rebuild's request or a stale proposal, current once re-derived, none with no lineage; one thought unchallenged, pending and stale at once; an unread table unknown on the axes resting on it, named in unread; STABLE, SECURITY INVOKER, 148 its last definer; a re-apply a no-op (SMD-3887)");
+console.log("\n[133] Migration 148: thought_validity — a thought's state on three axes read from the records that exist (SMD-3887's claim-validity record): NULL NO_IDS, over 100 distinct ids TOO_MANY whole, a repeat answered once, in the order given, an unknown id found false and a forgotten one forgotten; validity unchallenged with no record (never supported), superseded by a pointer set (its writer named) and back when cleared, contested by a pending proposal on the falling side, unresolved once its text moves or the row goes stale, superseded on an accept and back on a reject (the review decided, the reviewer named), supported by a citation whose source stands and not once the source is superseded or deleted, contested and unresolved by a corrected verification by the checkpoint rule (current, earlier, unmatched) and back on a later verified; review pending, decided, checked, unchecked, none; freshness stale on a moved input, requested on a rebuild's request or a stale proposal, current once re-derived, none with no lineage; one thought unchallenged, pending and stale at once; an unread table unknown on the axes resting on it, named in unread, a role without the ledger or the verifications answered under a generic plan too, and a role without thoughts NOT_READABLE; a checkpoint compared case-blind, one at a stale stored key earlier; a source: extraction kept on a moved text, a relation's judge number, a pass-settled rejection read, an orphaned row listed; STABLE, SECURITY INVOKER, 148 its last definer; a re-apply a no-op (SMD-3887)");
 {
   const file = files.find((f) => /^\d{3}_thought_validity\.sql$/.test(f)) ?? "no NNN_thought_validity.sql";
   type Rec = Record<string, unknown>;
@@ -22341,7 +22341,7 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   assert(meta.d === false && meta.v === "s" && /Migration 148 \/ SMD-3887\./.test(meta.c ?? "") && lastDefinerOf("thought_validity") === file && (await functionsNamed("thought_validity")) === 1,
     `thought_validity: STABLE, SECURITY INVOKER, 148's comment, 148 its last definer and the only one of the name (${meta.d}/${meta.v}/${lastDefinerOf("thought_validity")})`);
 
-  // The call: NULL NO_IDS; 101 distinct TOO_MANY whole; 100 distinct and a repeat answered (the cap counts distinct ids); the order given, a repeat once; an unknown id found false.
+  // The call: NULL NO_IDS; 101 distinct TOO_MANY whole; 100 distinct and a repeat answered (the cap counts distinct ids); the order given, a repeat once; an unknown id found false; 1001 ids TOO_MANY before de-duplication.
   const A = await thought("[133] A: the deploy runs at noon"), B = await thought("[133] B: the deploy runs at nine");
   const ghost = "3887f000-0000-4000-8000-0000000000ff";
   const nulls = await read(null);
@@ -22354,7 +22354,7 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
          && ordered.ok === true && ordered.thoughts!.map((t) => t.id).join() === [B, A, ghost].join() && ordered.thoughts![2].found === false
          && ordered.thoughts![2].forgotten === false && Array.isArray(ordered.thoughts![2].unread) && ordered.thoughts![2].unread.length === 0
          && flood.ok === false && flood.error === "TOO_MANY" && flood.given === 1001,
-    `NULL NO_IDS, 101 distinct ids TOO_MANY (given 101), 100 distinct and a repeat answered, the order given with a repeat once and a NULL skipped, an unknown id found false (${nulls.error}, ${many.error}/${many.given}, ${hundred.thoughts?.length}, ${ordered.thoughts?.map((t) => t.found).join()})`);
+    `NULL NO_IDS, 101 distinct ids TOO_MANY (given 101), 100 distinct and a repeat answered, the order given with a repeat once and a NULL skipped, an unknown id found false, 1001 ids TOO_MANY before de-duplication (${nulls.error}, ${many.error}/${many.given}, ${hundred.thoughts?.length}, ${ordered.thoughts?.map((t) => t.found).join()})`);
 
   // No record: unchallenged, never supported; review none; freshness none; the version is the fingerprint now and the newest event's seq.
   const plain = await v(A);
@@ -22548,7 +22548,7 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   assert(apart.validity.state === "unchallenged" && apart.review.state === "pending" && apart.freshness.state === "stale",
     `one thought reads its three axes apart: unchallenged, pending, stale (${apart.validity.state}, ${apart.review.state}, ${apart.freshness.state})`);
 
-  // An unread table: a role with no SELECT on 068's projection reads validity unknown (a found contested could be superseded), names pointer in unread, and review stands; without derivations, freshness unknown.
+  // An unread table: a role with no SELECT on 068's projection reads validity unknown (what was found could be superseded), names pointer in unread, and review stands; without derivations, freshness unknown.
   await db.exec(`DROP ROLE IF EXISTS ob1_133_reader; CREATE ROLE ob1_133_reader;
     GRANT SELECT ON thoughts, supersession_proposals, deliverable_events, thought_facets, derivations, thought_chunks, thought_entities, ob1_entity_edges, thought_audit, thought_forgotten TO ob1_133_reader`);
   const asRole = async (ids: string[]) => {
@@ -22559,7 +22559,7 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   const [eNoPointer] = await asRole([E]);
   await db.exec(`REVOKE SELECT ON derivations FROM ob1_133_reader`);
   const [mNoLineage] = await asRole([M]);
-  // Without the log, everything else readable: a corrected checkpoint that is not the text now cannot be placed — unknown, unresolved found, audit in unread.
+  // Without the log, everything else readable: a corrected checkpoint that is neither the text's key nor the stored key cannot be placed — unknown, unresolved found, audit in unread.
   await db.exec(`GRANT SELECT ON derivations, ob1_superseded_by TO ob1_133_reader; REVOKE SELECT ON thought_audit FROM ob1_133_reader`);
   const [outNoAudit] = await asRole([out]);
   // Without the forget ledger and the verifications, under custom and generic plans: an unknown id answers forgotten null and an output reads review unknown — each read behind an IF, never a raised permission error (a guard inside one expression is still privilege-checked).
@@ -22591,7 +22591,7 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
          && mNoLineage.freshness.state === "unknown" && mNoLineage.unread.join() === "pointer,lineage"
          && outNoAudit.validity.state === "unknown" && outNoAudit.validity.found === "unresolved" && reads(outNoAudit) === "unknown" && outNoAudit.unread.join() === "audit"
          && noThoughts!.ok === false && noThoughts!.error === "NOT_READABLE",
-    `an unread table: validity unknown with what was found named, pointer in unread, review standing; freshness unknown without lineage; without the log a corrected checkpoint reads unknown, validity unknown (${cNoPointer.validity.state}/${cNoPointer.validity.found}, ${eNoPointer.validity.found}, ${mNoLineage.freshness.state}, ${mNoLineage.unread.join()}, ${outNoAudit.validity.state}/${reads(outNoAudit)}/${outNoAudit.unread.join()})`);
+    `an unread table: validity unknown with what was found named, pointer in unread, review standing; freshness unknown without lineage; without the log a corrected checkpoint reads unknown, validity unknown; without thoughts NOT_READABLE (${cNoPointer.validity.state}/${cNoPointer.validity.found}, ${eNoPointer.validity.found}, ${mNoLineage.freshness.state}, ${mNoLineage.unread.join()}, ${outNoAudit.validity.state}/${reads(outNoAudit)}/${outNoAudit.unread.join()})`);
 
   // Forgotten: found false, forgotten true with its time, no text.
   const gone = await thought("[133] forget me");
