@@ -199,13 +199,15 @@ async function main(cmd: string, args: string[]) {
   // down and logs read compose.yaml, whose settings are all required: they are given placeholders, which neither
   // command uses (review pass 4: a bare `compose logs` the operator was told to paste refused on each).
   if (cmd === "down" || cmd === "logs") {
-    const r = Bun.spawnSync(composeArgs(o.runtime, cmd === "down" ? ["down", "--remove-orphans"] : ["logs", "--follow", "slots"]), { env: composeEnv(process.env, { port: 1 }, BROKER, cmd, cmd), stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+    const r = Bun.spawnSync(composeArgs(o.runtime, cmd === "down" ? ["down", "--remove-orphans"] : ["logs", "--follow", "--timestamps", "slots"]), { env: composeEnv(process.env, { port: 1 }, BROKER, cmd, cmd), stdin: "inherit", stdout: "inherit", stderr: "inherit" });
     process.exit(r.exitCode === 0 ? 0 : 1);
   }
   if (!existsSync(o.registry)) { console.error(`no registry at ${o.registry} — copy deploy/federated/federation.example.yaml there and name your servers and brains, or give --registry PATH`); process.exit(2); }
   const text = readFileSync(o.registry, "utf8");
-  const { registry, problems } = parseRegistry(text);
+  const { registry, problems, warnings } = parseRegistry(text);
   if (!registry) { console.error(`${o.registry}:\n${problems.map((p) => `  ${p}`).join("\n")}`); process.exit(2); }
+  // Taken, and said: a `ps` that looks wrong as written (the broker's container reads each list itself, from there).
+  for (const w of warnings) console.error(`federated: ${o.registry}: ${w}`);
   const refusals: string[] = [];
   for (const path of [o.registry, BROKER]) { const problem = modeProblem(statSync(path).mode, path); if (problem) refusals.push(problem); }
   const facts = factsOf(o.runtime);
@@ -235,7 +237,7 @@ async function main(cmd: string, args: string[]) {
   if (!ours && await listens(host, registry.port)) refusals.push(`${host}:${registry.port} (broker.port) already answers, and not as this broker: stop it, or set broker.port in the registry to a free port`);
   if (refusals.length) { for (const x of refusals) console.error(x); process.exit(2); }
   const alias = shape?.alias ?? LOOPBACK.alias;
-  const summary = `the slot broker: ${registry.brains.map((b) => b.name).join(", ")} on ${registry.servers.map((s) => `${s.name} (${s.slots} slots, ${s.reserve} reserved)`).join(", ")}; brains reach it at ws://${alias}:${registry.port}/v1/slots (published on ${host})`;
+  const summary = `the slot broker: ${registry.brains.map((b) => b.name).join(", ")} on ${registry.servers.map((s) => `${s.name} (${s.slots} slots, ${s.reserve} reserved${s.ps ? `, its loaded models to be read at ${s.ps}` : ""})`).join(", ")}; brains reach it at ws://${alias}:${registry.port}/v1/slots (published on ${host})`;
   if (cmd === "check") { console.log(summary); return; }
   const env = composeEnv(process.env, registry, o.registry, sha256(readFileSync(BROKER, "utf8")), sha256(text), host);
   const rt = o.runtime === "podman" ? "" : ` --runtime ${o.runtime}`;
@@ -293,6 +295,7 @@ function selfCheck() {
     ["the broker runs unprivileged, read-only, with no capability", slots.user === "65534:65534" && (slots.cap_drop as string[]).join() === "ALL" && slots.read_only === true && (slots.security_opt as string[]).includes("no-new-privileges:true")],
     ["its one port is on the shape's host address alone (FEDERATED_HOST), never every address", (slots.ports as string[]).length === 1 && (slots.ports as string[])[0].startsWith("${FEDERATED_HOST:?")],
     ["it joins no network but its project's own", !("networks" in slots) && !("network_mode" in slots)],
+    ["it names the host as the stack's api does, for a model server's list (SMD-3379 PR 3c-1)", (() => { const stack = Bun.YAML.parse(readFileSync(join(HERE, "..", "compose.yaml"), "utf8")) as { services: Record<string, { extra_hosts?: string[] }> }; return JSON.stringify(slots.extra_hosts) === JSON.stringify(["host.docker.internal:host-gateway"]) && JSON.stringify(stack.services.api.extra_hosts) === JSON.stringify(slots.extra_hosts); })()],
     ["it runs the mounted broker on the mounted registry, no .env, no install", JSON.stringify(slots.command) === JSON.stringify(["bun", "--no-install", "--no-env-file", "/broker.ts", "--registry", "/federation.yaml", "--host", "0.0.0.0"])],
     ["its image is the stack's forwarder's, by digest", (() => { const stack = Bun.YAML.parse(readFileSync(join(HERE, "..", "compose.yaml"), "utf8")) as { services: Record<string, { image?: string }> }; return slots.image === stack.services.forwarder.image && /@sha256:[0-9a-f]{64}$/.test(String(slots.image)); })()],
   ];
