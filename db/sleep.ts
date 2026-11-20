@@ -3185,10 +3185,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       const firstPool = SIG === undefined ? null : await reading(() => extractPool());
       if (SIG !== undefined && firstPool === null) return false;
       // Never past to a consolidation a statement holds: it starts in no period, and would hold extraction parked for good.
-      // Its backlog's (SMD-4468): a capture since the period began is not in the way.
-      const firstBacklog = firstPool?.backlog ?? firstPool;
-      if (firstBacklog && joinsPast(firstBacklog) && !statementHeld.has("consolidate")) {
-        out(`  extraction holds only ${firstBacklog.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more long hard stops in a row took with no window gained — consolidating first; extraction resumes once its pool drains`);
+      // The whole pool's, not the backlog's (SMD-4468): a capture since goes first, ahead of the stalled thoughts the
+      // period's start dated last, and the polls join beside it.
+      if (firstPool && joinsPast(firstPool) && !statementHeld.has("consolidate")) {
+        out(`  extraction holds only ${firstPool.stalled} thought(s) that ${SLEEP_STALLED_JOIN} or more long hard stops in a row took with no window gained — consolidating first; extraction resumes once its pool drains`);
         start("consolidate");
         consolidating = true;
         parked = true;
@@ -3933,7 +3933,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           out(statementHeld.has("consolidate") ? `  ${what}, consolidation held until a restart — the subject sweep's turn` : `  ${what} — consolidating beside it${drained(pools.extract) ? "" : " while it extracts the captures since"}`);
           start("consolidate");
           consolidating = true;
-        } else if (joinsPast(backlog) && !statementHeld.has("consolidate") && !running.some((r) => r.name === "extract" && r.settled)) {
+        } else if (joinsPast(backlog) && !(queuesBehind(pools.extract) && reorders && Date.now() - restartedAt >= restartEvery) && !statementHeld.has("consolidate") && !running.some((r) => r.name === "extract" && r.settled)) {
+          // (Newer work behind the stalled thought in hand has the restart
+          // below first, when due — SMD-3008's order — and the join past
+          // follows. Past the backlog's (SMD-4468), once the restart is not
+          // due: under an inflow newer work is always behind, and the join
+          // past the whole pool's never came.)
           // (An extraction that ended by itself during the reads is the next
           // poll's to report, not the join's to swallow: review pass 6.)
           // Only thoughts no stop has gained a window on lately are left:
