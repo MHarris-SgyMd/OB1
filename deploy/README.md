@@ -2476,9 +2476,16 @@ extraction, and
 consolidation beside it once the thoughts captured before the period began
 are extracted, so the backlog order above is built in: a capture since is
 judged against neighbours captured on an earlier UTC date, all of them in
-that backlog, and captures arriving all period no longer keep consolidation
-out of it, as they did while it waited for extraction's whole pool to drain
-(SMD-4468). Beside consolidation runs the subject sweep
+that backlog but across 00:00 UTC, and captures arriving all period no
+longer keep consolidation out of it, as they did while it waited for
+extraction's whole pool to drain (SMD-4468). An edit to an older thought,
+which is extracted again (board-sync re-rendering a ticket), or a write
+dated before the period began, counts as that backlog, and so does a backlog
+thought a pause stopped: it goes behind the captures since, and waits for
+extraction to catch up with them. Consolidation's judge calls, and the
+subject sweep's, now run while captures arrive: on a model server of one
+slot they share it with extraction. Under a steady inflow the period does
+not end until the captures stop. Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
 model's: started once a period, its claims bounded by the period's start plus
@@ -2582,7 +2589,11 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 The log says `working:` when a period begins, `extraction drained — consolidating
 beside it` (or `extraction has done the thoughts captured before the period
 began — consolidating beside it while it extracts the captures since`, under
-an inflow, SMD-4468), `paused:` with the live call that paused it and `resumed:` once
+an inflow, SMD-4468; and `extraction holds only N thought(s) that 3 or more
+long hard stops in a row took with no window gained — consolidating first`
+when it joins past stalled ones, ending `, N thought(s) captured since the
+period began waiting with it` when captures wait with extraction set aside),
+`paused:` with the live call that paused it and `resumed:` once
 the capture has passed, and `the pools drained — the period ends`; `share:`
 at its start names the turns, `re-embed has had its share — 120 s alone — N
 thought(s) left for its next turn …` when re-embed gives way to extraction,
