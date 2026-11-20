@@ -2213,7 +2213,7 @@ services:
     # (docker/compose#11900, as with the proxy's table), so an upgrade that
     # changes the dashboard or a rule reaches Grafana on its `up -d`.
     labels:
-      ob1.grafana-dashboard: "sha256:10718aeb5b113f13f5bddcc3870416727d6a0bd710ac2ff6ec241e6e8a6dd983"
+      ob1.grafana-dashboard: "sha256:56ab57904ddefb4fdec8c0bb6ec02ca1abe96a6e95f9a112ddbde3a9e6e82593"
       ob1.grafana-alert-rules: "sha256:ff31383605e19b20dadd7cfb3876824c8f773cb3ca3faa9f77e9b3d889e79cdc"
       ob1.grafana-dashboard-provider: "sha256:386d684e6960c7b6d164558b23fcb7deda92aa548d557fa48c33922820976a5d"
     # `mesh` as lgtm.ob1.internal: the MCP server and the REST core send to it there, and
@@ -2648,7 +2648,7 @@ configs:
             "type": "timeseries",
             "id": 31,
             "title": "Listen streams open",
-            "description": "The listen streams the MCP server holds open (ob1.mcp.listen_streams), summed over the servers picked: a sample at each metric export, not each open and close, so a server just started is not counted until its first. 0 where no server picked sends the count, as none does yet (SMD-4347; the REST core never will); no data where none sends metrics at all. A stream is counted until its connection ends, read or not. A stopped server ends on 0; one killed, or stopped while the collector did not answer, stays counted at its last for five minutes, beside the server started after it. Keyed /health's listen has the bounds and each caller's share.",
+            "description": "The listen streams the MCP server holds open (ob1.mcp.listen_streams), summed over the servers picked: a sample at each metric export (a minute apart unless set otherwise), not each open and close, so a server just started is not counted until its first. 0 where no server picked sends the count, as none does yet (SMD-4347; the REST core never will); no data where none sends metrics at all. A stream is counted until its connection ends, read or not. A stopped server ends on 0; one killed, or stopped while the collector did not answer, stays counted at its last for five minutes, beside the server started after it. The bounds are each server's own, so a sum over two servers is not to be read against one: keyed /health's listen has them, with each caller's share.",
             "datasource": {"type": "prometheus", "uid": "prometheus"},
             "gridPos": {"x": 16, "y": 17, "w": 8, "h": 7},
             "targets": [
@@ -2659,7 +2659,7 @@ configs:
                 "legendFormat": "open"
               }
             ],
-            "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0}, "overrides": []},
+            "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0, "custom": {"axisSoftMax": 1}}, "overrides": []},
             "options": {
               "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
               "tooltip": {"mode": "multi", "sort": "desc"}
