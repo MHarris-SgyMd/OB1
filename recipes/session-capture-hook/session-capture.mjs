@@ -102,8 +102,8 @@ import { fileURLToPath } from "node:url";
  * that prepared the model's input.
  */
 export const HOOK_VERSION = "1.11.0";
-/** A version's shape, three numbers: the only stamp `postCapture` sends. */
-const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
+/** A version's shape, three numbers: the only stamp `postCapture` sends. The suite holds HOOK_VERSION to it. */
+export const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
 const SELF = fileURLToPath(import.meta.url);
 const HOME = homedir();
@@ -2034,7 +2034,7 @@ export function prepare(hook, opts = {}) {
       prompts: distinctPrompts(cleaned.ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0, // as the text counts them: two asks that differed in a secret alone are one line once blanked (first review pass)
       ...(redactions.length ? { redactions } : {}), // what was blanked, where — the log's and the message's; absent when nothing was
       ...(ticketsFrom ? { tickets_from: ticketsFrom } : {}), // where the header's tickets came from (SMD-3306 PR 7a-3b-2)
-      hook_version: HOOK_VERSION, // the hook whose rules wrote the text, whichever later hook drains the queue (SMD-4378)
+      hook_version: HOOK_VERSION, // the hook that prepared the payload (its derived text, or the model's input), whichever later hook drains the queue (SMD-4378)
     };
     // The model's input rides the payload only when the option is on AND the
     // payload is a durable one the model will actually write — not a running
@@ -3996,7 +3996,7 @@ export async function main(argv) {
   // terminal or /dev/null, as an agent's or a script's shell runs it to confirm
   // an upgrade, which then writes no log and makes no state dir (review pass 2).
   if (has(args, "--version")) {
-    if (stdinIsPiped()) log(`--version: printed session-capture ${HOOK_VERSION}; stdin unread, nothing captured, renewed or copied (in a hook command it stops every run: remove it)`);
+    if (stdinIsPiped()) log(`--version: printed session-capture ${HOOK_VERSION}; stdin unread, nothing captured, renewed or copied (if this is a hook command, it stops every run: remove --version)`);
     console.log(`session-capture ${HOOK_VERSION}`);
     return 0;
   }

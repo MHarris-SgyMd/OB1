@@ -44,7 +44,7 @@ const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, headerTickets, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, CaptureError, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
   loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
-  loadBrains, useStateRoot, HOOK_VERSION,
+  loadBrains, useStateRoot, HOOK_VERSION, VERSION_RE,
 } = await import(SCRIPT);
 /** The version metadata.json gives the hook (SMD-4378): the script's own must equal it. */
 const META_VERSION = JSON.parse(readFileSync(join(HERE, "metadata.json"), "utf8")).version;
@@ -2598,12 +2598,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(noCfgTypo.code === 1 && /not "x"/.test(noCfgTypo.err) && !/no endpoint or key/.test(noCfgTypo.err) && printTypo.code === 2 && /not "x"/.test(printTypo.err) && !printTypo.out.trim(),
     `a misspelt mode is named before a missing config, and --print-hook refuses it too, exit 2, printing no hook (first review pass: the one path that let it by; exits ${noCfgTypo.code}/${printTypo.code})`);
   // The hook says its version (SMD-4378): one source, the script's constant, which metadata.json must give too.
-  assert(HOOK_VERSION === META_VERSION && /^\d+\.\d+\.\d+$/.test(HOOK_VERSION), `the script's version is metadata.json's (${HOOK_VERSION}, ${META_VERSION}): bump both (SMD-4378)`);
+  assert(HOOK_VERSION === META_VERSION && VERSION_RE.test(HOOK_VERSION), `the script's version is metadata.json's (${HOOK_VERSION}, ${META_VERSION}): bump both; and in the shape postCapture sends, or no summary would be stamped (SMD-4378, review pass 3)`);
   const sentBefore = received.length;
   const ver = await spawnScript(["--version"]);
   const verPiped = await runHook({ session_id: "s-version", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--version"]);
   const verWith = await spawnScript(["--check", "--version", "--harness", "bogus"], { env: { OB1_CAPTURE_ON_SECRET: "x", OB1_SESSION_CAPTURE_CONFIG: join(TMP, "nope.json") } });
-  const versionLogged = (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "").split("\n").filter((l) => l.includes(`--version: printed ${VERSION_LINE}; stdin unread, nothing captured, renewed or copied (in a hook command it stops every run: remove it)`)).length;
+  const versionLogged = (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "").split("\n").filter((l) => l.includes(`--version: printed ${VERSION_LINE}; stdin unread, nothing captured, renewed or copied (if this is a hook command, it stops every run: remove --version)`)).length;
   assert(versionLogged === 1, `--version with stdin piped, as in a hook command, says in the log that nothing was captured (review pass 1: silent); on /dev/null, as an agent's shell runs it, it does not (review pass 2: it told the operator to remove a flag no hook had) (SMD-4378) (${versionLogged} line(s), of 1 piped run and 2 on /dev/null)`);
   const freshState = join(TMP, "version-fresh-state");
   const verNull = await spawnScript(["--version"], { env: { OB1_SESSION_CAPTURE_STATE: freshState } });
