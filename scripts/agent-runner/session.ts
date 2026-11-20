@@ -6,8 +6,11 @@
  * profile.ts builds and the prompt on stdin, and reads the stream as it comes:
  *
  *   - the init event must show the pinned version, dontAsk, the key helper as the key's source (a settings file that
- *     fails validation is ignored without a word, so this is how a profile that didn't load shows), exactly the
+ *     fails validation can be ignored without a word, so this is how a profile that didn't load shows), exactly the
  *     role's tools, no MCP server, the model, and the root as the working directory; else the session is ended;
+ *   - a turn or a result before any init event ends it the same way. Since 2.1.329 Claude Code refuses to start on
+ *     sandbox settings that fail validation, with one error result and no init: a session that never ran, not one
+ *     that ended with its result (SMD-4489);
  *   - each tool result must answer a call the guard logged, else the session is ended: the backstop for a call the
  *     guard never saw;
  *   - at its time limit the session is ended: its process group and every process it started, the sandboxed ones
@@ -47,7 +50,7 @@ export type InitSummary = { version: unknown; permissionMode: unknown; apiKeySou
 export type ResultSummary = { subtype: unknown; isError: unknown; numTurns: unknown; totalCostUsd: unknown; permissionDenials: unknown; terminalReason: unknown };
 export type ToolCall = { id: string; name: string; input: unknown };
 export type ToolResult = { id: string; isError: boolean; text: string };
-/** Why a session ended: its result, its process exiting without one, a failed init check, a tool result the guard never logged, its time limit, or a refusal before it started. */
+/** Why a session ended: its result, its process exiting without one, a failed init check (or a turn or a result before any init), a tool result the guard never logged, its time limit, or a refusal before it started. */
 export type Ended = "result" | "exit" | "init" | "unlogged-call" | "time" | "refused";
 
 export type SessionOutcome = {
@@ -216,6 +219,13 @@ function appendNoFollow(path: string, text: string): void {
   }
 }
 
+/** What a result that came before any init says of itself: its subtype, its startup failure reason and its first error, each as untrusted text. */
+function startupWhy(ev: Record<string, unknown>): string {
+  const reason = typeof ev.startup_failure_reason === "string" ? `, ${shownText(ev.startup_failure_reason, 80)}` : "";
+  const first = Array.isArray(ev.errors) ? ev.errors.find((e) => typeof e === "string") : undefined;
+  return `its result ${shownText(String(ev.subtype), 80)}${reason}${first === undefined ? "" : `: ${shownText(first, 300)}`}`;
+}
+
 /** Starts the session, watches its stream, and returns how it went. It never throws for the session's sake: a refusal or failure is an outcome. */
 export async function runSession(spec: SessionSpec, deps: SessionDeps = REAL_DEPS): Promise<SessionOutcome> {
   const outcome: SessionOutcome = { ended: "refused", why: "", init: null, result: null, report: "", exitCode: null, signal: null, calls: [], results: [], stderr: "" };
@@ -325,6 +335,12 @@ export async function runSession(spec: SessionSpec, deps: SessionDeps = REAL_DEP
       }
     } else if (ev.type === "result") {
       outcome.result = { subtype: ev.subtype, isError: ev.is_error, numTurns: ev.num_turns, totalCostUsd: ev.total_cost_usd, permissionDenials: ev.permission_denials, terminalReason: ev.terminal_reason };
+      // A result with no init before it is Claude Code refusing to start (since 2.1.329, a profile that fails validation:
+      // one error result, no init event). The session never ran, so it did not end with its result, and its text is no report.
+      if (outcome.init === null) {
+        await end("init", `Claude Code ended before its init event: ${startupWhy(ev)}`);
+        return;
+      }
       // The result event's `result` is the session's final message text (its report). Kept for the gate and the PR body; other subtypes (a budget or turn error) carry none.
       if (typeof ev.result === "string") outcome.report = ev.result;
     }
