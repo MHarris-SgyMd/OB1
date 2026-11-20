@@ -800,6 +800,33 @@ export function ticketsIn(text, teams) {
   return out;
 }
 /**
+ * The tickets an ask names, read with its secrets blanked (SMD-4292): a ticket-shaped value a secret holds
+ * (`password=ABC-1234`) is no ticket. Read off the raw ask, it headed the summary while the ask that held it was
+ * blanked, the brain keyed it as a subject, it began an episode ("begun with ABC-1234") and it decided where the
+ * session split. Both readers of an ask's tickets, `named` and the segmenter's boundaries, go through here.
+ * In both modes: under `refuse`, read raw, the secret split off an episode of its own, and the clean episode before it
+ * was sent saying "ended when ABC-1234 was taken up" (review pass 1: limiting this rule to `redact` kept sending that
+ * line). Read blanked, it splits nothing, and its episode is refused whole, as one holding `password=hunter2` always
+ * was. A real ticket the scan takes for a secret (`Password: SMD-12 (reset flow)`) is dropped too: its ask is blanked
+ * in the text as well.
+ * The ask is blanked on one line, as `redactEpisode` blanks each prompt: blanked as written, a quoted secret whose
+ * closing quote is on the next line (`password = "hunter22⏎QQZ-9876"`) was cut at its first space, and its
+ * ticket-shaped part headed the summary while the prompt showed it blanked (review pass 1, secrets adversary).
+ * Only tickets the raw ask names, read with the same teams, are kept: blanking can join a word to its marker into a
+ * ticket shape (`XY-12` before a Slack webhook's URL; review pass 1, cold read), and a lower-case mention of that key
+ * before any team is known is no ticket (review pass 3, mutant).
+ * The cost: the scan runs once per ask, cached per event (the segmenter and the episode both read it), and only for an
+ * ask whose raw text names a ticket: about 20 ms per MB of such asks, nothing for an ask naming none.
+ */
+const blankedAsks = new WeakMap();
+const askTickets = (ev, teams) => {
+  const raw = ticketsIn(ev.text, teams);
+  if (!raw.length) return [];
+  let text = blankedAsks.get(ev);
+  if (text === undefined) { text = redactSecrets(oneLine(ev.text)).text; blankedAsks.set(ev, text); }
+  return ticketsIn(text, teams).filter((id) => raw.includes(id));
+};
+/**
  * A place's own tickets (SMD-4291): the first ticket-shaped word of `text` is the place's ticket, and the other keys of
  * its team are tickets beside it (`smd-610-and-smd-611`); a word of another team is the place's description, no ticket
  * and no team (`node-22` of `smd-610-bump-node-22`). Before, every ticket-shaped word of a branch or a directory was a
@@ -843,7 +870,7 @@ function apply(x, ev, teams) {
     case "time": if (!x.first) x.first = ev.at; x.last = ev.at; break;
     case "cwd": x.cwd = ev.v; x.roots.add(ev.v); break;
     case "branch": x.branch = ev.v; break;
-    case "prompt": x.prompts.push(ev.text); for (const id of ticketsIn(ev.text, teams)) x.named.add(id); break;
+    case "prompt": x.prompts.push(ev.text); for (const id of askTickets(ev, teams)) x.named.add(id); break;
     case "outcome": x.outcome = ev.text; x.assistant.push(ev.text); if (x.assistant.length > LIMITS.modelMsgs) x.assistant.shift(); break; // `outcome` is the last, for the derived text; `assistant` keeps the recent window for the model (SMD-2014)
     case "file": x.files.add(ev.path); break;
     case "commit": x.commits++; break;
@@ -1023,7 +1050,7 @@ export function segment(events, s = emptySummary()) {
       continue;
     }
     if (ev.t === "prompt") {
-      const named = ticketsIn(ev.text, teams);
+      const named = askTickets(ev, teams);
       if (cur.prompts.length) {
         const known = knownTickets(cur), fresh = named.filter((id) => !known.has(id));
         const moved = away();
@@ -1579,7 +1606,9 @@ export function redactEpisode(ep) {
   };
   // The DISTINCT prompts, as the summary lists them: a retried prompt is one
   // line in the text and one redaction in the count.
-  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
+  // The title as the summary shows it, on one line, as the prompts are (SMD-4292 review pass 2, secrets adversary: blanked
+  // as written, a quoted value whose closing quote is on the next line was cut there, and the rest shown).
+  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(typeof ep.title === "string" ? oneLine(ep.title) : ep.title, "the title") };
   const text = take(renderSummary(redacted), "the text");
   return { ep: redacted, text, redactions, blocks };
 }
@@ -2867,6 +2896,18 @@ const releaseDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "ut
 /** Whether this process still holds the lock, its age reset: false once another has taken it back — the drain stops, the copy left to it. */
 const holdDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8").trim()) !== process.pid) return false; const t = new Date(); utimesSync(DRAIN_LOCK(), t, t); return true; } catch { return false; } };
 
+/**
+ * Whether a queued file holds a copy as the hook writes one: an object whose `tool` is one the fan-out copies
+ * (FANOUT_TOOLS: a mistyped one was held a week, the log saying to mint a write key that was fine — review pass 2), an
+ * object `args`, an `at` that parses as a date, and the names the drain reads — `args.client_key`, `args.id`, `alt` — each a string or absent.
+ * Anything else, a hand edit or a corrupt file, is given up as one that does not parse: it threw on every drain, ahead
+ * of the week's give-up, or, with no date, was never given up once a fault kept it, and every copy behind it waited
+ * for good (SMD-4412). A name that is no string (`{"toString":1}`) threw wherever a template or String() met it — the
+ * log's label, a forget's note, its drop of dead/ copies — so it is refused here, before any of them (review passes 1, 2).
+ */
+const isCopy = (op) => FANOUT_TOOLS.includes(op?.tool) && op.args !== null && typeof op.args === "object" && !Array.isArray(op.args)
+  && Number.isFinite(Date.parse(op.at)) && [op.args.client_key, op.args.id, op.alt].every((n) => n === undefined || typeof n === "string");
+
 /** A copy as the log names it: the tool and the id or key it names, never its text. */
 const opLabel = (op) => `${op.tool}${op.tool === "capture_thought" ? ` (client_key ${op.args.client_key})` : ` of ${op.args.id}`}`;
 
@@ -3015,6 +3056,11 @@ export async function drainWrites(cfg) {
           const o = { dead: true, name, line: `not copied (given up): ${name} does not parse` };
           log(o.line); outcomes.push(o); continue;
         }
+        if (!isCopy(op)) {
+          moveWrite(path, WRITES_DEAD(), name);
+          const o = { dead: true, name, line: `not copied (given up): ${name} is not a copy${op?.tool === "forget_thought" ? " — a forget: its text stays on this brain until forgotten there by hand" : ""}` };
+          log(o.line); outcomes.push(o); continue;
+        }
         // A send may reach the brain whatever it answers: the copy says so in its own file before it goes (`sending`),
         // and a forget's drop leaves it — dropped, a capture committed after the forget's NOT_FOUND kept its text for
         // good (review pass 7). One a drain killed mid-send left `sending` is read as having been sent (review pass 8).
@@ -3028,7 +3074,12 @@ export async function drainWrites(cfg) {
         // send a copy its successor may have sent, and a forget after (review pass 9). Narrowed, not closed: the gap is
         // the microseconds to the request.
         if (!holdDrainLock()) { stopped = true; break; }
-        let o = await postWrite(cfg, op);
+        // A throw on one copy (an answer of a shape the hook cannot read: the url not the brain's /mcp, or a server and
+        // hook out of step) keeps it, as a fault does, rather than ending the drain: its send may have reached the brain,
+        // and after a week it is given up like any other (SMD-4412).
+        let o;
+        try { o = await postWrite(cfg, op); }
+        catch (e) { o = { keep: true, unknown: true, line: `kept: ${opLabel(op)} — the brain's answer could not be read (${oneLine(String(e?.message ?? e)).slice(0, 160)}): check that the url is this brain's /mcp, and that its server and this hook are current` }; }
         // A lock taken back while this copy was in flight: the queue is its new holder's, and this drain touches no
         // file of it — not this copy's, which the holder may be sending again (review pass 8: a stale holder's
         // write-back put a copy back after the forget that followed it).

@@ -181,10 +181,15 @@ Each runner session, the worker's and the review's, runs inside the five layers 
   * a tool result answers a call the guard never logged;
   * the time limit runs out.
 * **`probes.ts`:** the probes. **`mock-api.ts`** is their stand-in for the Messages API. **`probes-check.ts`** is the offline self-check.
+* **Helpers the whole runner shares (SMD-4325).** Each has one definition, and the rest of the runner imports it.
+  * In files hashed into the probe stamp, so an edit to one voids it: **`guard.ts`** has `isObject` (an array is not one, in a claim reply too), `codePointName`, `printable` and `shownText`; **`session.ts`** has the no-follow file read and write.
+  * Outside the stamp: **`text.ts`** has the one-line cut and `maskTokens`, the one mask for a claim token (`wc_…` and the markdown-escaped `wc\_…`); **`facts.ts`** has `jsonOf` and `NOT_JSON`; **`fixture-git.ts`** has the git the self-checks build fixtures with.
 
 ```bash
-shasum -a 256 ~/.local/share/claude/versions/2.1.319                                  # the version to pin's checksum (cut 2b runs a copy in the install)
-bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.319
+mkdir -p ~/.local/share/open-brain/agent-runner/claude && chmod 700 ~/.local/share/open-brain/agent-runner/claude
+cp -p ~/.local/share/claude/versions/2.1.329 ~/.local/share/open-brain/agent-runner/claude/  # the runner's own copy: the updater prunes its own directory
+shasum -a 256 ~/.local/share/open-brain/agent-runner/claude/2.1.329                   # the pinned copy's checksum
+bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.329
 bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts … --state <dir> --only init,keychain --main-checkout ~/Projects/OB1
 bun scripts/agent-runner/probes.ts --self-check                                       # offline, no Claude Code; CI runs it
 ```
@@ -217,7 +222,14 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 * **Grep and Glob don't follow a link out of the clone.**
 * **Claude Code sets two credentials for a command itself.** One is the token of its messaging socket, which the sandbox blocks. The other is its sandbox proxy's login, and the proxy refuses every host. Neither is the runner's.
 
-One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
+**What they found on 2.1.329** (2026-11-20, SMD-4489). The pin moved here: Claude Code's updater had pruned 2.1.319 from `~/.local/share/claude/versions`, and the stamp names the binary's path. So the pinned binary is now a copy in the runner's own directory, `~/.local/share/open-brain/agent-runner/claude/2.1.329`, and `--claude` is given that path, for the probes and for a run. All 35 pass, after one change:
+
+* **Claude Code refuses to start on a profile that fails validation.** Given `sandbox.enabled: "yes"`, 2.1.319 started and the init check ended the session. 2.1.329 emits no init event, only one error result (`error_during_execution`, `startup_failure_reason: sandbox_required_unavailable`), and exits. `session.ts` took that for a session that ended with its result. A result before any init now ends the session as `init`, with the result's subtype, its startup failure reason and its first error as the reason, and its text is not taken as a report.
+* The other 34 probes passed unchanged. Their notes on 2.1.329: a call asking for `dangerouslyDisableSandbox` runs sandboxed; Claude Code sets `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLOUDSDK_PROXY_USERNAME` and `CLOUDSDK_PROXY_PASSWORD` itself; an Edit of `CLAUDE.md` goes through with the guard off. The 2.1.319 sweep's records kept each probe's pass, not its notes, so the notes are not compared.
+
+**The brief probe passes on 2.1.329** (2026-11-20): the worker got past CLAUDE.md step 1 and edited the clone, in 17 turns for $0.21. The guard refused three of its sixteen calls, each for the command's shape (an `&`, a `git bundle` form other than `create`, an `ls`), none for a tool input it didn't know. A first try that day reached no model: the API answered 401 to the runner's Anthropic key, which the maintainer then replaced.
+
+**The stamp also names the checkout the probes ran from,** and a run must start from that checkout with the six hashed files as probed. Keep the runner's install a checkout that stays on one commit; a worktree that changes branch with each task refuses to run whenever its branch differs in one of them.
 
 ## The live run (`live-run.ts`)
 

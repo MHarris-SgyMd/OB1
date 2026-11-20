@@ -72,7 +72,8 @@ export async function selfCheck(): Promise<number> {
       ok(canary.ok === false && canary.detail.includes("not stable"), "a canary brain is refused — the claim domain is stable's");
       ok((await brainReady(stub(() => ({ status: 503, body: {} })).fetch, CFG, KEY)).ok === false, "a non-200 /v1/brain is refused");
       ok((await brainReady(stub(() => ({ raw: "<html>" })).fetch, CFG, KEY)).ok === false, "a non-JSON /v1/brain is refused");
-      ok((await brainReady(stub(() => ({ body: [] })).fetch, CFG, KEY)).ok === false, "a JSON array (not an object) is refused");
+      const arr = await brainReady(stub(() => ({ body: [] })).fetch, CFG, KEY);
+      ok(arr.ok === false && arr.detail.includes("isn't an object"), "a JSON array is refused as not an object (SMD-4325: it was read as an object with no tier)");
       ok((await brainReady(stub(() => ({ fail: true })).fetch, CFG, KEY)).ok === false, "a transport failure is refused, not thrown");
     });
 
@@ -96,6 +97,8 @@ export async function selfCheck(): Promise<number> {
       ok(transport.kind === "error" && transport.detail.includes("claim_work failed"), "a transport failure is an error reply, not a throw");
       const junk = await claimWork(stub(() => ({ raw: "not json" })).fetch, BASE, KEY, { ticket: "SMD-9", lease_seconds: 86400, label: "l" });
       ok(junk.kind === "error", "a 200 with a non-JSON body is an error reply");
+      const list = await claimWork(stub(() => ({ body: [{ claim: row(), token: "wc_" + "a".repeat(64) }] })).fetch, BASE, KEY, { ticket: "SMD-9", lease_seconds: 86400, label: "l" });
+      ok(list.kind === "error" && list.detail.includes("the brain answered 200"), "a 200 whose body is a JSON array is an error reply naming the status, like any body that isn't an object");
     });
 
     await section("renewClaim maps each reply", async () => {
@@ -105,6 +108,10 @@ export async function selfCheck(): Promise<number> {
       ok(revived.kind === "renewed" && revived.revived?.lapsedAt === "t0" && revived.revived.others[0].holder === "other" && revived.revived.others[0].ownKey === true && revived.revived.others[0].expiresAt === "t-end" && revived.revived.unreadable === false && revived.revived.more === 2, "a revived lapse reads body.lapsed: when, the claims made meanwhile (holder, own-key, lease end), and how many more");
       const unread = await renewClaim(stub(() => ({ body: { claim: row(), lapsed: { at: "t0", claimedSince: null } } })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
       ok(unread.kind === "renewed" && unread.revived?.unreadable === true && unread.revived.others.length === 0, "a revived lapse whose meanwhile-claims are null is marked unreadable");
+      const listed = await renewClaim(stub(() => ({ body: { claim: row(), lapsed: [] } })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
+      ok(listed.kind === "renewed" && listed.revived === null, "a lapsed field that is an array is no lapse the runner knows, as a string there is none (SMD-4325: it read as a lapse at no time)");
+      const renewList = await renewClaim(stub(() => ({ body: [{ claim: row() }] })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
+      ok(renewList.kind === "error" && renewList.detail.includes("the brain answered 200"), "a 200 renewal whose body is a JSON array is an error reply naming the status");
       const ended = await renewClaim(stub(() => ({ status: 409, body: { code: "CLAIM_RELEASED", ticketClosed: true } })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
       ok(ended.kind === "ended" && ended.ticketClosed === true, "409 CLAIM_RELEASED with ticketClosed=true means board-sync closed the ticket");
       const notYours = await renewClaim(stub(() => ({ status: 403, body: { code: "CLAIM_NOT_YOURS" } })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
@@ -116,6 +123,8 @@ export async function selfCheck(): Promise<number> {
     });
 
     await section("releaseClaim maps each reply", async () => {
+      const releaseList = await releaseClaim(stub(() => ({ body: [{ outcome: "released", claim: row() }] })).fetch, BASE, KEY, { id: "i", token: "wc_x", reason: "r" });
+      ok(releaseList.kind === "error" && releaseList.detail.includes("the brain answered 200"), "a 200 release whose body is a JSON array is an error reply naming the status, never a release");
       const released = await releaseClaim(stub(() => ({ body: { outcome: "released", claim: row({ state: "released" }) } })).fetch, BASE, KEY, { id: "i", token: "wc_x", reason: "merged" });
       ok(released.kind === "released" && released.alreadyEnded === false, "a 200 released reply");
       const already = await releaseClaim(stub(() => ({ body: { outcome: "already_released", claim: row({ state: "released" }) } })).fetch, BASE, KEY, { id: "i", token: "wc_x", reason: "merged" });
@@ -143,6 +152,9 @@ export async function selfCheck(): Promise<number> {
     await section("a server message is masked and shortened: no token leaks into a reply detail", async () => {
       const r = await claimWork(stub(() => ({ status: 400, body: { code: "REFUSED_CLAIM_INPUT", message: "leaked wc_" + "d".repeat(64) } })).fetch, BASE, KEY, { ticket: "SMD-9", lease_seconds: 86400, label: "l" });
       ok(r.kind === "refused" && r.detail.includes("wc_…") && !/wc_[0-9a-f]{10}/.test(r.detail), "a wc_ token in a server message is masked in the detail");
+      // The markdown-escaped form, which a server's message can carry: masked here as in a PR's text (SMD-4325).
+      const esc = await claimWork(stub(() => ({ status: 400, body: { code: "REFUSED_CLAIM_INPUT", message: "leaked wc\\_" + "d".repeat(64) } })).fetch, BASE, KEY, { ticket: "SMD-9", lease_seconds: 86400, label: "l" });
+      ok(esc.kind === "refused" && esc.detail.includes("wc_…") && !esc.detail.includes("d".repeat(10)), "the markdown-escaped wc\\_ form is masked in the detail too");
     });
 
     await section("the token files round-trip, owner-only, never through a link", () => {

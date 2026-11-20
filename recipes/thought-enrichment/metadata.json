@@ -1,23 +1,23 @@
 {
   "name": "Thought Enrichment Pipeline",
-  "description": "Retroactively classifies existing thoughts with type, importance, topics, tags, and more using LLM-based enrichment; its type and sensitivity backfills are db/backfill-metadata.ts now.",
+  "description": "Moved to db/ in Daemonic Brain (SMD-3318): the enrichment is retired for db/retag.ts, the core's re-tag worker (SMD-2298), and the type and sensitivity backfills are db/backfill-metadata.ts. This directory is a pointer; the scripts are gone.",
   "category": "recipes",
   "author": {
     "name": "Alan Shurafa",
     "github": "alanshurafa"
   },
-  "version": "1.0.0",
+  "version": "2.0.0",
   "requires": {
     "open_brain": true,
-    "services": ["OpenRouter API (enrich-thoughts.mjs only; or any OpenAI-compatible endpoint, a local one included)", "Anthropic API (enrich-thoughts.mjs, --provider anthropic)"],
+    "services": [],
     "tools": ["Bun 1.4+"],
     "env": {
-      "required": ["SUPABASE_URL"],
-      "optional": ["OPENROUTER_API_KEY", "OPENROUTER_BASE_URL", "OPENROUTER_CLASSIFIER_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_CLASSIFIER_MODEL", "ENRICH_PROVIDER", "ENRICH_MAX_CALLS", "ENRICH_STATE_DIR", "FETCH_TIMEOUT_MS", "DEBUG"],
-      "ignored": ["SUPABASE_SERVICE_ROLE_KEY"]
+      "required": [],
+      "optional": ["DATABASE_URL"]
     }
   },
-  "tags": ["enrichment", "classification", "backfill", "metadata", "llm", "openrouter", "anthropic"],
+  "tags": ["enrichment", "classification", "backfill", "metadata", "retired"],
   "difficulty": "intermediate",
-  "estimated_time": "30 minutes"
+  "estimated_time": "30 minutes",
+  "updated": "2026-11-19"
 }

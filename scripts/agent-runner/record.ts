@@ -9,8 +9,9 @@
  * (2b-2) and the gate (gate.ts) fill the fields.
  */
 
-import { closeSync, constants, mkdirSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
+import { mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { readNoFollow, writeNoFollow } from "./session.ts";
 
 /** The steps a run passes through, in order. Cut 2b reaches `gate`; the claim, publish and end are cuts 2c and 3. */
 export const STEPS = ["lock", "gates", "select", "claim", "prepare", "work", "review", "gate", "publish", "end"] as const;
@@ -94,25 +95,9 @@ export function branchFor(ticket: string, title: string): string {
   return `agent/smd-${n}-${slugOf(title)}`;
 }
 
-/** Writes text to a file, owner-only, truncating, never following a link (so nothing redirects the record). */
-export function writeNoFollow(path: string, text: string): void {
-  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
-  try {
-    writeSync(fd, text);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/** Reads a file whole, never following a link. */
-export function readNoFollow(path: string): string {
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    return readFileSync(fd, "utf8");
-  } finally {
-    closeSync(fd);
-  }
-}
+// Writing a file owner-only and reading one, never through a link, so nothing redirects the record: session.ts's
+// (SMD-4325: the two were written out here as well), handed on to this module's importers.
+export { readNoFollow, writeNoFollow } from "./session.ts";
 
 /** A fresh record for a run, with only what the first steps know; the directory is made 0700. */
 export function startRecord(state: string, fields: { run: string; ticket: string; base: string; branch: string }): RunRecord {
