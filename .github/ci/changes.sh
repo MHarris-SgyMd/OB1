@@ -4,7 +4,8 @@
 # why= to $GITHUB_OUTPUT (and says them); `changes.sh --self-check` runs its
 # cases; `changes.sh --not-code` prints which of the paths on stdin skip (check
 # 47); `changes.sh --blocks FILE` prints how it cuts a workflow (check 51);
-# `changes.sh --charges` prints CHARGES (check 53).
+# `changes.sh --charges` prints CHARGES (check 53); `changes.sh --map-lists`
+# prints MAP_LISTS (check 56).
 # The changes job runs the BASE branch's copy of this file (review pass 1), so
 # a pull request that edits it is judged by the copy already on its base.
 #
@@ -38,6 +39,15 @@
 # off the list is CHARGES's or a workflow edit skips the gated jobs nothing
 # charged or edited. Check 53 holds CHARGES to the files and steps naming each
 # path. A workflow edit beside HOLDS_THE_CUT's files runs every job.
+#
+# A path off the list that nothing above names ran every job until PR 3b-2.
+# Now the jobs MAP_LISTS names may skip it, by what they read (by_map): each
+# keeps a list of the tracked files it opened and the folders it listed
+# (.github/ci/reads.sh), and a job that passed on main, reading nothing that
+# differs between that commit and this checkout, reads the same bytes here and
+# passes again. The lists are those of main's newest green push run, fetched
+# here by the base's copy of this file; no lists, or any doubt below, and
+# every job runs as before.
 set -uo pipefail
 WORKFLOW=.github/workflows/brain-checks.yml
 # The jobs an edit of which runs every job: the changes job, whose answer the
@@ -52,7 +62,8 @@ HOLDS_THE_CUT="scripts/check-consistency.ts .github/ci/changes.sh"
 # a tab, then the gated jobs it can affect, one space between, or none for a
 # path no gated job reads; a path not here runs every job. Check 53 holds
 # each entry to the files whose code names it and the jobs whose steps do.
-# Kept by hand until PR 3b derives it from what each job runs.
+# Kept by hand: by_map counts it beside a job's own list (PR 3b-2), so a job
+# it names runs for its paths whatever the list holds.
 CHARGES="changes/*	deploy-stack db-schema
 scripts/check-consistency.ts	data-layer
 .github/ci/typecheck.sh	portable-server
@@ -65,6 +76,21 @@ scripts/check-consistency.ts	data-layer
 .github/workflows/release-steps.yml
 .github/workflows/ci-shift.yml
 db/ci-parity.sh	"
+
+# The lists the record of main's reads may skip a job by (PR 3b-2): a job's
+# name, or job.cell for each cell of a matrix job, as reads.sh names its
+# lists. A job skips by them only when every one of its lists is there, of one
+# commit, from a job that succeeded and saw access times. The six here were
+# stable over main's runs (SMD-2435's measurement, 2026-11-20). Not here, so
+# run by any path off the lists above: the jobs that run a compose stack or
+# build an image, whose containers read through mounts no list sees (PR 3c's),
+# and compat-shim, which greps the whole tree. Check 56 holds each name to a
+# gated job and its cells, and each gated job to this list or to its reason.
+MAP_LISTS="portable-server db-schema replay-gate data-layer preflight-rest db-live.rest db-live.sleep db-live.long db-live.extract db-live.sweep db-live.claims"
+# The names a runtime or git looks for in each folder above a file it loads,
+# without opening what is not there: one added above a file a job read counts
+# against the job, though no list could hold it.
+MAP_LOOKED_FOR="package.json tsconfig.json jsconfig.json bunfig.toml bun.lock bun.lockb .npmrc .gitattributes .gitignore"
 
 # Not code: a path no gated job reads, builds or runs. An allowlist, so a new
 # kind of file runs every job until it is shown here not to matter: Markdown
@@ -103,7 +129,9 @@ charges() {
 # OLDSHA NEWSHA STATUS", NUL, the path, NUL. Prints "true|false<TAB>why", or
 # "partial<TAB>WF<TAB>JOBS<TAB>why" when every path off the list is an edit of
 # WORKFLOW, a regular file before and after (WF 1), or one CHARGES names, JOBS
-# the gated jobs those charge; answer then reads the workflow by job.
+# the gated jobs those charge; answer then reads the workflow by job. The one
+# true that names a path off every list ends "<TAB>map": answer then asks
+# by_map which jobs read nothing that differs.
 decide() {
   local event=$1 file=$2 meta f n=0 wf=0 oldmode newmode charged='' partial=0 j held=''
   if [ "$event" != pull_request ]; then printf 'true\ta %s run runs every job\n' "$event"; return; fi
@@ -124,7 +152,7 @@ decide() {
     not_code "$f" && continue
     case " $HOLDS_THE_CUT " in *" $f "*) held=$f ;; esac
     if j=$(charges "$f"); then charged="$charged $j"; partial=1; continue; fi
-    printf 'true\t%s can affect the code jobs\n' "$f"; return
+    printf 'true\t%s can affect the code jobs\tmap\n' "$f"; return
   done < "$file"
   if [ "$n" = 0 ]; then printf 'true\tno path read from HEAD^1..HEAD\n'; return; fi
   if [ "$wf" = 1 ] && [ -n "$held" ]; then printf 'true\t%s is edited beside %s, which holds how it is read by job\n' "$WORKFLOW" "$held"; return; fi
@@ -185,6 +213,20 @@ cut_blocks() {
     }' "$1"
 }
 
+# changed_ids DIR: the ids whose block differs between DIR/base and DIR/head,
+# as cut_blocks wrote them (.top for what lies outside the jobs), one space
+# between; a block on one side alone differs.
+changed_ids() {
+  local d=$1 f id changed=''
+  for f in "$d"/base/* "$d"/base/.top "$d"/head/* "$d"/head/.top; do
+    [ -e "$f" ] || continue
+    id=${f##*/}
+    case " $changed " in *" $id "*) continue ;; esac
+    cmp -s "$d/base/$id" "$d/head/$id" || changed="$changed $id"
+  done
+  printf '%s' "${changed# }"
+}
+
 # by_job WF CHARGED: in a checkout whose every path off the list is an edit of
 # WORKFLOW (WF 1) or one CHARGES names, CHARGED the gated jobs those charge;
 # prints "true<TAB>skip<TAB>why". skip names the gated jobs (a block holding
@@ -202,13 +244,7 @@ by_job() {
     printf 'true\t\t%s is not in the shape its jobs are read apart in\n' "$WORKFLOW"; rc=1
   fi
   if [ "$rc" = 0 ] && [ "$wf" = 1 ]; then
-    for f in "$d"/base/* "$d"/base/.top "$d"/head/* "$d"/head/.top; do
-      [ -e "$f" ] || continue
-      id=${f##*/}
-      case " $changed " in *" $id "*) continue ;; esac
-      cmp -s "$d/base/$id" "$d/head/$id" || changed="$changed $id"
-    done
-    changed=${changed# }
+    changed=$(changed_ids "$d")
     case " $changed " in
       *' .top '*) printf 'true\t\t%s is edited outside its jobs\n' "$WORKFLOW"; rc=1 ;;
     esac
@@ -229,8 +265,185 @@ by_job() {
   rm -rf "$d"
 }
 
+# limit SECONDS COMMAND...: the command, ended at its limit where there is a
+# timeout to end it (a runner has one; macOS does not, and runs it unbounded).
+limit() { if command -v timeout > /dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }
+
+# fetch_lists DIR DEFAULT_BRANCH: MAP_LISTS's lists of this workflow's newest
+# push run on the default branch that succeeded, into DIR, each as
+# reads.sh named it. The run is asked for by event and branch, so no pull
+# request's run can be the one found, whatever its branch is named in the
+# repository it comes from. Needs gh, unzip and the run's token (GH_TOKEN,
+# with GITHUB_REPOSITORY): contents: read is enough of a public repository
+# (the probe, OB1 PR 846), and a private one would want actions: read, every
+# job running until it had it. Fails with none of them or no such run. Each
+# download is tried three times: on the probe one of eleven failed once, and
+# its job ran for it; a list that still does not arrive is by_map's to miss.
+# Bounded: the gated jobs wait on this job, about two seconds for all of it.
+fetch_lists() {
+  local dir=$1 default=$2 run id arts name ids=''
+  if ! command -v gh > /dev/null 2>&1 || ! command -v unzip > /dev/null 2>&1 || [ -z "${GH_TOKEN:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "$default" ]; then return 1; fi
+  run=$(limit 30 gh api "repos/$GITHUB_REPOSITORY/actions/workflows/${WORKFLOW##*/}/runs?branch=$default&event=push&status=success&per_page=1" --jq '.workflow_runs[0].id' 2> /dev/null) || return 1
+  id=${run%%[!0-9]*}
+  if [ -z "$id" ] || [ "$id" != "$run" ]; then return 1; fi
+  arts=$(limit 30 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | "\(.name) \(.id)"' 2> /dev/null) || return 1
+  for name in $MAP_LISTS; do
+    ids="$ids $(awk -v want="reads-${name//./-}" '$1 == want && $2 ~ /^[0-9]+$/ { print $2; exit }' <<< "$arts")"
+  done
+  # Each artifact is a zip of the one list; all at once, a second or so in all.
+  # shellcheck disable=SC2086,SC2016 # ids split on purpose; sh expands $REPO and $DIR
+  printf '%s\n' $ids | REPO=$GITHUB_REPOSITORY DIR=$dir limit 90 xargs -P 12 -I '{}' sh -c 'for try in 1 2 3; do
+      if gh api "repos/$REPO/actions/artifacts/{}/zip" > "$DIR/{}.zip" 2> /dev/null && unzip -q -o -j -d "$DIR" "$DIR/{}.zip" "*.txt" > /dev/null 2>&1; then exit 0; fi
+      sleep 1
+    done; exit 1' || true
+  return 0
+}
+
+# by_map WHY DEFAULT_BRANCH, in a pull request's checkout one of whose paths is
+# off every list above (WHY names it): prints "true<TAB>skip<TAB>why", skip the
+# jobs MAP_LISTS names that read nothing that differs. X is the commit the
+# lists were recorded on, and the change counted is everything between X and
+# HEAD, main's own commits since X with the pull request's: a job's list says
+# what it read at X, and holds here only if none of that has moved. A job runs
+# when, between X and HEAD:
+# - a file its list holds (opened, or gone by its end) is modified or deleted;
+# - a path is added or deleted, or a file's mode changes, in a folder the job
+#   listed or opened a file in (or, the folder itself new or gone, the nearest
+#   one above that is not): what a job asks after without opening leaves no
+#   access time, and a job at work in a folder is taken to ask after its files;
+# - a MAP_LOOKED_FOR name is added or deleted in any folder above a file it
+#   opened;
+# - CHARGES names a path that differs, and the job;
+# - its block of the workflow differs, or it holds no gate on skip.
+# Every job runs (skip empty) with no lists to read, lists of more than one
+# commit, an X that is not here and cannot be fetched, a symlink, a submodule
+# or a path with a control character in the change, a workflow that cannot be
+# cut, one that differs outside its jobs or in a RUN_ALL_JOBS job, or one that
+# differs beside HOLDS_THE_CUT's files. READS_MAP_DIR, when set, is where the
+# lists are read from in place of the fetch: the cases' own, and a replay's.
+by_map() {
+  local why=$1 default=$2 d x='' name job cell f head re jobs='' bad='' ok='' meta p oldmode newmode s j wf=0 held='' changed='' charged='' id skip='' hit n=0
+  d=$(mktemp -d) || { printf 'true\t\t%s\n' "$why"; return; }
+  # no_map REASON: every job runs, as before PR 3b-2, and the answer says why.
+  no_map() { printf 'true\t\t%s; %s\n' "$why" "$1"; rm -rf "$d"; }
+  mkdir "$d/lists" "$d/base" "$d/head"
+  if [ -n "${READS_MAP_DIR:-}" ]; then cp "$READS_MAP_DIR"/*.txt "$d/lists/" 2> /dev/null || true
+  else fetch_lists "$d/lists" "$default" || true; fi
+  for name in $MAP_LISTS; do
+    job=${name%%.*} cell=-
+    case "$name" in *.*) cell=${name#*.} ;; esac
+    f="$d/lists/$name.txt" head=''
+    if [ -f "$f" ]; then IFS= read -r head < "$f" || true; fi
+    re="^# reads v1 job=$job cell=$cell commit=([0-9a-f]{40}) status=success sight=ok "
+    if [[ "$head" =~ $re ]]; then
+      if [ -n "$x" ] && [ "$x" != "${BASH_REMATCH[1]}" ]; then no_map "main's lists of what its jobs read are of more than one commit"; return; fi
+      x=${BASH_REMATCH[1]}
+      sed 1d "$f" >> "$d/rows.$job"
+      case " $jobs " in *" $job "*) ;; *) jobs="$jobs $job" ;; esac
+    else
+      bad="$bad $job"
+      echo "changes.sh: $job runs: its list $name is not here, or is not one a passing job with sight wrote" >&2
+    fi
+  done
+  for job in $jobs; do case " $bad " in *" $job "*) ;; *) ok="$ok $job" ;; esac; done
+  if [ -z "$ok" ]; then no_map "no list of what main's jobs read to skip by"; return; fi
+  # X is the base's tip unless main has run since: fetched alone then, one commit deep where the clone is
+  # shallow already (the changes job's) and whole where it is not, so no full clone is left shallow.
+  if ! git cat-file -e "$x^{commit}" 2> /dev/null; then
+    f=''
+    if [ "$(git rev-parse --is-shallow-repository 2> /dev/null)" = true ]; then f=--depth=1; fi
+    # shellcheck disable=SC2086 # $f is one flag or none
+    if ! limit 60 git fetch -q --no-tags $f origin "$x" > /dev/null 2>&1 || ! git cat-file -e "$x^{commit}" 2> /dev/null; then
+      no_map "main's jobs read at ${x:0:12}, which is not here to compare with"; return
+    fi
+  fi
+  if ! git diff --raw -z --no-renames --no-abbrev "$x" HEAD > "$d/raw" 2> /dev/null \
+    || ! git ls-tree -r -d --name-only -z "$x" 2> /dev/null | tr '\0' '\n' > "$d/xdirs" \
+    || ! git ls-tree -r -d --name-only -z HEAD 2> /dev/null | tr '\0' '\n' > "$d/hdirs"; then
+    no_map "what differs since ${x:0:12} could not be read"; return
+  fi
+  : > "$d/changes"
+  while IFS= read -r -d '' meta; do
+    if ! IFS= read -r -d '' p; then no_map "a change record since ${x:0:12} has no path after it"; return; fi
+    n=$((n + 1))
+    case " ${meta#:} " in
+      *' 120000 '* | *' 160000 '*) no_map "a symlink or a submodule differs since ${x:0:12}"; return ;;
+    esac
+    case "$p" in
+      *[[:cntrl:]]*) no_map "a path with a control character differs since ${x:0:12}"; return ;;
+    esac
+    read -r oldmode newmode _ _ s <<< "${meta#:}"
+    # M: its bytes alone; C: its mode too, which a job can ask after unopened, as it can a path's being there.
+    case "$s" in
+      A | D) ;;
+      *) if [ "$oldmode" = "$newmode" ]; then s=M; else s=C; fi ;;
+    esac
+    printf '%s\t%s\n' "$s" "$p" >> "$d/changes"
+    if [ "$p" = "$WORKFLOW" ]; then wf=1; fi
+    case " $HOLDS_THE_CUT " in *" $p "*) held=$p ;; esac
+    if j=$(charges "$p"); then charged="$charged $j"; fi
+  done < "$d/raw"
+  if ! git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null; then
+    no_map "$WORKFLOW could not be read by job"; return
+  fi
+  if [ "$wf" = 1 ]; then
+    if [ -n "$held" ]; then no_map "$WORKFLOW differs since ${x:0:12} beside $held, which holds how it is read by job"; return; fi
+    if ! git show "$x:$WORKFLOW" > "$d/base.yml" 2> /dev/null || ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null; then
+      no_map "$WORKFLOW at ${x:0:12} could not be read by job"; return
+    fi
+    changed=$(changed_ids "$d")
+    case " $changed " in
+      *' .top '*) no_map "$WORKFLOW differs outside its jobs since ${x:0:12}"; return ;;
+    esac
+    for id in $RUN_ALL_JOBS; do
+      case " $changed " in *" $id "*) no_map "$WORKFLOW's job $id, which every skip relies on, differs since ${x:0:12}"; return ;; esac
+    done
+  fi
+  for job in $ok; do
+    hit=''
+    case " $changed " in *" $job "*) hit="its block of $WORKFLOW differs" ;; esac
+    case " $charged " in *" $job "*) hit=${hit:-a path CHARGES gives it differs} ;; esac
+    if [ -z "$hit" ] && { [ ! -f "$d/head/$job" ] || ! grep -qF "' $job '" "$d/head/$job" || ! grep -qF 'needs.changes.outputs.skip' "$d/head/$job"; }; then hit='it holds no gate on skip'; fi
+    if [ -z "$hit" ]; then
+      hit=$(awk -F '\t' -v rows="$d/rows.$job" -v xd="$d/xdirs" -v hd="$d/hdirs" -v looked="$MAP_LOOKED_FOR" '
+        function dirname(p,   i) { i = match(p, /\/[^\/]*$/); return i ? substr(p, 1, i - 1) : "" }
+        function basename(p) { sub(/^.*\//, "", p); return p }
+        function shown(q) { return q == "" ? "the top folder" : q "/" }
+        BEGIN {
+          while ((getline line < xd) > 0) xdirs[line] = 1
+          while ((getline line < hd) > 0) hdirs[line] = 1
+          while ((r = (getline line < rows)) > 0) {
+            kind = substr(line, 1, 1); p = substr(line, 3)
+            if (kind == "d") { sub(/\/$/, "", p); if (p == ".") p = ""; listed[p] = 1; continue }
+            opened[p] = 1; q = dirname(p); worked[q] = 1
+            for (;;) { above[q] = 1; if (q == "") break; q = dirname(q) }
+          }
+          if (r < 0) { print "its list could not be read"; done = 1; exit }
+          n = split(looked, name, " "); for (i = 1; i <= n; i++) lookedfor[name[i]] = 1
+        }
+        {
+          s = $1; p = substr($0, 3)
+          if (s != "A" && (p in opened)) { print "it read " p ", which differs"; done = 1; exit }
+          if (s == "M") next
+          q = dirname(p)
+          if ((basename(p) in lookedfor) && (q in above)) { print p " is looked for above files it read"; done = 1; exit }
+          for (;;) {
+            if (q in listed) { print "it listed " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
+            if (q in worked) { print "it read files in " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
+            if (q == "" || (s == "A" ? (q in xdirs) : (q in hdirs))) break
+            q = dirname(q)
+          }
+        }' "$d/changes" 2> /dev/null) || hit=${hit:-its list could not be set against the change}
+    fi
+    if [ -z "$hit" ]; then skip="$skip $job"; else echo "changes.sh: $job runs: $hit" >&2; fi
+  done
+  skip=${skip# }
+  printf 'true\t%s\t%s; of what main'"'"'s jobs read at %s, job(s) %s read nothing among the %s path(s) that differ since\n' "$skip" "$why" "${x:0:12}" "${skip:-none}" "$n"
+  rm -rf "$d"
+}
+
 # answer EVENT BASE_REF DEFAULT_BRANCH, in a checkout: prints
-# "true|false<TAB>skip<TAB>why", skip empty but when by_job fills it.
+# "true|false<TAB>skip<TAB>why", skip empty but when by_job or by_map fills it.
 answer() {
   local event=$1 base=$2 default=$3 changed result
   if [ "$event" != pull_request ]; then result=$(decide "$event" /dev/null); printf '%s\t\t%s\n' "${result%%$'\t'*}" "${result#*$'\t'}"; return; fi
@@ -249,11 +462,17 @@ answer() {
     jobs=${rest#*$'\t'}; jobs=${jobs%%$'\t'*}
     by_job "${rest%%$'\t'*}" "$jobs"; return
   fi
+  if [ "${result%%$'\t'*}" = true ] && [ "${result##*$'\t'}" = map ]; then
+    local why=${result#true$'\t'}
+    by_map "${why%$'\t'map}" "$default"; return
+  fi
   printf '%s\t\t%s\n' "${result%%$'\t'*}" "${result#*$'\t'}"
 }
 
 self_check() {
   local dir fails=0 expect event got v
+  # The caller's, under which a case that expects no lists would fetch main's, or read another's.
+  unset GH_TOKEN READS_MAP_DIR
   # git exports GIT_DIR and its like to whatever it runs, a hook above all, and
   # under them the scratch repository's commits would land on the caller's
   # branch (reads.sh's self-check has a case for its own; SMD-2435 PR 3b-1).
@@ -334,17 +553,23 @@ self_check() {
   local repo="$dir/repo" out="$dir/out" lines
   # Under no setting of the caller's that could stop a scratch commit: a signature asked of every commit, a hook.
   g() { git -c user.email=ci@example.invalid -c user.name=ci -c init.defaultBranch=main -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
-  # run EXPECT EVENT BASE OPS: OPS on a branch, main moved, merged --no-ff, then the run.
+  # run EXPECT EVENT BASE OPS: OPS on a branch, main moved (MAIN_OPS=… beside its docs file), merged --no-ff, then the run.
   run() {
     expect=$1 event=$2 base=$3 ops=$4
     rm -rf "$repo"; mkdir -p "$repo"
     if ! (cd "$repo" && g init -q && mkdir -p docs server-portable && echo b > docs/a.md && echo b > server-portable/api.ts \
         && eval "${BASE_OPS:-:}" && g add -A && g commit -qm base && g switch -qc pr && eval "$ops" && g add -A && g commit -qm pr \
-        && g switch -q main && echo m > docs/main.md && g add -A && g commit -qm main && g merge -q --no-ff -m merge pr) > /dev/null 2>&1; then
+        && g switch -q main && echo m > docs/main.md && eval "${MAIN_OPS:-:}" && g add -A && g commit -qm main && g merge -q --no-ff -m merge pr) > /dev/null 2>&1; then
       echo "changes.sh: could not make the scratch repository for: $ops" >&2; fails=$((fails + 1)); return
     fi
     : > "$out"
-    (cd "$repo" && GITHUB_OUTPUT="$out" bash "$SELF" "$event" "$base" main) > /dev/null 2>&1
+    # LISTS=…: main's lists for the run, written by list and live (below) in the merged checkout.
+    rm -rf "$dir/map"
+    if [ -n "${LISTS:-}" ]; then
+      mkdir "$dir/map"
+      if ! (cd "$repo" && eval "$LISTS") > /dev/null 2>&1; then echo "changes.sh: could not write the lists for: $ops" >&2; fails=$((fails + 1)); return; fi
+    fi
+    (cd "$repo" && GITHUB_OUTPUT="$out" READS_MAP_DIR="${LISTS:+$dir/map}" bash "$SELF" "$event" "$base" main) > /dev/null 2>&1
     lines=$(grep -c '^code=' "$out"); got=$(sed -n 's/^code=//p' "$out")
     if [ "$lines" != 1 ] || [ "$got" != "$expect" ]; then echo "changes.sh: the run for $event into $base after '$ops' wrote code=$(tr '\n' ',' <<<"$got") ($lines line(s)), not $expect" >&2; fails=$((fails + 1)); fi
     got=$(sed -n 's/^skip=//p' "$out")
@@ -432,6 +657,86 @@ EOF
     BASE_OPS=$wfb SKIP='data-layer h' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; sub "echo g" "echo g2"'
     BASE_OPS=$wfb run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; echo x >> server-portable/api.ts'
     BASE_OPS=$wfb run true pull_request main 'mkdir -p scripts && echo x > scripts/check-consistency.ts; sub "echo g" "echo g2"'
+    # The record of main's reads (PR 3b-2): a path off every list above runs the jobs that read something
+    # that differs, and skips the mapped jobs that did not. The workflow here gates g, which no list
+    # names, and three MAP_LISTS does: data-layer, db-schema and db-live, a matrix job of six lists.
+    {
+      printf 'name: f\non: push\njobs:\n  changes:\n    runs-on: x\n'
+      for v in g data-layer db-schema db-live; do
+        printf "  %s:\n    needs: changes\n    if: \${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' %s '))) }}\n    steps:\n      - run: echo %s\n" "$v" "$v" "$v"
+      done
+      printf '  repo-consistency:\n    steps:\n      - run: bun scripts/check-consistency.ts\n'
+    } > "$dir/wfm.yml"
+    # list NAME ROW...: NAME's list, each ROW "f path", "d folder/" or "g path", recorded at AT (HEAD^1, the
+    # base's tip, unless set); STATUS, SIGHT, COMMIT and AS (the job its header names) say otherwise.
+    # shellcheck disable=SC2317,SC2329 # called from the cases' LISTS, which run() evals
+    list() {
+      local name=$1 cell=- row; shift
+      case "$name" in *.*) cell=${name#*.} ;; esac
+      {
+        printf '# reads v1 job=%s cell=%s commit=%s status=%s sight=%s files=0 dirs=0 gone=0 odd=0\n' "${AS:-${name%%.*}}" "$cell" "${COMMIT:-$(git rev-parse "${AT:-HEAD^1}")}" "${STATUS:-success}" "${SIGHT:-ok}"
+        for row in "$@"; do printf '%s\t%s\n' "${row%% *}" "${row#* }"; done
+      } > "$dir/map/$name.txt"
+    }
+    # live ROW...: db-live's six lists, each of the rows.
+    # shellcheck disable=SC2317,SC2329 # as list
+    live() { local c; for c in rest sleep long extract sweep claims; do list "db-live.$c" "$@"; done; }
+    # The base: data-layer read server-portable/api.ts and ext/x.ts and listed ext/; db-schema read the one
+    # migration and listed its folder; each db-live cell read db/a.ts. No one read db/tool.sh.
+    # shellcheck disable=SC2016 # run() evals it in the scratch repository, where $dir and $WF expand
+    local mb='mkdir -p .github/workflows db/migrations ext && cp "$dir/wfm.yml" "$WF" && echo a > db/a.ts && echo t > db/tool.sh && echo m > db/migrations/1.sql && echo x > ext/x.ts'
+    local std='list data-layer "f server-portable/api.ts" "f ext/x.ts" "d ext/"; list db-schema "f db/migrations/1.sql" "d db/migrations/"; live "f db/a.ts"'
+    # A file no job read: the three skip. One job's file: the other two skip. With no lists, none.
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema db-live' run true pull_request main 'echo x >> server-portable/api.ts'
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer' run true pull_request main 'echo x >> db/a.ts'
+    BASE_OPS=$mb run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS=: run true pull_request main 'echo x >> db/tool.sh'
+    # Docs alone are code=false still, and a record or a workflow edit alone is read as before, lists or no.
+    BASE_OPS=$mb LISTS=$std run false pull_request main 'echo x >> docs/a.md'
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live g' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md'
+    # A list a job did not vouch for skips nothing of that job: one that failed, one blind, one of a matrix
+    # job's missing, one whose header names another job.
+    BASE_OPS=$mb LISTS="$std; STATUS=failure list db-schema" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="$std; SIGHT=blind list db-live.rest" SKIP='db-schema data-layer' run true pull_request main 'echo x >> db/tool.sh'
+    # shellcheck disable=SC2016 # as above
+    BASE_OPS=$mb LISTS="$std"'; rm "$dir/map/db-live.sweep.txt"' SKIP='db-schema data-layer' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="$std; AS=data-layer list db-schema" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    # Lists of two commits, or of one that is not here, skip nothing at all.
+    BASE_OPS=$mb LISTS="$std; AT=HEAD^1~1 list db-schema" run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="COMMIT=0123456789012345678901234567890123456789; $std" run true pull_request main 'echo x >> db/tool.sh'
+    # What counts is everything since the lists' commit: recorded one commit before the base's tip, a job
+    # that listed docs/ runs for main's own docs/main.md, which the pull request never touched.
+    BASE_OPS=$mb LISTS="$std; list db-schema 'd docs/'" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="AT=HEAD^1~1; $std; list db-schema 'd docs/'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    # A path that comes or goes: in a folder a job listed; in one it read a file in; in a new folder under
+    # one; a file gone that it read, as a row of either kind; the last file of a folder, up to where it worked.
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo n > db/migrations/2.sql'
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer' run true pull_request main 'echo n > db/b.ts'
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer' run true pull_request main 'mkdir db/new && echo n > db/new/f.ts'
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema db-live' run true pull_request main 'git rm -q ext/x.ts'
+    BASE_OPS=$mb LISTS="$std; list data-layer 'g ext/x.ts'" SKIP='db-schema db-live' run true pull_request main 'git rm -q ext/x.ts'
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer' run true pull_request main 'git rm -q db/migrations/1.sql'
+    # A mode alone: no one read db/tool.sh, and db-live, at work in db/, could have asked whether it runs.
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer' run true pull_request main 'chmod +x db/tool.sh'
+    # A name tools look for, added above a file read: db-schema's migration is under db/, where db-live works too.
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer' run true pull_request main 'echo "{}" > db/package.json'
+    BASE_OPS=$mb LISTS=$std run true pull_request main 'echo "{}" > tsconfig.json'
+    # The workflow since then: a job's own block, a path CHARGES gives a job, and what stops every skip.
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; sub "echo db-schema" "echo db-schema2"'
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; mkdir -p changes && echo x > changes/smd-1.md'
+    BASE_OPS=$mb LISTS=$std run true pull_request main 'echo x >> db/tool.sh; sub "name: f" "name: f2"'
+    BASE_OPS=$mb LISTS=$std run true pull_request main 'echo x >> db/tool.sh; sub "runs-on: x" "runs-on: y"'
+    BASE_OPS=$mb LISTS=$std run true pull_request main 'echo x >> db/tool.sh; sub "echo g" "echo g2"; mkdir -p scripts && echo x > scripts/check-consistency.ts'
+    # A mapped job with no gate of its own on skip is not named, whatever it read.
+    BASE_OPS="$mb && sed -i.bak \"/' db-schema '/d\" \"\$WF\" && rm -f \"\$WF.bak\"" LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    # A symlink main itself took in since the lists' commit, none of the pull request's, skips nothing.
+    BASE_OPS=$mb MAIN_OPS='ln -s tool.sh db/l.sh' LISTS="AT=HEAD^1~1; $std" run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb MAIN_OPS='echo m > docs/more.md' LISTS="AT=HEAD^1~1; $std" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    # A symlink, or a path with a newline in its name, runs every job, lists or no; another event has none read.
+    BASE_OPS=$mb LISTS=$std run true pull_request main 'ln -s tool.sh db/link.sh'
+    BASE_OPS=$mb LISTS=$std run true pull_request main "printf x > \"\$(printf 'db/x\ncode=false')\""
+    BASE_OPS=$mb LISTS=$std run true push main 'echo x >> db/tool.sh'
     # A HEAD with no second parent: the pull request's head itself.
     rm -rf "$repo"; mkdir -p "$repo"; : > "$out"
     (cd "$repo" && g init -q && mkdir docs && echo b > docs/a.md && g add -A && g commit -qm base && echo x >> docs/a.md && g add -A && g commit -qm docs \
@@ -459,6 +764,9 @@ if [ "${1:-}" = --not-code ]; then
 fi
 # --charges: CHARGES as it stands, a pattern and its jobs a line (check 53 reads it).
 if [ "${1:-}" = --charges ]; then printf '%s\n' "$CHARGES"; exit 0; fi
+# --map-lists: MAP_LISTS as it stands, a list a line (check 56 reads it).
+# shellcheck disable=SC2086 # split on purpose: one list a line
+if [ "${1:-}" = --map-lists ]; then printf '%s\n' $MAP_LISTS; exit 0; fi
 # --blocks FILE: how cut_blocks cuts a workflow, a run of lines a line (check 51 reads it).
 if [ "${1:-}" = --blocks ]; then cut_blocks "${2:?--blocks takes a file}"; exit; fi
 

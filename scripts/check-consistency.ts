@@ -649,9 +649,16 @@
  *      the job that runs changes.sh's cases runs reads.sh's, where a runner
  *      that records no access times fails (SMD-2435 PR 3b-1). Its probe pins
  *      what it refuses and passes
+ *  56. .github/ci/changes.sh's MAP_LISTS — the lists of what main's jobs
+ *      read that a pull request's jobs may skip by — names gated jobs alone,
+ *      a matrix job by every one of its cells and no other; every gated job
+ *      is in it or in MAP_ALWAYS_RUN with why its list cannot be trusted; and
+ *      no job in it runs a compose stack, builds an image or mounts a path
+ *      into a container, whose reads no list sees (SMD-2435 PR 3b-2). Its
+ *      probe pins what it refuses and passes
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
- * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50, 51 and 55 parse YAML with Bun.YAML,
+ * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50, 51, 55 and 56 parse YAML with Bun.YAML,
  * and check 44 TOML with Bun.TOML)
  * Exits non-zero on any violation.
  */
@@ -5060,13 +5067,17 @@ const gatedIf = (job: string): string =>
  * alone, shallow and blobless; a decide step whose env reads the event and
  * the branches and whose run runs the BASE's classifier, or answers
  * code=true; its two outputs, code and skip, from that step. No other key, so
- * no continue-on-error, no pinned EVENT, no output a literal can set.
+ * no continue-on-error, no pinned EVENT, no output a literal can set. Since
+ * PR 3b-2 the base's classifier fetches the lists of what main's jobs read:
+ * the step's env hands it the run's token as GH_TOKEN. The job sets no
+ * permissions of its own, so the token is the workflow's, contents: read,
+ * which reads a public repository's artifacts and writes nothing.
  */
 const CHANGES_JOB_KEYS = ["name", "runs-on", "timeout-minutes", "outputs", "steps"];
 const CHANGES_OUTPUTS = { code: "${{ steps.decide.outputs.code }}", skip: "${{ steps.decide.outputs.skip }}" };
 const CHANGES_CHECKOUT_IF = "github.event_name == 'pull_request'";
 const CHANGES_CHECKOUT_WITH = { "persist-credentials": false, "fetch-depth": 2, filter: "blob:none", "sparse-checkout": ".github/ci" };
-const CHANGES_ENV = { EVENT: "${{ github.event_name }}", BASE_REF: "${{ github.base_ref }}", DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}" };
+const CHANGES_ENV = { EVENT: "${{ github.event_name }}", BASE_REF: "${{ github.base_ref }}", DEFAULT_BRANCH: "${{ github.event.repository.default_branch }}", GH_TOKEN: "${{ github.token }}" };
 const CHANGES_RUN = `if [ "$EVENT" = pull_request ] && git show 'HEAD^1:.github/ci/changes.sh' > "$RUNNER_TEMP/changes.sh" 2> /dev/null; then
   bash "$RUNNER_TEMP/changes.sh" "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
 else
@@ -5452,6 +5463,8 @@ const GATED_MUTANTS: [why: string, mutate: (j: ProbeJobs) => ProbeJobs, says: st
   ["MAY_SKIP's condition dropped to the code output alone", (j) => { aggOf(j).steps[0].env.MAY_SKIP = `\${{ needs.changes.outputs.code == 'false' && 'commit-lint publish g' || 'commit-lint publish' }}`; return j; }, "sets MAY_SKIP to"],
   ["a job that needs a gated job without !cancelled()", (j) => { (j.publish as Record<string, unknown>).if = "github.event_name == 'push'"; return j; }, "job publish needs g, which the changes job may skip"],
   ["a gated job also in AGGREGATE_MAY_SKIP's list", (j) => j, "__runner_passes_g_in_may_skip__"],
+  ["the changes job given permissions of its own", (j) => { changesOf(j).permissions = { contents: "write" }; return j; }, `job ${CHANGES_JOB} sets permissions`],
+  ["the decide step without the token the lists are fetched with", (j) => { delete (changesOf(j).steps[1].env as Record<string, string>).GH_TOKEN; return j; }, "decide step reads env"],
   ["the decide step's EVENT pinned", (j) => { (changesOf(j).steps[1].env as Record<string, string>).EVENT = "pull_request"; return j; }, "decide step reads env"],
   ["the changes job's output a literal", (j) => { changesOf(j).outputs = { code: "false" }; return j; }, `job ${CHANGES_JOB}'s outputs are`],
   ["the decide step continue-on-error", (j) => { changesOf(j).steps[1]["continue-on-error"] = true; return j; }, "decide step sets continue-on-error"],
@@ -12076,6 +12089,109 @@ function checkReadsRecorded() {
   if (!existsSync(join(ROOT, READS_SCRIPT))) fail(READS_SCRIPT, "is gone, and every gated job runs it (check 55, SMD-2435)");
 }
 checkReadsRecorded();
+
+// ── 56: the lists a job may skip by are its own, every one, and say all it read (SMD-2435 PR 3b-2) ──
+//
+// .github/ci/changes.sh's by_map skips a job MAP_LISTS names when nothing its
+// lists hold differs from the commit they were recorded on. That is sound
+// only for a job whose list is whole. A matrix job's cells each keep one, so
+// MAP_LISTS names every cell, and a cell added to the matrix and not there
+// would be skipped by the others' reads. A job that runs a compose stack,
+// builds an image or mounts a path into a container reads through the
+// container, where no access time moves on the checkout, so its list says
+// less than it read: such a job stays out. And a gated job in neither list
+// was never decided: MAP_ALWAYS_RUN gives each job left out its reason.
+const MAP_ALWAYS_RUN: Record<string, string> = {
+  "deploy-stack": "runs the compose stack, whose containers read through mounts and build contexts (PR 3c)",
+  "deploy-stack-brains": "runs the compose stack twice over, and canary.sh has git read the tree back",
+  "deploy-stack-auth": "runs the compose stack and builds three images",
+  "deploy-stack-observability": "runs the compose stack",
+  "auth-poc": "runs a compose stack of its own through evals/eval-auth.ts",
+  "compat-shim": "greps the whole tree and has git read it back, so its list is nearly every file",
+};
+/** A command whose reads of the checkout no list holds: compose, an image build, a container given a path. */
+const MAP_HIDES_READS = /\b(?:docker|podman)\s+(?:compose|build|buildx)\b|\bdocker-compose\b|\b(?:docker|podman)\s+run\b[^\n]*\s(?:-v|--volume|--mount)[\s=]/;
+/** MAP_LISTS as CHANGES_SCRIPT prints it, or why it could not be read. */
+function mapLists(): string[] | string {
+  const r = Bun.spawnSync(["bash", join(ROOT, CHANGES_SCRIPT), "--map-lists"]);
+  if (r.exitCode !== 0) return `${CHANGES_SCRIPT} --map-lists exited ${r.exitCode}: ${r.stderr.toString().trim()}`;
+  return r.stdout.toString().split("\n").filter((l) => l.trim());
+}
+/** What check 56 reports of MAP_LISTS against a workflow's text, its gated jobs and the jobs left out with a reason. */
+function mapListsProblems(lists: readonly string[], text: string, gated: readonly string[], always: Readonly<Record<string, string>>): string[] {
+  let doc: unknown;
+  try { doc = Bun.YAML.parse(text); } catch (e) { return [`does not parse: ${(e as Error).message} — check 56 cannot read the jobs MAP_LISTS names (SMD-2435)`]; }
+  const jobs = mapping(mapping(doc)?.jobs);
+  if (!jobs) return ["has no `jobs:` map check 56 can read (SMD-2435)"];
+  const problems: string[] = [];
+  const twice = lists.filter((l, i) => lists.indexOf(l) !== i);
+  if (twice.length) problems.push(`MAP_LISTS names ${[...new Set(twice)].join(", ")} twice (check 56, SMD-2435)`);
+  const named = [...new Set(lists.map((l) => l.split(".")[0]))];
+  for (const key of named) {
+    const mine = lists.filter((l) => l === key || l.startsWith(`${key}.`));
+    if (!gated.includes(key)) { problems.push(`MAP_LISTS names ${mine.join(", ")}, and ${key} is no gated job — only a job the changes job gates can skip by its list (check 56, SMD-2435)`); continue; }
+    if (key in always) problems.push(`MAP_LISTS names ${key}, which MAP_ALWAYS_RUN leaves out because it ${always[key]} — one or the other (check 56, SMD-2435)`);
+    const job = mapping(jobs[key]);
+    if (!job) { problems.push(`MAP_LISTS names ${key}, which is no job in the workflow (check 56, SMD-2435)`); continue; }
+    const matrix = mapping(job.strategy)?.matrix;
+    const axes = matrix === undefined ? [] : matrixAxes(matrix);
+    let want: string[];
+    if (axes === null || axes.length > 1) { problems.push(`MAP_LISTS names ${key}, whose matrix check 56 cannot read as one written-out axis — its cells' lists cannot be told to be all there (check 56, SMD-2435)`); continue; }
+    else if (axes.length === 0) want = [key];
+    else {
+      const values = mapping(matrix)?.[axes[0]];
+      want = (Array.isArray(values) ? values : []).map((v) => `${key}.${String(v)}`);
+    }
+    const missing = want.filter((w) => !mine.includes(w)), extra = mine.filter((m) => !want.includes(m));
+    if (missing.length || extra.length) problems.push(`MAP_LISTS names ${mine.join(", ")} for job ${key}, whose lists are ${want.join(", ")} — ${missing.length ? `without ${missing.join(", ")} the job would skip by its other cells' reads` : `${extra.join(", ")} is no list of its`} (check 56, SMD-2435)`);
+    (Array.isArray(job.steps) ? job.steps : []).forEach((st, i) => {
+      const run = mapping(st)?.run;
+      const hit = typeof run === "string" ? run.split("\n").find((l) => !/^\s*#/.test(l) && MAP_HIDES_READS.test(l)) : undefined;
+      if (hit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${hit.trim().slice(0, 80)}\` in step ${i + 1} — a container reads the checkout where no access time moves, so the job's list would say less than it read; take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
+    });
+  }
+  for (const key of gated) if (!named.includes(key) && !(key in always)) problems.push(`gated job ${key} is in neither MAP_LISTS nor MAP_ALWAYS_RUN — a job skips by its list, or is left out with the reason its list cannot be trusted (check 56, SMD-2435)`);
+  for (const key of Object.keys(always)) if (!gated.includes(key)) problems.push(`MAP_ALWAYS_RUN names ${key}, which is no gated job — take it off (check 56, SMD-2435)`);
+  return problems;
+}
+function checkMapLists() {
+  const step = (run: string) => `      - run: ${run}\n`;
+  const job = (key: string, steps: string, head = "") => `  ${key}:\n    runs-on: ubuntu-24.04\n${head}    steps:\n${steps}`;
+  const MATRIX = "    strategy:\n      matrix:\n        shard: [x, y]\n";
+  const wf = (...jobsText: string[]) => `name: probe\non: push\njobs:\n${jobsText.join("")}`;
+  const PG = step("docker run -d --name postgres -p 5432:5432 -e POSTGRES_PASSWORD=x image");
+  const good = wf(job("a", step("bun test.ts")), job("m", PG + step("bun live.ts"), MATRIX), job("s", step("docker compose up -d")));
+  const ALWAYS = { s: "runs the compose stack" };
+  // [why, lists, text, gated, always, what each problem it reports says, in order]: none for a pass.
+  const cases: [string, string[], string, string[], Record<string, string>, string[]][] = [
+    ["a job, a matrix job by its cells, and one left out with its reason", ["a", "m.x", "m.y"], good, ["a", "m", "s"], ALWAYS, []],
+    ["a mapped job that starts a container and gives it no path", ["a", "m.x", "m.y"], good, ["a", "m", "s"], ALWAYS, []],
+    ["a matrix job with a cell not named", ["a", "m.x"], good, ["a", "m", "s"], ALWAYS, ["for job m, whose lists are m.x, m.y — without m.y"]],
+    ["a matrix job named whole", ["a", "m"], good, ["a", "m", "s"], ALWAYS, ["for job m, whose lists are m.x, m.y — without m.x, m.y"]],
+    ["a cell the matrix does not have", ["a", "m.x", "m.y", "m.z"], good, ["a", "m", "s"], ALWAYS, ["m.z is no list of its"]],
+    ["a plain job named by a cell", ["a.x", "m.x", "m.y"], good, ["a", "m", "s"], ALWAYS, ["for job a, whose lists are a — without a"]],
+    ["a list named twice", ["a", "a", "m.x", "m.y"], good, ["a", "m", "s"], ALWAYS, ["MAP_LISTS names a twice"]],
+    ["a job that is not gated", ["a", "m.x", "m.y", "lint"], good, ["a", "m", "s"], ALWAYS, ["lint is no gated job"]],
+    ["a gated job in neither list", ["m.x", "m.y"], good, ["a", "m", "s"], ALWAYS, ["gated job a is in neither"]],
+    ["a job in both lists", ["a", "m.x", "m.y", "s"], good, ["a", "m", "s"], ALWAYS, ["MAP_LISTS names s, which MAP_ALWAYS_RUN leaves out", "job s, which MAP_LISTS names, runs `docker compose up -d`"]],
+    ["a mapped job that runs compose", ["a", "m.x", "m.y", "s"], good, ["a", "m", "s"], {}, ["job s, which MAP_LISTS names, runs `docker compose up -d`"]],
+    ["a mapped job that mounts a path into a container", ["a", "m.x", "m.y"], wf(job("a", step("docker run --rm -v \"$PWD/db:/db:ro\" image psql")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker run --rm -v"]],
+    ["a mapped job that builds an image", ["a", "m.x", "m.y"], wf(job("a", step("docker build -t x .")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker build -t x .`"]],
+    ["a compose line in a comment", ["a", "m.x", "m.y"], wf(job("a", "      - run: |\n          # docker compose up is the stack jobs'\n          bun test.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["a matrix of two axes", ["a", "m.x", "m.y"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x, y]\n        pg: [16, 17]\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["whose matrix check 56 cannot read as one written-out axis"]],
+    ["a job left out that is gated no longer", ["a", "m.x", "m.y"], good, ["a", "m"], ALWAYS, ["MAP_ALWAYS_RUN names s, which is no gated job"]],
+    ["a job named that the workflow lacks", ["a", "m.x", "m.y", "gone"], good, ["a", "m", "s", "gone"], ALWAYS, ["MAP_LISTS names gone, which is no job in the workflow"]],
+    ["a file that does not parse", ["a"], "jobs: [", ["a"], {}, ["does not parse"]],
+  ];
+  const wrong = cases.map(([why, lists, text, gated, always, says]) => ({ why, says, got: mapListsProblems(lists, text, gated, always) }))
+    .filter((c) => c.got.length !== c.says.length || c.says.some((x, i) => !c.got[i].includes(x)));
+  if (wrong.length) fail(SELF, `check 56 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-2435)`);
+  const lists = mapLists();
+  if (typeof lists === "string") { fail(CHANGES_SCRIPT, `${lists} — check 56 reads MAP_LISTS from it (SMD-2435)`); return; }
+  if (!lists.length) fail(CHANGES_SCRIPT, "--map-lists printed nothing — MAP_LISTS names the lists a job may skip by (check 56, SMD-2435)");
+  for (const msg of mapListsProblems(lists, readFileSync(join(ROOT, WORKFLOW), "utf8"), AGGREGATE_GATED, MAP_ALWAYS_RUN)) fail(msg.startsWith("job ") ? WORKFLOW : CHANGES_SCRIPT, msg);
+}
+checkMapLists();
 
 // ── 35. db/ci-parity.sh runs what CI runs (SMD-2903) ─────────────────────────
 //
