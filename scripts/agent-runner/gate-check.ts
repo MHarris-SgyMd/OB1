@@ -1,7 +1,7 @@
 /**
  * gate-check.ts — the offline self-check of cut 2b-1 (SMD-4087): the run record (record.ts) and the gate (gate.ts),
  * on fixtures, with no Claude Code and no network. CI runs it (`bun scripts/agent-runner/gate-check.ts --self-check`). It
- * builds a real bare repository and a branch with git (see developerGit below), and runs the whole gate against it
+ * builds a real bare repository and a branch with git (fixture-git.ts's fixtureGit), and runs the whole gate against it
  * with stubbed commitlint and secret scanners; the pure parsers are also unit-tested directly, including the
  * signed-commit case git can't make here without a key. The run orchestration that produces a real branch is cut 2b-2.
  *
@@ -17,24 +17,9 @@ import {
 import {
   branchFor, isFinished, listRuns, readRecord, readNoFollow, runId, slugOf, startRecord, updateRecord, writeNoFollow,
 } from "./record.ts";
+import { fixtureGit } from "./fixture-git.ts";
 
 const BOT = { name: "Agent Runner Bot", email: "bot@agent-runner.invalid" };
-
-/**
- * The git to run the fixtures with: on macOS the active developer git (so it isn't Apple's xcrun shim), on Linux (CI
- * runs this self-check on ubuntu) plain `git` from PATH. `xcode-select` isn't there on Linux and `Bun.spawnSync` throws
- * ENOENT on a missing binary, so the probe is guarded — the same Linux slip as cut 2a's `hostStamp` (`sw_vers`).
- */
-function developerGit(): string {
-  try {
-    const r = Bun.spawnSync(["/usr/bin/xcode-select", "-p"], { stdout: "pipe", stderr: "ignore" });
-    const git = `${r.stdout.toString().trim()}/usr/bin/git`;
-    if (r.exitCode === 0 && existsSync(git)) return git;
-  } catch {
-    // No xcode-select (Linux): fall back to PATH git, which the fixture runs with /usr/bin:/bin.
-  }
-  return "git";
-}
 
 export async function selfCheck(): Promise<number> {
   let passed = 0;
@@ -61,7 +46,7 @@ export async function selfCheck(): Promise<number> {
     }
   };
 
-  const GIT = developerGit();
+  const GIT = fixtureGit();
   const fixture = mkdtempSync(join(tmpdir(), "obr-gate-"));
   try {
     await section("the run record", async () => {

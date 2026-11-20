@@ -184,7 +184,7 @@ const entries = sources.filter((f) => {
 });
 {
   ok(entries.length >= 20, `the entry-point census finds the scripts (${entries.length}: ${entries.join(", ")})`);
-  for (const must of ["extract-entities.ts", "consolidate.ts", "reembed.ts", "migrate.ts", "tier.ts", "sync-linear.ts", "graph-centrality.ts", "bench-hnsw.ts"])
+  for (const must of ["extract-entities.ts", "consolidate.ts", "reembed.ts", "retag.ts", "migrate.ts", "tier.ts", "sync-linear.ts", "graph-centrality.ts", "bench-hnsw.ts"])
     ok(entries.includes(must), `the census counts ${must} as an entry point`);
   for (const lib of ["cli.ts", "lease.ts", "env.ts", "brain-compare.ts", "ingest-contract.ts", "bench-oracle.ts", "worker-bootstrap.ts", "subject-sweep.ts"])
     ok(!entries.includes(lib), `the census does not count the library ${lib}`);

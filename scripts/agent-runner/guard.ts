@@ -81,16 +81,25 @@ const SCRIPT = /\.(ts|tsx|mts|cts|js|mjs|cjs)$/;
 /** A package script's name, for `bun run <name>`: no path, no option. */
 const SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:_.-]*$/;
 
-/** Untrusted text on one line for a reason or a log: each hidden code point as <U+XXXX>, whitespace closed, cut at `max`. */
-export function shownText(value: unknown, max = 200): string {
-  const s = typeof value === "string" ? value : String(value);
+/** A code point by its number, `<U+XXXX>`: how the runner writes one that doesn't show (SMD-4325: one writing of it). */
+export const codePointName = (ch: string): string => `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>`;
+
+/** Untrusted text for a terminal: each code point that doesn't show, or changes how text shows, as <U+XXXX>. */
+export function printable(s: string): string {
   let out = "";
-  for (const ch of s.replace(/\s+/g, " ").trim()) out += HIDDEN_TEXT.test(ch) ? `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>` : ch;
-  const cps = [...out];
-  return cps.length > max ? `${cps.slice(0, max - 1).join("")}…` : out;
+  for (const ch of s) out += HIDDEN_TEXT.test(ch) ? codePointName(ch) : ch;
+  return out;
 }
 
-const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+/** Untrusted text on one line for a reason or a log: each hidden code point as <U+XXXX>, whitespace closed, cut at `max` code points, so it can't wrap into a line of its own. */
+export function shownText(value: unknown, max = 200): string {
+  const s = typeof value === "string" ? value : String(value);
+  const cps = [...printable(s.replace(/\s+/g, " ").trim())];
+  return cps.length > max ? `${cps.slice(0, max - 1).join("")}…` : cps.join("");
+}
+
+/** A plain object: not null, not an array. The runner's one rule for it (SMD-4325: it was written out in four files, once without the array's refusal). */
+export const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const errnoOf = (e: unknown): string | undefined => (isObject(e) && typeof e.code === "string" ? e.code : undefined);
 
 /** A path as written: absolute, with at least one part, no empty, `.` or `..` part, and no character that doesn't show. */

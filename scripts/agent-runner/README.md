@@ -181,6 +181,9 @@ Each runner session, the worker's and the review's, runs inside the five layers 
   * a tool result answers a call the guard never logged;
   * the time limit runs out.
 * **`probes.ts`:** the probes. **`mock-api.ts`** is their stand-in for the Messages API. **`probes-check.ts`** is the offline self-check.
+* **Helpers the whole runner shares (SMD-4325).** Each has one definition, and the rest of the runner imports it.
+  * In files hashed into the probe stamp, so an edit to one voids it: **`guard.ts`** has `isObject` (an array is not one, in a claim reply too), `codePointName`, `printable` and `shownText`; **`session.ts`** has the no-follow file read and write.
+  * Outside the stamp: **`text.ts`** has the one-line cut and `maskTokens`, the one mask for a claim token (`wc_…` and the markdown-escaped `wc\_…`); **`facts.ts`** has `jsonOf` and `NOT_JSON`; **`fixture-git.ts`** has the git the self-checks build fixtures with.
 
 ```bash
 shasum -a 256 ~/.local/share/claude/versions/2.1.319                                  # the version to pin's checksum (cut 2b runs a copy in the install)
