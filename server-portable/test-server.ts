@@ -5195,6 +5195,31 @@ console.log("\n[22] A request's span and each tool call's (SMD-1849 PR 2b): the 
     const uptime = uptimes[0]?.dataPoints[0] as { value: number; attributes: Record<string, unknown> } | undefined;
     assert(uptimes.length === 1 && uptimes[0].dataPointType === DataPointType.GAUGE && uptimes[0].descriptor.unit === "s" && uptimes[0].dataPoints.length === 1 && uptime !== undefined && Object.keys(uptime.attributes).length === 0 && uptime.value > 0 && uptime.value <= process.uptime() && process.uptime() - uptime.value < 30,
       `the export carries the uptime gauge: process.uptime, a gauge in s, one point with no labels, the process's uptime, read at the export (${JSON.stringify(uptimes.map((m) => [m.descriptor.unit, m.dataPoints]))})`);
+    // The listen streams' count (SMD-4458): no such series until a server that holds streams asks for it; then the
+    // count it keeps, read at each export, one point with no labels of its own. An up-down counter: a sum that may fall.
+    const listenCounts = () => (metricsOut.getMetrics().at(-1)?.scopeMetrics ?? []).flatMap((sm) => sm.metrics).filter((m) => m.descriptor.name === "ob1.mcp.listen_streams");
+    const countsBefore = listenCounts().length;
+    const { observeListenStreams } = await import("./tracing.ts");
+    let streamsHeld = 3;
+    const countAsked = observeListenStreams(() => streamsHeld);
+    await tracing.flush();
+    const heldThree = listenCounts();
+    const threePoint = heldThree[0]?.dataPoints[0] as { value: number; attributes: Record<string, unknown> } | undefined;
+    streamsHeld = 1;
+    await tracing.flush();
+    const heldOne = listenCounts();
+    // A meter that throws loses the count, and says so by its answer, where a throw would end a server's start.
+    let countThrew = "";
+    let countMade: boolean | undefined;
+    try {
+      countMade = observeListenStreams(() => 1, { getMeter: () => { throw new Error("a meter that throws"); } } as never);
+    } catch (e) {
+      countThrew = (e as Error).message;
+    }
+    assert(countMade === false && countThrew === "", `a meter that throws: the count is not made, said by the answer, and nothing is thrown (made ${countMade}; threw ${JSON.stringify(countThrew)})`);
+    assert(countsBefore === 0 && countAsked === true && heldThree.length === 1 && heldThree[0].dataPointType === DataPointType.SUM && heldThree[0].isMonotonic === false && heldThree[0].descriptor.unit === "{stream}" && heldThree[0].dataPoints.length === 1 && threePoint?.value === 3 && Object.keys(threePoint.attributes).length === 0
+      && heldOne.length === 1 && heldOne[0].dataPoints[0]?.value === 1,
+      `the listen streams' count: none until it is asked for, then, answered as made (${countAsked}), ob1.mcp.listen_streams, a sum of streams that may fall, one point with no labels, the count as each export reads it (${countsBefore} before; ${JSON.stringify(heldThree.map((m) => [m.descriptor.unit, m.dataPoints]))}; then ${JSON.stringify(heldOne.map((m) => m.dataPoints.map((pt) => pt.value)))})`);
     // …and a key the registry did not clear (revoked) is refused at its key too (review pass 4).
     const { agents: mirrorRegistryOf } = await import("./root.ts");
     const mirrorRegistry = mirrorRegistryOf();
