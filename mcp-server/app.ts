@@ -523,7 +523,7 @@ export function createMcpApp(deps: McpDeps): Hono {
   };
 
   // The listen streams this server holds open (SMD-4347), where it holds any: how many are open (`listen.count`, for
-  // the entry's stop), and how many under each caller's name. The SDK bounds the streams of the whole server and
+  // the entry's stop, and since SMD-4458 for keyed /health and the entry's metric), and how many under each caller's name. The SDK bounds the streams of the whole server and
   // nothing else, so one caller could take every place; the route gives each caller its share before the handler
   // is asked, and gives the place back when the stream ends, however it ends.
   const listen = deps.listen?.hold ? deps.listen : null;

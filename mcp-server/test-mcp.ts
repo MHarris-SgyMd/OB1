@@ -882,15 +882,20 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
   const exported: string[] = [];
   // …and its metric exports, for the count of open streams (SMD-4458).
   const metered: string[] = [];
+  /** When each of those arrived, by the suite's clock. */
+  const meteredAt: number[] = [];
   const collector = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: async (req) => {
     const path = new URL(req.url).pathname;
     if (path === "/v1/traces") exported.push(await req.text());
-    else if (path === "/v1/metrics") metered.push(await req.text());
+    else if (path === "/v1/metrics") {
+      metered.push(await req.text());
+      meteredAt.push(performance.now());
+    }
     return Response.json({});
   } });
   type Point = { asDouble?: number; asInt?: number | string };
-  /** The points of one metric, a gauge's or a sum's, among the exports the collector has had since the `from`th, each export's in turn. */
-  const pointsOf = (name: string, from: number) => metered.slice(from).flatMap((t) => (JSON.parse(t) as { resourceMetrics: { scopeMetrics: { metrics: { name: string; gauge?: { dataPoints: Point[] }; sum?: { dataPoints: Point[] } }[] }[] }[] }).resourceMetrics)
+  /** The points of one metric, a gauge's or a sum's, among the exports the collector has had since the `from`th, each export's in turn; where times are given, those that arrived between them. */
+  const pointsOf = (name: string, from: number, after = -Infinity, before = Infinity) => metered.slice(from).filter((_, i) => meteredAt[from + i] > after && meteredAt[from + i] < before).flatMap((t) => (JSON.parse(t) as { resourceMetrics: { scopeMetrics: { metrics: { name: string; gauge?: { dataPoints: Point[] }; sum?: { dataPoints: Point[] } }[] }[] }[] }).resourceMetrics)
     .flatMap((r) => r.scopeMetrics).flatMap((x) => x.metrics).filter((m) => m.name === name).flatMap((m) => m.gauge?.dataPoints ?? m.sum?.dataPoints ?? []).map((pt) => Number(pt.asDouble ?? pt.asInt));
   /** The spans the collector has been sent for listen requests, by count. */
   const listenSpans = () => exported.flatMap((t) => (JSON.parse(t) as { resourceSpans: { scopeSpans: { spans: { name: string }[] }[] }[] }).resourceSpans).flatMap((r) => r.scopeSpans).flatMap((x) => x.spans).filter((x) => /subscriptions\/listen/.test(x.name)).length;
@@ -1007,15 +1012,16 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     assert(spansBoth === 1 && /; telemetry sent; 1 held stream closed; exit 0/.test(bothStopped.out), `…and with a collector, the stream's span has been sent by the stop's end (${spansBoth} span(s) in all; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     // The count of open streams (SMD-4458): 1 while the stream was open, and 0 as the stop's flush read it, though the stream is closed only after that flush.
     // The flush's is the last point this server sends: left at 1, a panel that sums the servers would count the stream beside the next server's.
-    const gauged = pointsOf("ob1.mcp.listen_streams", meteredBefore);
-    assert(gauged.includes(1) && gauged.at(-1) === 0, `…and its metrics hold the count of listen streams: 1 while the stream was open, and 0 at the stop's flush, its last point (${JSON.stringify(gauged)} in ${metered.length - meteredBefore} export(s))`);
+    const openSeen = pointsOf("ob1.mcp.listen_streams", meteredBefore);
+    assert(openSeen.includes(1) && openSeen.at(-1) === 0, `…and its metrics hold the count of listen streams: 1 while the stream was open, and 0 at the stop's flush, its last point (${JSON.stringify(openSeen)} in ${metered.length - meteredBefore} export(s))`);
     assert(both.up && late === "refused", `…and a connection attempted after the signal is refused, not served and not answered by a handler that is closing (${late})`);
 
     // Streams open and a call cut at the bound: the call's line is `cut`, every stream still gets its closing frame, exit 1.
     // Twenty-four of them, under the one name's bound of 32: the frames of many must all have left before the connections are cut.
     answer = (n) => (n === "thoughtStats" ? new Promise(() => {}) : ok({}));
     const meteredAtCut = metered.length;
-    const cutting = await start(true, collector.port!, true, { OTEL_METRIC_EXPORT_INTERVAL: "1000" });
+    // Its metrics every second, and a grace of 4 s, so a drain of 2: at least one export is read during the drain.
+    const cutting = await start(true, collector.port!, true, { OTEL_METRIC_EXPORT_INTERVAL: "1000", OB1_STOP_GRACE: "4" });
     const cutStreams = await Promise.all(Array.from({ length: 24 }, async () => toEnd(await cutting.send("subscriptions/listen", listenParams))));
     for (let waited = 0; !pointsOf("ob1.mcp.listen_streams", meteredAtCut).includes(24) && waited < 5_000; waited += 50) await Bun.sleep(50);
     const hungCall = cutting.send("tools/call", { name: "thought_stats", arguments: {} }).then(async (r) => (r.status === 599 ? "no answer: dropped" : `${r.status} ` + (await r.text().then((t) => `ended whole (${t.length} bytes)`, () => "dropped"))));
@@ -1023,6 +1029,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const hungLegacy = fetch(cutting.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-brain-key": "write-raw" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "thought_stats", arguments: {} } }) })
       .then((r) => r.text().then((t) => `${r.status} ended whole (${t.length} bytes)`, () => "dropped"), () => "no answer: dropped");
     await Bun.sleep(200);
+    const cutAt = performance.now();
     const cutStopped = await cutting.stop();
     const hung = [await hungCall, await hungLegacy];
     const cutTexts = await Promise.all(cutStreams.map((x) => x.text));
@@ -1035,8 +1042,11 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const spansCut = listenSpans();
     assert(spansCut === 25 && /; telemetry sent; 24 held streams closed; exit 1/.test(cutStopped.out), `…their spans sent too by the stop's end (${spansCut} span(s) in all; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     // The count of open streams was 24 while they were open, the entry's own count and not a 1 for any; at this stop's flush it is 0 too.
-    const gaugedCut = pointsOf("ob1.mcp.listen_streams", meteredAtCut);
-    assert(gaugedCut.includes(24) && gaugedCut.at(-1) === 0, `…and the count of open streams its metrics hold: 24 while they were open, and 0 at this stop's flush (${JSON.stringify(gaugedCut)})`);
+    const openSeenAtCut = pointsOf("ob1.mcp.listen_streams", meteredAtCut);
+    assert(openSeenAtCut.includes(24) && openSeenAtCut.at(-1) === 0, `…and the count of open streams its metrics hold: 24 while they were open, and 0 at this stop's flush (${JSON.stringify(openSeenAtCut)})`);
+    // During the drain it is still the count: the stop serves its streams until the drain ends, 2 s on here, and only then does the count read 0.
+    const openSeenInDrain = pointsOf("ob1.mcp.listen_streams", meteredAtCut, cutAt, cutAt + 1_800);
+    assert(openSeenInDrain.length >= 1 && openSeenInDrain.every((n) => n === 24), `…and through the drain the count is the streams still open, 24 in each export the collector had between the signal and 1.8 s on, not the 0 the drain's end brings (${JSON.stringify(openSeenInDrain)})`);
     assert(hung.every((x) => x.endsWith("dropped")) && cutStopped.err.split("\n").filter((l) => /cut off by the server's stop/.test(l)).length === 2,
       `…and each cut call's own answer is dropped with its connection, not ended as a whole answer of nothing; one warning for each (${hung.join(", ")}; ${cutStopped.err.split("\n").filter((l) => /cut off/.test(l)).length} warning(s))`);
 

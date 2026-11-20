@@ -101,7 +101,7 @@ Found in the build, by its first run against a real process: closing the handler
 - One line: `rpc` `subscriptions/listen`, `ok`, written when the stream opens, its `ms` the time to open it. The request is answered once its stream is open, and its record ends there. Its end writes nothing.
 - It is no failure. Before the build the route would have ended a held stream's record as `stalled` after 10 minutes, with a warning to look at the database; a client closing its stream was `abandoned`, with a warning that a capture may have landed; and the stop's was `cut`. `stalled` and `cut` are among the outcomes the `ob1-server-failures` alert counts: three sessions listening again after one restart would put three failures on a quiet brain ten minutes later.
 - Its sample in `http.server.request.duration`, which the dashboard's p50 and p99 panels read, is the time to open it: a request's, not a stream's hours.
-- An open stream shows somewhere: its line and its span as it opens, sent with the next batch, and the stop's two lines, which count the streams it found open and say whether they were closed.
+- An open stream shows somewhere: its line and its span as it opens, sent with the next batch, and the stop's two lines, which count the streams it found open and say whether they were closed. (Added by SMD-4458: and while it is open it is counted, on keyed `/health` and in a metric of the total.)
 
 This rule was first written as one line at the stream's end, its `ms` its lifetime, and no sample. "As built" says why the build wrote the line at the open.
 
@@ -124,12 +124,13 @@ Amended in the build: as merged the rule set the server's cap where the handler 
 - A tunnel or TLS proxy in front (`SETUP.md`, `docs/01-getting-started.md`): it must carry an event stream without buffering or cutting it, and the quick tunnel does not.
 - The statements that no stream is held: the comment above `buildServer`, `docs/mcp-sdk-v2-migration.md`, `mcp-server/README.md`, the rows in `test-mcp.ts` [9b].
 - What the operator is told of a line, which is true today and false of a held stream (found by a reader on the operator's side, in the build's third review):
-  - `deploy/README.md`, "What the servers log": a stream's line "at the stream's end"; `ms` "to its end"; what `stalled`, `abandoned` and `cut` mean; where a `code` comes from, the two new ones named nowhere but here.
+  - `deploy/README.md`, "What the servers log": a stream's line "at the stream's end"; `ms` "to its end"; what `stalled`, `abandoned` and `cut` mean; where a `code` comes from (the two new ones are named there since SMD-4458).
   - The p50 panel's description in `deploy/observability/dashboard.json` and its copy in `deploy/compose.yaml`; the histogram's own description and the `ms` field's in `server-portable/telemetry.ts`.
   - `mcp-server/README.md` on the stop ("waits for Bun's requests in flight … then cuts what is left"), and `deploy/README.md` on the flush's bound, which after a drain that finished is 0.2 s shorter on a server that holds streams.
 - `server-portable/telemetry.ts`'s own account of `cut` ("the server's stop closed it while its client was still there"): on a server that holds streams it is also a request that arrived after the drain had ended and was never served.
 - The suite's preload, `mcp-server/test-listen-on.ts`, which turns on a line that will then say `true`, and the rows that hold "today's entry" to holding none: each needs its reverse, or goes.
 - What no page says yet: that a restart of `mcp` is seen by every connected session, and that five in an hour may park a client for hours. The commands that restart it are in `plugins/example/README.md` and `deploy/README.md`.
+- What SMD-4458 wrote of the count while no server held a stream: "none yet" and "none does yet" in `deploy/README.md` (a line's `code`, and the paragraph on the count), "none does until" in `mcp-server/README.md`; and `db/brain-compare.ts`'s comment on what keyed `/health` carries beside the record, which then holds `listen` too.
 - The workflow's own reading of the MCP server's stop: `.github/workflows/brain-checks.yml` matches its last line whole, and a stream open at that stop adds to it.
 
 **The path.** A held stream is never idle on the wire: the SDK writes a comment on it every 15 seconds, under the proxy's idle limit of 180. No stream has been held through the stack's own forwarder and proxy: every one measured ran from the client to the probe on loopback, for about a minute at most.
