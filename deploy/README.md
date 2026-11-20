@@ -2473,22 +2473,26 @@ until its pool drains, or for `OB1_SLEEP_REEMBED_SHARE` seconds while
 extraction or consolidation has work (unset, 120; SMD-4384), the two then
 taking turns in the period as long each — then
 extraction, and
-consolidation beside it once the thoughts captured before the period began
-are extracted, so the backlog order above is built in: a capture since is
-judged against neighbours captured on an earlier UTC date, all of them in
-that backlog but across 00:00 UTC, and captures arriving all period no
-longer keep consolidation out of it, as they did while it waited for
-extraction's whole pool to drain (SMD-4468). An edit to an older thought,
-which is extracted again (board-sync re-rendering a ticket), or a write
-dated before the period began, counts as that backlog, and so does a backlog
-thought a pause stopped: it goes behind the captures since, and waits for
-extraction to catch up with them. Consolidation's judge calls, and the
-subject sweep's, now run while captures arrive: on a model server of one
-slot they share it with extraction. Under a steady inflow the period does
-not end until the captures stop. Beside consolidation runs the subject sweep
+consolidation beside it once every thought dated before today (UTC) is
+extracted, so the backlog order above is built in: a thought dated today is
+judged against neighbours captured on an earlier UTC date, all of them
+extracted by then, except across 00:00 UTC. Writes that pause nothing
+(board-sync's, an `ingested` key's) no longer keep consolidation out of a
+period for as long as they come, as they did while it waited for
+extraction's whole pool to drain (SMD-4468). A ticket board-sync first
+writes that was created on an earlier day is backlog, as it should be. One
+re-rendered during the period keeps its entities until it is extracted
+again, and is not; one re-rendered before the period began is, until
+extracted again, since each period's re-derive sweep clears its entities. A backlog thought a
+pause has taken goes behind the newer writes, and waits for extraction to
+catch up with them, and the join with it, as before. Consolidation's judge
+calls now run while such writes arrive: on a model server of one slot they
+share it with extraction. Under a steady inflow the period does not end
+until the writes stop. Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
-model's: started once a period, its claims bounded by the period's start plus
+model's: started once a period, once extraction's whole pool has drained or
+been joined past (not the backlog consolidation joins on, SMD-4468), its claims bounded by the period's start plus
 30 days, so a thought it sets back waits for a later period. On a brain with
 no pool named, the first period names one and pools every thought with no
 current subject, the rules keying what they can and the judge model asked the
@@ -2587,13 +2591,9 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 The log says `working:` when a period begins, `extraction drained — consolidating
-beside it` (or `extraction has done the thoughts captured before the period
-began — consolidating beside it while it extracts the captures since`, under
-an inflow, SMD-4468; and `extraction holds only N thought(s) that 3 or more
-long hard stops in a row took with no window gained — consolidating first`
-when it joins past stalled ones, ending `, N thought(s) captured since the
-period began waiting with it` when captures wait with extraction set aside),
-`paused:` with the live call that paused it and `resumed:` once
+beside it` (or `extraction has done every thought dated before today (UTC) —
+consolidating beside it while it extracts today's` while newer writes keep
+coming, SMD-4468), `paused:` with the live call that paused it and `resumed:` once
 the capture has passed, and `the pools drained — the period ends`; `share:`
 at its start names the turns, `re-embed has had its share — 120 s alone — N
 thought(s) left for its next turn …` when re-embed gives way to extraction,
@@ -2607,7 +2607,11 @@ at its start names the session settings in force, and a statement past its
 timeout says `<pass>: a statement passed the pass's statement_timeout (300 s)`
 and `<pass> held until a restart`. Each period begins with the re-derive
 sweep, which says `re-derive: N orphaned lineage row(s) swept` when it deletes
-any.
+any. A period that says `working:` and no consolidating line while writes keep
+arriving still has backlog to extract: a thought dated before today that
+extraction has not reached, such as one a pause took, behind the newer
+writes. `extract-entities.ts --status` shows extraction's pool going down;
+consolidation joins once extraction reaches it, or once the writes stop.
 The settings go out as startup parameters, which a transaction pooler
 (PgBouncer, a managed host's pooled endpoint) refuses: the scheduler connects to
 Postgres directly, as the stack's own does. `extract-entities.ts
