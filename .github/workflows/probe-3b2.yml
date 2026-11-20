@@ -38,9 +38,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           command -v gh unzip timeout awk
-          start=$(date +%s%N)
-          bash probe/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
-          echo "took $(( ($(date +%s%N) - start) / 1000000 )) ms"
+          for n in 1 2 3 4 5 6; do
+            start=$(date +%s%N)
+            bash probe/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH" 2> "$RUNNER_TEMP/err" | cut -c1-160
+            echo "run $n took $(( ($(date +%s%N) - start) / 1000000 )) ms; jobs judged: $(grep -c ' runs: it ' "$RUNNER_TEMP/err"); lists missing: $(grep -c 'is not here' "$RUNNER_TEMP/err")"
+          done
+          cat "$RUNNER_TEMP/err"
           echo "shallow: $(git rev-parse --is-shallow-repository); commits here: $(git rev-list --all --count)"
           cat "$GITHUB_OUTPUT"
 
@@ -65,9 +68,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           echo "--- contents: read alone"
-          start=$(date +%s%N)
-          bash probe/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
-          echo "took $(( ($(date +%s%N) - start) / 1000000 )) ms"
+          for n in 1 2 3 4 5 6; do
+            start=$(date +%s%N)
+            bash probe/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH" 2> "$RUNNER_TEMP/err" | cut -c1-160
+            echo "run $n took $(( ($(date +%s%N) - start) / 1000000 )) ms; jobs judged: $(grep -c ' runs: it ' "$RUNNER_TEMP/err"); lists missing: $(grep -c 'is not here' "$RUNNER_TEMP/err")"
+          done
           echo "--- no token"
           start=$(date +%s%N)
           GH_TOKEN='' bash probe/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"

@@ -273,10 +273,13 @@ limit() { if command -v timeout > /dev/null 2>&1; then timeout "$@"; else shift;
 # push run on the default branch that succeeded, into DIR, each as
 # reads.sh named it. The run is asked for by event and branch, so no pull
 # request's run can be the one found, whatever its branch is named in the
-# repository it comes from. Needs gh, unzip and a token that reads Actions
-# (GH_TOKEN, with GITHUB_REPOSITORY); fails with none of them or no such run,
-# and a list that does not arrive is by_map's to miss. Bounded: the gated jobs
-# wait on this job.
+# repository it comes from. Needs gh, unzip and the run's token (GH_TOKEN,
+# with GITHUB_REPOSITORY): contents: read is enough of a public repository
+# (the probe, OB1 PR 846), and a private one would want actions: read, every
+# job running until it had it. Fails with none of them or no such run. Each
+# download is tried three times: on the probe one of eleven failed once, and
+# its job ran for it; a list that still does not arrive is by_map's to miss.
+# Bounded: the gated jobs wait on this job, about two seconds for all of it.
 fetch_lists() {
   local dir=$1 default=$2 run id arts name ids=''
   if ! command -v gh > /dev/null 2>&1 || ! command -v unzip > /dev/null 2>&1 || [ -z "${GH_TOKEN:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "$default" ]; then return 1; fi
@@ -289,7 +292,10 @@ fetch_lists() {
   done
   # Each artifact is a zip of the one list; all at once, a second or so in all.
   # shellcheck disable=SC2086,SC2016 # ids split on purpose; sh expands $REPO and $DIR
-  printf '%s\n' $ids | REPO=$GITHUB_REPOSITORY DIR=$dir limit 60 xargs -P 12 -I '{}' sh -c 'gh api "repos/$REPO/actions/artifacts/{}/zip" > "$DIR/{}.zip" 2> /dev/null && unzip -q -o -j -d "$DIR" "$DIR/{}.zip" "*.txt" > /dev/null 2>&1' || true
+  printf '%s\n' $ids | REPO=$GITHUB_REPOSITORY DIR=$dir limit 90 xargs -P 12 -I '{}' sh -c 'for try in 1 2 3; do
+      if gh api "repos/$REPO/actions/artifacts/{}/zip" > "$DIR/{}.zip" 2> /dev/null && unzip -q -o -j -d "$DIR" "$DIR/{}.zip" "*.txt" > /dev/null 2>&1; then exit 0; fi
+      sleep 1
+    done; exit 1' || true
   return 0
 }
 
@@ -336,6 +342,7 @@ by_map() {
       case " $jobs " in *" $job "*) ;; *) jobs="$jobs $job" ;; esac
     else
       bad="$bad $job"
+      echo "changes.sh: $job runs: its list $name is not here, or is not one a passing job with sight wrote" >&2
     fi
   done
   for job in $jobs; do case " $bad " in *" $job "*) ;; *) ok="$ok $job" ;; esac; done
