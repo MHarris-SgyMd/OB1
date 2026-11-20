@@ -22562,6 +22562,22 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   // Without the log, everything else readable: a corrected checkpoint that is not the text now cannot be placed — unknown, unresolved found, audit in unread.
   await db.exec(`GRANT SELECT ON derivations, ob1_superseded_by TO ob1_133_reader; REVOKE SELECT ON thought_audit FROM ob1_133_reader`);
   const [outNoAudit] = await asRole([out]);
+  // Without the forget ledger and the verifications, under custom and generic plans: an unknown id answers forgotten null and an output reads review unknown — each read behind an IF, never a raised permission error (a guard inside one expression is still privilege-checked).
+  await db.exec(`GRANT SELECT ON thought_audit TO ob1_133_reader; REVOKE SELECT ON thought_forgotten, deliverable_events FROM ob1_133_reader`);
+  const asRoleSafe = async (ids: string[], plan: string) => {
+    await db.exec(`SET ROLE ob1_133_reader; SET plan_cache_mode = ${plan}`);
+    try { return (await read(ids)).thoughts!; }
+    catch (e) { return [{ id: "raised", found: false, unread: [`raised ${String((e as { code?: string }).code ?? "?")}`] } as unknown as T]; }
+    finally { await db.exec(`RESET plan_cache_mode; RESET ROLE`); }
+  };
+  const ledgerCustom = await asRoleSafe([ghost, out], "force_custom_plan");
+  const ledgerGeneric = await asRoleSafe([ghost, out], "force_generic_plan");
+  await db.exec(`GRANT SELECT ON thought_forgotten, deliverable_events TO ob1_133_reader`);
+  const guarded = (r: T[]) => r.length === 2 && r[0].found === false && r[0].forgotten === null && r[0].unread.join() === "verification,forgotten"
+    && r[1].review.state === "unknown" && r[1].validity.state === "unknown";
+  assert(guarded(ledgerCustom) && guarded(ledgerGeneric),
+    `without the forget ledger and the verifications, custom and generic plans alike: an unknown id forgotten null, the output's review and validity unknown, no permission error (${JSON.stringify(ledgerCustom[0])} | ${JSON.stringify(ledgerGeneric[0])})`);
+
   // Without thoughts itself: NOT_READABLE, naming it, not a raised permission error.
   await db.exec(`REVOKE SELECT ON thoughts FROM ob1_133_reader`);
   await db.exec(`SET ROLE ob1_133_reader`);

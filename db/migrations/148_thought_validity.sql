@@ -156,8 +156,10 @@ DECLARE
   c_cap constant int := 100;
   -- What the caller's role may read. A record kind it may not is named in
   -- `unread` and moves the axes that rest on it to unknown (rows 1 and 2).
-  -- Each read below sits behind its IF, so a table the role may not SELECT is
-  -- never planned (a SQL function's CASE branch would be).
+  -- Each read below sits behind its own plpgsql IF or ELSIF, so a table the
+  -- role may not SELECT is never planned. A guard inside one statement (a
+  -- CASE, an AND) is not enough: its table is still privilege-checked under a
+  -- generic plan, as a SQL function's CASE branch is.
   r_pointer   boolean := has_table_privilege('ob1_superseded_by', 'SELECT');
   r_proposal  boolean := has_table_privilege('supersession_proposals', 'SELECT');
   r_verify    boolean := has_table_privilege('deliverable_events', 'SELECT');
@@ -176,6 +178,8 @@ DECLARE
   v_fp_text   text;
   v_seq       bigint;
   v_ckpt_unknown boolean;
+  v_has_check boolean;
+  v_gone      jsonb;
   v_earlier   text[];
   -- validity
   v_level     int;          -- 5 superseded, 4 contested, 3 unresolved, 2 supported, 1 unchallenged
@@ -242,10 +246,16 @@ BEGIN
     IF NOT FOUND THEN
       -- Not a thought: forgotten true (139's ledger holds it), false, or null
       -- when the ledger could not be read. Every answer carries unread.
-      v_out := v_out || jsonb_build_array(jsonb_build_object('id', v_id, 'found', false,
-        'forgotten', CASE WHEN r_forgotten THEN EXISTS (SELECT 1 FROM thought_forgotten f WHERE f.thought_id = v_id) END,
-        'forgotten_at', CASE WHEN r_forgotten THEN (SELECT max(f.forgotten_at) FROM thought_forgotten f WHERE f.thought_id = v_id) END,
-        'unread', to_jsonb(v_unread)));
+      -- The ledger read sits behind its own IF: a guard inside one expression
+      -- (a CASE, an AND) still has its table privilege-checked under a
+      -- generic plan.
+      IF r_forgotten THEN
+        SELECT jsonb_build_object('id', v_id, 'found', false, 'forgotten', count(*) > 0, 'forgotten_at', max(f.forgotten_at), 'unread', to_jsonb(v_unread))
+          INTO v_gone FROM thought_forgotten f WHERE f.thought_id = v_id;
+      ELSE
+        v_gone := jsonb_build_object('id', v_id, 'found', false, 'forgotten', NULL, 'forgotten_at', NULL, 'unread', to_jsonb(v_unread));
+      END IF;
+      v_out := v_out || jsonb_build_array(v_gone);
       CONTINUE;
     END IF;
 
@@ -264,7 +274,11 @@ BEGIN
     -- own is earlier whatever the log says: a raw update of the text leaves
     -- the stored key stale (018).
     v_earlier := CASE WHEN v_fp IS DISTINCT FROM v_fp_text THEN ARRAY[v_fp] ELSE '{}' END;
-    IF r_audit AND r_verify AND EXISTS (SELECT 1 FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'verification') THEN
+    v_has_check := false;
+    IF r_verify THEN
+      v_has_check := EXISTS (SELECT 1 FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'verification');
+    END IF;
+    IF r_audit AND v_has_check THEN
       -- Every earlier key the log holds for it, unredacted: a capture's
       -- content, an update's content before and after, and an update's stored
       -- key before and after (055).
