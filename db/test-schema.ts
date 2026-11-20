@@ -22476,8 +22476,9 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   await lineage("entities", SE, [SE], [await fp(SE)], "source:[133]");
   await edit(SE, "[133] SE: a synced ticket's text, re-synced");
   const sourced = await v(SE);
-  assert(kindState(sourced, "entities") === "current",
-    `a source: pass is kept on a moved text, as rebuild_derived keeps it (${kindState(sourced, "entities")})`);
+  const sourcedKind = sourced.freshness.kinds?.find((k) => k.kind === "entities") as { moved?: string[] } | undefined;
+  assert(kindState(sourced, "entities") === "current" && (sourcedKind?.moved ?? ["absent"]).length === 0,
+    `a source: pass's extraction is kept on a moved text, as rebuild_derived keeps it, and its current kind names nothing moved (${kindState(sourced, "entities")}, ${JSON.stringify(sourcedKind?.moved)})`);
 
   // A relation carries its judge's number, uncalibrated.
   const RN = await thought("[133] RN: the newer of a related pair"), RO = await thought("[133] RO: the older of a related pair");
@@ -22506,6 +22507,18 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   const upper = await v(out3);
   assert(upper.validity.state === "contested" && reads(upper) === "current",
     `a checkpoint in upper case reads current (${upper.validity.state}/${reads(upper)})`);
+
+  // A raw update of the text leaves the stored key stale (018): a checkpoint at that key reads earlier, unresolved, not current.
+  const out4 = await thought("[133] an output edited by a raw update");
+  await db.query(`UPDATE thoughts SET content_fingerprint = content_fingerprint_of(content) WHERE id = $1::uuid`, [out4]);
+  const k0 = (await one<{ k: string }>(`SELECT content_fingerprint AS k FROM thoughts WHERE id = $1::uuid`, [out4])).k;
+  await db.query(`SELECT record_deliverable($1, $2, $3, $4::jsonb)`, [out4, spec, k0, JSON.stringify(W)]);
+  await db.query(`SELECT verify_deliverable($1, 'corrected', 'review', 'wanting', $2::jsonb)`, [out4, JSON.stringify(V2)]);
+  await db.query(`UPDATE thoughts SET content = '[133] an output edited by a raw update, now different' WHERE id = $1::uuid`, [out4]);
+  const rawEdited = await v(out4);
+  const keyAfter = (await one<{ k: string }>(`SELECT content_fingerprint AS k FROM thoughts WHERE id = $1::uuid`, [out4])).k;
+  assert(keyAfter === k0 && rawEdited.validity.state === "unresolved" && reads(rawEdited) === "earlier",
+    `a raw text update leaves the stored key stale, and a checkpoint at it reads earlier, unresolved (${keyAfter === k0}, ${rawEdited.validity.state}/${reads(rawEdited)})`);
 
   // The key now is the stored one, as rebuild_derived reads it (061, 067): a stored key that is not the text's own, lineage made on it, reads current.
   const K = await thought("[133] K: a stored key that differs");

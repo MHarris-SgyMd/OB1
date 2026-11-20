@@ -72,20 +72,23 @@
 --       facets were not read. A row 067's test finds orphaned is listed as
 --       orphaned and not read; history (a closed facet, a key's decision on a
 --       proposal) is not read, while a rejection the pass itself settled is,
---       since 067 reopens it. A structured source pass (source:<system>) is
---       not keyed on the text, and 067 keeps it: a moved text leaves it
---       current. A relation row carries its judge's number. A kind carries its
---       producers and what moved under it. A stale or requested kind no pool re-runs (metadata, section)
+--       since 067 reopens it. A structured source pass's extraction
+--       (entities produced by source:<system>) is not keyed on the text, and
+--       067 keeps it: a moved text leaves it current. A relation row carries
+--       its judge's number. A kind carries its producers and what moved under
+--       its stale rows. A stale or requested kind no pool re-runs (metadata, section)
 --       says so (no_pool), on its rows and on the kind.
 --     * judges' numbers (row 9) ride under judge with calibrated: false.
 --     * unread: the record kinds the caller's role could not SELECT, by name.
 --
 --   THE CHECKPOINT RULE (the record's, below its states table). A
---   verification's checkpoint is free text. Equal to the key now (stored or
---   the text's): current; equal to an earlier key from the log (a capture's
---   content, an update's content and stored key before and after,
---   unredacted): earlier; else unmatched, read as applying. Without the log,
---   a checkpoint that is not the key now reads unknown.
+--   verification's checkpoint is free text, compared case-blind. Equal to the
+--   text's own key now: current; equal to an earlier key — a stored key that
+--   is not the text's own (a raw update of the text leaves it stale, 018), or
+--   one from the log (a capture's content, an update's content and stored key
+--   before and after, unredacted) — earlier; else unmatched, read as
+--   applying. Without the log, a checkpoint that is neither reads unknown.
+--   The log is read for this only when the thought has a verification.
 --
 --   Not here: the valid window (SMD-2011), a settled part (SMD-4446), what is
 --   fit to act on (SMD-3900). MINOR under the version rules: an additive
@@ -253,13 +256,19 @@ BEGIN
     v_fp := COALESCE(v_t.content_fingerprint, content_fingerprint_of(v_t.content));
     v_fp_text := content_fingerprint_of(v_t.content);
     v_seq := NULL;
-    v_earlier := '{}';
     IF r_audit THEN
       SELECT max(a.seq) INTO v_seq FROM thought_audit a WHERE a.thought_id = v_id;
+    END IF;
+    -- The earlier keys place a verification's checkpoint, so they are read
+    -- only for a thought that has one. A stored key that is not the text's
+    -- own is earlier whatever the log says: a raw update of the text leaves
+    -- the stored key stale (018).
+    v_earlier := CASE WHEN v_fp IS DISTINCT FROM v_fp_text THEN ARRAY[v_fp] ELSE '{}' END;
+    IF r_audit AND r_verify AND EXISTS (SELECT 1 FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'verification') THEN
       -- Every earlier key the log holds for it, unredacted: a capture's
       -- content, an update's content before and after, and an update's stored
       -- key before and after (055).
-      SELECT COALESCE(array_agg(DISTINCT x.fp), '{}') INTO v_earlier
+      SELECT v_earlier || COALESCE(array_agg(DISTINCT x.fp), '{}') INTO v_earlier
         FROM thought_audit a
         CROSS JOIN LATERAL (VALUES
             (CASE WHEN a.action = 'capture' THEN content_fingerprint_of(a.diff->>'content') END),
@@ -268,8 +277,9 @@ BEGIN
             (CASE WHEN a.action = 'update' AND jsonb_typeof(a.diff->'content_fingerprint') = 'object' THEN a.diff->'content_fingerprint'->>'before' END),
             (CASE WHEN a.action = 'update' AND jsonb_typeof(a.diff->'content_fingerprint') = 'object' THEN a.diff->'content_fingerprint'->>'after' END)) AS x(fp)
        WHERE a.thought_id = v_id AND a.redacted_at IS NULL AND jsonb_typeof(a.diff) = 'object' AND x.fp IS NOT NULL;
-      v_earlier := array_remove(array_remove(v_earlier, v_fp), v_fp_text);
     END IF;
+    -- Only the text's own key is current for a checkpoint.
+    v_earlier := array_remove(v_earlier, v_fp_text);
 
     -- --------------------------------------------------------------- validity
     v_level := 1;
@@ -342,9 +352,9 @@ BEGIN
         FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'verification'
        ORDER BY e.seq DESC LIMIT 1;
       IF FOUND AND v_v.status = 'corrected' THEN
-        v_reads := CASE WHEN lower(v_v.checkpoint) IN (v_fp, v_fp_text) THEN 'current'
-                        WHEN NOT r_audit THEN 'unknown'
+        v_reads := CASE WHEN lower(v_v.checkpoint) = v_fp_text THEN 'current'
                         WHEN lower(v_v.checkpoint) = ANY(v_earlier) THEN 'earlier'
+                        WHEN NOT r_audit THEN 'unknown'
                         ELSE 'unmatched' END;
         v_ckpt_unknown := v_reads = 'unknown';
         v_level := GREATEST(v_level, CASE WHEN v_reads IN ('earlier', 'unknown') THEN 3 ELSE 4 END);
@@ -433,9 +443,9 @@ BEGIN
         v_checked := true;
         v_rrecs := v_rrecs || jsonb_build_array(jsonb_build_object(
           'kind', 'verification', 'seq', v_v.seq, 'status', v_v.status, 'checkpoint', v_v.checkpoint,
-          'checkpoint_reads', CASE WHEN lower(v_v.checkpoint) IN (v_fp, v_fp_text) THEN 'current'
-                                   WHEN NOT r_audit THEN 'unknown'
-                                   WHEN lower(v_v.checkpoint) = ANY(v_earlier) THEN 'earlier' ELSE 'unmatched' END,
+          'checkpoint_reads', CASE WHEN lower(v_v.checkpoint) = v_fp_text THEN 'current'
+                                   WHEN lower(v_v.checkpoint) = ANY(v_earlier) THEN 'earlier'
+                                   WHEN NOT r_audit THEN 'unknown' ELSE 'unmatched' END,
           'by', jsonb_build_object('name', v_v.actor_name, 'kind', v_v.actor_kind), 'at', v_v.at));
       END LOOP;
       v_rstate := CASE WHEN v_pending THEN 'pending'
@@ -493,12 +503,12 @@ BEGIN
             'kind', v_d.artifact_kind, 'artifact', v_d.artifact_id, 'produced_by', v_d.produced_by, 'state', 'orphaned'));
           CONTINUE;
         END IF;
-        -- A structured source pass (produced_by source:<system>) reads its
-        -- source's own record, not the text: 067 keeps it on a moved text, and
-        -- so does this read.
+        -- A structured source pass's extraction (entities produced by
+        -- source:<system>) reads its source's own record, not the text: 067's
+        -- entities arm keeps it on a moved text, and so does this read.
         v_row_state := CASE
           WHEN v_d.stale_since IS NOT NULL OR (v_d.artifact_kind = 'proposal' AND v_d.proposal_status = 'stale') THEN 'requested'
-          WHEN cardinality(v_d.moved) > 0 AND v_d.produced_by NOT LIKE 'source:%' THEN 'stale'
+          WHEN cardinality(v_d.moved) > 0 AND NOT (v_d.artifact_kind = 'entities' AND v_d.produced_by LIKE 'source:%') THEN 'stale'
           WHEN v_d.legacy THEN 'legacy'
           ELSE 'current' END;
         v_rank := CASE v_row_state WHEN 'stale' THEN 4 WHEN 'requested' THEN 3 WHEN 'legacy' THEN 2 ELSE 1 END;
@@ -521,7 +531,7 @@ BEGIN
     -- has it (the record's shape).
     SELECT COALESCE(jsonb_agg(jsonb_build_object('kind', k.kind, 'state', k.state, 'produced_by', k.produced_by,
              'moved', COALESCE((SELECT to_jsonb(array_agg(DISTINCT m)) FROM jsonb_array_elements(v_frecs) r2, jsonb_array_elements_text(r2->'moved') m
-                                 WHERE r2->>'kind' = k.kind AND r2->>'state' <> 'orphaned'), '[]'::jsonb),
+                                 WHERE r2->>'kind' = k.kind AND r2->>'state' = 'stale'), '[]'::jsonb),
              'no_pool', k.no_pool) ORDER BY k.kind), '[]'::jsonb) INTO v_kinds
       FROM (SELECT r->>'kind' AS kind,
                    (ARRAY['current', 'legacy', 'requested', 'stale'])[max(CASE r->>'state' WHEN 'stale' THEN 4 WHEN 'requested' THEN 3 WHEN 'legacy' THEN 2 ELSE 1 END)] AS state,
@@ -543,4 +553,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_validity(uuid[]) IS
-  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given (a list over ten times the cap refused before de-duplication; a role that cannot read thoughts NOT_READABLE): {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending or stale proposal on it as the falling side with a text moved since judged, or stale; a corrected verification at an earlier checkpoint), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; a pass-settled rejection read, a key''s decision not; a source: pass kept on a moved text, as 067 keeps it; a relation''s judge number carried; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';
+  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given (a list over ten times the cap refused before de-duplication; a role that cannot read thoughts NOT_READABLE): {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending or stale proposal on it as the falling side with a text moved since judged, or stale; a corrected verification at an earlier checkpoint), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; a pass-settled rejection read, a key''s decision not; a source: pass''s extraction kept on a moved text, as 067''s entities arm keeps it; a kind''s moved from its stale rows; a checkpoint current only at the text''s own key, a stale stored key earlier; a relation''s judge number carried; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';
