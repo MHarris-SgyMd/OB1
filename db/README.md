@@ -5525,7 +5525,10 @@ already extracted that an edit pools again (board-sync re-rendering a
 ticket) keeps its entities until it is extracted again, so it holds nothing
 back, whenever the edit came; one whose extraction found no entity counts,
 and so does one whose entities are another extraction key's, as after a
-model's switch, which drains first as `extract`'s own rule asks. A thought
+model's switch, which drains first, as the backlog exception above asks, and
+one whose extracted entities are all ones a sync names structurally (053's
+`source:` rows win the pair), which holds the join at each re-render until
+extracted again, as before. A thought
 captured today before the period that the period itself first pools (a
 fresh brain, a key's switch) counts as a write since: no one's neighbour,
 but consolidation may then start beside it. Until SMD-4468 the join waited
@@ -5539,8 +5542,8 @@ extraction on a model server of one slot. A limit stands: a backlog thought
 a pause has taken goes behind the newer writes (below), so while they come
 faster than extraction takes them it is not reached, and the join waits for
 it, as before; a stalled one is joined past only once extraction holds
-nothing else. Under a steady inflow the period need not end until the
-writes stop. A live write pauses the passes (above),
+nothing else. Under a steady inflow the period can run on until the writes
+stop. A live write pauses the passes (above),
 a call in hand a minute old aborted while paused and its thought set back. A
 long thought's answered windows are kept (093, [Long thoughts
 resume](#extract-entitiests)), so one longer than every pause's bound advances

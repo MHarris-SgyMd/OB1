@@ -244,8 +244,9 @@
  * landing after the join, which no read waits for. Until SMD-4468 the join
  * waited for extraction's whole pool, which seldom drained while writes kept
  * arriving — 016's trigger pools each as it is written — so consolidation
- * joined only at a poll that found it empty, mostly once they stopped. Joined on that backlog, the
- * subject sweep waits for the whole pool, below. A limit stands (review
+ * joined only at a poll that found it empty, mostly once they stopped. Where
+ * consolidation joins on the backlog, the subject sweep waits for the whole
+ * pool, below. A limit stands (review
  * passes 1 and 2, the maintainer's choice to name it): a backlog thought a
  * pause has taken is dated behind the captures since, as below, so while
  * they come faster than extraction takes them it is not reached, and the
@@ -1104,8 +1105,9 @@ const backlogCut = (sql: SQL, since: string, job: string) =>
  * subjectsPool's. Extraction's with `backlogSince` (ISO text of the
  * database's clock: a period's start), not claims only, carries
  * `backlogLeft`: whether a thought captured before the period is still to
- * extract (SMD-4468, backlogCut) — every neighbour of a thought captured
- * since, and today's kept for the join's order beside them.
+ * extract, backlogCut's exceptions aside (SMD-4468): every neighbour of a
+ * thought captured since, and today's thoughts pooled before the period, so
+ * consolidation does not start beside a long one.
  */
 async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: string, unread?: (e: Error) => void, claimsOnly = false, mineSince?: Date, backlogSince?: string): Promise<Pool> {
   if (pass === "subjects") return subjectsPool(sql, job, { mineSince });
@@ -3955,11 +3957,11 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         if (pools === null) return stopped();
         behindPolls = queuesBehind(pools.extract) ? behindPolls + 1 : 0;
         // What the join waits for (SMD-4468, the maintainer's choices): the thoughts captured before the period began
-        // not yet extracted, a write since dated today and an edit of a thought extracted aside (backlogCut). A thought
+        // not yet extracted, a write since dated today and an edit of a thought already extracted aside (backlogCut). A thought
         // captured since is judged against neighbours captured on an earlier UTC date (029), so once those are
         // extracted, so are its neighbours — but across 00:00 UTC, consolidate.ts's exception, and a write dated an
-        // earlier day landing after the join — and under an inflow the whole pool, which 016's trigger fills between
-        // the follower's polls, seldom drained: consolidation joined mostly once the inflow stopped.
+        // earlier day landing after the join. Main's rule waited for the whole pool, which 016's trigger refills between
+        // polls; under an inflow it seldom drained, so consolidation joined mostly once the inflow stopped.
         if (drained(pools.extract) && statementHeld.has("consolidate") && !subjectsRuns()) {
           out("  the pools drained, consolidation held until a restart — the period ends");
           await stopPasses(false);
@@ -4049,8 +4051,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // extraction's whole pool has drained, or a statement holds it, where consolidation joined on the backlog alone
       // (SMD-4468 review pass 2, the maintainer's choice).
       // Its claims read first each poll while extraction works (about 50 ms at 1M claims, review pass 4); the pool
-      // whole only once they are empty (review pass 3). Joined past on the claims, the trigger leaving none unpooled,
-      // or at the drain.
+      // whole only once they are empty (review pass 3). A join past is read off the claims alone, since the trigger
+      // leaves none unpooled; otherwise it starts at the drain.
       if (consolidating && sweepWaits && subjectsRuns() && sweepJob === null) {
         if (statementHeld.has("extract")) sweepWaits = false;
         else {

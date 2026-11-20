@@ -2488,10 +2488,11 @@ before consolidation joins; one landing after is judged without a wait, and
 a thought judged before it misses its pair with it. A backlog thought a
 pause has taken goes behind the newer writes, and the join waits until
 extraction reaches it, which, while writes outpace extraction, comes only
-once they slow, as before. So does a thought whose entities are an older
-extraction key's, after a model's switch. Consolidation's judge calls now run while such writes
+once they slow, as before. A thought whose entities are only an older
+extraction key's, after a model's switch, holds the join too, until
+extraction re-extracts it. Consolidation's judge calls now run while such writes
 arrive: on a model server of one slot they share it with extraction. Under
-a steady inflow the period need not end until the writes stop. Beside consolidation runs the subject sweep
+a steady inflow the period can run on until the writes stop. Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
 model's: started once a period, once extraction's whole pool has drained or

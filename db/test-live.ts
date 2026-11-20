@@ -30232,7 +30232,7 @@ if (want("38c")) await (async () => {
     });
     const retiredE = Number((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE extraction_key = 'extract:retired-model@p1'`)[0].c);
     assert(begunE && !joinedInFlowE && leftE === archive.length && retiredE === 0 && e.allJudged && e.code === 0,
-      `…and after an extraction model's switch, thoughts carrying only the old key's entities are backlog: sixteen pooled again behind the inflow hold the join while it lasts, and once it ends they are extracted under the current key and every note is judged (joined during it ${joinedInFlowE}; ${leftE} of ${archive.length} still to extract at its end; ${retiredE} retired row(s) left; ${e.inflow.length} captured, all judged after ${e.allJudged}; exit ${e.code}${!joinedInFlowE && e.allJudged ? "" : lastLines()})`);
+      `…and after an extraction model's switch, thoughts carrying only the old key's entities are backlog: sixteen pooled again behind the inflow hold the join through 8 s of it, all sixteen still to extract, and once it ends they are extracted under the current key and every note is judged (joined during it ${joinedInFlowE}; ${leftE} of ${archive.length} still to extract at its end; ${retiredE} retired row(s) left; ${e.inflow.length} captured, all judged after ${e.allJudged}; exit ${e.code}${!joinedInFlowE && e.allJudged ? "" : lastLines()})`);
   } finally {
     await unpoolSubjects().catch(() => {});
     await done();
