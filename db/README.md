@@ -5133,6 +5133,12 @@ applies can be chosen as a deadlock's victim, fail with `40P01` and need
 running again (14 and 12 of 20 applies with two forgets looping; the
 migrator applied every time). 064 and 084 took both tables in one file the
 same way.
+An earlier definer applied by hand over 148 puts its bodies back: 063's
+three know no part (its lineage writer refuses the kind, so a part's write
+fails), and neither its `rebuild_derived` nor 067's has an arm for one.
+Where preflight finds `rebuild_derived` from before 067 and the parts'
+table standing, its remedy names 148 after 067. It does not see 067 alone
+re-applied over 148: `migrate.ts --reapply` runs every file in order.
 test-schema [133], test-upgrade [20ck].
 
 ### `consolidate.ts`

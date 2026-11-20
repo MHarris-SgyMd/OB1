@@ -2993,7 +2993,30 @@ else {
   const pre067 = await run(SQL_ENV);
   assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql\./.test(fix(pre067.out, "lineage")),
          `063 re-applied over 067 is a warning on rebuild_derived, naming 067 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
+  // The settled parts' file after 067 (SMD-4446, review pass 5): it last defines rebuild_derived (on 067's body),
+  // derivation_descendants and ob1_record_derivation, and 063 re-applied by hand put all three back. The remedy names
+  // it where its table stands, and 067 alone on a brain from before it, where the migrator applies the file in its turn.
+  assert(/Apply db\/migrations\/067_pass_settles_stale\.sql\. Then apply db\/migrations\/148_settled_parts\.sql — it last defines rebuild_derived \(on 067's body\), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that know no settled part: a moved text sets no pending part stale and a part's write is refused \(bun migrate\.ts --reapply runs every file in order\)\./.test(fix(pre067.out, "lineage")),
+         `…and the remedy names the settled parts' file after 067, the last definer of the three bodies 063 put back (${fix(pre067.out, "lineage").trim().slice(0, 240)})`);
+  const parts067 = new SQL({ url: LIVE, max: 1 });
+  await parts067.unsafe(`ALTER TABLE settled_parts RENAME TO settled_parts_away`);
+  const pre067NoParts = await run(SQL_ENV);
+  await parts067.unsafe(`ALTER TABLE settled_parts_away RENAME TO settled_parts`);
+  assert(pre067NoParts.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067/.test(pre067NoParts.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql\./.test(fix(pre067NoParts.out, "lineage")) && !/settled_parts/.test(fix(pre067NoParts.out, "lineage")),
+         `…and 067 alone on a brain with no parts' table (${fix(pre067NoParts.out, "lineage").trim().slice(0, 240)})`);
+  // The remedy followed, a file at a time: 067 alone leaves rebuild_derived with no arm for a part, the walk with no
+  // part in its order and the lineage writer, 063's, refusing the kind; the parts' file after it puts all three back.
+  const knowsParts = async () => (await parts067.unsafe(`
+    SELECT (SELECT w.prosrc LIKE '%ob1:a-moved-text-stales-its-parts%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS arm,
+           (SELECT w.prosrc LIKE '%''subject'', ''part'')%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS kind,
+           (SELECT w.prosrc LIKE '%''proposal'', ''part'', ''metadata''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.derivation_descendants(uuid, integer, integer)')) AS walk`))[0] as { arm: boolean; kind: boolean; walk: boolean };
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
+  const alone067 = await knowsParts();
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => /^\d{3}_settled_parts\.sql$/.test(f) });
+  const after067 = await knowsParts();
+  await parts067.close();
+  assert(alone067.arm === false && alone067.kind === false && alone067.walk === false && after067.arm === true && after067.kind === true && after067.walk === true,
+         `067 alone, as the remedy stood, leaves the three bodies knowing no part; the settled parts' file after it puts them back (${JSON.stringify(alone067)} then ${JSON.stringify(after067)})`);
   // 029 re-applied by hand over 110 (SMD-2313, SMD-3248, SMD-3249) — this
   // ladder's own state since the queue section re-applied 029 alone: 029's
   // two-argument listing stands BESIDE 110's seven-argument one, and a call

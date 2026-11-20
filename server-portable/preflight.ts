@@ -618,6 +618,17 @@ const APPLY_110 = "Apply db/migrations/110_listing_pages.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
 const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
 /**
+ * 063 also holds rebuild_derived, derivation_descendants and
+ * ob1_record_derivation, which the settled parts' file last defines
+ * (SMD-4446: rebuild_derived on 067's body): 063 re-applied by hand puts all
+ * three back, and 067 applied alone after it leaves them knowing no part — a
+ * moved text sets no pending part stale, and the lineage writer refuses the
+ * kind, so a part's write fails. Said after 067's remedy where the parts'
+ * table stands; on a brain from before the file the migrator applies it in
+ * its turn, and its guard would refuse a hand apply ahead of 114.
+ */
+const THEN_PARTS = " Then apply db/migrations/148_settled_parts.sql — it last defines rebuild_derived (on 067's body), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that know no settled part: a moved text sets no pending part stale and a part's write is refused (bun migrate.ts --reapply runs every file in order).";
+/**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
  * and THAT body carries it (055). A trigger that calls the function it is
@@ -2665,6 +2676,8 @@ if (configFailed) {
                      -- on a text move (its sentinel); 063 re-applied by hand over 067 puts the body back that keeps every rejected row.
                      to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_067,
                      (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
+                     -- The settled parts' table (SMD-4446), where its file is applied: that file last defines rebuild_derived, so 067's remedy names it after.
+                     to_regclass('public.settled_parts') IS NOT NULL AS has_parts,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
                      -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
@@ -2680,7 +2693,7 @@ if (configFailed) {
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
@@ -2854,7 +2867,7 @@ if (configFailed) {
             } else if (reopenOlder) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but rebuild_derived is from before 067 (063 re-applied by hand over it): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again (SMD-2297). ${coverage}`,
-                  ledgerRemedy("067", APPLY_067));
+                  ledgerRemedy("067", bodies.has_parts ? `${APPLY_067}${THEN_PARTS}` : APPLY_067));
             } else if (Number(c.lineage_pairs)) {
               // 070 (SMD-2313): a proposal standing on a lineage pair — judged
               // before 066, or recorded raw — is a reviewer's alone: a pending

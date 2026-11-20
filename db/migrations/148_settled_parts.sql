@@ -252,6 +252,14 @@
 --   a `relation` or `subject` row (SMD-4474), and now fails there on one
 --   holding a part and neither of those; this file re-applied alone
 --   validates over its own kind.
+--   An earlier definer applied by hand over this file puts its bodies back.
+--   063's three know no part: its lineage writer refuses the kind, so a
+--   part's write fails, and its rebuild_derived, like 067's, has no arm for
+--   one, so a moved text sets no pending part stale. Preflight reads 067's
+--   sentinel and not this file's. Where it finds rebuild_derived from before
+--   067 with the parts' table standing, its remedy names this file after
+--   067 (review pass 5: it named 067 alone, which left the three bodies as
+--   063's and 067's). 067 alone re-applied over this file it does not see.
 --   MINOR under MAINTAINING.md's version rules. test-schema [133],
 --   test-upgrade [20ck].
 --
