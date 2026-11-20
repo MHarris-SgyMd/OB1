@@ -6138,9 +6138,11 @@ and its answer is written through the 11-argument `update_thought` with
 tags row at the text, the mark cleared, even when the tags came out the same
 (no event then). The run is refused before 148. A thought the policy refuses
 is failed naming the rule, nothing sent; an answer that is not tags, or a 400,
-413 or 422, is failed and nothing written, as is a thought whose metadata is
-SQL NULL or no JSON object, before any call; a tag key the row holds and the
-answer leaves out is cleared; a provider error is read by `claim-loop.ts`'s rule; an
+413 or 422, is failed and nothing written (but a 400 or 422 to three thoughts
+in a row, none answered between, is the request's shape and stops the run,
+exit 2), as is a thought whose metadata is null or no JSON object, before any
+call; a tag key the row holds and the answer leaves out is cleared (a list to
+`[]`, the type keys to null); a provider error is read by `claim-loop.ts`'s rule; an
 edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
 key other than the recorded one needs `--switch-key`; `--status` and
 `--dry-run` write nothing. Not yet: `rebuild_derived`'s requeue (PR 2),

@@ -45,10 +45,11 @@
  * extractMetadata, the capture's own call (the prompt, the model, the
  * temperature, the people gate), and the answer is written through the
  * 11-argument update_thought: the patch tagsOverExisting builds, with
- * every tag key the row holds and the answer leaves out nulled (the answer is
+ * every tag key the row holds and the answer leaves out cleared (the answer is
  * the thought's tags: old people, a type_raw, outlived it otherwise; review
- * pass 1) and a stale failure marker cleared — a null for a key the row does
- * not hold left out, so it moves nothing — the
+ * pass 1) — a list key to [], as a reader's jsonb_array_length expects, the
+ * type keys to null (review pass 2) — and a stale failure marker cleared; a
+ * clear of a key the row does not hold is left out, so it moves nothing — the
  * row's stamp as p_if_unchanged_since, the worker as the actor, and
  * `p_lineage = {"metadata": metadataRecipe(…)}`. Migration 148 makes that
  * write record the tags row — at the text, under the recipe, the mark
@@ -74,10 +75,14 @@
  *     422, which are this thought's (its length, a filter): the claim is
  *     failed and nothing is written — the tags the thought had stand. A
  *     capture would have written placeholder tags here; a re-tag never writes
- *     a tag set no model produced over one that one did;
- *   - a thought whose metadata is SQL NULL or no JSON object (a raw
- *     writer's) takes no patch through update_thought: it is failed before
- *     any call, nothing sent (review pass 1).
+ *     a tag set no model produced over one that one did. But a 400 or 422
+ *     to three thoughts in a row, none answered between, is the request's
+ *     shape (a field the server refuses: reasoning_effort, response_format),
+ *     not the thoughts': the run stops, exit 2, those three failed for
+ *     --retry-failed once it is fixed (review pass 2);
+ *   - a thought whose metadata is null or no JSON object (a raw writer's)
+ *     takes no patch through update_thought: it is failed before any call,
+ *     nothing sent (review pass 1).
  *
  * ── The cost, and the key ───────────────────────────────────────────────────
  * One chat call per thought in the backlog, the capture's call. On Daemonic
@@ -150,6 +155,10 @@ const REFUSED_MARK = String(metadataRefused().metadata_extraction_failed);
 
 /** The statuses that are this thought's, not the request's: its length or a content filter (400), its size (413), its content (422). */
 const THOUGHT_STATUSES: ReadonlySet<string> = new Set(["400", "413", "422"]);
+/** A 400 or 422 to this many thoughts in a row, none answered between, is the request's shape, not theirs (review pass 2). */
+const SHAPE_STREAK = 3;
+/** The tag keys whose value is a list: cleared to [], not null, so a reader's jsonb_array_length or _elements meets a list (review pass 2). */
+const LIST_TAGS: ReadonlySet<string> = new Set(["people", "action_items", "dates_mentioned", "topics"]);
 
 /**
  * What one re-tag run is asked to do — the CLI's flags, typed. A number left
@@ -480,6 +489,9 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   const halt = new AbortController();
   let retagged = 0, changedTags = 0, current = 0, failed = 0, refused = 0, changedMeanwhile = 0, vanished = 0, lost = 0, beats = 0, calls = 0;
   let configError = null as string | null;
+  /** 400s and 422s to thoughts in a row, none answered between; at SHAPE_STREAK the run stops (configError). */
+  let shapeStreak = 0;
+  let shapeStopped = false;
   const activeWorkers = new Set<string>();
   const taken = new Set<string>();
   const claiming = { n: 0 };
@@ -510,14 +522,14 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   }
 
   /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read. */
-  async function retagRow(row: Row): Promise<Outcome> {
+  async function retagRow(row: Row, workerId: string): Promise<Outcome> {
     if (!row.due) return { outcome: "current" };
     // update_thought merges no patch into SQL NULL (NULL || patch) and grows a non-object into an array (review pass 1):
     // nothing is sent for a thought whose tags could not be written.
     if (row.metadata === null || typeof row.metadata !== "object" || Array.isArray(row.metadata)) {
-      return { outcome: "failed", error: `its metadata is ${row.metadata === null ? "SQL NULL" : "no JSON object"} (a raw writer's): update_thought writes no tags there, so nothing was sent` };
+      return { outcome: "failed", error: `its metadata is ${row.metadata === null ? "null" : "no JSON object"} (a raw writer's): update_thought writes no tags there, so nothing was sent` };
     }
-    const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), ...(row.metadata ? { metadata: row.metadata } : {}), content: row.content };
+    const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata: row.metadata, content: row.content };
     // The gate the call meets, asked first so a refusal names its rule: nothing is sent for this thought.
     const gate = mayLeaveBox(subject, cfg.chat, cfg.egress);
     if (!gate.allowed) return { outcome: "failed", refused: true, error: `the egress policy refused it: ${gate.reason}; --retry-failed revisits it` };
@@ -531,6 +543,12 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       const status = /^provider_(\d{3})$/.exec(mark);
       // A 400, 413 or 422 is this thought's (its length, a filter); any other status the claim workers' rule reads.
       if (status && !THOUGHT_STATUSES.has(status[1])) throw new ProviderError(`the tags' call answered ${status[1]}`, "http", Number(status[1]));
+      if (status && status[1] !== "413" && ++shapeStreak >= SHAPE_STREAK && !configError) {
+        configError = `the provider answered ${status[1]} to ${SHAPE_STREAK} thoughts in a row, none answered between — the request's shape, not the thoughts' (often a field the server refuses: reasoning_effort, which OB1_METADATA_REASONING sets, or response_format)`;
+        shapeStopped = true;
+        stopping = true;
+        halt.abort();
+      }
       return { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
     }
     if (hardStopped) return { outcome: "abandoned" };
@@ -541,9 +559,11 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     // event for a re-tag that came out the same, which 148 settles with none (sync-linear.ts's compare does the same).
     // The answer is the thought's tags: a tag key the row holds and the answer leaves out is cleared too, as
     // tagsOverExisting does only after a fallback (review pass 1: old people and a type_raw outlived a settled re-tag).
+    shapeStreak = 0;
     const over = tagsOverExisting(answer);
-    for (const k of TAG_KEYS) if (!(k in over)) over[k] = null;
-    const patch = Object.fromEntries(Object.entries(over).filter(([k, v]) => v !== null || (row.metadata?.[k] ?? null) !== null));
+    for (const k of TAG_KEYS) if (!(k in over)) over[k] = LIST_TAGS.has(k) ? [] : null;
+    const cleared = (v: unknown): boolean => v === null || (Array.isArray(v) && v.length === 0);
+    const patch = Object.fromEntries(Object.entries(over).filter(([k, v]) => !cleared(v) || (row.metadata?.[k] ?? null) !== null));
     const [r] = (await sql`
       SELECT update_thought(
         ${row.id}::uuid, NULL::text, ${patch}::jsonb, NULL::vector, NULL::jsonb,
@@ -554,7 +574,12 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     if (r.r.error === "STALE_READ") {
       // Past the hard stop the row may be another worker's: a requeue would take it from its holder.
       if (hardStopped) return { outcome: "abandoned" };
-      await sql`SELECT requeue_thought_work(${JOB}, ${row.id}::uuid)`;
+      // requeue_thought_work's reset, on this worker's own claim alone: a lease that lapsed and was taken since is the
+      // new holder's (review pass 2, as the pool's requeue).
+      await sql`
+        UPDATE thought_work_claims
+           SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL, finished_at = NULL, enqueued_at = now(), worker_id = NULL
+         WHERE work_type = ${JOB} AND thought_id = ${row.id}::uuid AND status = 'claimed' AND worker_id = ${workerId}`;
       return { outcome: "changed" };
     }
     return { outcome: "failed", error: `update_thought: ${r.r.error}` };
@@ -599,7 +624,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
           const streak = { suspect: false };
           for (let attempt = 0; outcome === null; attempt++) {
             try {
-              outcome = await retagRow(row);
+              outcome = await retagRow(row, workerId);
             } catch (e) {
               if (hardStopped) return "stop";
               const turn = await thoughtFault(faults, { id: b.thought_id, workerId, attempt, streak, backFirst }, e);
@@ -714,8 +739,9 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     err(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
   }
   if (configError) {
-    err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}\n` +
-      "  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider. Nothing was marked failed.");
+    err(`\n  The provider refused the request itself: ${configError.slice(0, 400)}\n` +
+      "  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider. " +
+      (shapeStopped ? `The ${SHAPE_STREAK} thoughts it answered so are failed: once it is fixed, re-run with --retry-failed.` : "Nothing was marked failed."));
     return 2;
   }
   if (stopping) return 130;

@@ -86,7 +86,8 @@ Only extract what's explicitly there.`;
  * cannot remove a key; null is the nearest, and a patch compare that treats
  * null and absent as one writes nothing when there was none. One definition
  * for every writer that edits a tagged row (db/sync-linear.ts, SMD-1954; the
- * re-tag worker, db/retag.ts, SMD-2298).
+ * re-tag worker, db/retag.ts, SMD-2298, which also clears every tag key a full
+ * answer leaves out, its answer being the thought's tags).
  */
 export function tagsOverExisting(answer: Record<string, unknown>): Record<string, unknown> {
   if (!("metadata_extraction_failed" in answer)) return { metadata_extraction_failed: null, ...answer };

@@ -23668,7 +23668,7 @@ if (want("29")) {
     const ANSWER = { people: ["Ada"], action_items: [], dates_mentioned: [], topics: ["ledger"], type: "task" };
     const bodies: string[] = [];
     /** Thoughts answered otherwise, by a marker in their text (review pass 1): a status, or prose; a 408 answers once. */
-    const SPECIAL = new Map<string, number | "prose" | "slow">();
+    const SPECIAL = new Map<string, number | "prose" | "slow" | "partial">();
     let raced = false;
     let raceId = "";
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
@@ -23676,13 +23676,15 @@ if (want("29")) {
       bodies.push(body);
       if (!raced && raceId && body.includes("[29] race")) {
         raced = true;
-        await sql`UPDATE thoughts SET content = '[29] race, edited meanwhile', content_fingerprint = content_fingerprint_of('[29] race, edited meanwhile') WHERE id = ${raceId}::uuid`;
+        const edited = `[29] race, edited meanwhile ${raceId.slice(0, 8)}`;
+        await sql`UPDATE thoughts SET content = ${edited}, content_fingerprint = content_fingerprint_of(${edited}) WHERE id = ${raceId}::uuid`;
       }
       const special = [...SPECIAL.entries()].find(([marker]) => body.includes(marker));
       if (special) {
         const [marker, answer] = special;
         if (answer === 408) SPECIAL.delete(marker);
         if (typeof answer === "number") return new Response("stub: not this time", { status: answer });
+        if (answer === "partial") return Response.json({ choices: [{ message: { content: JSON.stringify({ topics: ["p"], type: "idea" }) } }] });
         if (answer === "slow") {
           await Bun.sleep(1500);
           return Response.json({ choices: [{ message: { content: JSON.stringify(ANSWER) } }] });
@@ -23774,6 +23776,9 @@ if (want("29")) {
       // --limit 1: the backlog pooled, one thought re-tagged, the rest left pending; the key recorded.
       const one = await retag({ limit: 1 });
       const afterOne = await claims();
+      // Which of the six --limit 1 took is a tie (one statement pooled them): B, answered with the stub's own tags, is
+      // the gated run's one "the same" only when it was still pending (review pass 2: asserted as fixed, it flaked).
+      const bTookFirst = afterOne.find((c) => c.id === B)?.status === "succeeded";
       assert(one.code === 0 && one.out.includes("pool: 6 thought(s) added, 0 re-tagged before and put back") && bodies.length === 1 && afterOne.filter((c) => c.status === "succeeded").length === 1 && afterOne.filter((c) => c.status === "pending").length === 5 && (await configured()) === JOB,
         `--limit 1 pools the six, re-tags one with one call, leaves five pending, exit 0, and records ${JOB} (${one.code}: ${bodies.length} call(s), ${afterOne.map((c) => c.status).join(",")})`);
 
@@ -23784,7 +23789,7 @@ if (want("29")) {
       const byId = new Map((await claims()).map((c) => [c.id, c]));
       const [aMeta, eMeta, bMeta, fMeta] = [await meta(A), await meta(E), await meta(B), await meta(F)];
       const bAfter = await stampOf(B);
-      assert(gatedRun.code === 1 && gatedRun.out.includes("pool: 2 thought(s) added") && /\n {2}6 re-tagged \(/.test(gatedRun.out) && gatedRun.out.includes("1 failed (1 refused by the egress policy, nothing sent), 1 changed while re-tagged and re-queued") && /6 re-tagged \(5 with the tags changed, 1 the same/.test(gatedRun.out)
+      assert(gatedRun.code === 1 && gatedRun.out.includes("pool: 2 thought(s) added") && /\n {2}6 re-tagged \(/.test(gatedRun.out) && gatedRun.out.includes("1 failed (1 refused by the egress policy, nothing sent), 1 changed while re-tagged and re-queued") && new RegExp(`6 re-tagged \\(${bTookFirst ? 6 : 5} with the tags changed, ${bTookFirst ? 0 : 1} the same`).test(gatedRun.out)
           && byId.get(R)?.status === "failed" && /^the egress policy refused it: OB1_EGRESS_DENY marker:secret-29 matches this retag/.test(byId.get(R)?.last_error ?? "") && !bodies.some((b) => b.includes("secret-29")) && (await tagsRow(R)) === undefined,
         `under OB1_EGRESS_DENY=marker:secret-29 the run re-tags the rest and fails R naming the term, nothing of it sent, exit 1 (${gatedRun.code}: ${line(gatedRun.out, "re-tagged (")}; R ${byId.get(R)?.status}: ${byId.get(R)?.last_error?.slice(0, 90)})`);
       assert(JSON.stringify(aMeta.topics) === '["ledger"]' && aMeta.type === "task" && JSON.stringify(aMeta.people) === '["Ada"]' && settled(await tagsRow(A)) && settled(await tagsRow(M)) && settled(await tagsRow(S)),
@@ -23830,9 +23835,10 @@ if (want("29")) {
       const P400 = await plant("[29] P400 tagged, refused by its content", { topics: ["t"], type: "idea" });
       const TONLY = await plant("[29] TONLY, a type and no topics", { type: "idea" });
       const PONLY = await plant("[29] PONLY, topics and no type", { topics: ["x"] });
+      const O2 = await plant("[29] O2, tagged in full long ago", { people: ["Zed"], action_items: ["file it"], dates_mentioned: ["2026-01-01"], topics: ["old"], type: "meeting" });
       const C2 = await tagged("[29] C2, current but pooled by hand");
       await sql`SELECT enqueue_thoughts(${JOB}, ARRAY[${C2}::uuid])`;
-      for (const [marker, answer] of [["[29] P408", 408], ["[29] P413", 413], ["[29] PJSON", "prose"], ["[29] P400", 400]] as const) SPECIAL.set(marker, answer);
+      for (const [marker, answer] of [["[29] P408", 408], ["[29] P413", 413], ["[29] PJSON", "prose"], ["[29] P400", 400], ["[29] O2", "partial"]] as const) SPECIAL.set(marker, answer);
       const before1 = new Map([P413, PJSON].map((id) => [id, ""]));
       for (const id of before1.keys()) before1.set(id, JSON.stringify(await meta(id)));
       const mark1 = bodies.length;
@@ -23844,12 +23850,13 @@ if (want("29")) {
           && st.get(P413)?.status === "failed" && /provider_413/.test(st.get(P413)?.last_error ?? "") && st.get(PJSON)?.status === "failed" && /no tags/.test(st.get(PJSON)?.last_error ?? "")
           && JSON.stringify(await meta(P413)) === before1.get(P413) && JSON.stringify(await meta(PJSON)) === before1.get(PJSON) && (await tagsRow(P413)) === undefined && (await tagsRow(PJSON)) === undefined,
         `a 408 is paused for and the thought re-tagged; a 413 and an answer in prose fail their thought, nothing written, exit 1 (${answers.code}: P408 ${st.get(P408)?.status} in ${sent1.filter((b) => b.includes("[29] P408")).length} call(s); P413 ${st.get(P413)?.last_error?.slice(0, 60)}; PJSON ${st.get(PJSON)?.last_error?.slice(0, 60)})`);
-      assert(st.get(N)?.status === "failed" && /SQL NULL/.test(st.get(N)?.last_error ?? "") && !sent1.some((b) => b.includes("[29] N,")) && (await tagsRow(N))?.marked === true
+      assert(st.get(N)?.status === "failed" && /its metadata is null/.test(st.get(N)?.last_error ?? "") && !sent1.some((b) => b.includes("[29] N,")) && (await tagsRow(N))?.marked === true
           && oMeta.people !== undefined && JSON.stringify(oMeta.people) === '["Ada"]' && oMeta.type === "task" && oMeta.type_raw === null && JSON.stringify(oMeta.topics) === '["ledger"]' && settled(await tagsRow(O))
-          && st.get(C2)?.status === "succeeded" && !sent1.some((b) => b.includes("[29] C2")) && /1 already current/.test(answers.out)
+          && st.get(C2)?.status === "succeeded" && !sent1.some((b) => b.includes("[29] C2")) && /, 1 already current,/.test(answers.out)
           && st.get(P400)?.status === "failed" && /provider_400/.test(st.get(P400)?.last_error ?? "") && (await tagsRow(P400)) === undefined
-          && settled(await tagsRow(TONLY)) && settled(await tagsRow(PONLY)),
-        `a thought whose metadata is SQL NULL is failed with no call, its row still marked; old tags the answer leaves out (type_raw) are cleared; a pooled thought no longer due is released with no call; a 400 fails its thought, nothing written; a type alone or topics alone with no row is in the backlog (N ${st.get(N)?.last_error?.slice(0, 50)}; O ${JSON.stringify(oMeta)}; ${line(answers.out, "already current")})`);
+          && settled(await tagsRow(TONLY)) && settled(await tagsRow(PONLY))
+          && ((m) => JSON.stringify([m.people, m.action_items, m.dates_mentioned, m.topics, m.type]) === '[[],[],[],["p"],"idea"]')(await meta(O2)),
+        `a thought whose metadata is null is failed with no call, its row still marked; old tags the answer leaves out (type_raw) are cleared; a pooled thought no longer due is released with no call; a 400 fails its thought, nothing written; a type alone or topics alone with no row is in the backlog; a partial answer clears the list keys it leaves out to [] (N ${st.get(N)?.last_error?.slice(0, 50)}; O ${JSON.stringify(oMeta)}; ${line(answers.out, "already current")})`);
 
       // The edit's audit event names the worker: the actor `retag` (no worker key here), the door db/retag.ts.
       const [oEvent] = (await sql`SELECT actor_name, origin FROM thought_audit WHERE thought_id = ${O}::uuid ORDER BY seq DESC LIMIT 1`) as { actor_name: string | null; origin: string | null }[];
@@ -23878,6 +23885,44 @@ if (want("29")) {
       const cliDry = await cli("--dry-run");
       assert(cliDry.code === 0 && cliDry.out.includes("Nothing was written.") && JSON.stringify(await claims()) === claimsBefore && (await configured()) === keyBefore,
         `bun db/retag.ts --dry-run writes nothing: no claim moved, the key as it was (${cliDry.code})`);
+
+      // Review pass 2. A STALE_READ under --limit 1 counts again: the thought re-tagged from its new text in the same run.
+      const RL = await plant("[29] race RL, tagged with no row", { topics: ["t"], type: "idea" });
+      raceId = RL;
+      raced = false;
+      const rlFrom = bodies.length;
+      await retag({ limit: 1, pausesMs: [10] });
+      const rlRow = await tagsRow(RL);
+      assert(raced && settled(rlRow) && bodies.slice(rlFrom).filter((b) => b.includes("[29] race")).length === 2 && (await claims()).find((c) => c.id === RL)?.status === "succeeded",
+        `under --limit 1 a thought edited while its call is out is re-tagged from its new text in the same run, two calls (${JSON.stringify(rlRow)})`);
+
+      // A 400 or 422 to three thoughts in a row, none answered between, is the request's shape: the run stops, exit 2.
+      const S422 = await Promise.all(["a", "b", "c"].map((k) => plant(`[29] S422 ${k}, tagged`, { topics: ["t"], type: "idea" })));
+      SPECIAL.set("[29] S422", 422);
+      const shapeRun = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] S422");
+      const sClaims = (await claims()).filter((c) => S422.includes(c.id));
+      assert(shapeRun.code === 2 && /answered 422 to 3 thoughts in a row/.test(shapeRun.err) && /re-run with --retry-failed/.test(shapeRun.err) && sClaims.length === 3 && sClaims.every((c) => c.status === "failed"),
+        `a 422 to three thoughts in a row stops the run, exit 2, naming the request's shape; the three failed for --retry-failed (${shapeRun.code}: ${sClaims.map((c) => c.status).join(",")})`);
+
+      // The streak is "in a row": a 413 is never the request's, and an answer between resets it. The pool's order pinned
+      // (claims go oldest first): two 413s, then 400, ok, 400, ok, 400 — no three in a row, so the run goes on.
+      const order = [
+        await plant("[29] I413 a, too large", { topics: ["t"], type: "idea" }), await plant("[29] I413 b, too large", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 a, refused", { topics: ["t"], type: "idea" }), await plant("[29] IOK a, answered", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 b, refused", { topics: ["t"], type: "idea" }), await plant("[29] IOK b, answered", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 c, refused", { topics: ["t"], type: "idea" }),
+      ];
+      await sql`SELECT enqueue_thoughts(${JOB}, ${sql.array(order, "TEXT")}::uuid[])`;
+      for (const [i, id] of order.entries()) await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(mins => ${60 - i}) WHERE work_type = ${JOB} AND thought_id = ${id}::uuid`;
+      SPECIAL.set("[29] I413", 413);
+      SPECIAL.set("[29] I400", 400);
+      const interleaved = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] I413");
+      SPECIAL.delete("[29] I400");
+      const iClaims = new Map((await claims()).filter((c) => order.includes(c.id)).map((c) => [c.id, c.status]));
+      assert(interleaved.code === 1 && !/in a row/.test(interleaved.err) && order.every((id, i) => iClaims.get(id) === (i === 3 || i === 5 ? "succeeded" : "failed")),
+        `two 413s, then a 400 between answers three times: no three in a row, so the run goes on, exit 1, the answered two re-tagged (${interleaved.code}: ${order.map((id) => iClaims.get(id)).join(",")})`);
 
       // A 401 is the request's: the run stops, exit 2, nothing marked failed, the thought pending for the next run.
       const P401 = await plant("[29] P401 tagged, the key refused", { topics: ["t"], type: "idea" });
