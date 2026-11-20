@@ -13,6 +13,7 @@
  */
 
 import { GitRun } from "./gate.ts";
+import { oneLine } from "./text.ts";
 
 export type CloneInput = {
   /** The runner's bare repository to clone from. */
@@ -32,10 +33,7 @@ export type CloneInput = {
 export type CloneResult = { ok: boolean; problem: string | null };
 
 /** Trim and shorten git's stderr for a problem message. */
-const detail = (stderr: string): string => {
-  const s = stderr.replace(/\s+/g, " ").trim();
-  return s.length > 200 ? `${s.slice(0, 199)}…` : s;
-};
+const detail = (stderr: string): string => oneLine(stderr);
 
 /**
  * Clones the bare repository into `dest`, copies the objects (no hard links), puts the clone at `base` on `branch`, and

@@ -17,6 +17,7 @@ import {
 import {
   branchFor, isFinished, listRuns, readRecord, readNoFollow, runId, slugOf, startRecord, updateRecord, writeNoFollow,
 } from "./record.ts";
+import { fixtureGit } from "./fixture-git.ts";
 
 const BOT = { name: "Agent Runner Bot", email: "bot@agent-runner.invalid" };
 
@@ -25,16 +26,6 @@ const BOT = { name: "Agent Runner Bot", email: "bot@agent-runner.invalid" };
  * runs this self-check on ubuntu) plain `git` from PATH. `xcode-select` isn't there on Linux and `Bun.spawnSync` throws
  * ENOENT on a missing binary, so the probe is guarded — the same Linux slip as cut 2a's `hostStamp` (`sw_vers`).
  */
-function developerGit(): string {
-  try {
-    const r = Bun.spawnSync(["/usr/bin/xcode-select", "-p"], { stdout: "pipe", stderr: "ignore" });
-    const git = `${r.stdout.toString().trim()}/usr/bin/git`;
-    if (r.exitCode === 0 && existsSync(git)) return git;
-  } catch {
-    // No xcode-select (Linux): fall back to PATH git, which the fixture runs with /usr/bin:/bin.
-  }
-  return "git";
-}
 
 export async function selfCheck(): Promise<number> {
   let passed = 0;
@@ -61,7 +52,7 @@ export async function selfCheck(): Promise<number> {
     }
   };
 
-  const GIT = developerGit();
+  const GIT = fixtureGit();
   const fixture = mkdtempSync(join(tmpdir(), "obr-gate-"));
   try {
     await section("the run record", async () => {

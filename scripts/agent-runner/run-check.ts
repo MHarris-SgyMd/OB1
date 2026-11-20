@@ -21,18 +21,8 @@ import { refOf } from "./bundle.ts";
 import { branchFor, bundleFile, clonePath, diffFile, readRecord, reviewCheckout } from "./record.ts";
 import { parseFindings, resumeDecision, run, type RunDeps, type RunLimits, type RunSession } from "./run.ts";
 import type { Ended, InitSummary, SessionOutcome } from "./session.ts";
+import { fixtureGit } from "./fixture-git.ts";
 
-/** The git to run the fixtures with: on macOS the active developer git, on Linux (CI) plain `git` from PATH. */
-function developerGit(): string {
-  try {
-    const r = Bun.spawnSync(["/usr/bin/xcode-select", "-p"], { stdout: "pipe", stderr: "ignore" });
-    const git = `${r.stdout.toString().trim()}/usr/bin/git`;
-    if (r.exitCode === 0 && existsSync(git)) return git;
-  } catch {
-    // No xcode-select (Linux): fall back to PATH git.
-  }
-  return "git";
-}
 
 /** A full SessionOutcome from a few fields; the rest are the empty defaults runSession would return. */
 function outcome(p: { ended?: Ended; report?: string; cost?: number | null; turns?: number | null; sessionId?: string | null }): SessionOutcome {
@@ -76,7 +66,7 @@ export async function selfCheck(): Promise<number> {
     }
   };
 
-  const GIT = developerGit();
+  const GIT = fixtureGit();
   const fixture = mkdtempSync(join(tmpdir(), "obr-run-"));
   let seq = 0;
   try {

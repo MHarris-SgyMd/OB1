@@ -17,7 +17,8 @@
 
 import { closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { SAFE_REQUEST, TIME_LIMITS, type Config, type Fetch } from "./facts.ts";
+import { SAFE_REQUEST, TIME_LIMITS, type Config, type Fetch, NOT_JSON, jsonOf } from "./facts.ts";
+import { oneLine } from "./text.ts";
 
 /** A claim as the REST core returns it. Only the fields the runner reads; the server may send more. */
 export type ClaimRow = {
@@ -80,25 +81,10 @@ export type ClaimReply =
 /** The token file the runner keeps for a claim, under `<RUNNER_DIR>/claims/`. */
 export type StoredToken = { id: string; token: string; ticket: string; piece: string | null; lease_seconds: number };
 
-/** What jsonOf answers for a body that isn't JSON, so a body that is the JSON `null` reads as itself (mirrors facts.ts). */
-const NOT_JSON = Symbol("not JSON");
-
-/** A response's JSON, or NOT_JSON. Never the parser's message, which would quote a body that can hold a key. */
-async function jsonOf(res: Response): Promise<unknown> {
-  try {
-    return await res.json();
-  } catch {
-    return NOT_JSON;
-  }
-}
-
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
 /** A short, printable one-line fragment of a server message, never a token (`wc_…` masked). */
-const detail = (s: string): string => {
-  const t = s.replace(/wc_[0-9a-f]{6,}/gi, "wc_…").replace(/\s+/g, " ").trim();
-  return t.length > 200 ? `${t.slice(0, 199)}…` : t;
-};
+const detail = (s: string): string => oneLine(s.replace(/wc_[0-9a-f]{6,}/gi, "wc_…"));
 
 /** A claim row from a body's field, or null if it isn't shaped like one (only `id` and `issue` are required to trust it). */
 function rowOf(v: unknown): ClaimRow | null {

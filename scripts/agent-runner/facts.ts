@@ -244,13 +244,13 @@ const githubInit = (token: string | null): RequestInit => ({
 });
 
 /** What jsonOf answers for a body that isn't JSON, so a body that is the JSON `null` reads as itself. */
-const NOT_JSON = Symbol("not JSON");
+export const NOT_JSON = Symbol("not JSON");
 
 /**
  * A response's JSON, or NOT_JSON when its body isn't JSON. Never the parser's message: it quotes the body, which can
  * hold anything a server chose to send back, a key among it.
  */
-async function jsonOf(res: Response): Promise<unknown> {
+export async function jsonOf(res: Response): Promise<unknown> {
   try {
     return await res.json();
   } catch {

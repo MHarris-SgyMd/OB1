@@ -8,23 +8,13 @@
  *   bun scripts/agent-runner/bundle-check.ts --self-check
  */
 
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { importBundle, verifyBundle } from "./bundle.ts";
 import { BriefTicket, buildReviewBrief, fence } from "./brief.ts";
+import { fixtureGit } from "./fixture-git.ts";
 
-/** The git to run the fixtures with: on macOS the active developer git, on Linux (CI) plain `git` from PATH. */
-function developerGit(): string {
-  try {
-    const r = Bun.spawnSync(["/usr/bin/xcode-select", "-p"], { stdout: "pipe", stderr: "ignore" });
-    const git = `${r.stdout.toString().trim()}/usr/bin/git`;
-    if (r.exitCode === 0 && existsSync(git)) return git;
-  } catch {
-    // No xcode-select (Linux): fall back to PATH git.
-  }
-  return "git";
-}
 
 export async function selfCheck(): Promise<number> {
   let passed = 0;
@@ -44,7 +34,7 @@ export async function selfCheck(): Promise<number> {
     }
   };
 
-  const GIT = developerGit();
+  const GIT = fixtureGit();
   const fixture = mkdtempSync(join(tmpdir(), "obr-bundle-"));
   try {
     const git = (args: string[], stdin?: string) => {

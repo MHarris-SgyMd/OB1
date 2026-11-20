@@ -14,6 +14,7 @@
 
 import { closeSync, constants, fstatSync, openSync } from "node:fs";
 import { GitRun } from "./gate.ts";
+import { oneLine } from "./text.ts";
 
 export type BundleInput = {
   /** The bundle the session wrote, in the run's temp directory. */
@@ -29,10 +30,7 @@ export type BundleInput = {
 export type BundleResult = { ok: boolean; problem: string | null };
 
 /** Trim and shorten git's stderr for a problem message. */
-const detail = (stderr: string): string => {
-  const s = stderr.replace(/\s+/g, " ").trim();
-  return s.length > 200 ? `${s.slice(0, 199)}…` : s;
-};
+const detail = (stderr: string): string => oneLine(stderr);
 
 /** The run's branch as a fully-qualified ref. */
 export const refOf = (branch: string): string => `refs/heads/${branch}`;
