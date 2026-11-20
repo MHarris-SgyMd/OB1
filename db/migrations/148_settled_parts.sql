@@ -1,0 +1,1044 @@
+-- =============================================================================
+-- Migration 148: settled parts — a statement in one thought that another
+--                thought settles, proposed by the consolidation pass and
+--                decided by a reviewer, both thoughts left standing
+--                (SMD-4446 PR 1)
+-- =============================================================================
+--
+-- WHY
+--   A supersession proposal (029) says one thought outdates another, and
+--   accepting it marks the falling thought superseded whole. The maintainer
+--   marked every proposal decide version 5 had made on the canary by
+--   2026-11-18 (SMD-3340): of 41, 2 were right as a whole, 32 were right
+--   about a part (a statement of the falling thought is outdated, and the
+--   thought still stands) and 7 were neither. Nothing stores a part: a pair
+--   holds one proposal, and a thought one `supersedes` pointer.
+--   docs/subject-anchored-claims.md, rows 8 to 10, decides that the pass
+--   records the settled part, as a proposal a reviewer decides.
+--
+-- WHAT
+--   * settled_parts, one row a part: the pair as a proposal names it
+--     (older_id, newer_id, by capture order), which of the two holds the
+--     statement (holder), the statement's words and the words of the other
+--     thought that show it, the fingerprint of each text as judged, the word
+--     (one of SMD-3116's eight settling labels) and its group
+--     (no_longer_holds, or done_or_settled), the reason, the judge's key, a
+--     status (pending, accepted, rejected, stale) and who decided it.
+--   * A pair may hold several parts. Two rows of one pair may not hold the
+--     same statement in the same thought: the statement is a part's
+--     identity, so a statement a reviewer rejected is not proposed on that
+--     pair again, while another statement of the pair may be. Whether the
+--     pass judges a pair again once it holds a part is PR 2's.
+--   * record_settled_part(older, newer, holder, statement, shown_by, word,
+--     reason, judge key, both fingerprints, recipe, agent) is the pass's one
+--     write. It refuses a part of the wrong shape with a RAISE, returns the
+--     new row's id, and returns NULL when that statement already stands on
+--     the pair. A stale row holding the statement is replaced in place and is
+--     pending again, as 063 replaces a stale proposal. The part's lineage row
+--     commits with it.
+--   * review_settled_part(id, accept or reject, note, actor, force) is the
+--     reviewer's decision. An accept is refused when either text has moved
+--     since it was judged (EDITED_SINCE), unless forced, and a decision that
+--     repeats the row's status is refused (ALREADY_ACCEPTED,
+--     ALREADY_REJECTED). A reviewer may reverse a decision. The reviewer
+--     columns are stamped from the actor envelope by 114's trigger function,
+--     which reads only the columns the two tables share.
+--   * No function here writes `thoughts`. An accepted part sets no
+--     `supersedes` pointer and demotes nothing.
+--   * `part` joins the lineage kinds: derivations' CHECK and
+--     ob1_record_derivation (111's body with one more kind).
+--   * rebuild_derived is 067's body with the part beside the proposal. When a
+--     text moves, a pending part, and one the pass itself rejected (a note
+--     beginning 'settled by the pass:'), goes stale and its newer thought is
+--     queued again under the part's judge key. A person's decision stands. A
+--     lineage row whose part is gone is deleted. The result gains stale_parts
+--     and cascading.parts.
+--   * Deleting either thought takes its parts (ON DELETE CASCADE), and a
+--     part's lineage row goes with the part (settled_parts_drop_derivation),
+--     as a proposal's does. forget_thought (139) removes a thought through
+--     delete_thought, so a part's quotes leave with either thought.
+--
+-- NOT HERE
+--   The pass does not write parts yet (PR 2), no surface lists or decides
+--   them (PR 3), and the proposals pending today are untouched (PR 4). The
+--   quote check stays the pass's (SMD-4442): this file checks a part's
+--   shape, not that its words are in the two texts.
+--
+-- NOT CHANGED
+--   supersession_proposals, thoughts.supersedes and every reader of them.
+--
+-- SAFETY
+--   One new table with its indexes and two triggers, three new functions,
+--   two bodies carried with one kind more, and the worker and server
+--   groups' grants on supersession_proposals carried to the new table, so a
+--   role that records or decides proposals does the same for parts. Nothing
+--   runs at apply time but the DDL and the grant: no row moves.
+--   A `part` lineage row is one more that an earlier file's kind list does
+--   not admit. `migrate.ts --reapply` already fails at 064 on a brain holding
+--   a `relation` or `subject` row (SMD-4474); a part does not change that,
+--   and this file re-applied alone validates over its own kind.
+--   MINOR under FORK.md's version rules. test-schema [133],
+--   test-upgrade [20ck].
+--
+-- Prerequisites
+--   016 (content_fingerprint_of, requeue_thought_work), 029
+--   (supersession_proposals), 061 (derivations), 063 and 067
+--   (derivation_descendants, rebuild_derived), 111 (ob1_record_derivation)
+--   and 114 (ob1_stamp_proposal_reviewer). Applied by `bun db/migrate.ts`.
+--   Re-applied: the table, its indexes and its constraints stand, the
+--   triggers are dropped and made again, and the functions are replaced as
+--   they were.
+-- =============================================================================
+
+-- Refused up front, by name, on a schema the ledger records but does not
+-- hold (052's shape).
+DO $qc$
+DECLARE
+  v_need text[][] := ARRAY[
+    ARRAY['content_fingerprint_of(text)', '016 (content_fingerprint_of)'],
+    ARRAY['requeue_thought_work(text, uuid)', '016 (requeue_thought_work)'],
+    ARRAY['derivation_descendants(uuid, integer, integer)', '063 (derivation_descendants)'],
+    ARRAY['rebuild_derived(uuid, text, boolean, text[], boolean, boolean)', '063 (rebuild_derived)'],
+    ARRAY['ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)', '061 (ob1_record_derivation)'],
+    ARRAY['ob1_stamp_proposal_reviewer()', '114 (ob1_stamp_proposal_reviewer)']];
+  i int;
+BEGIN
+  FOR i IN 1 .. array_length(v_need, 1) LOOP
+    IF to_regprocedure(v_need[i][1]) IS NULL THEN
+      RAISE EXCEPTION USING
+        MESSAGE = format('migration 148 needs %s; this schema lacks it', v_need[i][2]),
+        -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
+        HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
+        ERRCODE = 'invalid_schema_definition';
+    END IF;
+  END LOOP;
+  IF to_regclass('supersession_proposals') IS NULL OR to_regclass('derivations') IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'migration 148 needs 029 and 061 (supersession_proposals, derivations); this schema lacks one',
+      HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
+      ERRCODE = 'invalid_schema_definition';
+  END IF;
+END
+$qc$;
+
+-- ---------------------------------------------------------------------------
+-- 1. settled_parts
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS settled_parts (
+  id                   uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- The pair, by capture order, as 029 names a proposal's.
+  older_id             uuid        NOT NULL REFERENCES thoughts(id) ON DELETE CASCADE,
+  newer_id             uuid        NOT NULL REFERENCES thoughts(id) ON DELETE CASCADE,
+  -- Which of the two holds the statement. The other holds the words that
+  -- show it. Usually the older: a ticket row keeps its first capture date
+  -- and may hold later text.
+  holder               text        NOT NULL,
+  holder_id            uuid        GENERATED ALWAYS AS (CASE holder WHEN 'older' THEN older_id ELSE newer_id END) STORED,
+  -- The statement, quoted from the holder, and the words quoted from the
+  -- other thought that show it is no longer true or no longer open.
+  statement            text        NOT NULL,
+  shown_by             text        NOT NULL,
+  -- One of SMD-3116's eight settling labels, kept as data, and the group
+  -- anything that acts on a part reads.
+  word                 text        NOT NULL,
+  word_group           text        GENERATED ALWAYS AS (
+    CASE WHEN word IN ('corrects', 'reverses', 'revises', 'withdraws') THEN 'no_longer_holds' ELSE 'done_or_settled' END) STORED,
+  reason               text        NOT NULL,
+  -- 016's fingerprint of each text AS JUDGED: the quotes are from those texts.
+  older_fingerprint    text        NOT NULL,
+  newer_fingerprint    text        NOT NULL,
+  judge_key            text        NOT NULL,
+  judged_at            timestamptz NOT NULL DEFAULT now(),
+  canonical_agent_id   uuid,
+  status               text        NOT NULL DEFAULT 'pending',
+  reviewed_at          timestamptz,
+  review_note          text,
+  reviewed_by          text,
+  reviewed_by_agent_id uuid,
+  reviewed_by_kind     text,
+  CONSTRAINT settled_parts_pair              CHECK (older_id <> newer_id),
+  CONSTRAINT settled_parts_holder            CHECK (holder IN ('older', 'newer')),
+  CONSTRAINT settled_parts_statement         CHECK (btrim(statement) <> '' AND length(statement) <= 2000),
+  CONSTRAINT settled_parts_shown_by          CHECK (btrim(shown_by) <> '' AND length(shown_by) <= 2000),
+  CONSTRAINT settled_parts_word              CHECK (word IN ('corrects', 'reverses', 'revises', 'withdraws', 'implements', 'resolves', 'updates', 'prioritizes')),
+  CONSTRAINT settled_parts_reason            CHECK (btrim(reason) <> '' AND length(reason) <= 1000),
+  CONSTRAINT settled_parts_fingerprints      CHECK (older_fingerprint <> '' AND newer_fingerprint <> ''),
+  CONSTRAINT settled_parts_judge_key         CHECK (judge_key <> ''),
+  CONSTRAINT settled_parts_status_check      CHECK (status IN ('pending', 'accepted', 'rejected', 'stale')),
+  -- A stale row is unreviewed, as a pending one is (063's pairing rule).
+  CONSTRAINT settled_parts_unreviewed_check  CHECK ((status IN ('pending', 'stale')) = (reviewed_at IS NULL)),
+  -- 114's two rules for the reviewer columns.
+  CONSTRAINT settled_parts_reviewed_by_kind  CHECK (reviewed_by_kind IS NULL OR (reviewed_by_agent_id IS NOT NULL AND reviewed_by_kind IN ('operator', 'agent', 'ingested'))),
+  CONSTRAINT settled_parts_reviewer_decided  CHECK (reviewed_at IS NOT NULL OR (reviewed_by IS NULL AND reviewed_by_agent_id IS NULL AND reviewed_by_kind IS NULL))
+);
+
+COMMENT ON TABLE settled_parts IS
+  'One row per settled part: a statement in one thought of a pair that the other thought shows is no longer true or no longer open, with the quote from each, a reason and the word (docs/subject-anchored-claims.md, rows 8 to 10). Proposed by the consolidation pass through record_settled_part and decided by a reviewer through review_settled_part. An accepted part sets no supersedes pointer and demotes no thought: both thoughts stand. A pair may hold several parts, and one statement of one thought once. Deleting either thought takes the row, and its lineage row with it. Migration 148 / SMD-4446.';
+COMMENT ON COLUMN settled_parts.holder IS
+  'Which thought of the pair holds the statement: older or newer, by capture order. The other thought holds shown_by. holder_id is that thought''s id.';
+COMMENT ON COLUMN settled_parts.statement IS
+  'The statement, as the judge quoted it from the holder''s text at the fingerprint recorded. With the pair and the holder it is the part''s identity (settled_parts_one_statement).';
+COMMENT ON COLUMN settled_parts.shown_by IS
+  'The words of the other thought that show the statement is no longer true or no longer open, as the judge quoted them from its text at the fingerprint recorded.';
+COMMENT ON COLUMN settled_parts.word IS
+  'One of SMD-3116''s eight settling labels, kept as data. Anything that acts on a part reads word_group, not the word.';
+COMMENT ON COLUMN settled_parts.word_group IS
+  'The word''s group: no_longer_holds (corrects, reverses, revises, withdraws) or done_or_settled (implements, resolves, updates, prioritizes).';
+COMMENT ON COLUMN settled_parts.status IS
+  'pending: the part awaits a reviewer. accepted or rejected: a decision (review_settled_part). stale: rebuild_derived found one of the pair''s texts moved since the judge saw them; the next pass replaces the row in place when it names the statement again. Migration 148.';
+COMMENT ON COLUMN settled_parts.reviewed_by IS
+  'Who decided the row, from the decision''s actor envelope, with reviewed_by_agent_id and reviewed_by_kind: written only by settled_parts_stamp_reviewer, which runs 114''s ob1_stamp_proposal_reviewer. NULL while unreviewed.';
+
+-- One statement of one thought, once a pair. md5: a statement may be 2,000
+-- characters, past what a btree key holds.
+CREATE UNIQUE INDEX IF NOT EXISTS settled_parts_one_statement
+  ON settled_parts (older_id, newer_id, holder, md5(statement));
+-- The newer side, for the cascade and for the pass, which asks from it.
+CREATE INDEX IF NOT EXISTS settled_parts_newer_idx
+  ON settled_parts (newer_id);
+-- The review queue: pending rows, oldest first.
+CREATE INDEX IF NOT EXISTS settled_parts_pending_idx
+  ON settled_parts (judged_at)
+  WHERE status = 'pending';
+-- "This thought's accepted parts", which a read of the thought shows (PR 3).
+CREATE INDEX IF NOT EXISTS settled_parts_holder_idx
+  ON settled_parts (holder_id)
+  WHERE status = 'accepted';
+
+-- The reviewer columns: 114's trigger function, which reads NEW.reviewed_at
+-- and writes the three reviewer columns and nothing else, on this table too.
+DROP TRIGGER IF EXISTS settled_parts_stamp_reviewer ON settled_parts;
+CREATE TRIGGER settled_parts_stamp_reviewer
+  BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind
+  ON settled_parts
+  FOR EACH ROW EXECUTE FUNCTION ob1_stamp_proposal_reviewer();
+
+CREATE OR REPLACE FUNCTION ob1_drop_part_derivation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  DELETE FROM derivations WHERE artifact_kind = 'part' AND artifact_id = OLD.id;
+  RETURN NULL;
+END;
+$$;
+
+COMMENT ON FUNCTION ob1_drop_part_derivation() IS
+  'AFTER DELETE on settled_parts (settled_parts_drop_derivation, 148): drops the part''s `derivations` row, as 061 drops a proposal''s. A part goes by the cascade from either of its thoughts, so a deleted or forgotten thought leaves neither its parts'' quotes nor their recipes. Migration 148 / SMD-4446.';
+
+DROP TRIGGER IF EXISTS settled_parts_drop_derivation ON settled_parts;
+CREATE TRIGGER settled_parts_drop_derivation
+  AFTER DELETE ON settled_parts
+  FOR EACH ROW EXECUTE FUNCTION ob1_drop_part_derivation();
+
+-- ---------------------------------------------------------------------------
+-- 2. derivations: `part` joins the artifact kinds
+--
+-- 111's drop-by-shape, add NOT VALID, then VALIDATE, and its
+-- ob1_record_derivation, verbatim, each with one more value in the kind list
+-- and its message.
+-- ---------------------------------------------------------------------------
+DO $ck$
+DECLARE
+  v_name text;
+BEGIN
+  FOR v_name IN
+    SELECT conname FROM pg_constraint
+     WHERE conrelid = 'derivations'::regclass AND contype = 'c'
+       AND pg_get_constraintdef(oid) LIKE 'CHECK ((artifact_kind = ANY (ARRAY[%'
+  LOOP
+    EXECUTE format('ALTER TABLE derivations DROP CONSTRAINT %I', v_name);
+  END LOOP;
+END
+$ck$;
+ALTER TABLE derivations ADD CONSTRAINT derivations_artifact_kind_check
+  CHECK (artifact_kind IN ('chunks', 'entities', 'proposal', 'vector', 'metadata', 'section', 'relation', 'subject', 'part')) NOT VALID;
+ALTER TABLE derivations VALIDATE CONSTRAINT derivations_artifact_kind_check;
+
+CREATE OR REPLACE FUNCTION ob1_record_derivation(
+  p_kind         text,
+  p_artifact     uuid,
+  p_inputs       uuid[],
+  p_fingerprints text[],
+  p_produced_by  text,
+  p_recipe       jsonb,
+  p_agent        uuid DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_id uuid;
+BEGIN
+  -- The write path is the choke point, or an untrusted-input hole (025):
+  -- every refusal is a RAISE, since a producer that cannot record its lineage
+  -- must not commit its artifact either — the two are one transaction.
+  IF p_kind IS NULL OR p_kind NOT IN ('chunks', 'entities', 'proposal', 'vector', 'metadata', 'section', 'relation', 'subject', 'part') THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('ob1_record_derivation: artifact_kind must be chunks, entities, proposal, vector, metadata, section, relation, subject or part, got %L', p_kind),
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_artifact IS NULL THEN
+    RAISE EXCEPTION USING MESSAGE = 'ob1_record_derivation: artifact_id is required', ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_inputs IS NULL OR cardinality(p_inputs) < 1 OR array_position(p_inputs, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING MESSAGE = 'ob1_record_derivation: input_ids must name at least one input and no NULL', ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_fingerprints IS NULL OR cardinality(p_fingerprints) <> cardinality(p_inputs) OR array_position(p_fingerprints, NULL) IS NOT NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('ob1_record_derivation: input_fingerprints must be one non-NULL fingerprint per input (%s inputs, %s fingerprints)',
+                       cardinality(p_inputs), COALESCE(cardinality(p_fingerprints), 0)),
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_produced_by IS NULL OR p_produced_by = '' THEN
+    RAISE EXCEPTION USING MESSAGE = 'ob1_record_derivation: produced_by must name the pass', ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_recipe IS NULL OR jsonb_typeof(p_recipe) <> 'object' OR COALESCE(jsonb_typeof(p_recipe->'deterministic'), '') <> 'boolean' THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'ob1_record_derivation: recipe must be a JSON object carrying a boolean "deterministic"',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- ob1:rerun-clears-the-mark — a CONTRACT SENTINEL, not prose (the 014
+  -- convention); db/test-schema.ts reads it. 063: the producer's write is the
+  -- answer to a rebuild's request, so the upsert clears stale_since and
+  -- stale_reason (SMD-1732).
+  INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe, canonical_agent_id)
+  VALUES (p_kind, p_artifact, p_inputs, p_fingerprints, p_produced_by, p_recipe, p_agent)
+  ON CONFLICT (artifact_kind, artifact_id, produced_by) DO UPDATE
+    SET input_ids          = EXCLUDED.input_ids,
+        input_fingerprints = EXCLUDED.input_fingerprints,
+        recipe             = EXCLUDED.recipe,
+        produced_at        = now(),
+        canonical_agent_id = EXCLUDED.canonical_agent_id,
+        stale_since        = NULL,
+        stale_reason       = NULL
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+
+COMMENT ON FUNCTION ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid) IS
+  'Records one derived artifact''s lineage in `derivations`, upserting on (artifact_kind, artifact_id, produced_by) and moving produced_at: the inputs and their fingerprints (parallel, no NULL), the pass, the recipe (a JSON object with a boolean `deterministic`), the agent. Refuses a bad shape with a RAISE — a producer that cannot record its lineage must not commit its artifact either. Nine kinds since 148: chunks, entities, proposal, vector, metadata (061), section (064, a page section a machine wrote), relation (084, a judged relation between two thoughts), subject (111, a thought''s own subject) and part (148, a settled part of a pair of thoughts); the upsert clears 063''s mark (ob1:rerun-clears-the-mark). Migrations 061, 063, 064, 084, 111, 148 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306, SMD-4446.';
+
+-- ---------------------------------------------------------------------------
+-- 3. record_settled_part — the pass's one write
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION record_settled_part(
+  p_older_id          uuid,
+  p_newer_id          uuid,
+  p_holder            text,
+  p_statement         text,
+  p_shown_by          text,
+  p_word              text,
+  p_reason            text,
+  p_judge_key         text,
+  p_older_fingerprint text,
+  p_newer_fingerprint text,
+  -- The judge's recipe, recorded with the part in `derivations`, as 061
+  -- records a proposal's.
+  p_recipe            jsonb,
+  p_agent_id          uuid DEFAULT NULL
+)
+RETURNS uuid
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_id    uuid;
+  v_stale uuid;
+BEGIN
+  -- Every refusal is a RAISE, as ob1_record_derivation's are: a pass that
+  -- cannot record a part must not go on as if it had. Each shape the table's
+  -- CHECKs hold is refused here first, and said without the row: a CHECK's
+  -- own error carries the failing row in its DETAIL, and the row holds a
+  -- thought's words.
+  IF p_older_id IS NULL OR p_newer_id IS NULL OR p_older_id = p_newer_id THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'record_settled_part: a part is of two different thoughts',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_holder IS NULL OR p_holder NOT IN ('older', 'newer') THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('record_settled_part: p_holder must be older or newer, got %L', p_holder),
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_word IS NULL OR p_word NOT IN ('corrects', 'reverses', 'revises', 'withdraws', 'implements', 'resolves', 'updates', 'prioritizes') THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('record_settled_part: p_word must be corrects, reverses, revises, withdraws, implements, resolves, updates or prioritizes, got %L', p_word),
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- The lengths are said, not the words: a message is logged, and the words
+  -- are a thought's.
+  IF p_statement IS NULL OR btrim(p_statement) = '' OR length(p_statement) > 2000
+     OR p_shown_by IS NULL OR btrim(p_shown_by) = '' OR length(p_shown_by) > 2000 THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('record_settled_part: the statement and the words that show it must each hold 1 to 2000 characters, got %s and %s',
+                       COALESCE(length(p_statement)::text, 'none'), COALESCE(length(p_shown_by)::text, 'none')),
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_reason IS NULL OR btrim(p_reason) = '' OR length(p_reason) > 1000 THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('record_settled_part: p_reason must hold 1 to 1000 characters, got %s', COALESCE(length(p_reason)::text, 'none')),
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_judge_key IS NULL OR p_judge_key = '' THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'record_settled_part: p_judge_key must name the pass, e.g. consolidate:<model>@p1',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- The quotes are from the texts the judge was sent: without their
+  -- fingerprints nothing can say later whether a text has moved.
+  IF p_older_fingerprint IS NULL OR p_older_fingerprint = '' OR p_newer_fingerprint IS NULL OR p_newer_fingerprint = '' THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'record_settled_part: both fingerprints of the texts the judge was sent are required',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_recipe IS NULL OR jsonb_typeof(p_recipe) <> 'object' OR COALESCE(jsonb_typeof(p_recipe->'deterministic'), '') <> 'boolean' THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'record_settled_part: p_recipe must be a JSON object carrying a boolean "deterministic"',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  -- A stale row holding this statement is this judgement's to replace, as
+  -- 063 replaces a stale proposal. Locked here, so two judges of one pair
+  -- serialise. Its lineage row goes first: the key may differ from the one
+  -- that stands, and the lineage UNIQUE is per key.
+  SELECT s.id INTO v_stale FROM settled_parts s
+   WHERE s.older_id = p_older_id AND s.newer_id = p_newer_id AND s.holder = p_holder
+     AND md5(s.statement) = md5(p_statement) AND s.status = 'stale'
+   FOR UPDATE;
+  IF v_stale IS NOT NULL THEN
+    DELETE FROM derivations WHERE artifact_kind = 'part' AND artifact_id = v_stale;
+  END IF;
+  INSERT INTO settled_parts (older_id, newer_id, holder, statement, shown_by, word, reason,
+                             older_fingerprint, newer_fingerprint, judge_key, canonical_agent_id)
+  VALUES (p_older_id, p_newer_id, p_holder, p_statement, p_shown_by, p_word, p_reason,
+          p_older_fingerprint, p_newer_fingerprint, p_judge_key, p_agent_id)
+  ON CONFLICT (older_id, newer_id, holder, md5(statement)) DO UPDATE
+    SET shown_by           = EXCLUDED.shown_by,
+        word               = EXCLUDED.word,
+        reason             = EXCLUDED.reason,
+        older_fingerprint  = EXCLUDED.older_fingerprint,
+        newer_fingerprint  = EXCLUDED.newer_fingerprint,
+        judge_key          = EXCLUDED.judge_key,
+        canonical_agent_id = EXCLUDED.canonical_agent_id,
+        judged_at          = now(),
+        status             = 'pending',
+        review_note        = NULL
+    WHERE settled_parts.status = 'stale'
+  RETURNING id INTO v_id;
+  -- ob1:part-recorded-with-its-lineage — a CONTRACT SENTINEL, not prose (the
+  -- 014 convention), read by db/test-schema.ts: the part's lineage row
+  -- commits with the part, both inputs at the fingerprints the judge saw. A
+  -- statement that already stands on the pair inserts nothing and records
+  -- nothing.
+  IF v_id IS NOT NULL THEN
+    PERFORM ob1_record_derivation('part', v_id, ARRAY[p_older_id, p_newer_id],
+                                  ARRAY[p_older_fingerprint, p_newer_fingerprint], p_judge_key, p_recipe, p_agent_id);
+  END IF;
+  RETURN v_id;
+END;
+$$;
+
+COMMENT ON FUNCTION record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid) IS
+  'The consolidation pass''s one write of a settled part (148, SMD-4446): the pair, which thought holds the statement, the statement and the words of the other thought that show it, the word, the reason, the judge''s key, the fingerprint of each text as judged and the judge''s recipe. Refuses with a RAISE (invalid_parameter_value) a holder that is not older or newer, a word outside the eight settling labels, a statement or showing words empty or past 2000 characters, a reason empty or past 1000, a missing key, fingerprint or recipe, and a pair that is one thought. No refusal quotes the words. A thought that does not exist fails the foreign key, whose error names the id alone. Returns the new row''s id; NULL when that statement of that thought already stands on the pair, whatever its status, a stale row excepted: that one is replaced in place and is pending again, its lineage row recorded afresh. The part''s lineage row (kind part) commits with it. It does not check that the words are in the texts: the quote check is the pass''s (SMD-4442). Writes no thought. Migration 148 / SMD-4446.';
+
+-- ---------------------------------------------------------------------------
+-- 4. review_settled_part — the reviewer's decision
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION review_settled_part(
+  p_id       uuid,
+  p_decision text,
+  p_note     text    DEFAULT NULL,
+  p_actor    jsonb   DEFAULT NULL,
+  p_force    boolean DEFAULT false
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  r            settled_parts%ROWTYPE;
+  v_old_edited boolean;
+  v_new_edited boolean;
+BEGIN
+  IF p_decision IS NULL OR p_decision NOT IN ('accept', 'reject') THEN
+    RAISE EXCEPTION USING
+      MESSAGE = format('review_settled_part: p_decision must be accept or reject, got %L', p_decision),
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_actor IS NOT NULL THEN
+    PERFORM set_config('ob1.actor', p_actor::text, true);
+  END IF;
+
+  -- The locks in review_supersession_proposal's order (036): the
+  -- supersession advisory lock first, then the row. rebuild_derived takes the
+  -- same lock before it moves a part, and delete_thought before the cascade
+  -- that takes one, so every path that locks a part's row holds this first.
+  PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
+
+  SELECT * INTO r FROM settled_parts WHERE id = p_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND', 'id', p_id);
+  END IF;
+
+  -- A decision that repeats the row's status decides nothing, and is said so
+  -- rather than restamped with a second reviewer and time. The other way
+  -- round is a reversal, which a reviewer may make.
+  IF p_decision = 'reject' THEN
+    IF r.status = 'rejected' THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_REJECTED', 'id', p_id);
+    END IF;
+    UPDATE settled_parts SET status = 'rejected', reviewed_at = now(), review_note = p_note WHERE id = p_id;
+    RETURN jsonb_build_object('ok', true, 'id', p_id, 'status', 'rejected', 'was', r.status);
+  END IF;
+
+  -- accept
+  IF r.status = 'accepted' THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'ALREADY_ACCEPTED', 'id', p_id);
+  END IF;
+  -- The part quotes the texts as judged. Either edited since is refused
+  -- unless the reviewer, shown both texts, says p_force (036's rule).
+  SELECT r.older_fingerprint IS DISTINCT FROM content_fingerprint_of(content)
+    INTO v_old_edited FROM thoughts WHERE id = r.older_id;
+  SELECT r.newer_fingerprint IS DISTINCT FROM content_fingerprint_of(content)
+    INTO v_new_edited FROM thoughts WHERE id = r.newer_id;
+  IF NOT COALESCE(p_force, false) AND (COALESCE(v_old_edited, false) OR COALESCE(v_new_edited, false)) THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'EDITED_SINCE', 'id', p_id,
+                              'older_edited', COALESCE(v_old_edited, false), 'newer_edited', COALESCE(v_new_edited, false));
+  END IF;
+  -- ob1:a-part-never-writes-supersedes — a CONTRACT SENTINEL (the 014
+  -- convention), read by db/test-schema.ts: the acceptance is this one
+  -- UPDATE of the part's own row. No thought is written, so no pointer is
+  -- set and nothing is demoted (docs/subject-anchored-claims.md, row 8).
+  UPDATE settled_parts SET status = 'accepted', reviewed_at = now(), review_note = p_note WHERE id = p_id;
+  RETURN jsonb_build_object('ok', true, 'id', p_id, 'status', 'accepted', 'was', r.status,
+                            'holder_id', r.holder_id, 'word_group', r.word_group);
+END;
+$$;
+
+COMMENT ON FUNCTION review_settled_part(uuid, text, text, jsonb, boolean) IS
+  'The reviewer''s decision on one settled part (148, SMD-4446): accept or reject, with a note. Refuses, as values: NOT_FOUND; ALREADY_ACCEPTED and ALREADY_REJECTED, for a decision that repeats the row''s status; EDITED_SINCE for an accept when either text has moved since it was judged, unless p_force. A reviewer may reverse a decision, and may reject a stale row. An acceptance updates the part''s own row and writes no thought: no supersedes pointer is set and nothing is demoted. p_actor is set on ob1.actor, from which settled_parts_stamp_reviewer stamps who decided. Takes the supersession advisory lock, then the row, as review_supersession_proposal does. Returns {ok, id, status, was}, with holder_id and word_group for an acceptance. Migration 148 / SMD-4446.';
+
+-- ---------------------------------------------------------------------------
+-- 5. The primitive: 067's body verbatim, the part beside the proposal. Three
+--    places: a part's lineage row is an orphan when the part is gone, it is
+--    counted for the cascade when the input leaves, and a moved text stales
+--    the part.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION rebuild_derived(
+  p_input        uuid,
+  p_reason       text,
+  p_input_gone   boolean DEFAULT false,
+  p_fingerprints text[]  DEFAULT NULL,
+  p_force        boolean DEFAULT false,
+  -- 063, first review pass: the orphan sweep (db/rebuild.ts --orphans) acts
+  -- on the rows whose artifact is gone and nothing else — a stale row on the
+  -- same thought keeps its own reason for its own rebuild (cold read: the
+  -- sweep marked and handed on every stale row under the sweep's name).
+  p_orphans_only boolean DEFAULT false
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_t            record;             -- the input's row
+  v_a            record;             -- the artifact's thought, per row
+  v_a_found      boolean := false;
+  v_p            record;             -- the proposal, per row
+  v_s            record;             -- the part, per row (148)
+  v_row          record;             -- one walk row
+  v_fp           text;               -- the input's current fingerprint
+  v_cur          text;               -- the artifact's thought's current fingerprint
+  v_cfg_model    text;
+  v_cfg_dim      text;
+  v_cfg_key      text;
+  v_model        text;
+  v_pool         text;
+  v_snap_ok      boolean;            -- a usable snapshot row for the vector arm (no variable of the vector type: the body must run with pgvector off the search_path — db/test-search-path.ts)
+  v_fps          text[];
+  v_touched      uuid[];
+  v_more         uuid[];
+  v_graph_done   boolean := false;
+  v_windows_done boolean := false;
+  v_orphan       boolean;
+  v_stale        boolean;
+  v_fp_stale     boolean;
+  v_stale_props  int := 0;
+  v_stale_parts  int := 0;
+  v_walked       int := 0;
+  v_depth        int := 0;
+  v_rebuilt      int := 0;
+  v_enqueued     int := 0;
+  v_deleted      int := 0;
+  v_marked       int := 0;
+  v_unqueued     int := 0;
+  v_kept         int := 0;
+  v_current      int := 0;
+  v_legacy       int := 0;
+  v_casc_prop    int := 0;
+  v_casc_part    int := 0;
+  v_casc_rows    int := 0;
+  v_n            int;
+  v_irre         uuid[] := ARRAY[]::uuid[];
+  v_pools        text[] := ARRAY[]::text[];
+  v_claims       text[] := ARRAY[]::text[];  -- distinct (pool, thought) enqueued
+  -- ob1:rebuild-acts-on-a-held-frontier — a CONTRACT SENTINEL (the 014
+  -- convention), read by db/test-schema.ts: the walk is materialised whole
+  -- (a plpgsql set-returning function's rows) before any row moves, and the
+  -- supersession advisory lock is taken before the input's row — 036's and
+  -- 060's order, kept here because this function moves proposal rows.
+BEGIN
+  IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'rebuild_derived: p_reason must say why (forget, edit, trust, sweep ...) - it is recorded on every row marked',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_input_gone AND p_orphans_only THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'rebuild_derived: p_input_gone and p_orphans_only exclude each other - a leaving input takes every artifact it keyed, a sweep takes orphans alone',
+      ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF COALESCE(current_setting('ob1.projecting_replay', true), '') = 'on' THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'REPLAYING', 'id', p_input);
+  END IF;
+
+  -- The locks, in delete_thought's order (036/060): the supersession lock
+  -- first and unconditionally, then the input's row.
+  PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
+  SELECT t.id, t.content, t.content_fingerprint, t.embedding, t.embedding_model, t.metadata
+    INTO v_t FROM thoughts t WHERE t.id = p_input FOR NO KEY UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND', 'id', p_input);
+  END IF;
+  v_fp := COALESCE(v_t.content_fingerprint, content_fingerprint_of(v_t.content));
+
+  -- The workers' current keys (the pools they drain); NULL where unset.
+  -- An empty value is unset, as 016's trigger reads the extraction key (and
+  -- 015's claims refuse an empty work_type) — first review pass, cold read.
+  SELECT NULLIF(value, '') INTO v_cfg_model FROM ob1_config WHERE key = 'embedding_model';
+  SELECT NULLIF(value, '') INTO v_cfg_dim   FROM ob1_config WHERE key = 'embedding_dim';
+  SELECT NULLIF(value, '') INTO v_cfg_key   FROM ob1_config WHERE key = 'entity_extraction_key';
+
+  -- The input leaving: the snapshot fingerprints, computed while the input's
+  -- own lineage rows still stand — its OWN position on each (a proposal's row
+  -- carries both thoughts'), the current one, the caller's from the log —
+  -- minus any a standing thought other than the input holds.
+  IF p_input_gone THEN
+    SELECT array_agg(DISTINCT s.f) INTO v_fps
+      FROM (SELECT v_fp AS f
+            UNION ALL
+            SELECT d.input_fingerprints[array_position(d.input_ids, p_input)]
+              FROM derivations d WHERE d.input_ids @> ARRAY[p_input]
+            UNION ALL
+            SELECT unnest(COALESCE(p_fingerprints, ARRAY[]::text[]))) AS s
+     WHERE s.f IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM thoughts o
+                        WHERE o.id <> p_input
+                          AND (o.content_fingerprint = s.f
+                               OR (o.content_fingerprint IS NULL AND content_fingerprint_of(o.content) = s.f)));
+  END IF;
+
+  -- The walk, held whole (the set-returning function materialises its rows
+  -- before the first is read), then acted on row by row.
+  FOR v_row IN SELECT * FROM derivation_descendants(p_input) LOOP
+    v_walked := v_walked + 1;
+    v_depth  := GREATEST(v_depth, v_row.depth);
+
+    -- Prose: a derived_from child. Listed; its text did not move, and its
+    -- recipe is a synthesis no rebuild re-runs — the limit, named.
+    IF v_row.prose THEN
+      -- (Not under orphans_only: the sweep reproduces nothing, so it reports
+      -- nothing as irreproducible — second review pass, cold read.)
+      IF NOT p_orphans_only THEN v_irre := v_irre || v_row.artifact_id; END IF;
+      CONTINUE;
+    END IF;
+
+    -- The artifact's thought (the proposal's is the pair; read below). The
+    -- SELECT INTO runs on EVERY row: a record variable never assigned has no
+    -- tuple shape, and the first expression that names one of its fields
+    -- raises "record is not assigned yet" — the first rebuild in a session
+    -- whose first row was a proposal failed so (run-it, first review pass).
+    -- A no-row SELECT INTO leaves a NULL row WITH a shape.
+    SELECT t.id, t.content, t.content_fingerprint, t.embedding, t.embedding_model, t.metadata
+      INTO v_a FROM thoughts t WHERE t.id = v_row.artifact_id AND v_row.artifact_kind NOT IN ('proposal', 'part');
+    v_a_found := FOUND;
+
+    -- ORPHAN rules first: a row whose artifact is gone names nothing to
+    -- re-derive, and a vector row on a NULL embedding must never reach the
+    -- refresh (OB002 would roll a forget back).
+    v_orphan := CASE v_row.artifact_kind
+      WHEN 'chunks'   THEN NOT EXISTS (SELECT 1 FROM thought_chunks c WHERE c.thought_id = v_row.artifact_id)
+      WHEN 'entities' THEN NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.thought_id = v_row.artifact_id AND m.extraction_key = v_row.produced_by)
+                       AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.thought_id = v_row.artifact_id AND g.extraction_key = v_row.produced_by)
+      WHEN 'vector'   THEN NOT v_a_found OR v_a.embedding IS NULL
+      WHEN 'metadata' THEN NOT v_a_found OR NOT COALESCE(v_a.metadata ? 'type' OR v_a.metadata ? 'topics', false)
+      WHEN 'proposal' THEN NOT EXISTS (SELECT 1 FROM supersession_proposals p WHERE p.id = v_row.artifact_id)
+      WHEN 'part'     THEN NOT EXISTS (SELECT 1 FROM settled_parts s WHERE s.id = v_row.artifact_id)
+      ELSE false END;
+    IF v_orphan THEN
+      DELETE FROM derivations WHERE id = v_row.derivation_id;
+      v_deleted := v_deleted + 1;
+      CONTINUE;
+    END IF;
+    IF p_orphans_only THEN
+      v_current := v_current + 1;
+      CONTINUE;
+    END IF;
+    IF v_row.recipe->>'legacy' = 'true' THEN v_legacy := v_legacy + 1; END IF;
+
+    -- THE INPUT LEAVING, for the artifacts it keys: they go with it.
+    IF p_input_gone AND v_row.artifact_id = p_input THEN
+      CASE v_row.artifact_kind
+        WHEN 'chunks' THEN
+          IF NOT v_windows_done THEN
+            DELETE FROM thought_chunks WHERE thought_id = p_input;
+            v_windows_done := true;
+          END IF;
+          DELETE FROM derivations WHERE id = v_row.derivation_id;
+          v_deleted := v_deleted + 1;
+        WHEN 'entities' THEN
+          IF NOT v_graph_done THEN
+            -- The worker's lock order (016, 053): the entities first, then
+            -- the mention and edge rows, then the prune over what was touched.
+            SELECT array_agg(DISTINCT e) INTO v_touched
+              FROM (SELECT m.entity_id AS e FROM thought_entities m WHERE m.thought_id = p_input
+                    UNION ALL SELECT g.from_entity_id FROM ob1_entity_edges g WHERE g.thought_id = p_input
+                    UNION ALL SELECT g.to_entity_id   FROM ob1_entity_edges g WHERE g.thought_id = p_input) AS s;
+            IF v_touched IS NOT NULL THEN
+              PERFORM e.id FROM ob1_entities e WHERE e.id = ANY(v_touched) ORDER BY e.id FOR UPDATE;
+            END IF;
+            -- The deletes RETURN what they touched: a worker that committed
+            -- while this waited on the entity lock wrote rows the snapshot
+            -- above did not see, and its entities are pruned too (run-it,
+            -- the build: test-live [31]'s race left the worker's new entity
+            -- standing).
+            WITH d AS (DELETE FROM ob1_entity_edges WHERE thought_id = p_input RETURNING from_entity_id, to_entity_id)
+            SELECT array_agg(x) INTO v_more FROM (SELECT d.from_entity_id FROM d UNION SELECT d.to_entity_id FROM d) AS s(x);
+            v_touched := COALESCE(v_touched, ARRAY[]::uuid[]) || COALESCE(v_more, ARRAY[]::uuid[]);
+            WITH d AS (DELETE FROM thought_entities WHERE thought_id = p_input RETURNING entity_id)
+            SELECT array_agg(d.entity_id) INTO v_more FROM d;
+            v_touched := v_touched || COALESCE(v_more, ARRAY[]::uuid[]);
+            IF cardinality(v_touched) > 0 THEN
+              DELETE FROM ob1_entities e
+               WHERE e.id = ANY(v_touched)
+                 AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = e.id)
+                 AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = e.id OR g.to_entity_id = e.id);
+            END IF;
+            v_graph_done := true;
+          END IF;
+          DELETE FROM derivations WHERE id = v_row.derivation_id;
+          v_deleted := v_deleted + 1;
+        ELSE
+          -- The vector's and the tags' rows: 061's drop trigger's, at the
+          -- caller's row delete.
+          v_casc_rows := v_casc_rows + 1;
+      END CASE;
+      CONTINUE;
+    END IF;
+    IF p_input_gone AND v_row.artifact_kind = 'proposal' THEN
+      -- 029's cascade takes the proposal at the caller's row delete; its
+      -- lineage row goes by the proposal's own drop trigger.
+      v_casc_prop := v_casc_prop + 1;
+      CONTINUE;
+    END IF;
+    IF p_input_gone AND v_row.artifact_kind = 'part' THEN
+      -- 148: the part's own cascade takes it at the caller's row delete, and
+      -- its lineage row goes by the part's drop trigger.
+      v_casc_part := v_casc_part + 1;
+      CONTINUE;
+    END IF;
+
+    -- THE INPUT STANDING (or a row fed by the leaving input that another
+    -- thought keys): stale when any input's fingerprint moved or the input
+    -- has no row; --force says every row is.
+    v_fp_stale := (p_input_gone AND p_input = ANY(v_row.input_ids))
+               OR EXISTS (SELECT 1 FROM unnest(v_row.input_ids, v_row.input_fingerprints) AS u(iid, ifp)
+                            LEFT JOIN thoughts t ON t.id = u.iid
+                           WHERE t.id IS NULL
+                              OR u.ifp IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)));
+    v_stale := p_force OR v_fp_stale;
+    IF NOT v_stale THEN
+      v_current := v_current + 1;
+      CONTINUE;
+    END IF;
+
+    CASE v_row.artifact_kind
+      WHEN 'vector' THEN
+        v_cur   := COALESCE(v_a.content_fingerprint, content_fingerprint_of(v_a.content));
+        v_model := COALESCE(v_row.recipe->>'model', v_a.embedding_model, v_cfg_model);
+        -- (The row's OWN model — its recipe's or its label — against the
+        -- configured one, not v_model's fallback to the config: an unlabelled
+        -- vector would otherwise be re-recorded under a model nothing named,
+        -- where the pool's write moves the label and records — fourth
+        -- review pass.)
+        IF NOT v_fp_stale AND (v_cfg_model IS NULL OR COALESCE(v_row.recipe->>'model', v_a.embedding_model) IS NOT DISTINCT FROM v_cfg_model) THEN
+          -- --force on a vector whose text did not move, AT THE CONFIGURED
+          -- MODEL: the vector IS the current text's (a deterministic model,
+          -- the fingerprint the row carries), so what force renews is the
+          -- RECORD — the row is written again under the recipe as it stands,
+          -- which drops `legacy` and clears the mark. Sending it to the pool
+          -- would mark a row no worker could clear: the re-embedding
+          -- reproduces the vector, and the trigger returns before recording
+          -- when neither the vector nor its label moved (second review pass,
+          -- cold read and run-it). A vector at ANOTHER model — a corpus
+          -- mid-switch — takes the pool path below: the re-embed moves the
+          -- label, the trigger records, the mark clears (third review pass,
+          -- cold read: the re-record left such rows at the old model and
+          -- called them rebuilt). The row's agent stands when the session
+          -- sets no actor: the vector did not change, its writer's word does
+          -- (third pass, run-it).
+          PERFORM ob1_record_derivation('vector', v_a.id, ARRAY[v_a.id], ARRAY[v_cur], v_row.produced_by,
+                                        jsonb_build_object('deterministic', true, 'dims', array_length(v_a.embedding::real[], 1))
+                                          || jsonb_strip_nulls(jsonb_build_object('model', v_model)),
+                                        COALESCE(ob1_actor_agent_id(), (SELECT d.canonical_agent_id FROM derivations d WHERE d.id = v_row.derivation_id)));
+          v_rebuilt := v_rebuilt + 1;
+        ELSE
+        -- A usable snapshot row: the current text at the model, holding a
+        -- vector OTHER than the one the row carries. An identical vector is
+        -- not the new text's: 060's snapshot trigger records the standing
+        -- vector under the row's key when a raw writer moves the text and
+        -- leaves the vector, so that row is the raw writer's copy (a model
+        -- does not embed two texts to the same vector), and restoring it
+        -- would launder the staleness the census exists to see (061's first
+        -- review pass named the same trap on the vector trigger) — run-it,
+        -- the build: the smoke's raw move "rebuilt" its own stale vector.
+        -- …and only for a row stale BY FINGERPRINT: under --force alone the
+        -- row's text did not move, so a differing snapshot vector at its key
+        -- is a twin's raw move overwriting it (060's trigger upserts under
+        -- the key), and restoring it would launder the other way (cold read,
+        -- first review pass) — force sends the row to the pool instead.
+        v_snap_ok := v_fp_stale AND v_model IS NOT NULL AND EXISTS (
+          SELECT 1 FROM ob1_embedding_snapshot s
+           WHERE s.content_fingerprint = v_cur AND s.embedding_model = v_model
+             AND s.embedding::real[] IS DISTINCT FROM v_a.embedding::real[]);
+        IF v_snap_ok THEN
+          -- The one re-derivation this database owns: the text's vector at
+          -- the model already stands in the snapshot. A projection refresh
+          -- (no event, no updated_at); the vector moved, so the vector
+          -- trigger re-records the row at the current fingerprint.
+          PERFORM ob1_refresh_thought_vector(v_a.id,
+                                             (SELECT s.embedding FROM ob1_embedding_snapshot s WHERE s.content_fingerprint = v_cur AND s.embedding_model = v_model),
+                                             v_model);
+          v_rebuilt := v_rebuilt + 1;
+        ELSE
+          v_pool := CASE WHEN v_cfg_model IS NOT NULL AND v_cfg_dim IS NOT NULL THEN 'reembed:' || v_cfg_model || '@' || v_cfg_dim END;
+          UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
+          v_marked := v_marked + 1;
+          IF v_pool IS NULL THEN
+            v_unqueued := v_unqueued + 1;
+          ELSIF NOT ((v_pool || '|' || v_a.id::text) = ANY(v_claims)) THEN
+            PERFORM requeue_thought_work(v_pool, v_a.id);
+            v_claims := v_claims || (v_pool || '|' || v_a.id::text);
+            v_enqueued := v_enqueued + 1;
+            IF NOT (v_pool = ANY(v_pools)) THEN v_pools := v_pools || v_pool; END IF;
+          END IF;
+        END IF;
+        END IF;
+      WHEN 'chunks' THEN
+        -- The windows: split and embedded by db/reembed.ts under the
+        -- configured model, through the 11-argument update_thought, which
+        -- re-records them.
+        v_pool := CASE WHEN v_cfg_model IS NOT NULL AND v_cfg_dim IS NOT NULL THEN 'reembed:' || v_cfg_model || '@' || v_cfg_dim END;
+        UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
+        v_marked := v_marked + 1;
+        IF v_pool IS NULL THEN
+          v_unqueued := v_unqueued + 1;
+        ELSIF NOT ((v_pool || '|' || v_a.id::text) = ANY(v_claims)) THEN
+          PERFORM requeue_thought_work(v_pool, v_a.id);
+          v_claims := v_claims || (v_pool || '|' || v_a.id::text);
+          v_enqueued := v_enqueued + 1;
+          IF NOT (v_pool = ANY(v_pools)) THEN v_pools := v_pools || v_pool; END IF;
+        END IF;
+      WHEN 'entities' THEN
+        IF v_row.produced_by LIKE 'source:%' THEN
+          -- A structured pass reads the source's own record, not the text.
+          v_kept := v_kept + 1;
+        ELSE
+          v_pool := COALESCE(v_cfg_key, v_row.produced_by);
+          UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
+          v_marked := v_marked + 1;
+          IF NOT ((v_pool || '|' || v_a.id::text) = ANY(v_claims)) THEN
+            PERFORM requeue_thought_work(v_pool, v_a.id);
+            v_claims := v_claims || (v_pool || '|' || v_a.id::text);
+            v_enqueued := v_enqueued + 1;
+            IF NOT (v_pool = ANY(v_pools)) THEN v_pools := v_pools || v_pool; END IF;
+          END IF;
+        END IF;
+      WHEN 'proposal' THEN
+        SELECT p.id, p.status, p.newer_id, p.judge_key, p.review_note INTO v_p
+          FROM supersession_proposals p WHERE p.id = v_row.artifact_id FOR UPDATE;
+        -- ob1:pass-settled-is-the-pass-to-reopen — a CONTRACT SENTINEL (the
+        -- 014 convention), read by db/test-schema.ts and by preflight: a
+        -- rejected row whose review_note begins 'settled by the pass:' was
+        -- decided by db/consolidate.ts about texts that have now moved, so a
+        -- text move makes it stale again as it makes a pending one; a
+        -- person's decision stands (067, SMD-2297). The literal is
+        -- server-portable/consolidate.ts's PASS_SETTLED_PREFIX; test-schema
+        -- holds the two to one string.
+        IF v_p.status IN ('pending', 'stale')
+           OR (v_p.status = 'rejected' AND v_p.review_note LIKE 'settled by the pass:%') THEN
+          -- The proposal's own status is its mark: the lineage row is left
+          -- unmarked, since nothing but the pass's replacement writes it
+          -- again — a reviewer's decision on the stale row would otherwise
+          -- leave a mark standing for ever and the census counting it (cold
+          -- read, 063's first review pass). The judge's key is the pool by
+          -- construction (029: db/consolidate.ts writes its job as the key);
+          -- no config records the current one, so the claim written here
+          -- sits under the ROW's key — and since 067 the pass re-pools every
+          -- stale row's newer thought under its OWN key at the start of a
+          -- run, so a judge-model change no longer strands the pair (a
+          -- stray pending row under the old key is what --status shows).
+          -- A row already stale is requeued again and not counted again.
+          -- From pending or from the pass's own rejection: reviewed_at goes
+          -- back to NULL (063's unreviewed CHECK reads a stale row as
+          -- unreviewed) and the pass's note with it, as 063's replacement
+          -- clears a note — a stale row carries none.
+          IF v_p.status IN ('pending', 'rejected') THEN
+            UPDATE supersession_proposals
+               SET status = 'stale', reviewed_at = NULL, review_note = NULL
+             WHERE id = v_p.id AND status IN ('pending', 'rejected');
+            v_stale_props := v_stale_props + 1;
+          END IF;
+          v_pool := v_p.judge_key;
+          IF NOT ((v_pool || '|' || v_p.newer_id::text) = ANY(v_claims)) THEN
+            PERFORM requeue_thought_work(v_pool, v_p.newer_id);
+            v_claims := v_claims || (v_pool || '|' || v_p.newer_id::text);
+            v_enqueued := v_enqueued + 1;
+            IF NOT (v_pool = ANY(v_pools)) THEN v_pools := v_pools || v_pool; END IF;
+          END IF;
+        ELSE
+          -- A person's decision stands — an accepted row, or a rejection
+          -- whose note is not the pass's; the queue says edited-since.
+          v_kept := v_kept + 1;
+        END IF;
+      WHEN 'part' THEN
+        SELECT s.id, s.status, s.newer_id, s.judge_key, s.review_note INTO v_s
+          FROM settled_parts s WHERE s.id = v_row.artifact_id FOR UPDATE;
+        -- ob1:a-moved-text-stales-its-parts - a CONTRACT SENTINEL (the 014
+        -- convention), read by db/test-schema.ts. 148: the proposal's rule,
+        -- for a part. A pending part, and one the pass itself rejected,
+        -- quotes texts that have now moved, so it goes stale and its newer
+        -- thought is queued again under the part's judge key; a person's
+        -- decision stands. The part's status is its mark, and the lineage
+        -- row is left unmarked, as a proposal's is.
+        IF v_s.status IN ('pending', 'stale')
+           OR (v_s.status = 'rejected' AND v_s.review_note LIKE 'settled by the pass:%') THEN
+          IF v_s.status IN ('pending', 'rejected') THEN
+            UPDATE settled_parts
+               SET status = 'stale', reviewed_at = NULL, review_note = NULL
+             WHERE id = v_s.id AND status IN ('pending', 'rejected');
+            v_stale_parts := v_stale_parts + 1;
+          END IF;
+          v_pool := v_s.judge_key;
+          IF NOT ((v_pool || '|' || v_s.newer_id::text) = ANY(v_claims)) THEN
+            PERFORM requeue_thought_work(v_pool, v_s.newer_id);
+            v_claims := v_claims || (v_pool || '|' || v_s.newer_id::text);
+            v_enqueued := v_enqueued + 1;
+            IF NOT (v_pool = ANY(v_pools)) THEN v_pools := v_pools || v_pool; END IF;
+          END IF;
+        ELSE
+          v_kept := v_kept + 1;
+        END IF;
+      WHEN 'section' THEN
+        -- 064's generated page section (SMD-1812): no pool regenerates it —
+        -- its generator calls write_page_section, whose lineage upsert
+        -- clears the mark — so it is marked for the operator, as the tags
+        -- are. Before this file the row fell to the kept arm below, unmarked
+        -- and uncounted as waiting (067's post-merge review pass, run-it).
+        UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
+        v_marked   := v_marked + 1;
+        v_unqueued := v_unqueued + 1;
+      WHEN 'metadata' THEN
+        -- No pool re-tags a thought: marked for the operator, nothing more.
+        UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
+        v_marked   := v_marked + 1;
+        v_unqueued := v_unqueued + 1;
+      ELSE
+        v_kept := v_kept + 1;
+    END CASE;
+  END LOOP;
+
+  -- The input leaving, whatever the walk held: mentions written by a producer
+  -- from before 061 (or by a raw writer) have no lineage row, so the windows
+  -- and the graph go here when no row in the walk took them (run-it, first
+  -- review pass: a thought whose entities rows were gone kept its mentions
+  -- for the cascade and its entities for nobody). A worker committing an
+  -- extraction after this ran leaves an entity the caller's row delete does
+  -- not prune — delete_thought's own residue; prune_orphan_entities() is its
+  -- broom.
+  IF p_input_gone AND NOT v_windows_done THEN
+    DELETE FROM thought_chunks WHERE thought_id = p_input;
+    v_windows_done := true;
+  END IF;
+  IF p_input_gone AND NOT v_graph_done THEN
+    SELECT array_agg(DISTINCT e) INTO v_touched
+      FROM (SELECT m.entity_id AS e FROM thought_entities m WHERE m.thought_id = p_input
+            UNION ALL SELECT g.from_entity_id FROM ob1_entity_edges g WHERE g.thought_id = p_input
+            UNION ALL SELECT g.to_entity_id   FROM ob1_entity_edges g WHERE g.thought_id = p_input) AS s;
+    IF v_touched IS NOT NULL THEN
+      PERFORM e.id FROM ob1_entities e WHERE e.id = ANY(v_touched) ORDER BY e.id FOR UPDATE;
+    END IF;
+    WITH d AS (DELETE FROM ob1_entity_edges WHERE thought_id = p_input RETURNING from_entity_id, to_entity_id)
+    SELECT array_agg(x) INTO v_more FROM (SELECT d.from_entity_id FROM d UNION SELECT d.to_entity_id FROM d) AS s(x);
+    v_touched := COALESCE(v_touched, ARRAY[]::uuid[]) || COALESCE(v_more, ARRAY[]::uuid[]);
+    WITH d AS (DELETE FROM thought_entities WHERE thought_id = p_input RETURNING entity_id)
+    SELECT array_agg(d.entity_id) INTO v_more FROM d;
+    v_touched := v_touched || COALESCE(v_more, ARRAY[]::uuid[]);
+    IF cardinality(v_touched) > 0 THEN
+      DELETE FROM ob1_entities e
+       WHERE e.id = ANY(v_touched)
+         AND NOT EXISTS (SELECT 1 FROM thought_entities m WHERE m.entity_id = e.id)
+         AND NOT EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.from_entity_id = e.id OR g.to_entity_id = e.id);
+    END IF;
+    v_graph_done := true;
+  END IF;
+
+  -- The input leaving: the snapshot rows at its fingerprints (060 names this
+  -- file as their removal path).
+  IF p_input_gone AND v_fps IS NOT NULL THEN
+    DELETE FROM ob1_embedding_snapshot WHERE content_fingerprint = ANY(v_fps);
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    v_deleted := v_deleted + v_n;
+  END IF;
+
+  RETURN jsonb_build_object(
+    'ok', true, 'input', p_input, 'reason', p_reason, 'input_gone', p_input_gone, 'force', p_force, 'orphans_only', p_orphans_only,
+    -- at_cap: the walk returned its cap of rows; whatever stood beyond, if
+    -- anything, is the next call's (the walk is deterministic and shrinks as
+    -- rows are deleted or re-recorded) — first review pass: "truncated" read
+    -- as a cut on exactly the cap.
+    'walked', v_walked, 'depth', v_depth, 'at_cap', v_walked >= 2000,
+    'rebuilt', v_rebuilt, 'enqueued', v_enqueued, 'deleted', v_deleted,
+    'marked', v_marked, 'unqueued', v_unqueued, 'stale_proposals', v_stale_props, 'stale_parts', v_stale_parts, 'kept', v_kept, 'current', v_current, 'legacy', v_legacy,
+    'irreproducible', to_jsonb(v_irre),
+    'cascading', jsonb_build_object('proposals', v_casc_prop, 'parts', v_casc_part, 'lineage_rows', v_casc_rows),
+    'pools', to_jsonb(v_pools));
+END;
+$$;
+
+COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not), and for a settled part the same (148: a pending part, or one the pass rejected, goes stale and its newer thought is queued under the part''s judge key; stale_parts); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass and a person''s decision on a proposal or a part are kept; a generated page section (064) is marked with no pool, as the tags are; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals, the parts and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, stale_parts, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067, 148 / SMD-1732, SMD-2297, SMD-4446.';
+
+-- ---------------------------------------------------------------------------
+-- 6. supersession_proposals' grants, copied
+-- ---------------------------------------------------------------------------
+-- A role that decides or records proposals does the same for parts. One
+-- holding UPDATE on supersession_proposals (the server group's reviewer, the
+-- worker group's pass) gains SELECT and UPDATE on settled_parts, and one
+-- holding INSERT there (the pass) gains INSERT. A role that only reads the
+-- proposal queue (the structure group's board-sync) gains nothing: it has no
+-- use for a part. The owner holds every privilege already; a re-apply grants
+-- what is held, which changes nothing.
+DO $grant$
+DECLARE
+  v_item record;
+BEGIN
+  FOR v_item IN
+    SELECT DISTINCT a.grantee, a.privilege_type
+      FROM pg_class c, aclexplode(c.relacl) AS a
+     WHERE c.oid = 'supersession_proposals'::regclass AND a.grantee <> c.relowner AND a.privilege_type IN ('UPDATE', 'INSERT')
+  LOOP
+    EXECUTE format('GRANT %s ON settled_parts TO %s',
+                   CASE v_item.privilege_type WHEN 'UPDATE' THEN 'SELECT, UPDATE' ELSE 'INSERT' END,
+                   CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
+  END LOOP;
+END
+$grant$;

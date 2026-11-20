@@ -792,12 +792,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // refusing by name without 139 or 142 ([20ci]); 145 adds release_holder_claims,
   // an operator's one-call release of every live claim a holder holds, refusing
   // by name without 046 or 115 ([20cj]); 146 and 147 upsert ob1_config.schema_version
-  // for the 2.1.0 and 2.2.0 cuts, needing only 006's table — all recorded by the
+  // for the 2.1.0 and 2.2.0 cuts, needing only 006's table; 148 adds the settled
+  // parts' table beside the proposals', with its lineage kind and
+  // rebuild_derived's arm for it, refusing by name without 114's
+  // ob1_stamp_proposal_reviewer ([20ck]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 118, `030 is among the last one hundred and eighteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 119, `030 is among the last one hundred and nineteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7166,6 +7169,78 @@ console.log("\n[20cj] Migration 145: onto a populated brain at the file before i
   assert(after.released === 2 && (await live("up-h")) === 0,
     `a re-apply is a no-op: the operator still releases the two left (${after.released})`);
 
+  await sql.close();
+}
+console.log("\n[20ck] Migration 148: onto a populated brain at the file before it — refused by name without 114's ob1_stamp_proposal_reviewer, the table not made and the lineage kinds as they were; then applied: the pending proposal and its lineage row as they were; a part recorded beside it on the same pair and accepted, no pointer written; the roles that decide and record proposals hold the same on parts, a reader of the queue nothing; a moved text stales a pending part and the proposal, the accepted part standing; a re-apply with parts standing a no-op (SMD-4446)");
+{
+  const the148 = MIGRATIONS.find((f) => /^\d{3}_settled_parts\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the148.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the148 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+  const fp = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const O = await thought("upgrade 148: the plan is to ship the importer by Friday");
+  const N = await thought("upgrade 148: the importer shipped on Thursday");
+  const KEY = "consolidate:stub@p4d5";
+  const pid = String((await sql`SELECT record_supersession_proposal(${O}::uuid, ${N}::uuid, 'newer_supersedes_older', 0.9, 'the plan is done', 0.8, ${KEY}, NULL, NULL, NULL, '{"deterministic": false, "model": "stub"}'::jsonb) AS id`)[0].id);
+  const REVIEWER = "ob1_upgrade_148_reviewer", PASS = "ob1_upgrade_148_pass", READER = "ob1_upgrade_148_reader";
+  await sql.unsafe(`CREATE ROLE ${REVIEWER} NOLOGIN; CREATE ROLE ${PASS} NOLOGIN; CREATE ROLE ${READER} NOLOGIN;
+                    GRANT SELECT, UPDATE ON supersession_proposals TO ${REVIEWER}; GRANT SELECT, INSERT, UPDATE ON supersession_proposals TO ${PASS}; GRANT SELECT ON supersession_proposals TO ${READER}`);
+  const kinds = async () => String((await sql`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check'`)[0].d);
+  const proposal = async () => JSON.stringify((await sql`SELECT p.status, p.judge_key, p.reviewed_at,
+      (SELECT count(*)::int FROM derivations d WHERE d.artifact_kind = 'proposal' AND d.artifact_id = p.id) AS lineage FROM supersession_proposals p WHERE p.id = ${pid}::uuid`)[0]);
+  const made = async () => (await sql`SELECT to_regclass('settled_parts') IS NOT NULL AS m`)[0].m as boolean;
+  const kindsBefore = await kinds(), proposalBefore = await proposal();
+
+  // Without 114's ob1_stamp_proposal_reviewer (the table's reviewer trigger runs it): refused by name, nothing made.
+  await sql`ALTER FUNCTION ob1_stamp_proposal_reviewer() RENAME TO ob1_stamp_proposal_reviewer_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the148 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_stamp_proposal_reviewer_away() RENAME TO ob1_stamp_proposal_reviewer`;
+  assert(new RegExp(`^migration ${NUM} needs 114 \\(ob1_stamp_proposal_reviewer\\); this schema lacks it`).test(without) && !(await made()) && (await kinds()) === kindsBefore && !/'part'/.test(kindsBefore),
+    `without 114's ob1_stamp_proposal_reviewer the file is refused by name; the table not made, the lineage kinds as they were (${without.slice(0, 80)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the148 });
+  assert((await made()) && /'part'/.test(await kinds()) && (await proposal()) === proposalBefore,
+    `applied: the table made, part among the lineage kinds, the pending proposal and its lineage row as they were (${await proposal()})`);
+
+  // A part beside the proposal on the same pair, accepted: no pointer written, the proposal still pending.
+  const RECIPE = `{"deterministic": false, "model": "stub"}`;
+  const record = async (statement: string, shown: string, word: string) =>
+    String((await sql`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', ${statement}, ${shown}, ${word}, 'the later note reports it done', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb) AS id`)[0].id);
+  const part = await record("ship the importer by Friday", "the importer shipped on Thursday", "implements");
+  const accepted = (await sql`SELECT review_settled_part(${part}::uuid, 'accept', 'right', '{"name": "upgrade-148-op"}'::jsonb) AS r`)[0].r as { ok: boolean; status: string };
+  const shape = async () => (await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE supersedes IS NOT NULL) AS pointers, (SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid) AS proposal,
+      (SELECT status FROM settled_parts WHERE id = ${part}::uuid) AS part, (SELECT reviewed_by FROM settled_parts WHERE id = ${part}::uuid) AS by,
+      (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'part' AND artifact_id = ${part}::uuid) AS lineage`)[0] as { pointers: number; proposal: string; part: string; by: string | null; lineage: number };
+  const after = await shape();
+  assert(accepted.ok === true && after.pointers === 0 && after.proposal === "pending" && after.part === "accepted" && after.by === "upgrade-148-op" && after.lineage === 1,
+    `a part recorded beside the proposal on the same pair and accepted: no pointer written, the proposal still pending, the reviewer and the lineage row recorded (${JSON.stringify(after)})`);
+
+  // The grants carried from the proposals' table.
+  const may = async (role: string) => ((await sql`SELECT p, has_table_privilege(${role}, 'settled_parts', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p`) as unknown as { p: string; y: boolean }[]).filter((r) => r.y).map((r) => r.p).join();
+  const grants = async () => `${await may(REVIEWER)} | ${await may(PASS)} | ${await may(READER)}`;
+  assert((await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE | ",
+    `a role that decides proposals reads and updates parts, the pass's role also inserts, a reader of the queue gains nothing, and none deletes (${await grants()})`);
+
+  // The newer text moves: rebuild_derived sets a pending part stale, and the pending proposal, and leaves the accepted part.
+  const pending = await record("the plan is to ship", "shipped on Thursday", "resolves");
+  await sql`UPDATE thoughts SET content = 'upgrade 148: the importer shipped on Wednesday', content_fingerprint = content_fingerprint_of('upgrade 148: the importer shipped on Wednesday') WHERE id = ${N}::uuid`;
+  const rb = (await sql`SELECT rebuild_derived(${N}::uuid, 'edit') AS r`)[0].r as { ok: boolean; stale_parts: number; stale_proposals: number };
+  const moved = (await sql`SELECT (SELECT status FROM settled_parts WHERE id = ${pending}::uuid) AS pending, (SELECT status FROM settled_parts WHERE id = ${part}::uuid) AS accepted,
+      (SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid) AS proposal, (SELECT count(*)::int FROM thought_work_claims WHERE thought_id = ${N}::uuid AND work_type = ${KEY}) AS queued`)[0] as { pending: string; accepted: string; proposal: string; queued: number };
+  assert(rb.ok === true && rb.stale_parts === 1 && rb.stale_proposals === 1 && moved.pending === "stale" && moved.accepted === "accepted" && moved.proposal === "stale" && moved.queued === 1,
+    `a moved text sets the pending part stale beside the pending proposal, queues the newer thought once under their key, and leaves the accepted part (${JSON.stringify(rb)}; ${JSON.stringify(moved)})`);
+
+  // A re-apply with parts standing is a no-op: the rows, the triggers, the validated CHECK and the grants as they were.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the148 });
+  const again = (await sql`SELECT (SELECT string_agg(status, ',' ORDER BY status) FROM settled_parts) AS parts,
+      (SELECT count(*)::int FROM pg_trigger WHERE tgrelid = 'settled_parts'::regclass AND NOT tgisinternal) AS triggers,
+      (SELECT convalidated FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check') AS valid`)[0] as { parts: string; triggers: number; valid: boolean };
+  assert(again.parts === "accepted,stale" && again.triggers === 2 && again.valid === true && (await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE | ",
+    `a re-apply with parts standing is a no-op: the rows, two triggers, the kind's CHECK validated over their lineage rows, the grants (${JSON.stringify(again)})`);
+
+  await sql.unsafe(`DROP OWNED BY ${REVIEWER}; DROP ROLE ${REVIEWER}; DROP OWNED BY ${PASS}; DROP ROLE ${PASS}; DROP OWNED BY ${READER}; DROP ROLE ${READER}`);
   await sql.close();
 }
 

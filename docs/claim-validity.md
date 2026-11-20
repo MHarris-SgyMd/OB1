@@ -8,7 +8,7 @@ An architecture decision record. **Proposed on 2026-11-19.** The maintainer deci
 - **Record:** a table, column or facet that already says something about a thought: a pointer, a proposal, a relation, a citation, a lineage row, an audit event.
 - **Version:** which text of a thought a record was made on: the thought's id with its `content_fingerprint` (003), or one audit event's `seq` (050).
 - **Axis:** one question asked of a thought. This record keeps three: **validity** (does it still hold), **review** (did someone decide on it), **freshness** (have the views derived from it caught up). Each has its own states, read from its own records.
-- **Settled part:** a statement inside a thought that a later thought settles, while the thought itself still stands. SMD-4446 builds its store (decided on SMD-3340, 2026-11-19). Nothing stores one today.
+- **Settled part:** a statement inside a thought that a later thought settles, while the thought itself still stands. SMD-4446 builds its store (decided on SMD-3340, 2026-11-19): migration 148 is the table, `settled_parts`, and nothing writes one yet.
 - **Challenge:** a record that says a thought may not hold: a pending or stale supersession proposal that names it as the side that falls, or as one side of an undirected conflict; or a deliverable's `corrected` verification.
 
 ## Why

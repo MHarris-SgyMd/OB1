@@ -103,7 +103,9 @@ type Report = {
   input: string; reason: string; input_gone: boolean; force: boolean;
   walked: number; depth: number; at_cap: boolean;
   rebuilt: number; enqueued: number; deleted: number; marked: number; unqueued: number; stale_proposals: number; kept: number; current: number; legacy: number;
-  irreproducible: string[]; cascading: { proposals: number; lineage_rows: number }; pools: string[];
+  // 148 (SMD-4446): the settled parts set stale, and those the row delete takes. Absent from a brain before it.
+  stale_parts?: number;
+  irreproducible: string[]; cascading: { proposals: number; parts?: number; lineage_rows: number }; pools: string[];
 };
 
 /**
@@ -133,10 +135,10 @@ function printReport(r: Report, out: Writer["out"]): void {
   out(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns${r.force ? "; or, under --force, a vector at the configured model whose text did not move, its record renewed" : ""})`);
   out(`  enqueued:    ${r.enqueued} (thought, pool) claim(s) for the workers`);
   out(`  deleted:     ${r.deleted} (lineage rows whose artifact is gone${r.input_gone ? "; the windows, the graph and the snapshot rows the input keyed" : ""})`);
-  out(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (067) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not` : ""}`);
-  out(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a person's decision on a proposal stands)`);
+  out(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (067) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not` : ""}${r.stale_parts ? `; ${r.stale_parts} settled part(s) set stale, as a proposal is (148)` : ""}`);
+  out(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a person's decision on a proposal or a settled part stands)`);
   out(`  current:     ${r.current} (nothing moved)${r.legacy ? `; ${r.legacy} legacy row(s) read current by construction — --force re-runs them` : ""}`);
-  if (r.input_gone) out(`  cascade:     ${r.cascading.proposals} proposal(s) and ${r.cascading.lineage_rows} lineage row(s) go with the row delete (029's and 061's triggers)`);
+  if (r.input_gone) out(`  cascade:     ${r.cascading.proposals} proposal(s)${r.cascading.parts ? `, ${r.cascading.parts} settled part(s)` : ""} and ${r.cascading.lineage_rows} lineage row(s) go with the row delete (029's and 061's triggers)`);
   if (r.irreproducible.length) {
     out(`  irreproducible: ${r.irreproducible.length} derived_from child(ren) — prose no recipe re-runs; a human reviews them:`);
     for (const id of r.irreproducible) out(`    ${id}`);

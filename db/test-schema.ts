@@ -220,9 +220,12 @@ function definedIn(file: string): string[] {
  * functions it restored and whose DROP took 053's six-argument writer ([52]
  * re-applies 053). 056 and 136, whose apply_entity_type_gate and
  * merge_entities it also carries, are not carried: 056 runs the gate over the
- * rows at each apply.
+ * rows at each apply. 148 is 067's rebuild_derived and 111's
+ * ob1_record_derivation, each with the settled part's kind (SMD-4446), and
+ * carries both: 067 last defines the settle and 111 the subject's writer,
+ * which a re-apply of 063 or 084 reverts.
  */
-const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"] };
+const CARRIES: Record<string, string[]> = { "099": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "148": ["067", "111"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -9311,7 +9314,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   for (const [fn, last] of [["upsert_thought", "080"], ["update_thought", "099"]])
     assert(lastDefinerOf(fn).startsWith(last), `${last} is the last definer of ${fn} — 061's body with the trust stamp, [66] (${lastDefinerOf(fn)})`);
   assert(lastDefinerOf("record_supersession_proposal").startsWith("063"), `063 is the last definer of record_supersession_proposal — the stale proposal's replacement, on 061's body (${lastDefinerOf("record_supersession_proposal")})`);
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("111"), `111 is the last definer of ob1_record_derivation — 063's body (061's plus the mark the upsert clears) plus the section kind ([59]), the relation kind ([74]) and the subject kind ([99]) (${lastDefinerOf("ob1_record_derivation")})`);
+  assert(lastDefinerOf("ob1_record_derivation").endsWith("_settled_parts.sql"), `the settled parts' file is the last definer of ob1_record_derivation — 063's body (061's plus the mark the upsert clears) plus the section kind ([59]), the relation kind ([74]), the subject kind ([99]) and the part kind ([133]) (${lastDefinerOf("ob1_record_derivation")})`);
   assert(lastDefinerOf("delete_thought").startsWith("060") && lastDefinerOf("thoughts_write_audit").startsWith("060") && lastDefinerOf("ob1_project_thought_event").startsWith("060") && lastDefinerOf("ob1_refresh_thought_vector").startsWith("060"),
     "060 stays the last definer of delete_thought, the audit trigger, the projector and the refresh — 061 touches none");
   const RECORDS = /ob1:derivation-recorded-with-its-artifact/;
@@ -9404,7 +9407,7 @@ console.log("\n[57] Migration 061: lineage for every derived artifact — one de
   const badNull = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY[NULL::text], 'p', '{"deterministic": true}'::jsonb)`);
   const badKind = await refused(`SELECT ob1_record_derivation('facet', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], 'p', '{"deterministic": true}'::jsonb)`);
   const badPass = await refused(`SELECT ob1_record_derivation('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], '', '{"deterministic": true}'::jsonb)`);
-  assert(/boolean "deterministic"/.test(badRecipe) && /one non-NULL fingerprint per input \(1 inputs, 2 fingerprints\)/.test(badLength) && /one non-NULL fingerprint per input/.test(badNull) && /artifact_kind must be chunks, entities, proposal, vector, metadata, section, relation or subject, got 'facet'/.test(badKind) && /produced_by must name the pass/.test(badPass),
+  assert(/boolean "deterministic"/.test(badRecipe) && /one non-NULL fingerprint per input \(1 inputs, 2 fingerprints\)/.test(badLength) && /one non-NULL fingerprint per input/.test(badNull) && /artifact_kind must be chunks, entities, proposal, vector, metadata, section, relation, subject or part, got 'facet'/.test(badKind) && /produced_by must name the pass/.test(badPass),
     `the writer refuses a recipe without a boolean deterministic, unequal arrays, a NULL fingerprint, an unknown kind and an empty pass (${[badRecipe, badLength, badNull, badKind, badPass].map((m) => m.slice(0, 60)).join(" | ")})`);
   const direct = await refused(`INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe) VALUES ('vector', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['x'], 'p', '{"model": "m"}'::jsonb)`);
   assert(/violates check constraint/.test(direct), "…and the table's CHECK refuses the same recipe written around the writer — a missing key answers NULL, and COALESCE makes it false");
@@ -9594,10 +9597,11 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("063"), `one ${fn}, 063 its last definer (${lastDefinerOf(fn)})`);
   assert((await functionsNamed("consolidation_candidates")) === 1 && lastDefinerOf("consolidation_candidates").startsWith("079"),
     `one consolidation_candidates, 079 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
-  assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("111") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
-    `one ob1_record_derivation, 111 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]), the relation kind ([74]) and the subject kind ([99]) (${lastDefinerOf("ob1_record_derivation")})`);
-  // rebuild_derived's last definer is 067 (SMD-2297: the proposal arm reopens a pass-settled row); [61] asserts it.
-  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("067"), `one rebuild_derived, 067 its last definer (${lastDefinerOf("rebuild_derived")})`);
+  assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").endsWith("_settled_parts.sql") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
+    `one ob1_record_derivation, the settled parts' file its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]), the relation kind ([74]), the subject kind ([99]) and the part kind ([133]) (${lastDefinerOf("ob1_record_derivation")})`);
+  // rebuild_derived's last definer is the settled parts' file (SMD-4446: 067's body, the part beside the proposal);
+  // [61] asserts 067's arm in it, and [133] the part's.
+  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").endsWith("_settled_parts.sql"), `one rebuild_derived, the settled parts' file its last definer (${lastDefinerOf("rebuild_derived")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
   assert(/ob1:rebuild-acts-on-a-held-frontier/.test(await src(REBUILD_SIG)) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src(REBUILD_SIG)) && /FOR NO KEY UPDATE/.test(await src(REBUILD_SIG)),
     "the primitive carries its sentinel, takes the supersession lock and the row lock in delete_thought's order");
@@ -9923,8 +9927,8 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   const kindCheck = (await one<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check'`)).d;
   assert(/'section'/.test(kindCheck) && /'chunks'/.test(kindCheck) && /'metadata'/.test(kindCheck), `061's kind CHECK admits the sixth kind, section, beside the five (${kindCheck})`);
   const RD = "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)";
-  assert(lastDefinerOf("ob1_record_derivation").startsWith("111") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
-    "ob1_record_derivation, last defined by 110 — 061's body, one form, the section kind admitted (and since 084 the relation kind, since 110 the subject kind), the upsert kept");
+  assert(lastDefinerOf("ob1_record_derivation").endsWith("_settled_parts.sql") && (await functionsNamed("ob1_record_derivation")) === 1 && /'section'/.test(await src(RD)) && /ON CONFLICT \(artifact_kind, artifact_id, produced_by\) DO UPDATE/.test(await src(RD)),
+    "ob1_record_derivation, last defined by the settled parts' file — 061's body, one form, the section kind admitted (and since 084 the relation kind, since 111 the subject kind, since the settled parts' file the part kind), the upsert kept");
   for (const fn of ["upsert_page", "write_page_section", "accept_page_section", "reject_page_section", "release_page_section", "lock_page_section", "delete_page_section", "render_page", "page_sections_as_of", "ob1_render_page_thought", "ob1_page_actor", "ob1_page_lock", "ob1_page_evidence", "ob1_page_recipe", "page_section_revisions_refuse_mutation", "ob1_drop_section_derivations"]) assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith("064"), `one ${fn}, 064's`);
   const immutableDef = (await one<{ d: string }>(`SELECT pg_get_triggerdef(oid) AS d FROM pg_trigger WHERE tgname = 'page_section_revisions_immutable'`))?.d ?? "";
   assert(/BEFORE (UPDATE OR DELETE|DELETE OR UPDATE) ON (public\.)?page_section_revisions FOR EACH ROW/.test(immutableDef), `the revisions' row trigger refuses UPDATE and DELETE (${immutableDef})`);
@@ -9935,7 +9939,7 @@ console.log("\n[59] Migration 064: the page store — a page is a thought whose 
   const trig = (await q<{ t: string }>(`SELECT tgname AS t FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN ('page_sections'::regclass, 'page_section_revisions'::regclass) ORDER BY 1`)).map((x) => x.t).join();
   assert(trig === "page_section_revisions_immutable,page_section_revisions_immutable_truncate,page_sections_drop_derivations", `the three triggers: the revisions' two refusals, the sections' lineage drop (${trig})`);
   const kindMsg = await refused(`SELECT ob1_record_derivation('bogus', gen_random_uuid(), ARRAY[gen_random_uuid()], ARRAY['f'], 'p', '{"deterministic": true}'::jsonb)`);
-  assert(/chunks, entities, proposal, vector, metadata, section, relation or subject, got 'bogus'/.test(kindMsg), `the writer's refusal names the eight kinds — 084 added relation, 110 subject (${kindMsg.slice(0, 100)})`);
+  assert(/chunks, entities, proposal, vector, metadata, section, relation, subject or part, got 'bogus'/.test(kindMsg), `the writer's refusal names the nine kinds — 084 added relation, 111 subject, the settled parts' file part (${kindMsg.slice(0, 120)})`);
   const chk = (await q<{ n: string; d: string }>(`SELECT conname AS n, pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind%'`));
   assert(chk.length === 1 && chk[0].n === "derivations_artifact_kind_check" && !/NOT VALID/.test(chk[0].d), `one CHECK on artifact_kind stands, validated (${chk.map((c) => c.n).join()})`);
 
@@ -10363,8 +10367,8 @@ console.log("\n[61] Migration 067: the consolidation pass settles a stale propos
   // The shape: one settle function, 067 the last definer of both, the two
   // sentinels, the marker literal held to the TypeScript constant, the
   // comments naming 067.
-  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("067") && lastDefinerOf("rebuild_derived").startsWith("067"),
-    `one settle function; 067 is the last definer of it and of rebuild_derived (${lastDefinerOf("rebuild_derived")})`);
+  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("067") && lastDefinerOf("rebuild_derived").endsWith("_settled_parts.sql"),
+    `one settle function, 067 its last definer; rebuild_derived's is the settled parts' file, which carries 067's body (${lastDefinerOf("rebuild_derived")})`);
   const rebuildSrc = await src(REBUILD_SIG), settleSrc = await src(SETTLE_SIG);
   assert(/ob1:pass-settled-is-the-pass-to-reopen/.test(rebuildSrc) && /ob1:rebuild-acts-on-a-held-frontier/.test(rebuildSrc) && /ob1:settle-records-the-texts-it-judged/.test(settleSrc),
     "the reopen and the settle carry their sentinels; 063's frontier sentinel stands");
@@ -15823,11 +15827,13 @@ console.log("\n[99] Migration 111: a thought's own subject — a `subject` facet
 
   // The shape: 111 the last definer of its four functions and of the two it carries, but the door, which 113 carries
   // with a check of the ticket a thought is filed under ([101]) and 130 makes a set of one ([116]), and the validator,
-  // which 120 carries with a thread's edge ([108]); the sentinels; the trigger; the indexes (one standing per thought,
-  // since 130 per thought and key); the CHECK; the comments.
+  // which 120 carries with a thread's edge ([108]), and the lineage writer, which the settled parts' file carries with
+  // the part's kind ([133]); the sentinels; the trigger; the indexes (one standing per thought, since 130 per thought
+  // and key); the CHECK; the comments.
   for (const fn of ["subject_key_valid", "record_thought_subject", "ob1_drop_subject_derivation", "thought_facets_validate", "ob1_record_derivation"]) {
-    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "134" : "111";
-    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn).startsWith(by), `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
+    const by = fn === "record_thought_subject" ? "130" : fn === "thought_facets_validate" ? "134" : fn === "ob1_record_derivation" ? "_settled_parts.sql" : "111";
+    const last = lastDefinerOf(fn);
+    assert((await functionsNamed(fn)) === 1 && (by.startsWith("_") ? last.endsWith(by) : last.startsWith(by)), `one ${fn}, ${by} its last definer (${last})`);
   }
   const validatorSrc = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE proname = 'thought_facets_validate'`)).s);
   assert(/ob1:subject-facet/.test(validatorSrc) && /ob1:relation-facet/.test(validatorSrc) && /ob1:link-facet/.test(validatorSrc) && /ob1:subject-lineage-with-its-artifact/.test(await src("record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)")),
@@ -22307,6 +22313,253 @@ console.log("\n[132] Migration 145: release every live claim one holder holds �
 
   await db.exec(`UPDATE work_claims SET released_at = now(), released_by = 'cleanup', release_reason = 'test' WHERE released_at IS NULL AND holder_name IN ('[132] h', '[132] h2')`);
   await db.exec(`DELETE FROM ob1_agents WHERE label IN ('[132] op', '[132] h', '[132] h2', '[132] plain')`);
+}
+
+console.log("\n[133] Migration 148: settled parts — a statement in one thought that the other of a pair settles, recorded by the pass with a quote from each, the word and its group and both fingerprints, several a pair and one statement once; decided by a reviewer, an accept writing no thought, a repeat refused and a reversal allowed; a moved text refuses the accept unless forced, stales a pending part and queues its newer thought, a person's decision standing; a deleted or forgotten thought takes its parts and their lineage; the proposals' grants carried; a re-apply a no-op (SMD-4446)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  // A refusal's code, message and DETAIL: a constraint's own error carries the failing row there.
+  const refused = async (sql: string, params: unknown[] = []) => { try { await db.query(sql, params); return ""; } catch (e) { return `${String((e as { code?: string }).code ?? "?")}: ${(e as Error).message} ${String((e as { detail?: string }).detail ?? "")}`; } };
+  const count = async (sql: string, params: unknown[] = []) => (await one<{ c: number }>(sql, params)).c;
+  const file = files.find((f) => f.endsWith("_settled_parts.sql")) ?? "no _settled_parts.sql";  // by name: renumbered when main takes its number
+  const NUM = file.slice(0, 3);
+  const src = readFileSync(join(MIGRATIONS, file), "utf8");
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await restoreShipped("record_settled_part", "review_settled_part", "rebuild_derived", "ob1_record_derivation", "update_thought", "delete_thought", "forget_thought");
+
+  try {
+    // The shape: the table with its comment, four indexes beside the key's, two triggers (the reviewer's is 114's function),
+    // the three functions and the two carried bodies last defined here, the sentinels, the kind in a validated CHECK.
+    const REC = "record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)", REV = "review_settled_part(uuid, text, text, jsonb, boolean)";
+    const named = new RegExp(`Migration ${NUM} / SMD-4446`);
+    const tableComment = (await one<{ c: string | null }>(TABLE_COMMENT_SQL, ["settled_parts"])).c ?? "";
+    const idx = (await q<{ n: string }>(`SELECT indexname AS n FROM pg_indexes WHERE tablename = 'settled_parts' ORDER BY 1`)).map((r) => r.n).join();
+    const trg = (await q<{ n: string; f: string }>(`SELECT t.tgname AS n, p.proname AS f FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid WHERE t.tgrelid = 'settled_parts'::regclass AND NOT t.tgisinternal ORDER BY 1`)).map((r) => `${r.n}=${r.f}`).join();
+    const kindCheck = (await q<{ n: string; d: string }>(`SELECT conname AS n, pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind = ANY%'`));
+    assert(named.test(tableComment) && idx === "settled_parts_holder_idx,settled_parts_newer_idx,settled_parts_one_statement,settled_parts_pending_idx,settled_parts_pkey"
+        && trg === "settled_parts_drop_derivation=ob1_drop_part_derivation,settled_parts_stamp_reviewer=ob1_stamp_proposal_reviewer",
+      `the table, commented; its four indexes beside the key's; two triggers, the reviewer's running 114's function (${idx}; ${trg})`);
+    for (const fn of ["record_settled_part", "review_settled_part", "ob1_drop_part_derivation", "rebuild_derived", "ob1_record_derivation"])
+      assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, this file its last definer (${lastDefinerOf(fn)})`);
+    for (const sig of [REC, REV, "ob1_drop_part_derivation()", "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", "ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)"])
+      assert(new RegExp(`\\b${NUM}\\b`).test((await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [sig])).c ?? ""), `${sig}'s comment names ${NUM}`);
+    assert(/ob1:part-recorded-with-its-lineage/.test(src) && /ob1:a-part-never-writes-supersedes/.test(src) && /ob1:a-moved-text-stales-its-parts/.test(src)
+        && kindCheck.length === 1 && /'part'/.test(kindCheck[0].d) && !/NOT VALID/.test(kindCheck[0].d),
+      `the three sentinels; one CHECK on the lineage kind, validated, admitting part (${kindCheck.map((c) => c.n).join()})`);
+
+    // A pair, a third thought, and two classified keys.
+    const JUDGE = "consolidate:stub+writer@p4d6", JUDGE2 = "consolidate:stub+writer@p4d7";
+    const RECIPE = JSON.stringify({ deterministic: false, model: "stub-writer", prompt_version: 6 });
+    type T = { id: string; fingerprint: string };
+    const cap = async (content: string, at: number) =>
+      (await one<{ r: T }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify({ metadata: { source: "mcp" }, embedding_model: EMBEDDING_MODEL }), unit(at)])).r;
+    const O = await cap("[133] the plan: ship the importer by Friday; the count stands at 40; the review is open", 60);
+    const N = await cap("[133] the importer shipped on Thursday; the count is 52 now; the review closed", 61);
+    await db.query(`UPDATE thoughts SET created_at = now() - interval '3 days' WHERE id = $1::uuid`, [O.id]);
+    const opId = (await one<{ id: string }>(`INSERT INTO ob1_agents (label, kind) VALUES ('[133] operator key', 'operator') RETURNING canonical_agent_id::text AS id`)).id;
+    const agId = (await one<{ id: string }>(`INSERT INTO ob1_agents (label, kind) VALUES ('[133] agent key', 'agent') RETURNING canonical_agent_id::text AS id`)).id;
+    const OP = { name: "[133] operator key", via: "consolidate", agent_id: opId };
+    const AG = { name: "[133] agent key", via: "open-brain-api", agent_id: agId };
+
+    type Part = { older: string; newer: string; holder: string; holder_id: string; statement: string; shown_by: string; word: string; grp: string; ofp: string; nfp: string; key: string; status: string; reviewed_at: string | null; note: string | null; by: string | null; agent: string | null; kind: string | null };
+    const part = async (id: string) => one<Part>(`SELECT older_id::text AS older, newer_id::text AS newer, holder, holder_id::text AS holder_id, statement, shown_by, word, word_group AS grp,
+        older_fingerprint AS ofp, newer_fingerprint AS nfp, judge_key AS key, status, reviewed_at::text AS reviewed_at, review_note AS note, reviewed_by AS by, reviewed_by_agent_id::text AS agent, reviewed_by_kind AS kind
+      FROM settled_parts WHERE id = $1::uuid`, [id]);
+    // The eleven arguments of a good part on the pair; a case replaces one.
+    const base = (): unknown[] => [O.id, N.id, "older", "ship the importer by Friday", "the importer shipped on Thursday", "implements", "the later note reports the plan carried out", JUDGE, O.fingerprint, N.fingerprint, RECIPE];
+    const args = (over: Record<number, unknown>) => base().map((v, i) => (i in over ? over[i] : v));
+    const RECORD_SQL = `SELECT record_settled_part($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb) AS id`;
+    const record = async (over: Record<number, unknown> = {}) => (await one<{ id: string | null }>(RECORD_SQL, args(over))).id;
+    const lineage = async (id: string) => q<{ kind: string; inputs: string[]; fps: string[]; by: string; recipe: { model?: string; deterministic?: boolean } }>(
+      `SELECT artifact_kind AS kind, input_ids::text[] AS inputs, input_fingerprints AS fps, produced_by AS by, recipe FROM derivations WHERE artifact_id = $1::uuid`, [id]);
+    const onPair = async () => count(`SELECT count(*)::int AS c FROM settled_parts WHERE older_id = $1::uuid AND newer_id = $2::uuid`, [O.id, N.id]);
+    // What an acceptance must not move: each thought's pointer, its updated_at and its audit rows, and who is superseded.
+    const untouched = async () => JSON.stringify(await q(`SELECT t.id::text AS id, t.supersedes::text AS s, t.updated_at::text AS u,
+        (SELECT count(*)::int FROM thought_audit a WHERE a.thought_id = t.id) AS n, (SELECT count(*)::int FROM thoughts x WHERE x.supersedes = t.id) AS sup
+      FROM thoughts t WHERE t.id = ANY($1::uuid[]) ORDER BY t.id`, [[O.id, N.id]]));
+
+    // The word's group, for each of the eight: four say the statement no longer holds, four that it is done or settled.
+    // On the pair the other way round, and deleted after, so the counts below are the pair's own.
+    const groups: string[] = [];
+    for (const w of ["corrects", "reverses", "revises", "withdraws", "implements", "resolves", "updates", "prioritizes"]) {
+      const id = (await record({ 0: N.id, 1: O.id, 3: `a statement for ${w}`, 5: w, 8: N.fingerprint, 9: O.fingerprint }))!;
+      groups.push(`${w}=${(await part(id)).grp}`);
+    }
+    await db.query(`DELETE FROM settled_parts WHERE older_id = $1::uuid AND newer_id = $2::uuid`, [N.id, O.id]);
+    assert(groups.join() === "corrects=no_longer_holds,reverses=no_longer_holds,revises=no_longer_holds,withdraws=no_longer_holds,implements=done_or_settled,resolves=done_or_settled,updates=done_or_settled,prioritizes=done_or_settled"
+        && (await count(`SELECT count(*)::int AS c FROM derivations WHERE artifact_kind = 'part'`)) === 0,
+      `each of the eight words has its group, four and four (${groups.join()})`);
+
+    // Recorded: pending, the holder's thought and the word's group worked out, the lineage row beside it.
+    const p1 = (await record())!;
+    const r1 = await part(p1), l1 = await lineage(p1);
+    assert(p1 !== null && r1.status === "pending" && r1.reviewed_at === null && r1.holder_id === O.id && r1.word === "implements" && r1.grp === "done_or_settled" && r1.ofp === O.fingerprint && r1.nfp === N.fingerprint && r1.key === JUDGE,
+      `a part is recorded pending: its holder's thought, its word's group, both fingerprints as judged and the judge's key (${JSON.stringify({ status: r1.status, grp: r1.grp, key: r1.key })})`);
+    assert(l1.length === 1 && l1[0].kind === "part" && l1[0].inputs.join() === `${O.id},${N.id}` && l1[0].fps.join() === `${O.fingerprint},${N.fingerprint}` && l1[0].by === JUDGE && l1[0].recipe.model === "stub-writer" && l1[0].recipe.deterministic === false,
+      `…and its lineage row commits with it: kind part, both thoughts at the fingerprints judged, the key and the recipe (${l1.map((l) => l.kind).join()})`);
+
+    // Several a pair. A statement is a part's identity with its holder: the same one again writes nothing, the other holder's is another part.
+    const p2 = (await record({ 3: "the count stands at 40", 4: "the count is 52 now", 5: "updates" }))!;
+    const p3 = (await record({ 2: "newer", 3: "the count is 52 now", 4: "the count stands at 40", 5: "corrects" }))!;
+    const again = await record({ 4: "other words that show it", 5: "resolves" });
+    const r3 = await part(p3), r1again = await part(p1);
+    assert(p2 !== null && p3 !== null && again === null && (await onPair()) === 3 && (await count(`SELECT count(*)::int AS c FROM derivations WHERE artifact_kind = 'part'`)) === 3
+        && r3.holder_id === N.id && r3.grp === "no_longer_holds" && r1again.shown_by === "the importer shipped on Thursday" && r1again.word === "implements",
+      `a pair holds several parts; one statement of one thought once, the first standing as written; the newer thought may hold one too (${await onPair()} rows, again ${again})`);
+
+    // Refused, each by name and with no row: the shape of a part. A refusal says a length, never the words, in its
+    // message or its DETAIL: the function refuses each shape the table's CHECKs hold before the row is built.
+    const MARK = "QUOTED-WORDS-4446";
+    const cases: [string, Record<number, unknown>, RegExp][] = [
+      ["a holder that is neither", { 2: "both" }, /22023: record_settled_part: p_holder must be older or newer/],
+      ["a word outside the eight", { 5: "evolves" }, /22023: record_settled_part: p_word must be corrects, reverses, revises, withdraws, implements, resolves, updates or prioritizes/],
+      ["an empty statement", { 3: "  " }, /22023: record_settled_part: the statement and the words that show it must each hold 1 to 2000 characters/],
+      ["a statement past 2000 characters", { 3: `${MARK} ${"x".repeat(2000)}` }, /22023: .*1 to 2000 characters, got 20\d\d and/],
+      ["no showing words", { 4: null }, /22023: .*1 to 2000 characters, got \d+ and none/],
+      ["an empty reason", { 6: "" }, /22023: record_settled_part: p_reason must hold 1 to 1000 characters/],
+      ["a reason past 1000 characters", { 6: "r".repeat(1001) }, /22023: .*1 to 1000 characters, got 1001/],
+      ["no judge key", { 7: "" }, /22023: record_settled_part: p_judge_key must name the pass/],
+      ["a missing fingerprint", { 9: null }, /22023: record_settled_part: both fingerprints/],
+      ["no recipe", { 10: null }, /22023: record_settled_part: p_recipe must be a JSON object/],
+      ["a recipe without deterministic", { 10: JSON.stringify({ model: "m" }) }, /22023: record_settled_part: p_recipe must be a JSON object/],
+      ["one thought twice", { 1: O.id }, /22023: record_settled_part: a part is of two different thoughts/],
+      ["a thought that does not exist", { 1: "00000000-0000-4000-8000-000000000133" }, /23503: /],
+    ];
+    const refusals: string[] = [];
+    for (const [what, over, want] of cases) {
+      // Each refused part carries the mark in both quotes, unless the case replaces one: no refusal may echo it.
+      const got = await refused(RECORD_SQL, args({ 3: `${MARK} a statement of its own`, 4: `${MARK} the words that show it`, ...over }));
+      if (!want.test(got) || got.includes(MARK)) refusals.push(`${what}: ${got.slice(0, 90)}`);
+    }
+    assert(refusals.length === 0 && (await onPair()) === 3 && (await count(`SELECT count(*)::int AS c FROM derivations WHERE artifact_kind = 'part'`)) === 3,
+      `the write refuses ${cases.length} wrong shapes by name, none leaving a row or quoting the words (${refusals.join(" | ") || "all refused"})`);
+
+    // Accepted: the reviewer stamped from the envelope, and no thought written — no pointer, no edit, no audit row, nothing superseded.
+    const review = async (id: string, decision: string, actor: unknown, force = false, note: string | null = "note") =>
+      (await one<{ r: { ok: boolean; error?: string; status?: string; was?: string; holder_id?: string; word_group?: string; older_edited?: boolean; newer_edited?: boolean } }>(
+        `SELECT review_settled_part($1::uuid, $2, $3, $4::jsonb, $5) AS r`, [id, decision, note, actor === null ? null : JSON.stringify(actor), force])).r;
+    const before = await untouched();
+    const a1 = await review(p1, "accept", OP);
+    const ra = await part(p1);
+    assert(a1.ok === true && a1.status === "accepted" && a1.was === "pending" && a1.holder_id === O.id && a1.word_group === "done_or_settled"
+        && ra.status === "accepted" && ra.reviewed_at !== null && ra.note === "note" && ra.by === OP.name && ra.agent === opId && ra.kind === "operator",
+      `an accept decides the part and records who decided: the key's name, agent and the registry's kind (${JSON.stringify({ status: ra.status, by: ra.by, kind: ra.kind })})`);
+    assert((await untouched()) === before, `…and writes no thought: neither thought's supersedes, updated_at nor audit rows moved, and nothing is superseded (${(await untouched()) === before})`);
+
+    // A repeat is refused and restamps nothing; the other way round is a reversal, which a reviewer may make.
+    const twice = await review(p1, "accept", AG);
+    const afterTwice = (await part(p1)).by;
+    const reversed = await review(p1, "reject", AG, false, "wrong after all");
+    const rejectedTwice = await review(p1, "reject", OP);
+    const afterRejects = await part(p1);
+    const back = await review(p1, "accept", OP);
+    assert(twice.ok === false && twice.error === "ALREADY_ACCEPTED" && afterTwice === OP.name && reversed.ok === true && reversed.status === "rejected" && reversed.was === "accepted"
+        && rejectedTwice.ok === false && rejectedTwice.error === "ALREADY_REJECTED" && afterRejects.by === AG.name && afterRejects.note === "wrong after all" && back.ok === true && back.was === "rejected" && (await part(p1)).by === OP.name,
+      `a decision that repeats the row's status is refused and leaves the reviewer as it was; a reversal is made and restamped (${twice.error}, ${rejectedTwice.error}, ${afterRejects.by})`);
+    const notFound = await review("00000000-0000-4000-8000-000000000133", "accept", OP);
+    const badDecision = await refused(`SELECT review_settled_part($1::uuid, 'maybe')`, [p1]);
+    assert(notFound.ok === false && notFound.error === "NOT_FOUND" && /22023: review_settled_part: p_decision must be accept or reject/.test(badDecision),
+      `an unknown part is NOT_FOUND, and a decision that is neither is refused (${notFound.error}; ${badDecision.slice(0, 70)})`);
+
+    // Two more parts, decided before a text moves: one rejected by a person, one by the pass's own note.
+    const p4 = (await record({ 3: "the review is open", 4: "the review closed", 5: "resolves" }))!;
+    const p5 = (await record({ 3: "ship the importer", 4: "shipped on Thursday", 5: "implements" }))!;
+    await review(p4, "reject", OP, false, "not a statement of the plan");
+    await review(p5, "reject", { name: "consolidate", via: "consolidate" }, false, "settled by the pass: the writer no longer names it");
+
+    // The newer text moves. An accept of a part that quotes the old one is refused, the side named, unless forced.
+    const moved = (await one<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, '[133] the importer shipped on Thursday; the count is 53 now; the review closed', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) AS r`, [N.id])).r;
+    const edited = await review(p2, "accept", OP);
+    const stillPending = (await part(p2)).status;
+    const forced = await review(p2, "accept", OP, true);
+    assert(moved.ok === true && edited.ok === false && edited.error === "EDITED_SINCE" && edited.older_edited === false && edited.newer_edited === true && stillPending === "pending" && forced.ok === true && (await part(p2)).status === "accepted",
+      `an accept is refused when a text has moved since it was judged, naming the side, and the row is left pending; forced, it is accepted (${edited.error}, older ${edited.older_edited}, newer ${edited.newer_edited})`);
+
+    // rebuild_derived on the moved thought: the pending part and the pass's own rejection go stale, their reviewer and note
+    // cleared, and the newer thought is queued under the part's key; the person's accepts and reject stand.
+    type Report = { ok: boolean; stale_parts: number; stale_proposals: number; deleted: number; pools: string[]; cascading: { proposals: number; parts: number; lineage_rows: number } };
+    const rebuild = async (id: string, reason: string, gone = false, orphansOnly = false) =>
+      (await one<{ r: Report }>(`SELECT rebuild_derived($1::uuid, $2::text, $3::boolean, NULL::text[], false, $4::boolean) AS r`, [id, reason, gone, orphansOnly])).r;
+    const queued = async () => count(`SELECT count(*)::int AS c FROM thought_work_claims WHERE thought_id = $1::uuid AND work_type = $2`, [N.id, JUDGE]);
+    await db.query(`DELETE FROM thought_work_claims WHERE thought_id = $1::uuid`, [N.id]);
+    const rb = await rebuild(N.id, "edit");
+    const st = { p1: await part(p1), p2: await part(p2), p3: await part(p3), p4: await part(p4), p5: await part(p5) };
+    assert(rb.ok === true && rb.stale_parts === 2 && rb.stale_proposals === 0 && rb.pools.includes(JUDGE) && (await queued()) === 1
+        && st.p3.status === "stale" && st.p5.status === "stale" && st.p5.reviewed_at === null && st.p5.note === null && st.p5.by === null,
+      `a moved text sets the pending part and the pass's own rejection stale, clears the pass's note and reviewer, and queues the newer thought under the part's key (stale_parts ${rb.stale_parts}, queued ${await queued()}, ${st.p3.status}/${st.p5.status})`);
+    assert(st.p1.status === "accepted" && st.p2.status === "accepted" && st.p4.status === "rejected" && st.p4.by === OP.name && (await rebuild(N.id, "edit again")).stale_parts === 0,
+      `…and a person's decision stands, accept or reject; a second rebuild sets nothing more stale (${st.p1.status}, ${st.p2.status}, ${st.p4.status})`);
+
+    // The pass names a stale statement again: the row is replaced in place and is pending, its lineage row recorded
+    // afresh under the new key. A statement a person rejected is not written again; a stale row may be rejected.
+    const nfp2 = (await one<{ f: string }>(`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = $1::uuid`, [N.id])).f;
+    const replaced = await record({ 2: "newer", 3: "the count is 52 now", 4: "the count stands at 40", 5: "revises", 7: JUDGE2, 9: nfp2 });
+    const r3b = await part(p3), l3 = await lineage(p3);
+    const rejectedAgain = await record({ 3: "the review is open", 4: "the review closed", 5: "resolves", 9: nfp2 });
+    const staleRejected = await review(p5, "reject", OP, false, "not a part");
+    assert(replaced === p3 && r3b.status === "pending" && r3b.word === "revises" && r3b.nfp === nfp2 && r3b.key === JUDGE2 && l3.length === 1 && l3[0].by === JUDGE2 && l3[0].fps[1] === nfp2
+        && rejectedAgain === null && (await part(p4)).status === "rejected" && staleRejected.ok === true && staleRejected.was === "stale" && (await onPair()) === 5,
+      `a stale statement named again is replaced in place, pending, with one lineage row at the new key and fingerprint; a rejected statement is not proposed again; a stale row may be rejected (${r3b.status}, ${l3.map((l) => l.by).join()}, again ${rejectedAgain})`);
+
+    // A lineage row whose part is gone is an orphan, and the sweep deletes it; a part deleted takes its own.
+    const ghost = "00000000-0000-4000-8000-0000000a0133";
+    await db.query(`SELECT ob1_record_derivation('part', $1::uuid, ARRAY[$2::uuid, $3::uuid], ARRAY['x', 'y'], 'consolidate:ghost@p1', '{"deterministic": false}'::jsonb)`, [ghost, O.id, N.id]);
+    const sweep = await rebuild(O.id, "sweep", false, true);
+    const ghostLeft = await count(`SELECT count(*)::int AS c FROM derivations WHERE artifact_id = $1::uuid`, [ghost]);
+    await db.query(`DELETE FROM settled_parts WHERE id = $1::uuid`, [p4]);
+    assert(sweep.ok === true && sweep.deleted >= 1 && ghostLeft === 0 && (await lineage(p4)).length === 0 && (await lineage(p1)).length === 1,
+      `the sweep deletes a lineage row whose part is gone, and a deleted part takes its lineage row, another's standing (${sweep.deleted} deleted, ghost ${ghostLeft})`);
+
+    // The grants: a role that decides proposals decides parts, the pass's role records them, a reader of the queue gains nothing.
+    await db.exec(`CREATE ROLE ob1_t133_reviewer NOLOGIN; CREATE ROLE ob1_t133_pass NOLOGIN; CREATE ROLE ob1_t133_reader NOLOGIN;
+                   GRANT SELECT, UPDATE ON supersession_proposals TO ob1_t133_reviewer; GRANT SELECT, INSERT, UPDATE ON supersession_proposals TO ob1_t133_pass; GRANT SELECT ON supersession_proposals TO ob1_t133_reader`);
+    const snap = async () => JSON.stringify(await q(`SELECT id::text AS id, status, word, word_group, statement, reviewed_by FROM settled_parts ORDER BY id`));
+    const beforeReapply = await snap();
+    let reapplied: string;
+    try { reapplied = await reapply(NUM); } catch (e) { reapplied = `threw: ${(e as Error).message}`; }
+    const may = async (role: string) => (await q<{ p: string; y: boolean }>(`SELECT p, has_table_privilege($1, 'settled_parts', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p`, [role])).filter((r) => r.y).map((r) => r.p).join();
+    const grants = `${await may("ob1_t133_reviewer")} | ${await may("ob1_t133_pass")} | ${await may("ob1_t133_reader")}`;
+    assert(grants === "SELECT,UPDATE | SELECT,INSERT,UPDATE | ", `the proposals' grants are carried: a deciding role reads and updates parts, the pass's also inserts, a reader of the queue gains nothing, and nobody deletes (${grants})`);
+    const trgAfter = await count(`SELECT count(*)::int AS c FROM pg_trigger WHERE tgrelid = 'settled_parts'::regclass AND NOT tgisinternal`);
+    const checkAfter = await count(`SELECT count(*)::int AS c FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%''part''%'`);
+    assert(reapplied === file && (await snap()) === beforeReapply && trgAfter === 2 && checkAfter === 1 && (await functionsNamed("record_settled_part")) === 1,
+      `a re-apply with parts standing is a no-op: every row as it was, two triggers, the kind's CHECK validated over the parts' lineage rows (${reapplied.slice(0, 60)}, ${trgAfter}, ${checkAfter})`);
+    await db.exec(`DROP OWNED BY ob1_t133_reviewer; DROP ROLE ob1_t133_reviewer; DROP OWNED BY ob1_t133_pass; DROP ROLE ob1_t133_pass; DROP OWNED BY ob1_t133_reader; DROP ROLE ob1_t133_reader`);
+
+    // A thought forgotten takes its parts with it, whichever side it is, and their lineage rows: the quotes are its text.
+    const SECRET = "vault code 4446-PARTS";
+    const F = await cap(`[133] the ${SECRET} opens the store room`, 62);
+    const G = await cap(`[133] the store room lock was changed, and the ${SECRET} no longer works`, 63);
+    const pf = (await record({ 0: F.id, 1: G.id, 3: `the ${SECRET} opens the store room`, 4: `the ${SECRET} no longer works`, 5: "updates", 8: F.fingerprint, 9: G.fingerprint, 10: JSON.stringify({ deterministic: false, model: "stub-writer", quoted: `the ${SECRET} opens the store room` }) }))!;
+    await review(pf, "accept", OP);
+    await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[133] forget op', 'operator')`);
+    const forgot = (await one<{ r: { ok: boolean; error?: string } }>(`SELECT forget_thought($1::uuid, $2::jsonb) AS r`, [F.id, JSON.stringify({ name: "[133] forget op", scope: "write" })])).r;
+    const held = await count(`SELECT count(*)::int AS c FROM settled_parts WHERE older_id = $1::uuid OR newer_id = $1::uuid OR statement LIKE $2 OR shown_by LIKE $2 OR reason LIKE $2`, [F.id, `%${SECRET}%`]);
+    const heldLineage = await count(`SELECT count(*)::int AS c FROM derivations WHERE artifact_id = $1::uuid OR (artifact_kind = 'part' AND recipe::text LIKE $2)`, [pf, `%${SECRET}%`]);
+    assert(forgot.ok === true && held === 0 && heldLineage === 0,
+      `a forgotten thought leaves no part that names it or quotes it, accepted or not, and no lineage row of one (${forgot.error ?? "forgotten"}; ${held} parts, ${heldLineage} lineage rows)`);
+
+    // A thought deleted: the rebuild that goes before counts its parts for the cascade, and the delete takes them.
+    const leaving = await rebuild(N.id, "forget", true);
+    const partsBefore = await onPair();
+    const deleted = (await one<{ r: { ok: boolean } }>(`SELECT delete_thought($1::uuid, $2::jsonb) AS r`, [N.id, JSON.stringify(OP)])).r;
+    assert(leaving.ok === true && leaving.cascading.parts === partsBefore && partsBefore === 4 && deleted.ok === true && (await onPair()) === 0
+        && (await count(`SELECT count(*)::int AS c FROM derivations WHERE artifact_kind = 'part'`)) === 0,
+      `a leaving thought's parts are counted for the cascade and go with its row, their lineage rows with them (${leaving.cascading.parts} counted, ${await onPair()} left)`);
+
+  } catch (e) {
+    // A throw is a failed row, not the suite's end: the cleanup below runs, and so does whatever follows this section.
+    assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
+  } finally {
+    await db.exec(`DELETE FROM settled_parts WHERE older_id IN (SELECT id FROM thoughts WHERE content LIKE '[133]%') OR newer_id IN (SELECT id FROM thoughts WHERE content LIKE '[133]%')`);
+    await db.exec(`DELETE FROM derivations WHERE artifact_kind = 'part'`);
+    await db.exec(`DELETE FROM thoughts WHERE content LIKE '[133]%'`);
+    await db.exec(`DELETE FROM ob1_agents WHERE label LIKE '[133]%'`);
+    await db.exec(`DO $$ DECLARE r text; BEGIN FOR r IN SELECT rolname FROM pg_roles WHERE rolname LIKE 'ob1_t133_%' LOOP EXECUTE format('DROP OWNED BY %I', r); EXECUTE format('DROP ROLE %I', r); END LOOP; END $$`);
+  }
+  // No part and no part's lineage row is left for a later section's re-apply of an older file to trip on (111's CHECK lacks the kind).
+  assert((await count(`SELECT count(*)::int AS c FROM settled_parts`)) === 0 && (await count(`SELECT count(*)::int AS c FROM derivations WHERE artifact_kind = 'part'`)) === 0, "the section leaves no part and no part's lineage row behind");
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
