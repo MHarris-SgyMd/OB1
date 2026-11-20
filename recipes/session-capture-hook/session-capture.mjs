@@ -58,6 +58,7 @@
  * transcript_path, cwd, hook_event_name — so one script serves both; the
  * transcript's first line says which wrote it.
  *
+ *   bun session-capture.mjs --version                    # prints "session-capture <version>" (SMD-4378)
  *   bun session-capture.mjs --print-hook claude-code     # the settings.json to paste (SessionEnd + PreCompact); installs nothing
  *   bun session-capture.mjs --print-hook codex           # the hooks.json to paste (SessionEnd: Codex has no compaction hook)
  *   bun session-capture.mjs --print-hook claude-code --event Stop --min-interval 20   # the coarser checkpoint: a turn, at most every 20 min
@@ -89,6 +90,15 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // ── Configuration ────────────────────────────────────────────────────────────
+
+/**
+ * The hook's version, the one source of it (SMD-4378). It is a constant, not a
+ * read of `metadata.json`, because the installed hook is a copy of this file
+ * alone. The suite fails if it differs from `metadata.json`'s. `--version`
+ * prints it, `--check` and `--dry-run` name it first, and each summary carries
+ * it as `metadata.hook_version`.
+ */
+export const HOOK_VERSION = "1.11.0";
 
 const SELF = fileURLToPath(import.meta.url);
 const HOME = homedir();
@@ -1817,11 +1827,15 @@ export async function postCapture(cfg, payload) {
   // from, the asks or the place (SMD-3306 PR 7a-3b-2), for the brain's subject
   // rule, which the text alone leaves to guess — not with a model's summary,
   // whose prose has no header for the word to describe (review pass 4: a model
-  // echoing the header it was shown would have its tickets keyed).
+  // echoing the header it was shown would have its tickets keyed); and the
+  // version of the hook that prepared it (SMD-4378), so the brain can tell
+  // which rules wrote a header. A payload queued by a hook before 1.11.0 has
+  // none, and is sent without it: no hook can say which wrote it.
   const meta = {};
   if (payload.summary_model) meta.summary_model = payload.summary_model;
   if (payload.redactions?.length) meta.redactions = payload.redactions.length;
   if (payload.tickets_from && !payload.summary_model) meta.tickets_from = payload.tickets_from;
+  if (typeof payload.hook_version === "string" && payload.hook_version) meta.hook_version = payload.hook_version;
   if (Object.keys(meta).length) args.metadata = meta;
   const call = () => rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });
   let result = await call();
@@ -2011,6 +2025,7 @@ export function prepare(hook, opts = {}) {
       prompts: distinctPrompts(cleaned.ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0, // as the text counts them: two asks that differed in a secret alone are one line once blanked (first review pass)
       ...(redactions.length ? { redactions } : {}), // what was blanked, where — the log's and the message's; absent when nothing was
       ...(ticketsFrom ? { tickets_from: ticketsFrom } : {}), // where the header's tickets came from (SMD-3306 PR 7a-3b-2)
+      hook_version: HOOK_VERSION, // the hook whose rules wrote the text, whichever later hook drains the queue (SMD-4378)
     };
     // The model's input rides the payload only when the option is on AND the
     // payload is a durable one the model will actually write — not a running
@@ -3959,6 +3974,9 @@ async function readStdin() {
 
 export async function main(argv) {
   const args = argv.slice(2);
+  // First, whatever else is given and whether or not stdin is piped: an
+  // operator confirming an upgrade needs no config, no brain and no transcript (SMD-4378).
+  if (has(args, "--version")) { console.log(`session-capture ${HOOK_VERSION}`); return 0; }
   const harness = flag(args, "--harness");
   // Exit 1, not 2: on a Stop hook 2 would block the assistant's turn over a typo in the command line (seventh review pass).
   if (harness !== undefined && !HARNESSES.includes(harness)) { console.error(`--harness takes ${HARNESSES.join(" or ")}, not "${harness}" (omit it: the transcript's first line says which)`); return 1; }
@@ -4012,6 +4030,7 @@ export async function main(argv) {
     return 0;
   }
   if (has(args, "--check")) {
+    console.log(`session-capture ${HOOK_VERSION}`); // the copy being checked, before anything can fail (SMD-4378)
     if (modeError) { console.error(`session-capture: ${modeError}`); return 1; } // before the config: a missing config must not hide the typo (first review pass)
     let brains;
     try { brains = loadBrains(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
@@ -4175,6 +4194,7 @@ export async function main(argv) {
     if (triggerError) { console.error(triggerError); return 2; }
     if (has(args, "--min-interval")) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
     if (modeError) { console.error(modeError); return 2; }
+    console.log(`--- session-capture ${HOOK_VERSION}: what it would send; nothing is sent\n`); // which hook's rules the texts below follow (SMD-4378)
     // With the model summary on, say so and that a dry run does NOT call it: the
     // texts below are the DERIVED summaries — what the model is given, and what
     // is sent if the call is refused, slow or unconfigured (SMD-2014). Tolerant
@@ -4237,7 +4257,7 @@ export async function main(argv) {
 
   // The hook itself: JSON on stdin. A terminal is not a hook — say so instead
   // of waiting on it for ever (ninth review pass).
-  if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload> [--post <payload>…], --copy-forget <id>."); return 2; }
+  if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --version, --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload> [--post <payload>…], --copy-forget <id>."); return 2; }
   let hook;
   try { hook = JSON.parse(await readStdin()); } catch (e) { console.error(`session-capture: stdin is not the hook's JSON (${e.message})`); return 1; }
   // A hook takes two flags. Any other — `--event` or `--trigger`, which are

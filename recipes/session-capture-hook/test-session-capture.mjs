@@ -44,8 +44,12 @@ const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, headerTickets, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, CaptureError, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
   loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
-  loadBrains, useStateRoot,
+  loadBrains, useStateRoot, HOOK_VERSION,
 } = await import(SCRIPT);
+/** The version metadata.json gives the hook (SMD-4378): the script's own must equal it. */
+const META_VERSION = JSON.parse(readFileSync(join(HERE, "metadata.json"), "utf8")).version;
+/** The line --version prints and --check opens with; --dry-run opens with it after `--- `. */
+const VERSION_LINE = `session-capture ${META_VERSION}`;
 
 let passed = 0, failed = 0;
 function assert(cond, label) {
@@ -1326,6 +1330,8 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   assert(received[0].args.source === "claude-code" && received[0].args.derived_from.length === 3 && received[0].args.content === JSON.parse(JSON.stringify(p.payload)).text, "the call carries source, derived_from and the summary");
   assert(received[0].args.trust === "agent" && received.every((r) => r.args.trust === "agent"), "…and declares the summary an agent's output, on every post (SMD-1724)");
   assert(received[0].key === "cap-key", "…under the configured key");
+  assert(p.payload.hook_version === META_VERSION && received[0].args.metadata?.hook_version === META_VERSION,
+    `…the payload is stamped with the hook's version at prepare, and the summary carries it as metadata.hook_version (SMD-4378) (${p.payload.hook_version}, ${JSON.stringify(received[0].args.metadata)})`);
   const st = readState(SID);
   assert(st.thought_id === uuid(1001) && st.fingerprint === p.payload.fingerprint && st.sources === 3, "the state records the thought id and the fingerprint");
   assert(!existsSync(p.payloadPath), "the payload is removed");
@@ -1341,6 +1347,14 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   assert(received.at(-1).args.derived_from === undefined && received.at(-2).args.derived_from?.length === 1, "…two calls, the second bare — the one source was the one refused");
   const r1old = await postCapture(cfg, { text: "[[refuse-derived-old]] summary", harness: "codex", derived_from: [uuid(51), uuid(52)] });
   assert(r1old.id && /provenance dropped/.test(r1old.note) && received.at(-1).args.derived_from === undefined, "a server that names no position (before this pass) gets the whole list dropped");
+  // A queued payload is sent with the version of the hook that prepared it, not the one draining it (SMD-4378):
+  // one queued by a hook before 1.11.0 carries none, and none is sent; one an older hook stamped keeps its stamp.
+  await postCapture(cfg, { text: "a summary queued before 1.11.0", harness: "codex", derived_from: [] });
+  const unstamped = received.at(-1).args;
+  await postCapture(cfg, { text: "a summary an older hook stamped", harness: "codex", derived_from: [], hook_version: "1.10.9" });
+  const older = received.at(-1).args;
+  assert(unstamped.metadata === undefined && JSON.stringify(older.metadata) === JSON.stringify({ hook_version: "1.10.9" }),
+    `a payload is sent with the version that prepared it: none for one queued before 1.11.0, an older hook's own (SMD-4378) (${JSON.stringify([unstamped.metadata, older.metadata])})`);
   // An error is never a save, whatever id its words name (SMD-3153: the one
   // error that saved a thought, a save whose vector did not attach, left with its code).
   const r2 = await postCapture(cfg, { text: "[[refused-naming-id]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
@@ -1734,7 +1748,7 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
     `a redacted capture sends metadata.redactions as the count alone, no reasons or offsets (${JSON.stringify(received[0]?.args?.metadata)})`);
   received.length = 0;
   await postCapture(cfg, { text: "a clean summary", harness: "claude-code", derived_from: [] });
-  assert(received[0].args.metadata === undefined, "a clean capture — no redactions, no model — sends no metadata, so its row is unchanged");
+  assert(received[0].args.metadata === undefined, "a clean capture of an unstamped payload (queued before 1.11.0) — no redactions, no model — sends no metadata, so its row is unchanged (SMD-4378: a stamped one sends the version alone, as the end-to-end case shows)");
   received.length = 0;
   await postCapture(cfg, { text: "the model's redacted summary", harness: "claude-code", derived_from: [], summary_model: "test-model", redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }] });
   assert(received[0].args.metadata?.summary_model === "test-model" && received[0].args.metadata?.redactions === 1, "a model summary that was also redacted carries both keys");
@@ -2552,11 +2566,21 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(ok.code === 0 && /capture_thought alone \(capture scope\)\. On a secret: redact\. State: /.test(ok.out), `--check with a capture key: ok, naming the mode (${ok.out.trim().slice(0, 100)})`);
   const okRefuse = await spawnScript(["--check"], { env: { OB1_CAPTURE_ON_SECRET: "refuse" } });
   const okTypo = await spawnScript(["--check"], { env: { OB1_CAPTURE_ON_SECRET: "REFUSE" } });
-  assert(okRefuse.code === 0 && /On a secret: refuse\./.test(okRefuse.out) && okTypo.code === 1 && /OB1_CAPTURE_ON_SECRET takes redact or refuse, not "REFUSE"/.test(okTypo.err) && !okTypo.out.trim(), "…the environment's mode is the one named; a misspelt one is exit 1 and named (SMD-2127)");
+  assert(okRefuse.code === 0 && /On a secret: refuse\./.test(okRefuse.out) && okTypo.code === 1 && /OB1_CAPTURE_ON_SECRET takes redact or refuse, not "REFUSE"/.test(okTypo.err) && okTypo.out.trim() === VERSION_LINE, "…the environment's mode is the one named; a misspelt one is exit 1 and named, its output the version line alone (SMD-2127, SMD-4378)");
   const noCfgTypo = await spawnScript(["--check"], { env: { OB1_CAPTURE_ON_SECRET: "x", OB1_SESSION_CAPTURE_CONFIG: join(TMP, "nope.json") } });
   const printTypo = await spawnScript(["--print-hook", "claude-code"], { env: { OB1_CAPTURE_ON_SECRET: "x" } });
   assert(noCfgTypo.code === 1 && /not "x"/.test(noCfgTypo.err) && !/no endpoint or key/.test(noCfgTypo.err) && printTypo.code === 2 && /not "x"/.test(printTypo.err) && !printTypo.out.trim(),
     `a misspelt mode is named before a missing config, and --print-hook refuses it too, exit 2, printing no hook (first review pass: the one path that let it by; exits ${noCfgTypo.code}/${printTypo.code})`);
+  // The hook says its version (SMD-4378): one source, the script's constant, which metadata.json must give too.
+  assert(HOOK_VERSION === META_VERSION && /^\d+\.\d+\.\d+$/.test(HOOK_VERSION), `the script's version is metadata.json's (${HOOK_VERSION}, ${META_VERSION}): bump both (SMD-4378)`);
+  const sentBefore = received.length;
+  const ver = await spawnScript(["--version"]);
+  const verPiped = await runHook({ session_id: "s-version", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--version"]);
+  const verWith = await spawnScript(["--check", "--version", "--harness", "bogus"], { env: { OB1_CAPTURE_ON_SECRET: "x", OB1_SESSION_CAPTURE_CONFIG: join(TMP, "nope.json") } });
+  assert([ver, verPiped, verWith].every((r) => r.code === 0 && r.out === `${VERSION_LINE}\n` && !r.err) && received.length === sentBefore,
+    `--version prints "session-capture <version>" and exits 0, stdin piped or not, captures nothing, and is first: beside --check, a bad --harness, a misspelt mode and no config (SMD-4378) (${JSON.stringify([ver, verPiped, verWith].map((r) => [r.code, r.out, r.err.slice(0, 60)]))})`);
+  assert(ok.out.split("\n")[0] === VERSION_LINE && noCfgTypo.out.split("\n")[0] === VERSION_LINE && !printTypo.out.includes(VERSION_LINE),
+    `--check's first line names the version, a check that fails at once included; --print-hook's output, pasted as JSON, does not (SMD-4378) (${ok.out.split("\n")[0]})`);
   const wide = await run(["--check"], "write-key");
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
   // A capture key on a server since SMD-3664 sees the priority writers too, and since SMD-3665 the open-item writers: still a capture key, no warning.
@@ -2675,7 +2699,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
     `a config with a BOM loads; an empty one and a JSON null are each named, exit 2 (review pass 2; ${(empty.err + nul.err).trim().slice(0, 100)})`);
   writeFileSync(CONFIG, JSON.stringify({ url: URL_, key: "cap-key" }), { mode: 0o600 });
   const dry = await run(["--dry-run", CLAUDE_T]);
-  assert(dry.code === 0 && /^Session summary — claude-code/.test(dry.out) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");
+  assert(dry.code === 0 && dry.out.startsWith(`--- ${VERSION_LINE}: what it would send; nothing is sent\n\nSession summary — claude-code`) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");
   // Review pass 6 (mutant: a null word named lived): a summary whose header lists no ticket names no word.
   assert(/^--- would send: source=claude-code, derived_from=3 id\(s\)(?: \[[^\]]*\])?$/m.test(dry.out), `…a header listing no ticket names no metadata.tickets_from (${dry.out.split("\n").find((l) => l.startsWith("--- would send"))})`);
   assert(!/Checkpoint:/.test(dry.out), "…with no checkpoint line: a dry run has no event");
@@ -2709,8 +2733,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(eqForm.code === 0 && /Checkpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(eqForm.out), `--event=PreCompact --trigger=auto reads as the space form does (${eqForm.err.trim().slice(0, 60)})`);
   // The segmentation, for an operator (SMD-2013): one line per episode, then each text.
   const dryEp = await run(["--dry-run", EPISODES_T]);
-  assert(dryEp.code === 0 && /^--- 4 episodes — one thought each, on its own supersedes chain:\n    1\. SMD-1844 — \(michaelharris\/smd-1844-loopback\) — 2 prompt\(s\) — 2026-09-24 09:00 → 2026-09-24 09:40 — from the start — ended at a compaction\n    2\. SMD-1843, SMD-1844 — \(michaelharris\/smd-1843-env\) — 2 prompt\(s\) — 2026-09-24 10:00 → 2026-09-24 10:30 — begun after a compaction with SMD-1843 — ended when SMD-1917 was taken up\n    3\. SMD-1917 — [^\n]*— begun with SMD-1917 — ended at a compaction\n    4\. SMD-1917 — \(michaelharris\/smd-1917-fork-md\) — 2 prompt\(s\) — 2026-09-24 11:10 → 2026-09-24 11:31 — begun after a compaction — still open\n\n=== episode 1 ===\nSession summary — SMD-1844/.test(dryEp.out) && (dryEp.out.match(/^=== episode \d ===$/gm) ?? []).length === 4 && (dryEp.out.match(/^--- would send \(episode \d\): source=claude-code, derived_from=/gm) ?? []).length === 4 && (dryEp.out.match(/secret scan: clean/g) ?? []).length === 4,
-    `--dry-run prints the segmentation — one line per episode with its tickets, branch, asks, span and bounds — then each episode's text and what it would send (${dryEp.out.split("\n")[1]})`);
+  assert(dryEp.code === 0 && /^--- session-capture [^\n]*\n\n--- 4 episodes — one thought each, on its own supersedes chain:\n    1\. SMD-1844 — \(michaelharris\/smd-1844-loopback\) — 2 prompt\(s\) — 2026-09-24 09:00 → 2026-09-24 09:40 — from the start — ended at a compaction\n    2\. SMD-1843, SMD-1844 — \(michaelharris\/smd-1843-env\) — 2 prompt\(s\) — 2026-09-24 10:00 → 2026-09-24 10:30 — begun after a compaction with SMD-1843 — ended when SMD-1917 was taken up\n    3\. SMD-1917 — [^\n]*— begun with SMD-1917 — ended at a compaction\n    4\. SMD-1917 — \(michaelharris\/smd-1917-fork-md\) — 2 prompt\(s\) — 2026-09-24 11:10 → 2026-09-24 11:31 — begun after a compaction — still open\n\n=== episode 1 ===\nSession summary — SMD-1844/.test(dryEp.out) && (dryEp.out.match(/^=== episode \d ===$/gm) ?? []).length === 4 && (dryEp.out.match(/^--- would send \(episode \d\): source=claude-code, derived_from=/gm) ?? []).length === 4 && (dryEp.out.match(/secret scan: clean/g) ?? []).length === 4,
+    `--dry-run prints the segmentation — one line per episode with its tickets, branch, asks, span and bounds — then each episode's text and what it would send (${dryEp.out.split("\n")[3]})`);
   // Review pass 5 (mutants: the line naming no word, or always `asks`, lived): each episode's would-send line names its
   // word, as its payload carries it; one with no ticket in its header names none.
   const sends = dryEp.out.split("\n").filter((l) => l.startsWith("--- would send"));
@@ -2901,13 +2925,13 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   received.length = 0;
   const e2e = await runHook({ session_id: "s-model-e2e", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" },
     { OB1_SESSION_CAPTURE_SYNC: "1", OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: MODEL_URL, OB1_SESSION_CAPTURE_MODEL: "test-model", OB1_CHAT_LOCAL: "1" });
-  assert(e2e.code === 0 && received.length === 1 && received[0].args.content === "back to good." && received[0].args.metadata?.summary_model === "test-model" && received[0].args.source === "claude-code",
+  assert(e2e.code === 0 && received.length === 1 && received[0].args.content === "back to good." && received[0].args.metadata?.summary_model === "test-model" && received[0].args.metadata?.hook_version === META_VERSION && received[0].args.source === "claude-code",
     `the child posted the model's text with metadata.summary_model, source still the harness (${JSON.stringify(received[0]?.args?.metadata)}, content ${JSON.stringify(received[0]?.args?.content)})`);
 
   // Off, the same shape is the DERIVED summary with no metadata.
   received.length = 0;
   const e2eOff = await runHook({ session_id: "s-model-off", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
-  assert(e2eOff.code === 0 && received.length === 1 && /^Session summary/.test(received[0].args.content) && received[0].args.metadata === undefined, "with the option off, the derived summary is sent with no metadata");
+  assert(e2eOff.code === 0 && received.length === 1 && /^Session summary/.test(received[0].args.content) && JSON.stringify(received[0].args.metadata) === JSON.stringify({ hook_version: META_VERSION }), `with the option off, the derived summary is sent with no metadata but the hook's version, metadata.json's (SMD-4378) (${JSON.stringify(received[0]?.args?.metadata)})`);
 
   // A payload a model already wrote (summary_model set, persisted by a failed
   // post) is NOT re-modelled on a later drain — the stored model text is posted
