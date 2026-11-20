@@ -587,9 +587,8 @@ const FUNCTIONS = [
   // 148 (SMD-4446): settled parts — the pass's write, the reviewer's decision, the guard on a part's judgement and
   // the lineage row's drop.
   "record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)",
-  "review_settled_part(uuid, text, text, jsonb, boolean, timestamptz)",
+  "review_settled_part(uuid, text, text, jsonb, boolean, text)",
   "ob1_keep_part_judgement()",
-  "ob1_stamp_part_change()",
   "ob1_drop_part_derivation()",
 ];
 

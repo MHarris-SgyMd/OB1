@@ -7171,7 +7171,7 @@ console.log("\n[20cj] Migration 145: onto a populated brain at the file before i
 
   await sql.close();
 }
-console.log("\n[20ck] Migration 148: onto a populated brain at the file before it — refused by name without each of the six functions and two tables it needs, the table not made and the lineage kinds as they were; then applied: the pending proposal and its lineage row as they were; a part recorded beside it on the same pair and accepted, no pointer written; the roles that decide and record proposals hold the same on parts, a reader of the queue nothing; a moved text stales a pending part and the proposal, the accepted part standing; ANALYZE keeps no statistics on a part's words; a re-apply with parts standing a no-op; a write by a transaction that began before a row's last change still moves the row's stamp forward, to the clock's time of the write; a decision waits on the supersession lock before it takes the part's row, behind a write on that lock and behind a status written by hand on the row; a write takes that lock first and then holds its two thoughts' rows, an edit waiting for it and it for an edit, whose text it then reads; above READ COMMITTED the row lock refuses it; a rebuild counts a part as its row stands under its lock (SMD-4446)");
+console.log("\n[20ck] Migration 148: onto a populated brain at the file before it — refused by name without each of the six functions and two tables it needs, the table not made and the lineage kinds as they were; then applied: the pending proposal and its lineage row as they were; a part recorded beside it on the same pair and accepted, no pointer written; the roles that decide and record proposals hold the same on parts, the recording role a delete besides, a reader of the queue nothing; a moved text stales a pending part and the proposal, the accepted part standing; ANALYZE keeps no statistics on a part's words; a re-apply with parts standing a no-op; a decision waits on the supersession lock before it takes the part's row, behind a write on that lock and behind a status written by hand on the row, and finds nothing where its statement was judged again meanwhile; a write keeps the row it answers as standing from a delete by hand; a write holds that lock to its commit and none an edit waits for: an edit under it is made at once and the edit's rebuild waits, then finds the part; a write does not wait for an edit, and its part stands at the old text until a rebuild; a write reads its texts after it has the lock; a rebuild counts a part as its row stands under its lock (SMD-4446)");
 {
   const the148 = MIGRATIONS.find((f) => /^\d{3}_settled_parts\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   const NUM = the148.slice(0, 3);
@@ -7230,24 +7230,21 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   const record = async (statement: string, shown: string, word: string) =>
     String(((await sql`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', ${statement}, ${shown}, ${word}, 'the later note reports it done', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb) AS r`)[0].r as { action: string; id: string }).id);
   const part = await record("ship the importer by Friday", "the importer shipped on Thursday", "implements");
-  // The reviewer says when it read the row, as a JavaScript Date carries the time: to the millisecond, where the row's
-  // own has microseconds (PGlite's clock has none, so this is the row that holds the comparison to the millisecond).
-  // A read from before the row was judged is refused; the row's own stamp, passed back, is not.
-  const readAt = (await sql`SELECT changed_at AS at, changed_at::text AS micros FROM settled_parts WHERE id = ${part}::uuid`)[0] as { at: Date; micros: string };
-  const tooEarly = (await sql`SELECT review_settled_part(${part}::uuid, 'accept', 'right', '{"name": "upgrade-148-op"}'::jsonb, false, ${new Date(readAt.at.getTime() - 1000)}::timestamptz) AS r`)[0].r as { ok: boolean; error?: string };
-  const accepted = (await sql`SELECT review_settled_part(${part}::uuid, 'accept', 'right', '{"name": "upgrade-148-op"}'::jsonb, false, ${readAt.at}::timestamptz) AS r`)[0].r as { ok: boolean; status: string; error?: string };
+  // The reviewer says the status it read: another is refused, the row's own is not.
+  const misread = (await sql`SELECT review_settled_part(${part}::uuid, 'accept', 'right', '{"name": "upgrade-148-op"}'::jsonb, false, 'stale') AS r`)[0].r as { ok: boolean; error?: string; status?: string };
+  const accepted = (await sql`SELECT review_settled_part(${part}::uuid, 'accept', 'right', '{"name": "upgrade-148-op"}'::jsonb, false, 'pending') AS r`)[0].r as { ok: boolean; status: string; error?: string };
   const shape = async () => (await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE supersedes IS NOT NULL) AS pointers, (SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid) AS proposal,
       (SELECT status FROM settled_parts WHERE id = ${part}::uuid) AS part, (SELECT reviewed_by FROM settled_parts WHERE id = ${part}::uuid) AS by,
       (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'part' AND artifact_id = ${part}::uuid) AS lineage`)[0] as { pointers: number; proposal: string; part: string; by: string | null; lineage: number };
   const after = await shape();
-  assert(tooEarly.ok === false && tooEarly.error === "STALE_READ" && accepted.ok === true && after.pointers === 0 && after.proposal === "pending" && after.part === "accepted" && after.by === "upgrade-148-op" && after.lineage === 1,
-    `a part recorded beside the proposal on the same pair and accepted by a reviewer passing back the time it read, a Date's milliseconds of ${readAt.micros}, a read from a second earlier refused: no pointer written, the proposal still pending, the reviewer and the lineage row recorded (${tooEarly.error}, ${accepted.error ?? "accepted"}; ${JSON.stringify(after)})`);
+  assert(misread.ok === false && misread.error === "STALE_READ" && misread.status === "pending" && accepted.ok === true && after.pointers === 0 && after.proposal === "pending" && after.part === "accepted" && after.by === "upgrade-148-op" && after.lineage === 1,
+    `a part recorded beside the proposal on the same pair and accepted by a reviewer who says the status it read, pending, one who says another refused: no pointer written, the proposal still pending, the reviewer and the lineage row recorded (${misread.error} on ${misread.status}, ${accepted.error ?? "accepted"}; ${JSON.stringify(after)})`);
 
   // The grants carried from the proposals' table.
   const may = async (role: string) => ((await sql`SELECT p, has_table_privilege(${role}, 'settled_parts', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p`) as unknown as { p: string; y: boolean }[]).filter((r) => r.y).map((r) => r.p).join();
   const grants = async () => `${await may(REVIEWER)} | ${await may(PASS)} | ${await may(READER)}`;
-  assert((await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE | ",
-    `a role that decides proposals reads and updates parts, the pass's role also inserts, a reader of the queue gains nothing, and none deletes (${await grants()})`);
+  assert((await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE,DELETE | ",
+    `a role that decides proposals reads and updates parts, the pass's role also inserts and deletes, which is how an undecided part is judged again, and a reader of the queue gains nothing (${await grants()})`);
 
   // The newer text moves: rebuild_derived sets a pending part stale, and the pending proposal, and leaves the accepted part.
   const pending = await record("the plan is to ship", "shipped on Thursday", "resolves");
@@ -7276,50 +7273,18 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   const again = (await sql`SELECT (SELECT string_agg(status, ',' ORDER BY status) FROM settled_parts) AS parts,
       (SELECT count(*)::int FROM pg_trigger WHERE tgrelid = 'settled_parts'::regclass AND NOT tgisinternal) AS triggers,
       (SELECT convalidated FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check') AS valid`)[0] as { parts: string; triggers: number; valid: boolean };
-  assert(again.parts === "accepted,stale" && again.triggers === 4 && again.valid === true && (await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE | ",
-    `a re-apply with parts standing is a no-op: the rows, four triggers, the kind's CHECK validated over their lineage rows, the grants (${JSON.stringify(again)})`);
+  assert(again.parts === "accepted,stale" && again.triggers === 3 && again.valid === true && (await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE,DELETE | ",
+    `a re-apply with parts standing is a no-op: the rows, three triggers, the kind's CHECK validated over their lineage rows, the grants (${JSON.stringify(again)})`);
 
-  // The stamp a decision is read against is the table's: every write of the row moves it, to the clock's time as the
-  // row was written and not the writer's transaction's start. `held` begins its transaction first and writes last,
-  // three times: it replaces a stale part, it rejects a part and it accepts one, each recorded by the other session
-  // after `held` began. A reviewer holding the stamp read before `held`'s write is then refused, and the stamp is no
-  // earlier than a clock read taken just before that write: from now() it would be the old stamp and one millisecond.
   const other = new SQL({ url: URL_, max: 1 });
-  const stampOf = async (id: string) => (await sql`SELECT changed_at AS at FROM settled_parts WHERE id = ${id}::uuid`)[0].at as Date;
-  const decide = async (id: string, decision: string, since: Date) =>
-    (await sql`SELECT review_settled_part(${id}::uuid, ${decision}, 'decided on what was read', '{"name": "upgrade-148-op"}'::jsonb, true, ${since}::timestamptz) AS r`)[0].r as { ok: boolean; error?: string; status?: string };
-  const behind: string[] = [];
-  for (const write of ["replace", "reject", "accept"] as const) {
-    let id = "", read = new Date(0), before = new Date(0);
-    await other.begin(async (held) => {
-      await held`SELECT 1`;
-      await Bun.sleep(5);
-      id = await record(`a statement for the ${write}`, "words that show it", "updates");
-      read = await stampOf(id);
-      // Five milliseconds, so the clock's time of the write below and "the old stamp and one millisecond" are two
-      // different times. (It is no guard against a tie: the table stamps a later millisecond whatever the clock says.)
-      await Bun.sleep(5);
-      before = (await sql`SELECT clock_timestamp() AS at`)[0].at as Date;
-      if (write === "replace") {
-        await sql`UPDATE settled_parts SET status = 'stale' WHERE id = ${id}::uuid`;
-        await held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', ${`a statement for the ${write}`}, 'other words', 'resolves', 'judged again', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb)`;
-      } else {
-        await held`SELECT review_settled_part(${id}::uuid, ${write}, 'the first decision', '{"name": "upgrade-148-op"}'::jsonb, true)`;
-      }
-    });
-    const stamped = await stampOf(id);
-    const late = await decide(id, write === "accept" ? "reject" : "accept", read);
-    const now = (await sql`SELECT status, word FROM settled_parts WHERE id = ${id}::uuid`)[0] as { status: string; word: string };
-    behind.push(`${write}: ${late.ok ? "DECIDED" : late.error} on ${now.status}/${now.word}, stamped ${stamped.getTime() >= before.getTime() ? "at the write" : "BEFORE the write"}`);
-  }
-  assert(behind.join("; ") === "replace: STALE_READ on pending/resolves, stamped at the write; reject: STALE_READ on rejected/updates, stamped at the write; accept: STALE_READ on accepted/updates, stamped at the write",
-    `a write by a transaction that began before the row was recorded still moves the row's stamp forward, to the clock's time of the write: a reviewer holding the stamp read before it is refused, after a replacement, a reject and an accept (${behind.join("; ")})`);
 
   // The decision's two locks, each seen from a third session while a second holds what it waits for. Nothing here is
   // timed: each step waits until pg_stat_activity shows the decision waiting on a lock, or the decision has answered.
   const third = new SQL({ url: URL_, max: 1 });
   const thirdPid = Number((await third`SELECT pg_backend_pid() AS p`)[0].p);
+  const NO_PART = "00000000-0000-4000-8000-000000000148";  // for a write that answered no id: a failed row, not a throw
   type Decided = { ok: boolean; error?: string; status?: string };
+  type Written = { ok: boolean; action?: string; id?: string; replaced?: string | null; error?: string; older_edited?: boolean; newer_edited?: boolean };
   const waitOf = async (answered: Promise<unknown>): Promise<string> => {
     let done = false;
     void answered.then(() => { done = true; }, () => { done = true; });
@@ -7342,20 +7307,19 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
     rowWhileWaiting = await sql`SELECT 1 FROM settled_parts WHERE id = ${lockedPart}::uuid FOR UPDATE NOWAIT`.then(() => "free", (e: { errno?: string; message: string }) => `held (${e.errno ?? e.message.slice(0, 40)})`);
   });
   const afterLock = await decided;
-  // (2) A write and a decision go one after the other on that lock: a replacement not yet committed holds it, and a
-  // decision made meanwhile waits there, then reads the row as replaced.
-  const racedPart = await record("a statement replaced under a decision", "words that show it", "updates");
-  const racedStamp = await stampOf(racedPart);
-  await Bun.sleep(5);
+  // (2) A write and a decision go one after the other on that lock. A stale statement is judged again in a transaction
+  // not yet committed, which holds the lock; a decision on the stale row, made meanwhile by a reviewer who read it,
+  // waits there, then finds the row gone: the judgement is another row, and stands undecided.
+  const racedPart = await record("a statement judged again under a decision", "words that show it", "updates");
   await sql`UPDATE settled_parts SET status = 'stale' WHERE id = ${racedPart}::uuid`;
-  let waitedOnRow = "", raced: Promise<Decided> = Promise.resolve({ ok: false });
+  let waitedOnRow = "", racedAgain: Written = { ok: false }, raced: Promise<Decided> = Promise.resolve({ ok: false });
   await other.begin(async (held) => {
-    await held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement replaced under a decision', 'other words', 'resolves', 'judged again', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb)`;
-    raced = (async () => (await third`SELECT review_settled_part(${racedPart}::uuid, 'accept', 'on what was read', '{"name": "upgrade-148-op"}'::jsonb, true, ${racedStamp}::timestamptz) AS r`)[0].r as Decided)();
+    racedAgain = (await held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement judged again under a decision', 'other words', 'resolves', 'judged again', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb) AS r`)[0].r as Written;
+    raced = (async () => (await third`SELECT review_settled_part(${racedPart}::uuid, 'accept', 'on what was read', '{"name": "upgrade-148-op"}'::jsonb, true, 'stale') AS r`)[0].r as Decided)();
     waitedOnRow = await waitOf(raced);
   });
   const afterRow = await raced;
-  const racedNow = (await sql`SELECT status, word FROM settled_parts WHERE id = ${racedPart}::uuid`)[0] as { status: string; word: string };
+  const racedNow = (await sql`SELECT status, word, reviewed_at FROM settled_parts WHERE id = ${String(racedAgain.id ?? NO_PART)}::uuid`)[0] as { status: string; word: string; reviewed_at: Date | null } | undefined;
   // (2b) The row's own lock holds against a write that takes no advisory lock: a status written by hand. A reject made
   // by hand and not yet committed holds the row; a reject through the function waits for the row, then reads it as it
   // stands and is refused as a repeat. Without the row's lock it would read the row as it was, pending, and stamp it again.
@@ -7369,49 +7333,58 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   const afterHand = await repeated;
   const handNote = String((await sql`SELECT review_note FROM settled_parts WHERE id = ${handPart}::uuid`)[0].review_note);
 
-  // The write's hold on its two thoughts, seen the same way. An edit here is the UPDATE of the row, which asks the
-  // weakest lock an edit can (FOR NO KEY UPDATE): update_thought, a rebuild and a delete each ask that or more.
-  type Written = { ok: boolean; action?: string; id?: string; error?: string; older_edited?: boolean; newer_edited?: boolean };
+  // (2c) The write holds the row it meets. A statement that stands is named again in a transaction not yet committed,
+  // which answers `stands`; a DELETE of that row by hand, which takes no advisory lock, waits for the write. With the
+  // row left free, such a delete could land between the write's insert and its read of the row, and `stands` be
+  // answered with no id (40 of 40 with that gap widened, review pass 3).
+  const stoodPart = await record("a statement that stands under a delete by hand", "words that show it", "updates");
+  let stoodAnswer: Written = { ok: false }, waitedOnStands = "", deleting: Promise<number> = Promise.resolve(-1);
+  await other.begin(async (held) => {
+    stoodAnswer = (await held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement that stands under a delete by hand', 'other words', 'resolves', 'judged again', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb) AS r`)[0].r as Written;
+    deleting = (async () => (await third`DELETE FROM settled_parts WHERE id = ${stoodPart}::uuid RETURNING 1 AS gone`).length)();
+    waitedOnStands = await waitOf(deleting);
+  });
+  const deletedAfter = await deleting;
+
+  // The write holds the supersession lock to its commit, and no lock on a thought's row that an edit waits for (its
+  // foreign keys' key share is all), seen the same way. An edit here is the UPDATE of the row, which asks the weakest
+  // lock an edit can (FOR NO KEY UPDATE).
   const moveTo = (id: string, content: string) => ({ id, content });
-  // (3) An edit waits for a write. The write of a part on the pair is not yet committed; an edit of the older thought
-  // waits for it, so the rebuild that follows the edit finds the part and sets it stale. Without the hold the edit and
-  // its rebuild could end first: the part would then commit pending on a text no longer there, nothing left to have
-  // the pair judged again (20 of 20, review pass 2).
+  // (3) A rebuild waits for a write, and an edit does not. The write of a part on the pair is not yet committed: both
+  // thoughts' rows are free, and an edit of the older one is made at once. The rebuild that follows the edit waits on
+  // the lock, so it finds the part and sets it stale. Without the lock the rebuild could end first, and the part then
+  // commit pending on a text no longer there with nothing queued to have the pair judged again (8 of 400 pairs,
+  // review pass 3). A lock on the two thoughts' rows added nothing to that, and made the edit wait.
   const [ofpHeld, nfpHeld] = [await fp(O), await fp(N)];
   const toO = moveTo(O, "upgrade 148: the plan was to ship the importer by Friday");
-  let waitedOnWrite = "", heldPart = "", edited: Promise<{ ok: boolean; stale_parts: number }> = Promise.resolve({ ok: false, stale_parts: -1 });
+  let rowsUnderWrite = "", waitedOnWrite = "", heldPart = "", rebuildingO: Promise<{ ok: boolean; stale_parts: number }> = Promise.resolve({ ok: false, stale_parts: -1 });
   await other.begin(async (held) => {
-    heldPart = String(((await held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement written under an edit', 'words that show it', 'updates', 'judged before the edit', ${KEY}, ${ofpHeld}, ${nfpHeld}, (${RECIPE}::text)::jsonb) AS r`)[0].r as Written).id);
-    edited = (async () => {
-      await third`UPDATE thoughts SET content = ${toO.content}, content_fingerprint = content_fingerprint_of(${toO.content}) WHERE id = ${toO.id}::uuid`;
-      return (await third`SELECT rebuild_derived(${toO.id}::uuid, 'edit') AS r`)[0].r as { ok: boolean; stale_parts: number };
-    })();
-    waitedOnWrite = await waitOf(edited);
+    heldPart = String(((await held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement written under an edit', 'words that show it', 'updates', 'judged before the edit', ${KEY}, ${ofpHeld}, ${nfpHeld}, (${RECIPE}::text)::jsonb) AS r`)[0].r as Written).id ?? NO_PART);
+    rowsUnderWrite = await sql`SELECT 1 FROM thoughts WHERE id IN (${O}::uuid, ${N}::uuid) FOR NO KEY UPDATE NOWAIT`.then(() => "free", (e: { errno?: string; message: string }) => `held (${e.errno ?? e.message.slice(0, 40)})`);
+    // Made only if the rows are free: an edit that waited here would wait for this transaction, which waits for it.
+    if (rowsUnderWrite === "free") await sql`UPDATE thoughts SET content = ${toO.content}, content_fingerprint = content_fingerprint_of(${toO.content}) WHERE id = ${toO.id}::uuid`;
+    rebuildingO = (async () => (await third`SELECT rebuild_derived(${toO.id}::uuid, 'edit') AS r`)[0].r as { ok: boolean; stale_parts: number })();
+    waitedOnWrite = await waitOf(rebuildingO);
   });
-  const rebuiltO = await edited;
+  const rebuiltO = await rebuildingO;
   const heldNow = String((await sql`SELECT status FROM settled_parts WHERE id = ${heldPart}::uuid`)[0]?.status);
-  // (4) A write waits for an edit. The newer text is edited in a transaction not yet committed; a write of a judgement
-  // of the texts as they were waits for the row, then reads the text as the edit left it and is answered by its side.
+  // (4) A write does not wait for an edit. The newer text is edited in a transaction not yet committed; a write of a
+  // judgement of the text as it stands, which the edit is not yet, is made at once. The edit then commits, and the
+  // part stands pending at the old text, as one recorded a moment before the edit would: an accept of it is refused
+  // by its side, and the rebuild that follows the edit sets it stale.
   const [ofpWas, nfpWas] = [await fp(O), await fp(N)];
   const toN = moveTo(N, "upgrade 148: the importer shipped on Tuesday");
-  let waitedOnEdit = "", writing: Promise<Written> = Promise.resolve({ ok: true });
+  let waitedOnEdit = "", writing: Promise<Written> = Promise.resolve({ ok: false });
   await other.begin(async (held) => {
     await held`UPDATE thoughts SET content = ${toN.content}, content_fingerprint = content_fingerprint_of(${toN.content}) WHERE id = ${toN.id}::uuid`;
-    writing = (async () => (await third`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement judged before an edit', 'words that show it', 'updates', 'judged before the edit', ${KEY}, ${ofpWas}, ${nfpWas}, (${RECIPE}::text)::jsonb) AS r`)[0].r as Written)();
+    writing = (async () => (await third`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement judged under an edit', 'words that show it', 'updates', 'judged before the edit', ${KEY}, ${ofpWas}, ${nfpWas}, (${RECIPE}::text)::jsonb) AS r`)[0].r as Written)();
     waitedOnEdit = await waitOf(writing);
   });
   const written = await writing;
-  // (5) Above READ COMMITTED the lock itself refuses. A write whose transaction read before an edit cannot lock the
-  // row as it read it, and Postgres fails it 40001: no judgement of the text as it was is recorded there either.
-  const [ofpSnap, nfpSnap] = [await fp(O), await fp(N)];
-  const toN2 = moveTo(N, "upgrade 148: the importer shipped on Monday");
-  const atSnapshot = await other.begin(async (held) => {
-    await held`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`;
-    await held`SELECT count(*) FROM thoughts`;
-    await sql`UPDATE thoughts SET content = ${toN2.content}, content_fingerprint = content_fingerprint_of(${toN2.content}) WHERE id = ${toN2.id}::uuid`;
-    return held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement judged at a snapshot', 'words that show it', 'updates', 'judged before the edit', ${KEY}, ${ofpSnap}, ${nfpSnap}, (${RECIPE}::text)::jsonb) AS r`;
-  }).then((rows) => `answered ${JSON.stringify((rows as unknown as { r: Written }[])[0].r)}`, (e) => String((e as { errno?: string }).errno ?? (e as Error).message));
-  const unwritten = Number((await sql`SELECT count(*)::int AS c FROM settled_parts WHERE statement IN ('a statement judged before an edit', 'a statement judged at a snapshot')`)[0].c);
+  const underEdit = String(written.id ?? NO_PART);
+  const acceptUnderEdit = (await sql`SELECT review_settled_part(${underEdit}::uuid, 'accept', 'on a moved text', '{"name": "upgrade-148-op"}'::jsonb) AS r`)[0].r as Decided & { newer_edited?: boolean };
+  const rebuiltUnderEdit = (await sql`SELECT rebuild_derived(${N}::uuid, 'edit') AS r`)[0].r as { ok: boolean; stale_parts: number };
+  const underEditNow = String((await sql`SELECT status FROM settled_parts WHERE id = ${underEdit}::uuid`)[0]?.status);
   // (6) The rebuild reads a part under its row's lock. A part is recorded and its newer text then moves; a reject of
   // it written by hand and not yet committed holds the row. The rebuild of the moved thought waits for the row, then
   // counts the part as it stands, decided: kept, not set stale. Without the lock it would count a part stale that is not.
@@ -7426,35 +7399,42 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   });
   const rebuiltN = await rebuilding;
   const rebuildPartNow = String((await sql`SELECT status FROM settled_parts WHERE id = ${rebuildPart}::uuid`)[0].status);
-  // (7) The write's own order: the supersession lock first, then its thoughts' rows. While the lock is held elsewhere
-  // the write waits on it, and both thoughts' rows are free for an edit. Taken the other way round, the rows would be
-  // held across the wait, and a delete, which reaches a second thought's row after its own, could meet them head on.
+  // (7) The write reads its texts after it has the lock. While another holds the supersession lock the write waits on
+  // it, with both thoughts' rows free to an edit; the newer text is edited meanwhile; the lock let go, the write reads
+  // the text as the edit left it and is answered by its side. Read before the wait, the text would have been the old
+  // one, and the judgement of it recorded.
   const [ofpQ, nfpQ] = [await fp(O), await fp(N)];
-  let writeWaitedOn = "", thoughtsWhileWaiting = "", queued: Promise<Written> = Promise.resolve({ ok: false });
+  const toN4 = moveTo(N, "upgrade 148: the importer shipped on Saturday");
+  let writeWaitedOn = "", thoughtsWhileWaiting = "", queued: Promise<Written> = Promise.resolve({ ok: true });
   await other.begin(async (held) => {
     await held`SELECT pg_advisory_xact_lock(hashtext('ob1:supersession-review'))`;
     queued = (async () => (await third`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement written behind the lock', 'words that show it', 'updates', 'judged', ${KEY}, ${ofpQ}, ${nfpQ}, (${RECIPE}::text)::jsonb) AS r`)[0].r as Written)();
     writeWaitedOn = await waitOf(queued);
     thoughtsWhileWaiting = await sql`SELECT 1 FROM thoughts WHERE id IN (${O}::uuid, ${N}::uuid) FOR NO KEY UPDATE NOWAIT`.then(() => "free", (e: { errno?: string; message: string }) => `held (${e.errno ?? e.message.slice(0, 40)})`);
+    if (thoughtsWhileWaiting === "free") await sql`UPDATE thoughts SET content = ${toN4.content}, content_fingerprint = content_fingerprint_of(${toN4.content}) WHERE id = ${toN4.id}::uuid`;
   });
   const afterQueue = await queued;
+  const behindLock = Number((await sql`SELECT count(*)::int AS c FROM settled_parts WHERE statement = 'a statement written behind the lock'`)[0].c);
   await third.close();
   await other.close();
   assert(waitedOn === "advisory" && rowWhileWaiting === "free" && afterLock.ok === true && afterLock.status === "rejected",
     `a decision waits on the supersession lock before it takes the part's row: held elsewhere, the decision waits on it with the row free, and is made once the lock is let go (waited on ${waitedOn}, the row ${rowWhileWaiting}, then ${afterLock.status ?? afterLock.error})`);
-  assert(waitedOnRow === "advisory" && afterRow.ok === false && afterRow.error === "STALE_READ" && racedNow.status === "pending" && racedNow.word === "resolves",
-    `a decision made while a replacement is not yet committed waits on the lock the two share, then reads the row as replaced and is refused on the stamp it held (waited on ${waitedOnRow}; ${afterRow.error ?? "DECIDED"} on ${racedNow.status}/${racedNow.word})`);
+  assert(waitedOnRow === "advisory" && racedAgain.action === "recorded" && racedAgain.replaced === racedPart && racedAgain.id !== racedPart
+      && afterRow.ok === false && afterRow.error === "NOT_FOUND" && racedNow?.status === "pending" && racedNow.word === "resolves" && racedNow.reviewed_at === null,
+    `a decision made while its statement is judged again, not yet committed, waits on the lock the two share, then finds the row it read gone, forced or not: the judgement is another row and stands undecided (waited on ${waitedOnRow}; ${afterRow.error ?? "DECIDED"}; the new row ${racedNow?.status}/${racedNow?.word})`);
   assert(["transactionid", "tuple"].includes(waitedOnHand) && afterHand.ok === false && afterHand.error === "ALREADY_REJECTED" && handNote === "by hand",
     `a decision takes the part's row: behind a reject written by hand and not yet committed it waits for the row, then reads it as it stands and is refused as a repeat, the row as the hand left it (waited on ${waitedOnHand}; ${afterHand.error ?? "DECIDED"}; note ${handNote})`);
-  assert(["transactionid", "tuple"].includes(waitedOnWrite) && rebuiltO.ok === true && rebuiltO.stale_parts >= 1 && heldNow === "stale",
-    `a write holds its thoughts' rows: an edit of the older one waits for a write not yet committed, and the rebuild that follows it finds the part and sets it stale (waited on ${waitedOnWrite}; stale_parts ${rebuiltO.stale_parts}, the part ${heldNow})`);
-  assert(["transactionid", "tuple"].includes(waitedOnEdit) && written.ok === false && written.error === "EDITED_SINCE" && written.older_edited === false && written.newer_edited === true
-      && atSnapshot === "40001" && unwritten === 0,
-    `…and a write waits for an edit not yet committed, then reads the text as the edit left it and is refused by its side; under REPEATABLE READ, with the edit made after its snapshot, the lock fails it 40001; neither writes a row (waited on ${waitedOnEdit}; ${written.error ?? "WRITTEN"}, older ${written.older_edited}, newer ${written.newer_edited}; ${atSnapshot}; ${unwritten} rows)`);
+  assert(stoodAnswer.action === "stands" && stoodAnswer.id === stoodPart && ["transactionid", "tuple"].includes(waitedOnStands) && deletedAfter === 1,
+    `a write holds the row it answers as standing: a DELETE of that row by hand waits for the write not yet committed, and is made after it (${stoodAnswer.action} ${stoodAnswer.id === stoodPart ? "the row" : "ANOTHER ROW"}; the delete waited on ${waitedOnStands}, then removed ${deletedAfter})`);
+  assert(rowsUnderWrite === "free" && waitedOnWrite === "advisory" && rebuiltO.ok === true && rebuiltO.stale_parts >= 1 && heldNow === "stale",
+    `a write holds the supersession lock to its commit and no lock an edit waits for: under a write not yet committed both thoughts' rows are free to an edit and the older is edited, and the rebuild that follows the edit waits on the lock, then finds the part and sets it stale (the rows ${rowsUnderWrite}; the rebuild waited on ${waitedOnWrite}; stale_parts ${rebuiltO.stale_parts}, the part ${heldNow})`);
+  assert(waitedOnEdit === "answered without waiting" && written.ok === true && written.action === "recorded"
+      && acceptUnderEdit.ok === false && acceptUnderEdit.error === "EDITED_SINCE" && acceptUnderEdit.newer_edited === true && rebuiltUnderEdit.ok === true && rebuiltUnderEdit.stale_parts >= 1 && underEditNow === "stale",
+    `…and a write does not wait for an edit not yet committed: it reads the text as it stands and records its part, which the edit's commit leaves pending at the old text; an accept of it is refused by its side, and the edit's rebuild sets it stale (${waitedOnEdit}; ${written.action ?? written.error}; accept ${acceptUnderEdit.error ?? "DECIDED"}; stale_parts ${rebuiltUnderEdit.stale_parts}, the part ${underEditNow})`);
   assert(["transactionid", "tuple"].includes(waitedOnPart) && rebuiltN.ok === true && rebuiltN.stale_parts === 0 && rebuildPartNow === "rejected",
     `a rebuild reads a part under its row's lock: behind a reject written by hand and not yet committed it waits for the row, then counts the part as it stands, decided, and sets nothing stale (waited on ${waitedOnPart}; stale_parts ${rebuiltN.stale_parts}, the part ${rebuildPartNow})`);
-  assert(writeWaitedOn === "advisory" && thoughtsWhileWaiting === "free" && afterQueue.ok === true && afterQueue.action === "recorded",
-    `a write takes the supersession lock before its thoughts' rows: held elsewhere, the write waits on it with both rows free, and is made once the lock is let go (waited on ${writeWaitedOn}, the rows ${thoughtsWhileWaiting}, then ${afterQueue.action ?? afterQueue.error})`);
+  assert(writeWaitedOn === "advisory" && thoughtsWhileWaiting === "free" && afterQueue.ok === false && afterQueue.error === "EDITED_SINCE" && afterQueue.older_edited === false && afterQueue.newer_edited === true && behindLock === 0,
+    `a write reads its texts after it has the supersession lock: held elsewhere, the write waits on it with both thoughts' rows free to an edit; the newer text edited meanwhile, the write is answered by its side once the lock is let go, and writes nothing (waited on ${writeWaitedOn}, the rows ${thoughtsWhileWaiting}, then ${afterQueue.error ?? afterQueue.action}, newer ${afterQueue.newer_edited}; ${behindLock} rows)`);
 
   await sql.unsafe(`DROP OWNED BY ${REVIEWER}; DROP ROLE ${REVIEWER}; DROP OWNED BY ${PASS}; DROP ROLE ${PASS}; DROP OWNED BY ${READER}; DROP ROLE ${READER}`);
   await sql.close();

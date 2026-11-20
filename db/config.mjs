@@ -2502,7 +2502,7 @@ export const ROLE_GRANTS = Object.freeze({
     // decision arrive with the ticket's review surfaces, and 148 carries
     // this grant to the roles that hold the proposals' so those surfaces need
     // no grant of their own. Recording a part stays the worker group's
-    // (INSERT).
+    // (INSERT, DELETE).
     Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "UPDATE"]), since: "148" }),
     // brain_info reads what became of the findings board-sync posted to the
     // board (SMD-2682). Soft as the rest: without it the Findings row says
@@ -2536,11 +2536,12 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
     // consolidate.ts's settled parts (SMD-4446): 148's record_settled_part
     // and review_settled_part run as the caller, as 029's do, and
-    // rebuild_derived sets a part stale as it does a proposal. The write
-    // also holds its two thoughts' rows (FOR SHARE), for which Postgres
-    // asks the capture group's UPDATE on `thoughts`, as rebuild_derived's
-    // lock on its input does.
-    Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "148" }),
+    // rebuild_derived sets a part stale as it does a proposal. DELETE, which
+    // the proposals' row above lacks: a part's row is one judgement, so the
+    // write deletes an undecided row whose texts have moved and records the
+    // new judgement as another row, where 063 rewrites a stale proposal in
+    // place.
+    Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "148" }),
     // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
     // forget: the forget arm removes the snapshot rows at a leaving thought's
     // fingerprints — the one DELETE on 060's table, and this file's arm of the
