@@ -6,18 +6,22 @@
 import type { Principal } from "../auth.ts";
 import type { ValidityThought } from "../validity.ts";
 import type { Ctx } from "./context.ts";
-import { ok, refuse, type Outcome } from "./refusal.ts";
+import { ok, type Outcome } from "./refusal.ts";
 import type { Input } from "./schemas.ts";
 
 /** The validity read's value: the cap on distinct ids, and each thought asked for, in the order given, a repeat once. */
 export type ValidityResult = { cap: number; thoughts: ValidityThought[] };
-export type ValidityCode = "TOO_MANY";
+/** None: the schema holds the list to the cap, so 149 has nothing to refuse a call from here. */
+export type ValidityCode = never;
 
 export async function validity(ctx: Ctx, _principal: Principal, input: Input<"validity">): Promise<Outcome<ValidityResult, ValidityCode>> {
   const ids = input.ids.map((s) => s.trim().toLowerCase());
   const a = await (await ctx.store()).thoughtValidity(ids);
   if (a.ok) return ok({ cap: a.cap, thoughts: a.thoughts });
-  if (a.error === "TOO_MANY") return refuse({ code: "TOO_MANY", retryable: false, cap: a.cap, given: a.given });
+  // The schema holds the list to the cap (at most 100 ids, so at most 100 distinct): a TOO_MANY from 149 is the
+  // store's fault, as NO_IDS is. The REST door could not carry the 1,000 ids 149's raw bound allows: Bun refuses a
+  // request line past 16 KB (431), some 400 ids (review pass 1).
+  if (a.error === "TOO_MANY") throw new Error(`thought_validity answered TOO_MANY (${a.given} over ${a.cap}) to a list the operation's schema holds to the cap`);
   // The server's own role cannot read thoughts: a fault of the deployment, not of the call (149 answers NOT_READABLE
   // where a role lacks the one table it cannot do without).
   if (a.error === "NOT_READABLE") throw new Error("thought_validity: the server's database role cannot read thoughts");

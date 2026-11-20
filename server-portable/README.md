@@ -1644,7 +1644,6 @@ it, each over REST and MCP alike:
 | `capture_deliverable` | `POST /v1/deliverables` | write | `{outcome: captured\|unchanged, deliverable, event, capture}`; `capture` null when nothing was captured |
 | `verify_deliverable` | `POST /v1/deliverables/{id}/verifications` | write | `{outcome: changed, deliverable, event, from, to}` |
 | `deliverable_history` | `GET /v1/deliverables/{id}` | read | `{deliverable, events}`; `deliverable` null when its thought was deleted |
-| `validity` | `GET /v1/validity?ids=…` (`ids` once per id) | read | `{cap, thoughts}`: each thought's validity, review and freshness with the records each was read from, its version, and `unread`; up to 100 distinct ids, over that `TOO_MANY` (400); labels only (migration 149, `docs/claim-validity.md`) |
 
 - **The capture is a capture_thought.** The output is captured as any thought is (its
   egress, embedding, chunks and tags), its `derived_from` the spec, its text closing
@@ -1700,6 +1699,28 @@ capture.
 A role without the `deliverables` grant group has the deliverable calls fail, naming the
 table, and nothing else. Preflight's `deliverables` row checks the functions and the
 grant.
+
+### Validity (SMD-3887)
+
+A thought's state on three axes, read from the records the brain keeps (migration 149,
+`docs/claim-validity.md`): validity (does it still hold), review (did a key decide) and
+freshness (have the views derived from its text caught up). One tool reaches it, over
+REST and MCP alike:
+
+| Tool | REST | Group | Answers |
+| --- | --- | --- | --- |
+| `validity` | `GET /v1/validity?ids=…` (`ids` once per id) | read | `{cap, thoughts}`: each thought's three states with the records each was read from, its version and `unread`; an id that is no thought `found: false`, `forgotten` and `forgottenAt` |
+
+- **Up to 100 ids a call**, a repeat counted: the input's rule, so more is `REFUSED_INPUT`
+  (400). A list of 100 ids fits the 16 KB request line Bun allows; 1,000 would not.
+- **It labels only.** No rank moves and no other read changes.
+- **The records keep the database's keys** (`superseded_by`, `checkpoint_reads`,
+  `produced_by`), as the record's shape names them; a judge's number carries
+  `calibrated: false`.
+- A server role that cannot read `thoughts` faults it. A role that cannot read another of
+  its tables reads the axes resting on that table as `unknown`, naming it in `unread`.
+  Preflight's `validity` row says which, and fails when the ledger records 149 but the
+  function is missing.
 
 ## Where a tool's logic lives (SMD-2283)
 

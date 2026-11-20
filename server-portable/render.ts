@@ -3152,7 +3152,8 @@ export const renderVerifyDeliverable = (o: Outcome<VerifyDeliverableResult, Veri
 
 // ── The validity read (SMD-3887 PR 2b, migration 149) ─────────────────────────
 // The value is the read's JSON (AS_JSON): each axis's records are data a client reads. The text gives each thought's
-// three states, what was found under an unknown, and the records behind its validity, one line each.
+// three states (validity's found state under an unknown), the records behind its validity, its newest three review
+// records with who decided or checked, its orphaned lineage rows counted, and what was not read; the rest is the value's.
 
 const UNCALIBRATED = "uncalibrated";
 /** One record a validity state was read from, on one line, in the record's own words. */
@@ -3165,23 +3166,33 @@ const validityRecordLine = (r: ValidityRecord): string => {
   if (r.kind === "citation") return `  - cites ${String(r.source)}, its source ${String(r.source_reads)}${r.supports ? ", supporting" : ""}`;
   return `  - ${oneLine(snipText(String(r.kind), 40))}`;
 };
+/** One record review was read from: a proposal's status and who decided it, or a verification's status and who checked. */
+const reviewRecordLine = (r: ValidityRecord): string => {
+  const by = r.by as { name?: string | null; kind?: string | null; pass?: boolean } | null | undefined;
+  const who = by?.name ? ` by ${oneLine(snipText(by.name, 80))}${by.kind ? ` (${by.kind})` : ""}${by.pass ? ", the pass's own settle" : ""}` : "";
+  if (r.kind === "proposal") return `  review: proposal ${String(r.id)} ${String(r.status)}${who}${r.at ? ` at ${String(r.at)}` : ""}`;
+  if (r.kind === "verification") return `  review: verification ${String(r.status)}${who}${r.at ? ` at ${String(r.at)}` : ""}, checkpoint ${String(r.checkpoint_reads)}`;
+  return `  review: ${oneLine(snipText(String(r.kind), 40))}`;
+};
+const orphanCount = (t: ValidityFound): number => t.freshness.records.filter((r) => r.state === "orphaned").length;
 const validityFoundLines = (t: ValidityFound): string[] => [
   `- ${t.id}: validity ${t.validity.state}${t.validity.state === "unknown" ? ` (found ${t.validity.found})` : ""}; review ${t.review.state}; freshness ${t.freshness.state}`
     + `${t.freshness.kinds.length ? ` (${t.freshness.kinds.map((k) => `${k.kind} ${k.state}${k.no_pool ? ", no pool re-runs it" : ""}`).join("; ")})` : ""}`
     + `; version ${t.version.fingerprint.slice(0, 12)}${t.version.seq === null ? "" : `, seq ${t.version.seq}`}`,
   ...t.validity.records.map(validityRecordLine),
+  ...t.review.records.slice(0, 3).map(reviewRecordLine),
+  ...(t.review.records.length > 3 ? [`  review: ${t.review.records.length - 3} more (the value lists them)`] : []),
+  ...(orphanCount(t) ? [`  freshness: ${orphanCount(t)} lineage row(s) whose artifact is gone, not read (orphaned)`] : []),
   ...(t.unread.length ? [`  not read: ${t.unread.join(", ")}`] : []),
 ];
 const validityLines = (t: ValidityThought): string[] =>
   t.found ? validityFoundLines(t)
   : [`- ${t.id}: not a thought${t.forgotten === true ? `, forgotten${t.forgottenAt ? ` at ${t.forgottenAt}` : ""}` : t.forgotten === null ? " (whether it was forgotten was not read)" : ""}`];
-const validityRefusal = (r: Refusal) =>
-  r.code === "TOO_MANY" ? `Refused: ${r.given} ids, over the cap of ${r.cap} distinct ids a call; ask in calls of up to ${r.cap}.`
-  : `Refused: ${r.code}.`;
+const validityRefusal = (r: Refusal) => `Refused: ${r.code}.`;
 
 export const renderValidity = (o: Outcome<ValidityResult, ValidityCode>): Reply => render(o, (v) =>
   [
-    `${v.thoughts.length} thought(s) on three axes — validity, review, freshness (up to ${v.cap} distinct ids a call). A judge's confidence is raw model output, ${UNCALIBRATED}.`,
+    `${v.thoughts.length} thought(s) on three axes — validity, review, freshness (up to ${v.cap} ids a call). A judge's confidence is raw model output, ${UNCALIBRATED}.`,
     ...v.thoughts.flatMap(validityLines),
   ].join("\n"),
   validityRefusal, AS_JSON);

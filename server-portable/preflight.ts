@@ -3373,6 +3373,14 @@ if (configFailed) {
           const vl = Array.isArray(vRows) ? vRows[0] : null;
           if (!vl) {
             add("validity", "warn", `could not verify: ${(vRows as Error).message}`, "The check reads thought_validity and the tables it reads in public; the message says why it failed.");
+          } else if (!vl.has_fn && ledger.has("149")) {
+            // Recorded and not there (a --baseline adoption, a dropped function): the tool faults on every call (review pass 1).
+            add("validity", "fail", "migration 149's thought_validity(uuid[]) missing though the ledger records 149; the validity tool faults on every call",
+                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+          } else if (!vl.has_fn && ledgerPresent && !ledgerRead) {
+            // Missing, and this role cannot read whether the ledger records 149: a warning, the remedy naming both.
+            add("validity", "warn", `thought_validity(uuid[]) missing, and ${whyUnread}, so whether migration 149 is recorded is unknown; the validity tool faults until it is there`,
+                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
           } else if (!vl.has_fn) {
             add("validity", "skip", "not checked — thought_validity does not exist (migration 149 not applied); the validity tool faults until it is");
           } else if (vl.unreadable.includes("thoughts")) {

@@ -14,10 +14,8 @@ export const VALIDITY_STATES = ["superseded", "contested", "unresolved", "suppor
 export const REVIEW_STATES = ["pending", "decided", "checked", "unchecked", "none", "unknown"] as const;
 /** Freshness's states, worst first, then none and unknown (row 6). */
 export const FRESHNESS_STATES = ["stale", "requested", "legacy", "current", "none", "unknown"] as const;
-/** The cap on distinct ids a call may ask for (149's c_cap). */
+/** The cap on ids a call may ask for: 149's c_cap on distinct ids, held by the operation's schema on the list itself. */
 export const VALIDITY_CAP = 100;
-/** The raw list's bound, a refusal before the de-duplication: ten times the cap (149). */
-export const VALIDITY_RAW_CAP = 10 * VALIDITY_CAP;
 
 export type ValidityState = (typeof VALIDITY_STATES)[number];
 export type ReviewState = (typeof REVIEW_STATES)[number];

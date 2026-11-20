@@ -114,8 +114,6 @@ export type Refusal =
   | { code: "NOT_A_DELIVERABLE"; retryable: false; id: string; deleted: boolean } // no deliverable was recorded on the thought, or its thought was deleted (deleted: its events stay as history)
   | { code: "ILLEGAL_TRANSITION"; retryable: false; id: string; from: string; to: string } // the status does not move from → to (unverified → verified or corrected, verified → corrected, corrected → verified)
   | { code: "VERIFY_NOT_YOURS"; retryable: false; id: string; as: "recorder" | "author" } // a move to verified by the key that recorded the deliverable, or a key the brain records as writing its thought
-  // The validity read (149, SMD-3887 PR 2b): the call refused whole.
-  | { code: "TOO_MANY"; retryable: false; cap: number; given: number } // more distinct ids than the cap (given: how many distinct, or the raw count when the list is over ten times the cap)
   // The agenda (123, SMD-3669): holder mine reads work_claims, which a role without the claims group may not.
   | { code: "CLAIMS_UNREADABLE"; retryable: false } // the server's database role lacks the claims group, so it cannot read whose claims are whose
   | { code: "ORDER_UNAVAILABLE"; retryable: false } // order due on a brain before migration 129 (SMD-4192), whose agenda has the priority order alone
@@ -275,7 +273,6 @@ const FACTS: Facts = {
   NOT_A_DELIVERABLE: (r) => ({ id: r.id, deleted: r.deleted }),
   ILLEGAL_TRANSITION: (r) => ({ id: r.id, from: r.from, to: r.to }),
   VERIFY_NOT_YOURS: (r) => ({ id: r.id, as: r.as }),
-  TOO_MANY: (r) => ({ cap: r.cap, given: r.given }),
   CLAIMS_UNREADABLE: none,
   ORDER_UNAVAILABLE: none,
   // The weights it names, from the known names alone: the database's words ride the text.
