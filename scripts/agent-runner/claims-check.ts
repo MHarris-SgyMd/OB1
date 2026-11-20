@@ -143,6 +143,9 @@ export async function selfCheck(): Promise<number> {
     await section("a server message is masked and shortened: no token leaks into a reply detail", async () => {
       const r = await claimWork(stub(() => ({ status: 400, body: { code: "REFUSED_CLAIM_INPUT", message: "leaked wc_" + "d".repeat(64) } })).fetch, BASE, KEY, { ticket: "SMD-9", lease_seconds: 86400, label: "l" });
       ok(r.kind === "refused" && r.detail.includes("wc_…") && !/wc_[0-9a-f]{10}/.test(r.detail), "a wc_ token in a server message is masked in the detail");
+      // The markdown-escaped form, which a server's message can carry: masked here as in a PR's text (SMD-4325).
+      const esc = await claimWork(stub(() => ({ status: 400, body: { code: "REFUSED_CLAIM_INPUT", message: "leaked wc\\_" + "d".repeat(64) } })).fetch, BASE, KEY, { ticket: "SMD-9", lease_seconds: 86400, label: "l" });
+      ok(esc.kind === "refused" && esc.detail.includes("wc_…") && !esc.detail.includes("d".repeat(10)), "the markdown-escaped wc\\_ form is masked in the detail too");
     });
 
     await section("the token files round-trip, owner-only, never through a link", () => {
