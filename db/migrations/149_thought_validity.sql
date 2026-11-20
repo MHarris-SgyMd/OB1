@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 148: a thought's state on three axes — validity, review, freshness —
+-- Migration 149: a thought's state on three axes — validity, review, freshness —
 --                read from the records that already exist (SMD-3887 PR 2a)
 -- =============================================================================
 --
@@ -93,8 +93,8 @@
 --
 --   Not here: the valid window (SMD-2011), a settled part (SMD-4446), what is
 --   fit to act on (SMD-3900). MINOR under the version rules: an additive
---   migration, a new function, nothing existing changed. test-schema [133],
---   test-upgrade [20ck].
+--   migration, a new function, nothing existing changed. test-schema [134],
+--   test-upgrade [20cl].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of, thought_entities, ob1_entity_edges),
@@ -140,7 +140,7 @@ BEGIN
   ) m;
   IF v_missing IS NOT NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 148 needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134 and 139; this schema lacks ' || v_missing,
+      MESSAGE = 'migration 149 needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134 and 139; this schema lacks ' || v_missing,
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -567,4 +567,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_validity(uuid[]) IS
-  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given (a list over ten times the cap refused before de-duplication; a role that cannot read thoughts NOT_READABLE): {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending proposal on it as the falling side with a text moved since judged, or a stale one; a corrected verification at an earlier checkpoint, a stale stored key among them; a checkpoint is current only at the text''s own key), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found, or a corrected checkpoint could not be placed without the log. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; a pass-settled rejection read, a key''s decision not; a source: pass''s extraction kept on a moved text, as 067''s entities arm keeps it; a kind''s moved from its stale rows; a relation''s judge number carried; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';
+  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 149 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given (a list over ten times the cap refused before de-duplication; a role that cannot read thoughts NOT_READABLE): {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending proposal on it as the falling side with a text moved since judged, or a stale one; a corrected verification at an earlier checkpoint, a stale stored key among them; a checkpoint is current only at the text''s own key), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found, or a corrected checkpoint could not be placed without the log. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; a pass-settled rejection read, a key''s decision not; a source: pass''s extraction kept on a moved text, as 067''s entities arm keeps it; a kind''s moved from its stale rows; a relation''s judge number carried; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 149 / SMD-3887.';

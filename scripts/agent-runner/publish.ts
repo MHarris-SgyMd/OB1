@@ -27,6 +27,7 @@ import type { Fetch } from "./facts.ts";
 import type { ScanSecrets } from "./gate.ts";
 import { updateRecord, type GateSummary, type OwedStep, type SessionCost } from "./record.ts";
 import type { Gql } from "../../db/linear-api.ts";
+import { maskTokens } from "./text.ts";
 
 // ── The PR body ────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -51,9 +52,6 @@ export type PrBodyInput = {
   /** The review's open (unfixed) findings, each a line of model text. */
   openFindings: string[];
 };
-
-/** Mask a claim token anywhere it might appear in model text, so a report that quoted one never reaches the PR. The optional backslash matches the markdown-escaped `wc\_` form a server error can carry (parity with the session hook's scrubber); a token never reaches an agent session, so this is defence in depth that `scanSecrets` also backstops. */
-const maskTokens = (s: string): string => s.replace(/wc\\?_[0-9a-f]{6,}/gi, "wc_…");
 
 /**
  * Scrub a relayed error/detail string before it enters a record field (`owed[].why`, `reason`): both a claim token and a
