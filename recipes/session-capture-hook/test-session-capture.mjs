@@ -450,6 +450,18 @@ let episodesLines;
   const teamKey = blanked(CWD("/wt/ob1"), BR("me/smd-610-x"), P("set password=smd-4321 and go"));
   const noSplit = blanked(CWD("/wt/ob1"), BR("main"), P("tidy the readme"), P("set password=ABC-1234 and go"));
   const alsoNamed = blanked(CWD("/wt/ob1"), BR("main"), P("for ABC-1234, set password=ABC-1234 and go"));
+  // Review pass 1 (cold read): blanking can join a word to its marker into a ticket shape, here XY-12 before a Slack
+  // webhook's URL, which the scan blanks from its first letter; only tickets the raw ask names are kept.
+  const joined = blanked(CWD("/wt/ob1"), BR("main"), P("XY-12https://hooks.slack.com/services/T0ABC/B0DEF/abcdefghijklmnop1234 and SMD-12"));
+  assert(joined.named === "SMD-12" && joined.head.tickets.join() === "SMD-12",
+    `blanking adds no ticket: a word the scan's marker makes ticket-shaped is not one (${JSON.stringify({ named: joined.named, head: joined.head })})`);
+  // Review pass 1 (secrets adversary): a quoted secret whose closing quote is on the next line. Blanked as written, the
+  // scan cut it at its first space and its ticket-shaped part headed the summary; the summary blanks the prompt on one
+  // line, whole, and the ask's tickets are read that way too.
+  const quoted = blanked(CWD("/wt/ob1"), BR("main"), P('set password = "hunter22\nQQZ-9876" and go'));
+  const quotedSecond = blanked(CWD("/wt/ob1"), BR("main"), P("tidy the readme"), P('export DB_PASSWORD="hunter22 \\\nQQZ-9876" now'));
+  assert(quoted.named === "" && quoted.head.from === null && !/QQZ-9876/.test(quoted.text) && quotedSecond.episodes === 1 && !/QQZ-9876/.test(quotedSecond.text),
+    `a quoted secret across a line break is no ticket either, as the first ask or as a later one (${JSON.stringify([quoted, quotedSecond].map((x) => ({ episodes: x.episodes, named: x.named, head: x.head })))})`);
   assert(noTeam.named === "" && noTeam.head.from === null && !/ABC-1234/i.test(noTeam.text)
       && teamKey.named === "" && teamKey.head.from === "place" && teamKey.head.tickets.join() === "SMD-610" && !/4321/.test(teamKey.text)
       && noSplit.episodes === 1 && !/ABC-1234/i.test(noSplit.text)
@@ -1210,6 +1222,16 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
       && /\[redacted:password assignment\]/.test(pwPrep.payload.text) && pwPrep.payload.redactions?.length === 1,
     `a ticket-shaped password is blanked and heads no summary: the payload carries it nowhere, and no tickets_from (${pwPrep.payload?.text?.split("\n")[0]}; ${pwPrep.payload?.tickets_from}; in the payload: ${Object.entries(pwPrep.payload ?? {}).filter(([, v]) => /ABC-1234/i.test(JSON.stringify(v))).map(([k, v]) => `${k}=${JSON.stringify(v).slice(Math.max(0, JSON.stringify(v).search(/ABC-1234/i) - 80), JSON.stringify(v).search(/ABC-1234/i) + 20)}`).join(" | ") || "nowhere"}; redactions: ${JSON.stringify(pwPrep.payload?.redactions)}; marker: ${/\[redacted:password assignment\]/.test(pwPrep.payload?.text ?? "")})`);
   if (pwPrep.payloadPath) unlinkSync(pwPrep.payloadPath);
+  // Review pass 1: under refuse too. Read raw, the secret's ask split off an episode of its own, which was refused, and
+  // the clean episode before it was sent saying "ended when ABC-1234 was taken up". Read blanked, it splits nothing,
+  // and the one episode holding it is refused whole, as one holding any other secret is.
+  const pwRefuseT = join(TMP, "ticket-password-refuse.jsonl");
+  writeFileSync(pwRefuseT, [user("tidy the readme", { origin: { kind: "human" } }), assistant([{ type: "text", text: "tidied" }]),
+    user("set password=ABC-1234 and go", { origin: { kind: "human" } }), assistant([{ type: "text", text: "set" }])].join("\n"));
+  const pwRefuse = prepare({ ...base, session_id: "s-ticket-password-refuse", transcript_path: pwRefuseT }, { onSecret: "refuse" });
+  assert(pwRefuse.code === 1 && (pwRefuse.payloadPaths ?? []).length === 0 && /nothing sent/.test(pwRefuse.message) && !/ABC-1234/i.test(pwRefuse.message),
+    `under refuse a ticket-shaped password splits off no episode: the one episode holding it is refused whole, and no clean episode is sent naming it (${pwRefuse.message.slice(0, 160)})`);
+  for (const f of pwRefuse.payloadPaths ?? []) unlinkSync(f);
   // Review pass 4 (mutants): the place's tickets three at most; a payload prepared on a branch naming a ticket says
   // `place`.
   const placedFour = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "smd-11-smd-12-smd-13-smd-14" });

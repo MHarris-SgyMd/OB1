@@ -801,20 +801,30 @@ export function ticketsIn(text, teams) {
 }
 /**
  * The tickets an ask names, read with its secrets blanked (SMD-4292): a ticket-shaped value a secret holds
- * (`password=ABC-1234`) is no ticket. Read off the raw ask, it headed the summary under `redact`, the brain keyed it as
- * a subject, it began an episode ("begun with ABC-1234", "ended when ABC-1234 was taken up") and it decided where the
- * session split. Every reader of an ask's tickets — `named`, the segmenter's boundaries — goes through here, in every
- * mode: under `refuse` the session is not sent, so where its episodes split matters to nothing sent. The scan runs once
- * per ask (the session's rollup, the segmenter and the episode each read it), and only for an ask with a ticket-shaped
- * word, since blanking only takes words away. Measured on 3,000 asks of 2 KB each naming one, the worst case: 39 ms to
- * summarise before, 128 ms now (233 ms scanned three times each); an ask naming none costs nothing more.
+ * (`password=ABC-1234`) is no ticket. Read off the raw ask, it headed the summary while the ask that held it was
+ * blanked, the brain keyed it as a subject, it began an episode ("begun with ABC-1234") and it decided where the
+ * session split. Every reader of an ask's tickets — `named`, the segmenter's boundaries — goes through here.
+ * In every mode, `refuse` too: there an episode holding a secret is refused whatever the secret's shape, as one holding
+ * `password=hunter2` always was. Read raw, a ticket-shaped secret split off an episode of its own, and the clean
+ * episode before it, which `refuse` sends, said "ended when ABC-1234 was taken up" (review pass 1: limiting this to
+ * `redact` kept that clean episode sendable, and sent the value with it). A scanner match on a real ticket
+ * (`Password: SMD-12 (reset flow)`) drops it as well: that ask is blanked in the text too.
+ * The ask is blanked as the summary blanks it, on one line (`redactEpisode` blanks each prompt flattened): blanked as
+ * written, a quoted secret whose closing quote is on the next line (`password = "hunter22⏎QQZ-9876"`) was cut at its
+ * first space, so its ticket-shaped part headed the summary while the prompt showed it blanked (review pass 1, secrets
+ * adversary). Only tickets the raw ask names are kept: blanking can join a word to a marker into a ticket shape (`XY-12`
+ * before a Slack webhook's URL), which it must not add (review pass 1, cold read). The scan runs once per ask (the session's rollup, the
+ * segmenter and the episode each read it), and only for an ask naming a ticket-shaped word. Measured on 3,000 asks of
+ * 2 KB each naming one, the worst case: 43 ms to summarise before, 161 ms now (233 ms scanned three times each); an
+ * ask naming none costs nothing more.
  */
 const blankedAsks = new WeakMap();
 const askTickets = (ev, teams) => {
-  if (!ticketsIn(ev.text).length) return [];
+  const raw = ticketsIn(ev.text);
+  if (!raw.length) return [];
   let text = blankedAsks.get(ev);
-  if (text === undefined) { text = redactSecrets(ev.text).text; blankedAsks.set(ev, text); }
-  return ticketsIn(text, teams);
+  if (text === undefined) { text = redactSecrets(oneLine(ev.text)).text; blankedAsks.set(ev, text); }
+  return ticketsIn(text, teams).filter((id) => raw.includes(id));
 };
 /**
  * A place's own tickets (SMD-4291): the first ticket-shaped word of `text` is the place's ticket, and the other keys of
