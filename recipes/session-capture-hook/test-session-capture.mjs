@@ -3027,6 +3027,7 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
     if (gate && !gate.opened) { for (let i = 0; i < 250 && !gateSeen(); i++) await sleep(20); gate.opened = gateSeen() ? "seen" : "timed out"; }
     if (slowMs) await sleep(slowMs);
     if (/\[\[fault\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "update_thought failed: the REST core did not answer" }], structuredContent: { code: "FAILED", message: "the REST core did not answer" } } }));
+    if (/\[\[bad-content\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { content: "an answer whose content is no list" } })); // one that throws in the hook's textOfResult (SMD-4412)
     if (/\[\[meta\]\]/.test(String(args.content ?? "")) && args.metadata) return err("Refused: `metadata.reserved_x` is set by the server, not the caller.", { code: "REFUSED_METADATA_SHAPE", problem: "reserved_key" });
     if (/\[\[embed-down\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Error: the edit (its new text needs its vector) was not done — the brain's embedding provider is unavailable: the connection was refused. The same call can land once it answers." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: true, reason: "provider_unreachable", setting: "OB1_LLM_BASE_URL", check: [] } } }));
     if (/\[\[embed-401\]\]/.test(String(args.content ?? ""))) return Response.json(envelope({ result: { isError: true, content: [{ type: "text", text: "Refused: the capture was not done — the brain's embedding provider answered 401 (its credential was refused). An operator checks OB1_LLM_BASE_URL and its key." }], structuredContent: { code: "EMBEDDING_PROVIDER_ERROR", retryable: false, reason: "provider_401", status: 401, setting: "OB1_LLM_BASE_URL" } } }));
@@ -3265,6 +3266,57 @@ console.log("\n[12] The write fan-out: a write through the connector's server is
   rmSync(join(CANARY_ROOT, "writes", "pending", RACED), { force: true });
   assert(racedBack?.sent === true && racedBack?.sending === undefined,
     `a copy a drop removed during its send, its answer a fault, is written back sent (${JSON.stringify(racedBack)})`);
+
+  // A queued file that parses but is no copy (null, {}, a list, a capture with no args, args a list or null, a tool that
+  // is a number, no date) threw on every drain ahead of the week's give-up, or was never given up, and the copies behind
+  // it waited for good: each is given up as one that does not parse, and the copy behind them lands in the same drain
+  // (SMD-4412).
+  const NOT_COPY = (n) => `000000000000009-000000000000009-${String(n).padStart(2, "0")}.json`; // padded: the queue drains in name order
+  const nowAt = new Date().toISOString();
+  const notCopies = [null, {}, { from: "stable", at: nowAt, tool: "capture_thought" }, { from: "stable", at: nowAt, tool: "capture_thought", args: ["x"] },
+    { from: "stable", tool: "capture_thought", args: { content: "a copy with no date", client_key: S(51) } }, [], { from: "stable", at: nowAt, tool: 7, args: {} }, { from: "stable", at: nowAt, tool: "update_thought", args: null },
+    // A date there but no date the week's give-up can read: a string that does not parse, and a number (review pass 1: mutants checking presence, or new Date(), survived).
+    { from: "stable", at: "2026-13-45", tool: "capture_thought", args: { content: "a copy with a date that does not parse", client_key: S(51) } },
+    { from: "stable", at: Date.now(), tool: "capture_thought", args: { content: "a copy dated by a number", client_key: S(51) } },
+    // A tool the fan-out never copies (a typo): held a week before, the log saying to mint a write key that was fine (review pass 2).
+    { from: "stable", at: nowAt, tool: "update_thougt", args: { id: S(51), content: "an edit whose tool is misspelt" } },
+    // A name that is no string, which a template or String() cannot print (`{"toString":1}`), threw in the log's label,
+    // in the catch that keeps a throw's copy, and in a landed forget's drop of dead/ copies, stopping the queue for good
+    // (review passes 1 and 2); the forget among them, and the held one with no date after it, each say its text stays.
+    { from: "stable", at: nowAt, tool: "capture_thought", args: { content: "a copy whose key is no string", client_key: { toString: 1 } } },
+    { from: "stable", at: nowAt, tool: "update_thought", args: { id: { toString: null, valueOf: null }, content: "an edit whose id is no string" } },
+    { from: "stable", at: nowAt, tool: "forget_thought", args: { id: S(53), confirm: S(53), detach_citations: true }, alt: { toString: 1 } },
+    { from: "stable", tool: "forget_thought", args: { id: S(53), confirm: S(53), detach_citations: true }, held: true }];
+  const FORGETS_NOT_COPIES = [notCopies.length - 1, notCopies.length];
+  notCopies.forEach((op, i) => writeFileSync(join(CANARY_ROOT, "writes", "pending", NOT_COPY(i + 1)), JSON.stringify(op)));
+  const BEHIND = NOT_COPY(notCopies.length + 1);
+  writeFileSync(join(CANARY_ROOT, "writes", "pending", BEHIND), JSON.stringify({ from: "stable", at: nowAt, tool: "capture_thought", args: { content: "the copy behind the files that are no copies", client_key: S(52) } }));
+  calls.length = 0;
+  const drainedBad = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  const deadBad = readdirSync(join(CANARY_ROOT, "writes", "dead")).filter((f) => f.startsWith("000000000000009-")).sort();
+  const notCopyLines = (logOf(CANARY_ROOT).match(/not copied \(given up\): 000000000000009-\S+ is not a copy/g) ?? []).length;
+  assert(drainedBad.code === 1 && !queueIn().length && deadBad.length === notCopies.length && !deadBad.includes(BEHIND) && notCopyLines === notCopies.length
+      && calls.length === 1 && calls[0].args?.client_key === S(52) && byName(S(52))
+      && FORGETS_NOT_COPIES.every((n) => logOf(CANARY_ROOT).includes(`${NOT_COPY(n)} is not a copy — a forget: its text stays on this brain until forgotten there by hand`))
+      && !/^session-capture: /m.test(drainedBad.err),
+    `queued files that parse but are no copy go to dead/, each logged "is not a copy" (a forget with its text-stays warning), no error printed, and the copy behind them lands in the same drain (${JSON.stringify({ code: drainedBad.code, dead: deadBad.length, lines: notCopyLines, queue: queueIn(), calls: calls.map((c) => c.args?.client_key ?? null) })})`);
+  for (const f of deadBad) rmSync(join(CANARY_ROOT, "writes", "dead", f), { force: true });
+
+  // An answer whose content is no list throws in postWrite (textOfResult): the copy is kept, sent (the brain may hold
+  // it), as a fault keeps one, rather than the drain ending in an exception; at a week old it is given up (SMD-4412).
+  const THREW = NOT_COPY(20), THREW_OLD = NOT_COPY(21);
+  writeFileSync(join(CANARY_ROOT, "writes", "pending", THREW), JSON.stringify({ from: "stable", at: nowAt, tool: "capture_thought", args: { content: "[[bad-content]] a copy whose answer the hook cannot read", client_key: S(51) } }));
+  const drainedThrew = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  const threwAfter = existsSync(join(CANARY_ROOT, "writes", "pending", THREW)) ? JSON.parse(readFileSync(join(CANARY_ROOT, "writes", "pending", THREW), "utf8")) : null;
+  rmSync(join(CANARY_ROOT, "writes", "pending", THREW), { force: true });
+  writeFileSync(join(CANARY_ROOT, "writes", "pending", THREW_OLD), JSON.stringify({ from: "stable", at: new Date(Date.now() - 8 * 24 * 3600_000).toISOString(), tool: "capture_thought", args: { content: "[[bad-content]] a week-old copy whose answer the hook cannot read", client_key: S(51) } }));
+  const drainedThrewOld = await spawnScript(["--drain-writes", "--brain", "canary"], { env });
+  const threwOldDead = existsSync(join(CANARY_ROOT, "writes", "dead", THREW_OLD));
+  rmSync(join(CANARY_ROOT, "writes", "dead", THREW_OLD), { force: true });
+  assert(drainedThrew.code === 1 && !/^session-capture: /m.test(drainedThrew.err) && threwAfter?.sent === true && threwAfter?.sending === undefined
+      && /kept: capture_thought \(client_key [^)]+\) — the brain's answer could not be read \(.*\): check that the url is this brain's \/mcp/.test(logOf(CANARY_ROOT))
+      && drainedThrewOld.code === 1 && threwOldDead && !queueIn().length && /not copied \(given up after a week\): capture_thought \(client_key [^)]+\) — the brain's answer could not be read \(/.test(logOf(CANARY_ROOT)),
+    `a copy whose answer throws in the hook is kept, sent, and logged, not an exception; a week old, it is given up (${JSON.stringify({ code: drainedThrew.code, err: drainedThrew.err.slice(0, 200), threwAfter: threwAfter && { sent: threwAfter.sent, sending: threwAfter.sending }, old: drainedThrewOld.code, threwOldDead })})`);
 
   // The receiving brain's own forget leaves things for a person to review there: the log names them (review pass 7).
   canaryReview = true;
