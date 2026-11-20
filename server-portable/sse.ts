@@ -27,6 +27,8 @@
 // until the transport closes it or the client goes, when the timer stops
 // itself. Half the default, so a stream is never silent for a whole sweep; a
 // proxy's read timeout in front of the server (SMD-1846) is kept the same way.
+// One answer is not kept so: a stream its server means to stay open (`held`,
+// the MCP server's listen streams, SMD-4347), whose writer keeps it alive.
 //
 // The brain's own servers serve with Bun's ceiling, 255 s (IDLE_TIMEOUT_S in
 // server-portable/api.ts and mcp-server/index.ts), for the GET the keepalive
@@ -84,6 +86,19 @@ export function withSseKeepalive(
   response: Response,
   opts: {
     intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; onCancel?: () => void; label?: string;
+    /**
+     * Whether the server's stop has cut this answer (an answer of the MCP server's at `/mcp`, in the moment between
+     * its handler's close, which ends a 2026-07-28 tool call's, and its connections' close: SMD-4347). From then nothing more of it is
+     * passed on, no frame of this wrapper's among it, and its end is not passed on either: the answer stays open,
+     * as much of it as had left, until its connection goes. Its end is told as its reader's leaving is (`onCancel`).
+     */
+    isCut?: () => boolean;
+    /**
+     * A stream meant to stay open (the MCP server's listen streams, SMD-4347): no frame of this wrapper's and no
+     * bound. Its writer keeps it alive itself, and past ten minutes it is neither stuck nor slow. Its end and its
+     * reader's leaving are still told (`onEnd`, `onCancel`).
+     */
+    held?: boolean;
   } = {},
 ): Response {
   const body = response.body;
@@ -104,7 +119,9 @@ export function withSseKeepalive(
   };
   const keepalive = new TransformStream<Uint8Array, Uint8Array>({
     start(controller) {
+      if (opts.held) return;
       timer = setInterval(() => {
+        if (opts.isCut?.()) return;
         const elapsed = performance.now() - started;
         if (elapsed >= maxMs) {
           stop();
@@ -121,11 +138,16 @@ export function withSseKeepalive(
       }, intervalMs);
     },
     transform(chunk, controller) {
+      if (opts.isCut?.()) return;
       bytes += chunk.byteLength;
       controller.enqueue(chunk);
     },
     flush() {
       stop(); // the transport closed the stream: the response is complete
+      if (opts.isCut?.()) {
+        opts.onCancel?.();
+        return new Promise<void>(() => {});
+      }
       opts.onEnd?.(bytes);
     },
     cancel() {
