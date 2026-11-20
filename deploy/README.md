@@ -514,6 +514,25 @@ free:
     beside one. The loaded models' background goes on meanwhile, less the
     120 s of each drain tried.
 
+  Measured on one Mac's Ollama 0.33.3 (SMD-3379 PR 3c-2): 64 GiB, with a
+  22 GiB judge model that can't share memory with the extraction model and
+  the embedder. One brain's background asked for both at once, three
+  workers a pass. Another brain, with no background of its own, took a live
+  capture and a search every 30 s for 20 minutes, each timed to its answer:
+
+  | Registry | Capture, median | 90th percentile | Over 60 s | Thoughts extracted | Judge calls |
+  |---|---|---|---|---|---|
+  | no backlog (6 minutes) | 3.2 s | 4.0 s | 0 of 11 | | |
+  | no `ps` | 53 s | 106 s | 17 of 39, and 3 saved degraded | 4 | 10 |
+  | `ps` | 8.5 s | 65 s | 5 of 39 | 47 | 8 |
+  | `ps`, the backlogged brain's `OB1_SLEEP_MAX_WAIT=600` | 4.1 s | 8.9 s | 0 of 39 | 97 | 2 |
+
+  With `ps` and the wait unset, a live call still waits when it arrives
+  while the judge model runs a call, the first cost above: 15 of the 39
+  captures took over 30 s. With the wait at 600 s the judge model loaded
+  twice in the 20 minutes, 607 and 611 s after it was asked for, and one
+  capture took over 30 s.
+
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
 coordinator holds the brain's one connection, and its passes ask through it,
@@ -612,10 +631,14 @@ bun --no-env-file deploy/federated/federated.ts down
     `/api/tags` has the same shape and lists every model on disk, which
     would make every model look loaded.
   - **The rule takes the list to name a model only once it has loaded.**
-    Ollama 0.33.3's log reads that way: over 1,670 loads on one Mac it
-    says `loaded runners` after `llama-server started`, 28 ms after at the
-    median and under a second at most. This has not been probed with a
-    read during a load. A server that lists a model from the start of its
+    Ollama 0.33.3 does (probed, SMD-3379 PR 3c-2): over 187 loads on one
+    Mac, read every 15 ms, the list first named the model 13 ms after the
+    server logged `loaded runners` at the median, 0.7 s at most, and never
+    while it loaded. A model put out for another leaves the list before
+    the other begins to load, so the list can be empty for a whole load.
+    None of 254,000 reads during loads and evictions failed; the slowest
+    took 0.7 s, while a 22 GiB model was put out, against the broker's
+    2 s. A server that lists a model from the start of its
     load ends the hold on the others early, counts `stay_s` from the
     load's start, and has its failed loads go unpaced. A server that
     doesn't answer during a load reads as unreadable: past 10 s the rule
