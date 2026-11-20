@@ -106,7 +106,7 @@
  *
  * ── The pool, and what is not here ──────────────────────────────────────────
  * rebuild_derived feeds the pool between runs: a tags row it finds stale is
- * requeued under the key this worker recorded (migration 149, SMD-2298 PR 2).
+ * requeued under the key this worker recorded (migration 150, SMD-2298 PR 2).
  * Each run pools the rest of the backlog itself, what no rebuild marked (a
  * thought tagged before 061, a capture that fell back, a text moved raw with
  * no rebuild) — the thoughts not in the pool are added (enqueue_thoughts, which skips a
@@ -471,7 +471,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
   if (stoppedEarly()) return 130;
-  // The pool, every run, beside rebuild_derived's requeue (149): the backlog not pooled, and a re-tagged one due again.
+  // The pool, every run, beside rebuild_derived's requeue (150): the backlog not pooled, and a re-tagged one due again.
   const [{ added }] = (await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(${backlogIds()})) AS added`) as { added: number }[];
   // requeue_thought_work's reset, guarded: the UPDATE checks `succeeded` again on the row it locks (READ COMMITTED's
   // recheck), so a thought another run requeued and claimed since this statement began keeps its lease (review pass 1:

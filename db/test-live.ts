@@ -23885,7 +23885,7 @@ if (want("29")) {
       assert(![C, U].some((id) => byId.has(id)) && !bodies.some((b) => /\[29\] (C|U),/.test(b)),
         "a current thought and one with no tags are never pooled nor sent");
 
-      // --status after: R alone in the backlog, failed (its row listed). Then A moved again and rebuilt: under 149
+      // --status after: R alone in the backlog, failed (its row listed). Then A moved again and rebuilt: under 150
       // rebuild_derived requeues it under the recorded key (SMD-2298 PR 2, the pool's feed). And M moved raw with no
       // rebuild: re-tagged before and due again, which the worker's own run puts back.
       const status1 = await cli("--status");
@@ -23899,7 +23899,7 @@ if (want("29")) {
           && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && fed.enqueued === 1 && fed.unqueued === 0 && fed.pools.includes(JOB) && aFed === "pending" && drainer(JOB) === "bun db/retag.ts --url <url>"
           && status2.out.includes("backlog: 3 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale, 1 with the row at other text") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again")
           && status2.out.includes("status: 6 re-tagged, 1 failed, 0 in flight, 1 pending"),
-        `--status after: seven re-tagged, R failed and listed, R alone in the backlog; A moved and rebuilt is requeued under ${JOB} by rebuild_derived (149), pending; M moved raw reads as re-tagged before and due again (${JSON.stringify(fed)}; ${line(status1.out, "backlog:")} | ${line(status2.out, "backlog:")})`);
+        `--status after: seven re-tagged, R failed and listed, R alone in the backlog; A moved and rebuilt is requeued under ${JOB} by rebuild_derived (150), pending; M moved raw reads as re-tagged before and due again (${JSON.stringify(fed)}; ${line(status1.out, "backlog:")} | ${line(status2.out, "backlog:")})`);
 
       // --retry-failed with the policy lifted: R re-tagged; A, pooled by the rebuild, re-tagged; M put back by the run and re-tagged.
       const mark = bodies.length;

@@ -49,7 +49,7 @@
  * the recipes — db/reembed.ts, db/extract-entities.ts, db/consolidate.ts,
  * db/retag.ts — and the end of a run names each pool that gained rows with
  * the command that drains it. A stale tags row is requeued under the re-tag
- * key db/retag.ts recorded (migration 149, SMD-2298); before its first run
+ * key db/retag.ts recorded (migration 150, SMD-2298); before its first run
  * there is none, and the row is marked and reported alone.
  *
  * ── Exit codes ──────────────────────────────────────────────────────────────
