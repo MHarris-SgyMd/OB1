@@ -5284,6 +5284,14 @@ jobs:
         with:
           persist-credentials: false
 
+      # SMD-2435 probe, never merged: does this runner record access times?
+      - name: Probe, the marker after the checkout
+        run: |
+          findmnt -T . -no SOURCE,FSTYPE,OPTIONS
+          stat -c '%n  atime %x  mtime %y' SECURITY.md LICENSE.md db/cli.ts
+          sleep 1.1; touch "$RUNNER_TEMP/probe-marker"; sleep 1.1
+          stat -c '%n  mtime %y' "$RUNNER_TEMP/probe-marker"
+
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.3"
@@ -5295,6 +5303,23 @@ jobs:
       - name: Typecheck
         working-directory: compat/supabase-sql
         run: bunx tsc --noEmit
+
+      # SMD-2435 probe, never merged: four reads by four means, and one file left alone.
+      - name: Probe, known reads
+        run: |
+          cat SECURITY.md > /dev/null
+          bun -e 'await Bun.file("CODE_OF_CONDUCT.md").text()'
+          bun -e 'require("node:fs").readFileSync("CONTRIBUTORS.md", "utf8")'
+          bun -e 'await import("./jev/verdict.ts").catch(() => {})' || true
+          ls schemas > /dev/null
+          docker run --rm -v "$PWD:/w:ro" pgvector/pgvector:0.8.6-pg16 cat /w/AGENTS.md > /dev/null
+          for f in SECURITY.md CODE_OF_CONDUCT.md CONTRIBUTORS.md jev/verdict.ts AGENTS.md LICENSE.md; do
+            if [ "$f" -nt "$RUNNER_TEMP/probe-marker" ]; then echo "$f: modified since the marker (not expected)"; fi
+            if find "$f" -neweram "$RUNNER_TEMP/probe-marker" | grep -q .; then echo "$f: accessed since the marker"; else echo "$f: NOT accessed since the marker"; fi
+          done
+          if find schemas -maxdepth 0 -neweram "$RUNNER_TEMP/probe-marker" | grep -q .; then echo "schemas/: listed since the marker"; else echo "schemas/: NOT seen as listed"; fi
+          # A second read of a file already read: relatime would leave its access time alone.
+          before=$(stat -c %x SECURITY.md); sleep 1.1; cat SECURITY.md > /dev/null; echo "SECURITY.md read again: atime $before -> $(stat -c %x SECURITY.md)"
 
       # db-live's "Wait for Postgres" has why (SMD-3196, SMD-3474).
       - name: Wait for Postgres
@@ -5367,6 +5392,18 @@ jobs:
           path: /tmp/ob1-test-counts/
           if-no-files-found: warn
           retention-days: 7
+
+      # SMD-2435 probe, never merged: the tracked files this job accessed since its checkout.
+      - name: Probe, what the job read
+        if: always()
+        run: |
+          # shellcheck disable=SC2016 # sh expands "$@" and "$0", not this shell
+          git ls-files -z | xargs -0 -n 200 sh -c 'find "$@" -maxdepth 0 -neweram "$0" 2> /dev/null' "$RUNNER_TEMP/probe-marker" | sort > "$RUNNER_TEMP/accessed.txt"
+          echo "tracked files: $(git ls-files | wc -l); accessed since the checkout: $(wc -l < "$RUNNER_TEMP/accessed.txt")"
+          echo "by top-level directory:"; awk -F/ '{ n[(NF > 1) ? $1 : "(root)"]++ } END { for (d in n) print n[d], d }' "$RUNNER_TEMP/accessed.txt" | sort -rn
+          echo "::group::every accessed tracked file"; cat "$RUNNER_TEMP/accessed.txt"; echo "::endgroup::"
+          echo "directories listed since the checkout: $(find . -path ./.git -prune -o -name node_modules -prune -o -type d -neweram "$RUNNER_TEMP/probe-marker" -print | wc -l)"
+          find . -path ./.git -prune -o -name node_modules -prune -o -type d -neweram "$RUNNER_TEMP/probe-marker" -print | sort | head -60
 
       # db-live's last step has why (SMD-3474).
       - name: Postgres's log, and its removal
