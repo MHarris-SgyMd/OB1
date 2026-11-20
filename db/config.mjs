@@ -1243,6 +1243,37 @@ export function poolModelFor(key) {
 export const CONSOLIDATE_KEY_PREFIX = "consolidate:";
 
 /**
+ * The shape of a re-tag pool key (SMD-2298): `retag:<metadata model>@p<prompt
+ * version>`, the tags' extractor's model and server-portable/metadata.ts's
+ * METADATA_PROMPT_VERSION, so a change of either is a new pool, as
+ * `extract:` and `consolidate:` are. Built and read here: the version is the
+ * caller's argument, not a copy of the constant, so this plain-JS module
+ * imports no prompt module and cannot drift from it. The model may itself
+ * contain ":" or "@" (qwen3:8b), so the version is read after the LAST "@p".
+ * db/retag.ts records its key in ob1_config.retag_key.
+ */
+export const RETAG_KEY_PREFIX = "retag:";
+
+/**
+ * @param {string} model
+ * @param {number} promptVersion
+ * @returns {string}
+ */
+export function retagKey(model, promptVersion) {
+  return `${RETAG_KEY_PREFIX}${model}@p${promptVersion}`;
+}
+
+/**
+ * @param {string} key
+ * @returns {{model: string, promptVersion: number} | null}
+ */
+export function parseRetagKey(key) {
+  if (!key.startsWith(RETAG_KEY_PREFIX)) return null;
+  const m = /^(.+)@p(0|[1-9][0-9]*)$/.exec(key.slice(RETAG_KEY_PREFIX.length));
+  return m ? { model: m[1], promptVersion: Number(m[2]) } : null;
+}
+
+/**
  * The corpus by the model its vectors carry (migration 021): one row per
  * label, NULL for unknown, vectorless rows left out — what preflight's
  * `vector models` check and reembed.ts's corpus line both read. Plain SQL with
