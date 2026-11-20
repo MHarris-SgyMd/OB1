@@ -102,6 +102,8 @@ import { fileURLToPath } from "node:url";
  * that prepared the model's input.
  */
 export const HOOK_VERSION = "1.11.0";
+/** A version's shape, three numbers: the only stamp `postCapture` sends. */
+const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
 const SELF = fileURLToPath(import.meta.url);
 const HOME = homedir();
@@ -1835,11 +1837,14 @@ export async function postCapture(cfg, payload) {
   // which rules wrote a header. A payload queued by a hook before 1.11.0 has
   // none, and is sent without it: no hook can say which wrote it. A hook
   // before 1.11.0 sending a payload a later one queued (a rollback) drops it.
+  // A stamp not in a version's shape (a hand edit, a corrupt file) is not sent:
+  // a long one the server refused cost the summary all its metadata, the
+  // redaction count among it (review pass 2).
   const meta = {};
   if (payload.summary_model) meta.summary_model = payload.summary_model;
   if (payload.redactions?.length) meta.redactions = payload.redactions.length;
   if (payload.tickets_from && !payload.summary_model) meta.tickets_from = payload.tickets_from;
-  if (typeof payload.hook_version === "string" && payload.hook_version) meta.hook_version = payload.hook_version;
+  if (typeof payload.hook_version === "string" && VERSION_RE.test(payload.hook_version)) meta.hook_version = payload.hook_version;
   if (Object.keys(meta).length) args.metadata = meta;
   const call = () => rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });
   let result = await call();
@@ -3976,15 +3981,22 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** Whether stdin is a pipe or a socket, as a harness hands a hook its JSON: not a terminal, not /dev/null (SMD-4378 review pass 2). */
+function stdinIsPiped() {
+  try { const st = fstatSync(0); return st.isFIFO() || st.isSocket(); } catch { return false; }
+}
+
 export async function main(argv) {
   const args = argv.slice(2);
   // First, whatever else is given and whether or not stdin is piped: an
   // operator confirming an upgrade needs no config, no brain and no transcript (SMD-4378).
-  // With stdin not a terminal it may be a hook command's, which then captures
-  // nothing at every run: the log says so, as it does for a flag no hook takes
-  // (review pass 1: it was silent).
+  // With stdin a pipe or a socket, as a harness hands a hook, it may be a hook
+  // command's, which then does nothing at every run: the log says so, as it
+  // does for a flag no hook takes (review pass 1: it was silent). Not on a
+  // terminal or /dev/null, as an agent's or a script's shell runs it to confirm
+  // an upgrade, which then writes no log and makes no state dir (review pass 2).
   if (has(args, "--version")) {
-    if (!process.stdin.isTTY) log(`--version: printed session-capture ${HOOK_VERSION}; stdin unread, nothing captured (in a hook command it stops every capture: remove it)`);
+    if (stdinIsPiped()) log(`--version: printed session-capture ${HOOK_VERSION}; stdin unread, nothing captured, renewed or copied (in a hook command it stops every run: remove it)`);
     console.log(`session-capture ${HOOK_VERSION}`);
     return 0;
   }

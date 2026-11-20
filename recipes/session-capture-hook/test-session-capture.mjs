@@ -814,6 +814,8 @@ let episodesLines;
   received.length = 0;
   const he = await runHook({ session_id: "s-ep-hook", transcript_path: EPISODES_T, cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
   assert(he.code === 0 && (he.err.match(/session-capture: captured 0000/g) ?? []).length === 4 && received.length === 4, `as a hook, synchronous: four captures, four lines on stderr (exit ${he.code}: ${he.err.trim().split("\n").length} line(s))`);
+  assert(received.length === 4 && received.every((r) => r.args.metadata?.hook_version === META_VERSION) && received.some((r) => r.args.metadata?.tickets_from),
+    `…each episode's summary stamped with the hook's version, beside tickets_from where its header names tickets (SMD-4378 review pass 2) (${JSON.stringify(received.map((r) => r.args.metadata))})`);
   const epLog = existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : ""; // a missing log is a failure the assertion names, not a throw
   assert(/captured session=s-ep-hook harness=claude-code id=/.test(epLog) && /captured session=s-ep-hook episode=2 harness=claude-code id=/.test(epLog) && /captured session=s-ep-hook episode=4 harness=claude-code id=/.test(epLog), "the log names the episode after the first");
   const hs = await runHook({ session_id: "s-ep-hook-sec", transcript_path: join(TMP, "episodes-secret.jsonl"), cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1", OB1_CAPTURE_ON_SECRET: "refuse" });
@@ -822,6 +824,8 @@ let episodesLines;
   const hr = await runHook({ session_id: "s-ep-hook-red", transcript_path: join(TMP, "episodes-secret.jsonl"), cwd: "/repo/wt/smd-1917-fork-md", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
   assert(hr.code === 0 && (hr.err.match(/session-capture: captured 0000/g) ?? []).length === 4 && received.length === 11 && readState("s-ep-hook-red#e2")?.thought_id && received.slice(7).filter((r) => /MCP_ACCESS_KEY=\[redacted:credential assignment, high-entropy token\] was the key/.test(r.args.content)).length === 1 && !received.slice(7).some((r) => /abcdefghijklmnop/.test(r.args.content)),
     `…and under redact (the default) all four capture, exit 0, the marker in what reached the endpoint and the key nowhere (${hr.err.trim().split("\n").length} line(s))`);
+  assert(received.slice(7).every((r) => r.args.metadata?.hook_version === META_VERSION) && received.slice(7).some((r) => r.args.metadata?.redactions === 1 && r.args.metadata?.hook_version === META_VERSION),
+    `…each stamped with the version, the redacted one beside its redaction count (SMD-4378 review pass 2) (${JSON.stringify(received.slice(7).map((r) => r.args.metadata))})`);
   assert(/captured session=s-ep-hook-red episode=2 harness=claude-code id=\S+ sources=3 redactions=1\n/.test(readFileSync(join(STATE, "log"), "utf8")) && !/session=s-ep-hook-red harness=claude-code id=\S+ sources=1 redactions/.test(readFileSync(join(STATE, "log"), "utf8")), "…the log line counts the redactions on that episode's capture and no other");
   rmSync(STATE, { recursive: true, force: true });
   received.length = 0;
@@ -1354,7 +1358,28 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   await postCapture(cfg, { text: "a summary an older hook stamped", harness: "codex", derived_from: [], hook_version: "1.10.9" });
   const older = received.at(-1).args;
   assert(unstamped.metadata === undefined && JSON.stringify(older.metadata) === JSON.stringify({ hook_version: "1.10.9" }),
-    `a payload is sent with the version that prepared it: none for one queued before 1.11.0, an older hook's own (SMD-4378) (${JSON.stringify([unstamped.metadata, older.metadata])})`);
+    `postCapture sends a payload's own stamp, or none: none for one prepared before 1.11.0, an older hook's own (SMD-4378) (${JSON.stringify([unstamped.metadata, older.metadata])})`);
+  // A stamp not in a version's shape (a hand edit, a corrupt file) is not sent, and costs nothing else: a long one
+  // the server refused dropped the redaction count with it (SMD-4378 review pass 2).
+  const badStamps = ["", 7, null, "x".repeat(300), "1.11.0\nx", "1.11", { v: 1 }];
+  const sentFor = [];
+  for (const hv of badStamps) {
+    await postCapture(cfg, { text: `a summary stamped ${JSON.stringify(hv)}`, harness: "codex", derived_from: [], redactions: [{ reason: "anthropic key", at: 4, in: "prompt 1" }], hook_version: hv });
+    sentFor.push(received.at(-1).args.metadata);
+  }
+  assert(sentFor.every((m) => JSON.stringify(m) === '{"redactions":1}'), `a stamp not in a version's shape is not sent, the redaction count still is (SMD-4378 review pass 2) (${JSON.stringify(sentFor)})`);
+  // Through the queue: payloads prepare wrote, one rewritten as a hook before 1.11.0 would have left it (no stamp)
+  // and one as an older hook's, drained by postPending (SMD-4378 review pass 2: the cases above call postCapture alone).
+  const qOld = prepare({ session_id: "s-queue-unstamped", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const qOlder = prepare({ session_id: "s-queue-older", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" });
+  const { hook_version: _dropped, ...asBefore } = JSON.parse(readFileSync(qOld.payloadPath, "utf8"));
+  writeFileSync(qOld.payloadPath, JSON.stringify(asBefore));
+  writeFileSync(qOlder.payloadPath, JSON.stringify({ ...JSON.parse(readFileSync(qOlder.payloadPath, "utf8")), hook_version: "1.10.9" }));
+  const qFrom = received.length;
+  await postPending(cfg, [qOld.payloadPath, qOlder.payloadPath]);
+  const qSent = received.slice(qFrom).map((r) => r.args.metadata?.hook_version ?? null);
+  assert(qOld.payload.hook_version === META_VERSION && JSON.stringify(qSent) === JSON.stringify([null, "1.10.9"]),
+    `drained from the queue, a payload a hook before 1.11.0 wrote is sent with no stamp, and one an older hook stamped with that hook's, not the draining hook's (SMD-4378 review pass 2) (${JSON.stringify(qSent)})`);
   // An error is never a save, whatever id its words name (SMD-3153: the one
   // error that saved a thought, a save whose vector did not attach, left with its code).
   const r2 = await postCapture(cfg, { text: "[[refused-naming-id]] summary", harness: "codex", derived_from: [] }).then((v) => v, (e) => e);
@@ -2488,6 +2513,7 @@ console.log("\n[7] As a hook: JSON on stdin, exit codes, and what reaches the en
   const cpt = await runHook({ session_id: "s-compact-chain", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "PreCompact", trigger: "auto" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
   assert(cpt.code === 0 && received.length === before + 1 && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(received.at(-1).args.content) && received.at(-1).args.supersedes === undefined,
     `a PreCompact hook captures a summary naming the compaction (exit ${cpt.code}: ${cpt.err.trim().slice(0, 60)})`);
+  assert(received.at(-1).args.metadata?.hook_version === META_VERSION, `…a checkpoint's summary stamped with the version too (SMD-4378 review pass 2) (${JSON.stringify(received.at(-1).args.metadata)})`);
   const cptId = readState("s-compact-chain")?.thought_id;
   const end = await runHook({ session_id: "s-compact-chain", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd", reason: "other" }, { OB1_SESSION_CAPTURE_SYNC: "1" });
   assert(end.code === 0 && received.length === before + 2 && cptId && received.at(-1).args.supersedes === cptId && !/Checkpoint:/.test(received.at(-1).args.content),
@@ -2577,8 +2603,14 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const ver = await spawnScript(["--version"]);
   const verPiped = await runHook({ session_id: "s-version", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--version"]);
   const verWith = await spawnScript(["--check", "--version", "--harness", "bogus"], { env: { OB1_CAPTURE_ON_SECRET: "x", OB1_SESSION_CAPTURE_CONFIG: join(TMP, "nope.json") } });
-  const versionLogged = (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "").split("\n").filter((l) => l.includes(`--version: printed ${VERSION_LINE}; stdin unread, nothing captured (in a hook command it stops every capture: remove it)`)).length;
-  assert(versionLogged === 3, `--version with stdin not a terminal, as in a hook command, says in the log that nothing was captured (SMD-4378 review pass 1: silent) (${versionLogged} line(s))`);
+  const versionLogged = (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "").split("\n").filter((l) => l.includes(`--version: printed ${VERSION_LINE}; stdin unread, nothing captured, renewed or copied (in a hook command it stops every run: remove it)`)).length;
+  assert(versionLogged === 1, `--version with stdin piped, as in a hook command, says in the log that nothing was captured (review pass 1: silent); on /dev/null, as an agent's shell runs it, it does not (review pass 2: it told the operator to remove a flag no hook had) (SMD-4378) (${versionLogged} line(s), of 1 piped run and 2 on /dev/null)`);
+  const freshState = join(TMP, "version-fresh-state");
+  const verNull = await spawnScript(["--version"], { env: { OB1_SESSION_CAPTURE_STATE: freshState } });
+  const nullMadeState = existsSync(freshState);
+  const verPipedFresh = await runHook({ session_id: "s-version-fresh" }, { OB1_SESSION_CAPTURE_STATE: freshState }, ["--version"]);
+  assert(verNull.code === 0 && verNull.out === `${VERSION_LINE}\n` && !nullMadeState && verPipedFresh.code === 0 && existsSync(join(freshState, "log")),
+    `--version on /dev/null with no state dir makes none; piped, the log is written (SMD-4378 review pass 2) (${nullMadeState})`);
   assert([ver, verPiped, verWith].every((r) => r.code === 0 && r.out === `${VERSION_LINE}\n` && !r.err) && received.length === sentBefore,
     `--version prints "session-capture <version>" and exits 0, stdin piped or not, captures nothing, and is first: beside --check, a bad --harness, a misspelt mode and no config (SMD-4378) (${JSON.stringify([ver, verPiped, verWith].map((r) => [r.code, r.out, r.err.slice(0, 60)]))})`);
   assert(ok.out.split("\n")[0] === VERSION_LINE && noCfgTypo.out.split("\n")[0] === VERSION_LINE,
@@ -2728,7 +2760,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert((await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--min-interval", "20"])).code === 2 && (await run(["--print-hook", "claude-code", "--event", "PreCompact", "--trigger", "auto"])).code === 2, "a flag of the other by-hand form is refused on either, not validated nowhere and dropped");
   // The flags are read before the transcript (third review pass: a transcript with no prompt returned 0 past every refusal).
   const quietBogus = await run(["--dry-run", join(TMP, "quiet.jsonl"), "--event", "bogus", "--trigger", "Whatever", "--min-interval", "5"]);
-  assert(quietBogus.code === 2 && /--event takes/.test(quietBogus.err) && !quietBogus.out.trim() && /would SKIP/.test((await run(["--dry-run", join(TMP, "quiet.jsonl"), "--event", "PreCompact", "--trigger", "auto"])).out),
+  const quietGood = await run(["--dry-run", join(TMP, "quiet.jsonl"), "--event", "PreCompact", "--trigger", "auto"]);
+  assert(quietGood.out.startsWith(`--- ${VERSION_LINE}: `), `--dry-run's first line names the version on a transcript it would skip too (SMD-4378 review pass 2) (${quietGood.out.split("\n")[0]})`);
+  const dryModel = await spawnScript(["--dry-run", CLAUDE_T], { env: { OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:9/v1", OB1_SESSION_CAPTURE_MODEL: "test-model" } });
+  assert(dryModel.code === 0 && dryModel.out.split("\n")[0] === `--- ${VERSION_LINE}: what it would send; nothing is sent` && /^--- summary: model/m.test(dryModel.out.split("\n").slice(1).join("\n")),
+    `…and in model mode, before the model's status line (SMD-4378 review pass 2) (${JSON.stringify(dryModel.out.split("\n").slice(0, 3))})`);
+  assert(quietBogus.code === 2 && /--event takes/.test(quietBogus.err) && !quietBogus.out.trim() && /would SKIP/.test(quietGood.out),
     "--dry-run on a transcript with no prompt still refuses a bad flag, and with good ones says it would skip");
   // The `=` form (third review pass: unseen, so `--trigger=auto` previewed no trigger and `--min-interval=45` printed 20).
   const eqForm = await run(["--dry-run", CLAUDE_T, "--event=PreCompact", "--trigger=auto"]);
@@ -3075,6 +3112,9 @@ console.log("\n[11] Several brains: each its own key, queue and supersedes chain
   // --check: each brain, named; the worst exit.
   const ck = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: BRAINS_CFG } });
   assert(ck.code === 0 && /^\[stable\] ok: /m.test(ck.out) && /^\[canary\] ok: /m.test(ck.out) && ck.out.includes(`State: ${CANARY_ROOT}`), `--check checks each brain and names it, each with its own state (${ck.out.trim().slice(0, 160)})`);
+  const ckLines = ck.out.split("\n").filter(Boolean);
+  assert(ckLines[0] === VERSION_LINE && ckLines.filter((l) => l.includes("session-capture ")).length === 1 && ckLines.slice(1).every((l) => /^\[(stable|canary)\] /.test(l)),
+    `…its one version line first, untagged, every line after it led by its brain's name (SMD-4378 review pass 2) (${JSON.stringify(ckLines.map((l) => l.slice(0, 30)))})`);
   canaryAway = true;
   const ckAway = await spawnScript(["--check"], { env: { OB1_SESSION_CAPTURE_CONFIG: BRAINS_CFG } });
   canaryAway = false;
