@@ -514,30 +514,39 @@ free:
     beside one. The loaded models' background goes on meanwhile, less the
     120 s of each drain tried.
 
-  Measured on one Mac's Ollama 0.33.3 (SMD-3379 PR 3c-2), once each: 64 GiB,
-  Ollama keeping two models loaded (`OLLAMA_MAX_LOADED_MODELS=2`), and
-  three in use: the embedder and the extraction model, which every capture
-  needs, and a 22 GiB judge model. One brain's background asked for the
-  extraction model and the judge model at once, three workers a pass.
-  Another brain, with no background of its own, took a live capture and a
-  search every 30 s for 20 minutes, each timed to its answer (and from
-  minute 12 both brains took a burst of 60 timed calls):
+  Measured on one Mac's Ollama 0.33.3 (SMD-3379 PR 3c-2). Each run below
+  was made once. The Mac has 64 GiB, and Ollama keeps two models loaded
+  there (`OLLAMA_MAX_LOADED_MODELS=2`) where three were in use: the
+  embedder and the extraction model, which every capture needs, and a
+  22 GiB judge model, which one of the sleep's later passes calls. One
+  brain's background asked for the extraction model and the judge model at
+  once, three workers a pass. That was staged: a fresh backlog ordinarily
+  asks for one model at a time. Another brain, with no background of its
+  own, took a live capture and a search every 30 s for 20 minutes, each
+  timed to its answer (and from minute 12 a burst of 60 timed calls was
+  made on each brain):
 
-  | Registry | Capture, median | 90th percentile | Over 60 s | Thoughts extracted | Judge calls |
-  |---|---|---|---|---|---|
-  | no backlog (6 minutes) | 3.3 s | 4.4 s | 0 of 12 | | |
-  | no `ps` | 53 s | 99 s | 17 of 40, and 3 saved degraded | 8 | 10 |
-  | `ps` | 8.8 s | 65 s | 6 of 40 | 47 | 8 |
-  | `ps`, the backlogged brain's `OB1_SLEEP_MAX_WAIT=600` | 4.1 s | 7.9 s | 0 of 40 | 97 | 2 |
+  | Run | Capture, median | 90th percentile | Over 60 s | Saved without a vector or tags | Backlogged brain: thoughts extracted | Its judge-model calls ended |
+  |---|---|---|---|---|---|---|
+  | `ps`, no backlog (6 minutes) | 3.3 s | 4.4 s | 0 of 12 | 0 | | |
+  | no `ps` | 53 s | 99 s | 17 of 40 | 3 | 8 | 10 |
+  | `ps` | 8.8 s | 65 s | 6 of 40 | 0 | 47 | 8 |
+  | `ps`, the backlogged brain's `OB1_SLEEP_MAX_WAIT=600` | 4.1 s | 7.9 s | 0 of 40 | 0 | 97 | 2 |
 
-  With `ps` and the wait unset, a live call still waits when it arrives
-  while the judge model runs a call, the first cost above: 16 of the 40
-  captures took over 30 s. With the wait at 600 s the judge model loaded
-  twice in the 20 minutes, 607 and 611 s after it was asked for, and one
-  capture took over 30 s. Other work on the machine left different memory
-  free from run to run: in the last, the extraction model fitted beside
-  the judge model at both of its loads, as it never did in the run before,
-  so that row owes to room as well as to the wait.
+  - **With `ps` and the wait unset, a live call still waits** when it
+    arrives while the judge model runs a call and a model it needs isn't
+    loaded: 16 of the 40 captures took over 30 s. The wait is the length
+    of the background call in hand, 71 s on average there.
+  - **With the wait at 600 s** the judge model loaded twice, 607 and
+    611 s after it was asked for, and one capture took over 30 s. The
+    price is the backlogged brain's: its judge model ended 2 calls in the
+    20 minutes, not 8. That run differed in another way too, not
+    explained: after both of the judge model's loads the extraction model
+    loaded next and fitted beside it, where in the run before the embedder
+    always loaded next and the extraction model then waited for room. So
+    the last row owes to that as well as to the wait.
+  - Without `ps`, two of the 40 searches were answered by exact matches
+    alone, the embedder not answering in time.
 
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
@@ -639,12 +648,14 @@ bun --no-env-file deploy/federated/federated.ts down
   - **The rule takes the list to name a model only once it has loaded.**
     Ollama 0.33.3 does (probed, SMD-3379 PR 3c-2): over 187 loads on one
     Mac, read every 15 ms, the list first named the model within 0.7 s of
-    the server's `loaded runners` line reaching the reader, 13 ms after at
-    the median, and never while it loaded. A model put out for another is
-    gone from the list as the other begins to load, so the list can be
-    empty for a whole load. None of 254,000 reads during loads and
-    evictions failed; the slowest took 0.7 s, while a 22 GiB model was put
-    out, against the broker's 2 s. A server that lists a model from the
+    Ollama logging `loaded runners`, 13 ms after at the median, and never
+    while it loaded. A model put out for another is gone from the list as
+    the other begins to load, so the list can be empty for a whole load;
+    the broker grants background to no other model while a load is under
+    way (to the 120 s bound above), so it doesn't take that for a server
+    with nothing loaded. None of 254,000 reads during loads and evictions failed; the
+    slowest took 0.7 s, while a 22 GiB model was put out, inside the
+    broker's 2 s limit on a read. A server that lists a model from the
     start of its load ends the hold on the others early, counts `stay_s`
     from the load's start, and has its failed loads go unpaced. A server
     that doesn't answer during a load reads as unreadable: past 10 s the
@@ -673,8 +684,12 @@ bun --no-env-file deploy/federated/federated.ts down
   ask for a model that isn't loaded waits before the broker drains for
   it. To keep one brain's background from putting out models another
   brain's live calls use, raise that brain's `OB1_SLEEP_MAX_WAIT`: its
-  loads then wait for the server to be idle. No registry setting protects
-  a model that only live calls loaded, beyond the two-minute quiet.
+  loads then wait for the loaded models to be idle, or that long, whichever
+  comes first, so under steady live calls they go when it runs out (see
+  "Measured" above for a run at 600 s, and what it cost that brain). The
+  setting also orders that brain's own passes: see `OB1_SLEEP_MAX_WAIT`
+  under the sleep's settings. No registry setting protects a model that
+  only live calls loaded, beyond the two-minute quiet.
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1` (`host.docker.internal` for a
   brain under Docker Engine on Linux). A call to any other base isn't
