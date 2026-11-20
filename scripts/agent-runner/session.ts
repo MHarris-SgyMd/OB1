@@ -6,8 +6,11 @@
  * profile.ts builds and the prompt on stdin, and reads the stream as it comes:
  *
  *   - the init event must show the pinned version, dontAsk, the key helper as the key's source (a settings file that
- *     fails validation is ignored without a word, so this is how a profile that didn't load shows), exactly the
+ *     fails validation can be ignored without a word, so this is how a profile that didn't load shows), exactly the
  *     role's tools, no MCP server, the model, and the root as the working directory; else the session is ended;
+ *   - a turn or a result before any init event ends it the same way. Since 2.1.329 Claude Code refuses to start on
+ *     sandbox settings that fail validation, with one error result and no init: a session that never ran, not one
+ *     that ended with its result (SMD-4489);
  *   - each tool result must answer a call the guard logged, else the session is ended: the backstop for a call the
  *     guard never saw;
  *   - at its time limit the session is ended: its process group and every process it started, the sandboxed ones
