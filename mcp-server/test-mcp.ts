@@ -1011,9 +1011,10 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const spansBoth = listenSpans();
     assert(spansBoth === 1 && /; telemetry sent; 1 held stream closed; exit 0/.test(bothStopped.out), `…and with a collector, the stream's span has been sent by the stop's end (${spansBoth} span(s) in all; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     // The count of open streams (SMD-4458): 1 while the stream was open, and 0 as the stop's flush read it, though the stream is closed only after that flush.
-    // The flush's is the last point this server sends: left at 1, a panel that sums the servers would count the stream beside the next server's.
+    // With a collector that answers, the flush's is the last point this server sends: left at 1, a panel that sums the servers would count the stream beside the next server's.
+    // And the entry says nothing of a count it could not make: it made it.
     const openSeen = pointsOf("ob1.mcp.listen_streams", meteredBefore);
-    assert(openSeen.includes(1) && openSeen.at(-1) === 0, `…and its metrics hold the count of listen streams: 1 while the stream was open, and 0 at the stop's flush, its last point (${JSON.stringify(openSeen)} in ${metered.length - meteredBefore} export(s))`);
+    assert(openSeen.includes(1) && openSeen.at(-1) === 0 && !/could not be made/.test(bothStopped.err), `…and its metrics hold the count of listen streams: 1 while the stream was open, and 0 at the stop's flush, its last point, with no word at its start of a count not made (${JSON.stringify(openSeen)} in ${metered.length - meteredBefore} export(s))`);
     assert(both.up && late === "refused", `…and a connection attempted after the signal is refused, not served and not answered by a handler that is closing (${late})`);
 
     // Streams open and a call cut at the bound: the call's line is `cut`, every stream still gets its closing frame, exit 1.

@@ -1641,33 +1641,53 @@ provider-latency panel shows the servers' calls alone (SMD-2910).
 
 A server that holds listen streams (the MCP server, once SMD-4347's last PR
 turns them on; none does yet) says how many are open, in two places (SMD-4458).
+A stream is open from the answer that holds it until its connection ends or the
+server stops. Whether its client still reads it, and whether its key still
+stands, are not asked: a client that has gone quiet without closing keeps its
+place, and so does a key revoked since.
 
 As a metric, `ob1.mcp.listen_streams`: the total, with no label of its own, an
-up-down counter (a gauge, in Prometheus). It is a sample, read at each export
-(every 60 s unless `OTEL_METRIC_EXPORT_INTERVAL` says) and once more at the
-stop's flush. From the end of the stop's drain it reads 0, so that the series
-ends on 0: the stop then serves nothing new and is about to close every stream,
-after its flush where the drain finished, which a collector that is slow to
-answer can make 5 s. A stop whose flush does not get that last export out (a
-collector that does not answer, or is still answering the one before it; a
-kill) leaves the count before it as the series' last, and each start is a new series: until the old
-one goes stale, a sum over servers counts its streams beside the next
-server's.
+up-down counter, `ob1_mcp_listen_streams` in the profile's Prometheus (measured
+on its image). It is a sample: the first one export interval after the start,
+then at each (every 60 s unless `OTEL_METRIC_EXPORT_INTERVAL` says), and once
+more at the stop's flush. From the end of the stop's drain it reads 0, so that
+the series ends on 0: the stop then serves nothing new and is about to close
+every stream, after its flush where the drain finished, which a collector that
+is slow to answer can make 5 s. Each start is a new series, told from the last
+by `service.instance.id` alone. Two things follow. A server that stops inside
+its first interval sends that 0 and nothing else, so one that restarts more
+often than it exports reads 0, or nothing, however many streams each life held.
+And a stop whose flush does not get its last export out (a collector that does
+not answer, or is still answering the one before it; a kill) leaves the count
+before it as its series' last. Prometheus goes on reading that for five minutes
+(measured on the image: three streams open at a kill were counted beside the
+next server's one for 300 s), and a sum over servers is too high for as long.
 
 On its keyed `/health`, as `listen`, read as the route answers: `open`, the two
-bounds (`max` for the server and `perCaller` for one caller's name) and `callers`, one
+bounds (`max` for the server and `perCaller` for one caller) and `callers`, one
 `{ "name", "open" }` for each caller that holds a stream, the most first and
-equal counts in name order. It rides on the brain's record: where the route
-answers `ok` (the REST core away, or the key not cleared within the deadline)
-there is no count, and the metric is the only reading. Any key that may call
-`brain_info`, a read key included, sees every caller's name; a token is shown
-`ok` there and never the record. A key's caller name is the key's. A token's is
-`oauth:` and its subject, with `+` and its client where it signed in through
-one, and that client may be an https URL.
+equal counts in name order; `open` is their sum. It rides on the brain's record:
+where the route answers `ok` (the REST core away, or the key not cleared within
+the deadline; that request's own line says which) there is no count, and the
+metric is the only reading. Any key that may call `brain_info`, a read key
+included, sees every caller's name. A token is shown `ok` there and never the
+record, and so is a capture key, whose own streams are listed all the same. A
+caller is a name, and every session of one key is one caller: a key's is the
+name it has in `MCP_ACCESS_KEYS`; a token's is `oauth:` and its subject, with
+`+` and its client where it signed in through one, and that client may be an
+https URL. A line's `agent` is that name as a log line carries one, its first
+64 characters with anything outside printable ASCII as `?`, so a long name is
+matched by its start.
 
 A listen refused at a bound is a line whose `outcome` is `refused` and whose
-`code` is `LISTEN_SERVER_FULL` or `LISTEN_CALLER_FULL`. `listen` is what to read
-it against, as it is when asked, not as it was at the refusal. A server that
+`code` is `LISTEN_SERVER_FULL` or `LISTEN_CALLER_FULL`; its client was told
+"Subscription limit reached" in a JSON-RPC error. The server's bound is asked
+first, so a caller at its own bound on a full server is `LISTEN_SERVER_FULL`.
+`listen` is what to read the line against, as it is when asked, not as it was
+at the refusal. No setting changes the bounds. A place comes back when a
+client closes its stream or its connection ends, and not before: a caller at
+its bound has that many sessions open, or left open. Restarting `mcp` ends
+every stream, and each client that is still there asks again. A server that
 holds none sends no such series and has no such field.
 
 `bun preflight.ts --deep` makes each provider probe a span and a point under
