@@ -231,8 +231,6 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 
 **The stamp also names the checkout the probes ran from,** and a run must start from that checkout with the six hashed files as probed. Keep the runner's install a checkout that stays on one commit; a worktree that changes branch with each task refuses to run whenever its branch differs in one of them.
 
-One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
-
 ## The live run (`live-run.ts`)
 
 The executor runs one ticket end to end with the real clients — the capstone of cut 2c. Two modes, so the money path is never the default:
