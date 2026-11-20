@@ -18,8 +18,8 @@
  * It also names, for the top of the PR body, any changed file CI runs as a check, since CI runs the branch's copy.
  */
 
-import { HIDDEN_TEXT, mentionsTicket } from "./select.ts";
-import { refusedPart } from "./guard.ts";
+import { mentionsTicket } from "./select.ts";
+import { refusedPart, shownText } from "./guard.ts";
 
 /** How the gate runs git: the args, returning the exit code and output. The runner wires it to git with its own config and environment; a test stands in for it. */
 export type GitRun = (args: string[]) => { code: number; stdout: string; stderr: string };
@@ -106,13 +106,8 @@ export function parseNameStatus(zOutput: string): DiffEntry[] {
 const ok = (name: string, detail = ""): Check => ({ name, pass: true, detail });
 const bad = (name: string, detail: string): Check => ({ name, pass: false, detail });
 
-/** Untrusted text on one line: hidden code points as <U+XXXX>, whitespace closed, cut at `max`. */
-function shown(s: string, max = 160): string {
-  let out = "";
-  for (const ch of s.replace(/\s+/g, " ").trim()) out += HIDDEN_TEXT.test(ch) ? `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>` : ch;
-  const cps = [...out];
-  return cps.length > max ? `${cps.slice(0, max - 1).join("")}…` : out;
-}
+/** Untrusted text on one line, as guard.ts's shownText writes it, cut at 160 here unless told. */
+const shown = (s: string, max = 160): string => shownText(s, max);
 
 /** The branch checks: descends from the base, only the session's commits, none a merge, each by the bot and unsigned, each message commitlint-clean with the ticket in its subject. */
 export function checkBranch(input: GateInput): { checks: Check[]; commits: CommitInfo[] } {

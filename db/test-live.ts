@@ -66,7 +66,9 @@ import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT
 import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe } from "../server-portable/lineage.ts";
-import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
+import { METADATA_PROMPT_VERSION, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
+import { run as runRetag, type RetagOptions } from "./retag.ts";
+import { parseRetagKey, retagKey } from "./config.mjs";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { identityHash, readForgottenIdentities } from "./ingest-structure.ts";
@@ -6507,20 +6509,25 @@ if (want("10")) {
       }
 
       // A stop ends a probe in flight: after a timeout of 4 s the probe has the
-      // call's whole timeout, and a first stop 1 s into it returns at once,
-      // where the probe would have run 3 s more (review pass 1; 8 s and 2 s into
-      // it before SMD-3196). Timed from the probe's arrival, not the claim: a
+      // call's whole timeout, and a first stop 200 ms into it returns at once,
+      // where the probe would have run some 3.5 s more (review pass 1; 8 s and
+      // 2 s into it before SMD-3196; 1 s into it, under a 2 s bound, before
+      // SMD-4399). The return is 4 to 25 ms, alone or under load, so the bound
+      // is the runner's room, not the path's: a CI runner once took 2,054 ms.
+      // Stopping sooner leaves more of the probe's 4 s for the bound to sit
+      // under, 3 s of it. Timed from the probe's arrival, not the claim: a
       // stop during the hung call takes another path, the call left to time out,
       // no probe after it and the thought recorded failed. The hang begins once
       // the start's probe has answered, so the start never meets it.
       {
         const stopProbe = new AbortController();
-        const probeLines: string[] = [];
+        // Each line with when it came: a return past the bound says what the follower said after the stop, and when (SMD-4399).
+        const probeLines: { at: number; line: string }[] = [];
         let returnedAt = 0;
         // Deleted when the case ends: left pending, it would be the one-shot run's first claim below.
         let slow = "";
         const startProbes = probes;
-        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
+        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push({ at: Date.now(), line: l }), err: (l) => probeLines.push({ at: Date.now(), line: l }) } }).then((c) => { returnedAt = Date.now(); return c; });
         try {
           // Its start's probe answered, then the settle the cases above give it (SMD-3196: a 1 s sleep stood in for both).
           await pollUntil(async () => probes > startProbes, 10_000);
@@ -6531,12 +6538,14 @@ if (want("10")) {
           const claimed = await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
           const askedBefore = probesAsked;
           const probed = await pollUntil(async () => probesAsked > askedBefore, 15_000);
-          await Bun.sleep(1000);
+          await Bun.sleep(200);
           const stoppedAt = Date.now();
           stopProbe.abort();
           const code = await probing;
-          assert(claimed && probed && code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
-                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"})`);
+          const inTime = returnedAt - stoppedAt < 3000;
+          const afterStop = probeLines.filter((l) => l.at >= stoppedAt).map((l) => `+${l.at - stoppedAt} ms ${l.line.trim().slice(0, 110)}`).join(" | ");
+          assert(claimed && probed && code === 0 && inTime && (await claimRow(slow))?.status === "pending",
+                 `a first stop during a probe after a timeout ends it: the follower returns within 3 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"}${inTime ? "" : `; after the stop: ${afterStop || "the follower said nothing"}`})`);
         } finally {
           downUntil = 0;
           stopProbe.abort();
@@ -23729,252 +23738,322 @@ if (want("27")) {
 }
 
 if (want("29")) {
-  console.log("\n[29] recipes/thought-enrichment's enrich-thoughts on the SQL shim: the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL or a Supabase URL is one line naming no value (SMD-2139; the type and sensitivity backfills are db/backfill-metadata.ts, [51], SMD-3318)");
-  // The enrichment script SMD-2126 sent to compat/supabase-sql — the class's
-  // first writers, its two backfills since db/backfill-metadata.ts ([51],
-  // SMD-3318 PR 3a) — driven as deployed: `bun <file>` in a directory
-  // of their own, SUPABASE_URL the one variable beyond PATH and HOME, against
-  // this database carrying enhanced-thoughts ([18] left the columns;
-  // the file is idempotent). The planted table is the truth every printed
-  // count is held to, and a snapshot of every row's content, fingerprint and
-  // model label is what the writes are held away from. The enrichment's model
-  // is a Bun.serve stub on the loopback that answers one classification for
-  // every request and counts them — OPENROUTER_BASE_URL is the port's own
-  // seam — so the apply path runs without a key and without a byte leaving
-  // the machine. The scripts read `.env.local` from THEIR OWN directory (the
-  // recipe's, not the cwd — `--no-env-file` stops Bun's loader, not theirs),
-  // so on a machine where a developer keeps one there the no-URL refusals,
-  // which that file would defeat, are skipped by name; every other run puts its
-  // URL in the environment, which the scripts prefer. CI has no such file. The
-  // enrichment's checkpoint goes under ENRICH_STATE_DIR in the scratch, never
-  // the recipe's own data/ (an operator's checkpoint there is left as found —
-  // held by its mtime; review pass 1, cold read).
-  const sql = new SQL({ url: URL_, max: 2 });
-  const catalog27 = async () => ({
-    tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
-    views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
-    fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
-  });
-  const before27 = await catalog27();
-  const RECIPE = join(CONTRIB_DIR, "recipes", "thought-enrichment");
-  const scratch = join(tmpdir(), `ob1-live-2139-${process.pid}`);
-  mkdirSync(scratch, { recursive: true });
-  const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
-  const script = (file: string, extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPE, file), ...flags], { cwd: scratch, env: env(extra) });
-  const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
-  const errorLine = (s: string) => s.split("\n").find((l) => l.startsWith("ERROR:")) ?? firstLine(s);
-  /** Exactly one ERROR line on stderr and no stack frame: the shape every refusal is held to (a second ERROR line, or a retry ladder's lines, fail it). */
-  const errorLines = (s: string) => (s.match(/^ERROR:/gm) ?? []).length;
-  const oneLine = (r: { code: number; out: string }, re: RegExp) => r.code === 1 && re.test(r.out) && !/\n\s+at /.test(r.out) && errorLines(r.out) === 1;
-  const recipeEnvFile = existsSync(join(RECIPE, ".env.local")) ? "recipes/thought-enrichment/.env.local" : null;
-  // The model: a fixed answer, the requests counted, the last body kept for the prompt's shape.
-  let stubCalls = 0;
-  let stubBody = "";
-  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
-    stubCalls++;
-    stubBody = await req.text();
-    const content = JSON.stringify({ type: "task", summary: "stub summary", topics: ["stub"], tags: ["t"], people: ["Ada"], action_items: ["do it"], confidence: 0.9, importance: 4, detected_source_type: "generic_import" });
-    return Response.json({ choices: [{ message: { content } }] });
-  } });
-  const stateEnv = { ENRICH_STATE_DIR: join(scratch, "state") };
-  const statePath = join(scratch, "state", "enrichment-state.json");
-  const model = { OPENROUTER_API_KEY: "stub", OPENROUTER_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...stateEnv };
-  const recipeState = join(RECIPE, "data", "enrichment-state.json");
-  const recipeStateBefore = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
-  /** The blank row's id: the lowest uuid, so the enrichment meets it first on every run (review pass 1, cold read — a random id made the dry run's call count a coin toss). */
-  const BLANK_ID = "00000000-0000-0000-0000-000000000001";
-  const ENRICH_FLAGS = ["--provider", "openrouter", "--model", "stub-model", "--max-calls", "10000"];
-  try {
-    await sql`DELETE FROM thoughts`;
-    await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
-    // Thirteen rows, every type 'reference': one of whitespace alone, the
-    // enrichment's no-model path, at the lowest id so it is the first row every
-    // enrichment run meets. Fingerprint and model label set
-    // so the writes can be held away from them (a raw insert leaves both NULL
-    // otherwise).
-    await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
-      SELECT COALESCE(i::uuid, gen_random_uuid()), c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
-        ('00000000-0000-0000-0000-000000000002', 'a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
-        ('ffffffff-ffff-ffff-ffff-fffffffffff1', 'a lesson learned about batching', '{"type":"lesson"}', NULL),
-        ('ffffffff-ffff-ffff-ffff-fffffffffff2', 'the standup, three of us', '{"type":"meeting"}', ''),
-        ('ffffffff-ffff-ffff-ffff-fffffffffff3', 'tonight I wrote about the week', '{"type":"journal"}', 'standard'),
-        (NULL, 'bogus type row', '{"type":"bogus"}', ''),
-        (NULL, 'no type key here', '{}', 'standard'),
-        (NULL, 'already reference', '{"type":"reference"}', 'standard'),
-        (NULL, 'SSN 123-45-6789 appears in this text', '{}', 'standard'),
-        (NULL, 'SSN 987-65-4321 on the form, took 50 mg after', '{}', 'standard'),
-        (NULL, 'took metoprolol 50 mg today', '{}', NULL),
-        (NULL, 'blood pressure 120 over 80 this morning', '{}', ''),
-        (NULL, 'already personal, glucose 110 this morning', '{}', 'personal')
-      ) v(i, c, m, t)`);
-    await sql`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES (${BLANK_ID}::uuid, '   ', '{}', 'reference', 'standard', content_fingerprint_of('   '), 'planted-model')`;
-    const N = 13;
-    type Snap = { id: string; content: string; fp: string | null; em: string | null; metadata: Record<string, unknown> };
-    const snapshot = async () => (await sql`SELECT id::text AS id, content, content_fingerprint AS fp, embedding_model AS em, metadata FROM thoughts ORDER BY id`) as Snap[];
-    const planted = await snapshot();
-    const [truth] = (await sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE type = 'reference')::int AS refs,
-      count(*) FILTER (WHERE content_fingerprint IS NULL OR embedding_model IS NULL)::int AS bare FROM thoughts`) as { total: number; refs: number; bare: number }[];
-    assert(truth.total === N && truth.refs === N && truth.bare === 0 && planted.length === N,
-      `the planted table: ${N} rows of type 'reference', every row with a fingerprint and a model label (${JSON.stringify(truth)})`);
-
-
-    // A refused write ends the run on its first row: a LOGIN role with SELECT on thoughts alone reads the page and is
-    // refused the update — 42501, exit 1, no row changed — where the REST form counted a 403 and went on (the type
-    // script threw; the sensitivity script counted). [18]'s two guards: skipped where the connection cannot create a
-    // role or carries no credentials to swap.
-    const PROBE_ROLE = "ob1_live_enrich_probe";
-    const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
-    const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
-    /** The probe role, gone: before each guarded block and in its finally (used twice — the denied cases here, the grant ladder at the end). */
-    const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
-    if (probeUrl === URL_ || !mayCreateProbe) {
-      skip("…a role with SELECT alone: the enrichment refused on its first write", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
-    } else {
-      await dropProbe();
-      try {
-        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
-        // The enrichment, past the blank row (--skip 1, the .range() path), one row is classified — one paid call
-        // — and its write is refused, which ends the run: exit 1, one ERROR line, no summary, no row enriched, and a
-        // checkpoint that records nothing (written before the refusal ends the run, so the rows a chunk handled before
-        // it are not lost). Under Promise.allSettled it was a FAIL line per row while every later row still paid its
-        // call and the run exited 0 (review pass 1, both readers). Its own state directory, so the dry run below still
-        // meets none.
-        const mark = stubCalls;
-        const deniedEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...model, ENRICH_STATE_DIR: join(scratch, "state-denied") }, "--apply", "--skip", "1", "--limit", "2", "--concurrency", "1", ...ENRICH_FLAGS);
-        const [{ enrichedDenied }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedDenied" FROM thoughts`) as { enrichedDenied: number }[];
-        const deniedStatePath = join(scratch, "state-denied", "enrichment-state.json");
-        const deniedState = existsSync(deniedStatePath) ? JSON.parse(readFileSync(deniedStatePath, "utf8")) as { totalProcessed: number; failedIds: string[]; lastProcessedId: string | null } : null;
-        assert(oneLine(deniedEnrich, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== ENRICHMENT|FAIL #/.test(deniedEnrich.out) && stubCalls - mark === 1 && enrichedDenied === 0 && deniedState?.totalProcessed === 0 && deniedState.failedIds.length === 0 && deniedState.lastProcessedId === null,
-          `…and the enrichment ends on its first refused write after one model call: exit 1, one ERROR line, no FAIL lines, no summary, no row enriched, a checkpoint recording nothing (${deniedEnrich.code}: ${errorLine(deniedEnrich.out)}; ${stubCalls - mark} call(s), ${enrichedDenied} enriched, state ${JSON.stringify(deniedState)})`);
-      } finally {
-        await dropProbe();
+  console.log("\n[29] db/retag.ts on a real Postgres against a stub chat endpoint: the backlog (a tags row marked by rebuild_derived or by hand, one at other text, tags with no row, a capture that fell back) pooled and re-tagged through update_thought with the extractor's recipe, the row re-recorded at the text and its mark cleared, a re-tag that came out the same settling a pre-061 row with no event (148); --status and --dry-run write nothing; another recorded key refused without --switch-key; --limit; the egress policy refusing one thought fails it naming the rule and sends nothing of it; an edit mid-call requeued; --retry-failed and a re-tagged thought due again (SMD-2298, SMD-3318 PR 3b)");
+  // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+  await (async () => {
+    const sql = new SQL({ url: URL_, max: 3 });
+    // The model: one tag set for every request, each request's body kept; a request naming the race thought edits it
+    // first, once, so the worker's write meets STALE_READ.
+    const ANSWER = { people: ["Ada"], action_items: [], dates_mentioned: [], topics: ["ledger"], type: "task" };
+    const bodies: string[] = [];
+    /** Thoughts answered otherwise, by a marker in their text (review pass 1): a status, or prose; a 408 answers once. */
+    const SPECIAL = new Map<string, number | "prose" | "slow" | "partial">();
+    let raced = false;
+    let raceId = "";
+    const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+      const body = await req.text();
+      bodies.push(body);
+      if (!raced && raceId && body.includes("[29] race")) {
+        raced = true;
+        const edited = `[29] race, edited meanwhile ${raceId.slice(0, 8)}`;
+        await sql`UPDATE thoughts SET content = ${edited}, content_fingerprint = content_fingerprint_of(${edited}) WHERE id = ${raceId}::uuid`;
       }
-    }
-
-
-
-    // enrich-thoughts: the two exact counts of --status are head queries; the dry run calls the model and writes
-    // neither a row nor the checkpoint.
-    const status0 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
-    const markDry = stubCalls;
-    const dryEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "2", ...ENRICH_FLAGS);
-    const [{ enrichedAfterDry }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDry" FROM thoughts`) as { enrichedAfterDry: number }[];
-    assert(status0.code === 0 && status0.out.includes(`Total thoughts:     ${N}`) && status0.out.includes("Enriched:           0 (0.0%)") && status0.out.includes(`Remaining:          ${N}`) && dryEnrich.code === 0 && (dryEnrich.out.match(/^  \[DRY\] #[0-9a-f-]{36}: \{"type":"task"/gm) ?? []).length === 1 && stubCalls - markDry === 1 && enrichedAfterDry === 0 && !existsSync(statePath),
-      `enrich-thoughts.mjs --status counts ${N} thoughts, none enriched; --dry-run --limit 2 meets the blank row and one more — one [DRY] line, one call — and writes no row and no checkpoint (${status0.code}/${dryEnrich.code}: ${stubCalls - markDry} call(s), ${enrichedAfterDry} enriched)`);
-
-    // --apply --limit 5: five rows in id order — the model's answer as the enhanced columns and a metadata OBJECT
-    // that keeps the row's own keys, the whitespace row marked enriched without a call — and the checkpoint written
-    // under the run's directory, not the recipe's.
-    const markApply = stubCalls;
-    const applyEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--limit", "5", "--concurrency", "2", ...ENRICH_FLAGS);
-    type Enriched = { id: string; content: string; type: string; importance: number; source_type: string | null; mt: string; metadata: Record<string, unknown> };
-    const enrichedRows = (await sql`SELECT id::text AS id, content, type, importance, source_type, jsonb_typeof(metadata) AS mt, metadata FROM thoughts WHERE enriched ORDER BY id`) as Enriched[];
-    const blank = enrichedRows[0];
-    const classified = enrichedRows.slice(1);
-    const keepsOwnKeys = (r: Enriched) => Object.entries(planted.find((p) => p.id === r.id)?.metadata ?? {}).every(([k, v]) => k === "type" || JSON.stringify(r.metadata[k]) === JSON.stringify(v));
-    const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; lastProcessedId: string | null; failedIds: string[] } : null;
-    const recipeStateAfter = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
-    assert(applyEnrich.code === 0 && applyEnrich.out.includes("Enriched:       5") && applyEnrich.out.includes("LLM calls made: 4 / 10000") && stubCalls - markApply === 4 && enrichedRows.length === 5 && blank?.id === BLANK_ID && blank.type === "reference" && JSON.stringify(blank.metadata) === "{}" && enrichedRows.every((r) => r.mt === "object") && classified.every((r) => r.type === "task" && r.importance === 4 && r.source_type === "generic_import" && r.metadata.summary === "stub summary" && JSON.stringify(r.metadata.topics) === '["stub"]' && r.metadata.enriched_provider === "openrouter" && r.metadata.enriched_model === "stub-model" && r.metadata.type === "task" && keepsOwnKeys(r)) && /<thought_content>\\n[^]*<\/thought_content>/.test(stubBody) && state?.totalProcessed === 5 && state.lastProcessedId === enrichedRows[4].id && state.failedIds.length === 0 && recipeStateAfter === recipeStateBefore,
-      `…--apply --limit 5 --concurrency 2: the blank row and four more enriched in id order — four calls, the blank row marked with its type and metadata untouched — each classified row carrying the stub's type, importance, source and a metadata object with its own keys kept, the prompt delimited, the checkpoint at the last id under ENRICH_STATE_DIR and the recipe's own left as found (exit ${applyEnrich.code}: ${enrichedRows.length} rows, ${stubCalls - markApply} calls, state ${JSON.stringify(state)})`);
-
-    // --max-calls 1 at concurrency 2 over two rows is one call and the ABORTED banner: the chunk is cut to the calls left
-    // (a chunk of the full concurrency made three calls on a budget of one — review pass 1, run-it; unheld until pass 4).
-    const markBudget = stubCalls;
-    const budget = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model, ENRICH_STATE_DIR: join(scratch, "state-budget") }, "--dry-run", "--skip", "1", "--limit", "2", "--max-calls", "1", "--concurrency", "2", "--provider", "openrouter", "--model", "stub-model");
-    const budgetCalls = stubCalls - markBudget;
-    // --status reads the new split; --retry-failed reads its ids back through one .in() query, enriches them and drops
-    // them from the checkpoint's failedIds.
-    const status1 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
-    const [{ retryId }] = (await sql`SELECT id::text AS "retryId" FROM thoughts WHERE NOT enriched AND btrim(content) <> '' ORDER BY id LIMIT 1`) as { retryId: string }[];
-    writeFileSync(statePath, JSON.stringify({ ...state, failedIds: [retryId], totalFailed: 1 }));
-    const retry = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--retry-failed", ...ENRICH_FLAGS);
-    const [{ retried }] = (await sql`SELECT (enriched AND type = 'task' AND metadata->>'summary' = 'stub summary') AS retried FROM thoughts WHERE id = ${retryId}::uuid`) as { retried: boolean }[];
-    const stateAfterRetry = JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; failedIds: string[] };
-    assert(budget.code === 0 && budgetCalls === 1 && /=== ENRICHMENT ABORTED \(--max-calls reached\) ===/.test(budget.out) && status1.code === 0 && status1.out.includes("Enriched:           5 (38.5%)") && status1.out.includes(`Remaining:          ${N - 5}`) && retry.code === 0 && retry.out.includes(`  OK retry #${retryId} -> task`) && retry.out.includes("Processed: 1, Fixed: 1, Still failing: 0") && retried === true && stateAfterRetry.failedIds.length === 0 && stateAfterRetry.totalProcessed === 6,
-      `…--max-calls 1 at concurrency 2 makes one call and aborts; --status reads 5 of ${N}; --apply --retry-failed fetches the checkpoint's failed id by .in(), enriches it and drops it from failedIds (${budget.code}: ${budgetCalls} call(s); ${status1.code}/${retry.code}: ${errorLine(retry.out)}; state ${JSON.stringify(stateAfterRetry)})`);
-
-    // A model at a closed port is a per-row failure, not a refusal: one FAIL line, exit 1 with the summary, the id in the
-    // checkpoint's failedIds for --retry-failed, no ERROR line, no row written. Bun's fetch gives that error a code
-    // (ConnectionRefused), and pass 1's rule — "a rejection with a code ends the run" — ended the run on it (review
-    // pass 2, both readers). A fresh state directory, so no resume point applies.
-    const dead = { ...model, OPENROUTER_BASE_URL: "http://127.0.0.1:1/v1", ENRICH_STATE_DIR: join(scratch, "state-dead") };
-    const [{ enrichedBeforeDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedBeforeDead" FROM thoughts`) as { enrichedBeforeDead: number }[];
-    const deadRun = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...dead }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
-    const [{ enrichedAfterDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDead" FROM thoughts`) as { enrichedAfterDead: number }[];
-    const deadStatePath = join(scratch, "state-dead", "enrichment-state.json");
-    const deadState = existsSync(deadStatePath) ? JSON.parse(readFileSync(deadStatePath, "utf8")) as { failedIds: string[]; totalFailed: number } : null;
-    const failedLine = /^  FAIL #([0-9a-f-]{36}): /m.exec(deadRun.out);
-    assert(deadRun.code === 1 && failedLine !== null && !/^ERROR:/m.test(deadRun.out) && deadRun.out.includes("Failed:         1") && enrichedAfterDead === enrichedBeforeDead && deadState?.totalFailed === 1 && deadState.failedIds.length === 1 && deadState.failedIds[0] === failedLine?.[1],
-      `…a model at a closed port: the row fails with a FAIL line, the run ends with its summary and exit 1, no ERROR line, no row written, the id in the checkpoint's failedIds (${deadRun.code}: ${firstLine(deadRun.out.split("\n").filter((l) => /FAIL|ERROR/.test(l)).join(" | ") || deadRun.out).slice(0, 160)}; state ${JSON.stringify(deadState)})`);
-
-    // What no script may touch: every row's content, fingerprint and model label are the planted ones, the vector
-    // still absent, every metadata an object.
-    const after = await snapshot();
-    const [{ vectors }] = (await sql`SELECT count(*) FILTER (WHERE embedding IS NOT NULL)::int AS vectors FROM thoughts`) as { vectors: number }[];
-    const untouched = after.length === N && after.every((r, i) => r.id === planted[i].id && r.content === planted[i].content && r.fp === planted[i].fp && r.em === planted[i].em && typeof r.metadata === "object" && r.metadata !== null);
-    assert(untouched && vectors === 0,
-      `after every write: all ${N} rows keep their content, fingerprint and model label, no vector appeared, every metadata is an object (${after.filter((r, i) => r.content !== planted[i].content || r.fp !== planted[i].fp || r.em !== planted[i].em).length} rows differ, ${vectors} vectors)`);
-
-    // Refused before any query, one line each, no stack.
-    if (recipeEnvFile) {
-      skip("…no URL: the enrichment ends in one line naming the variable", `${recipeEnvFile} exists on this machine and the scripts read it`);
-    } else {
-      const noUrl = [await script("enrich-thoughts.mjs", {}, "--status")];
-      const named = /^ERROR: SUPABASE_URL must be set — the brain's postgres:\/\/ connection string, in the environment or in \.env\.local beside the scripts\.$/m;
-      assert(noUrl.every((r) => oneLine(r, named) && r.out.trim().split("\n").length === 1),
-        `…no URL: the enrichment ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
-    }
-    // A value that is not postgres:// is refused by the recipe's own line, which names the scheme and never the value:
-    // the shim's refusal quotes the first forty characters, which since this port carry the password (review pass 1,
-    // run-it). The mistyped scheme below carries a token that must appear nowhere in the output.
-    const mistyped = await script("enrich-thoughts.mjs", { SUPABASE_URL: "mysql://brain:pw-not-real@127.0.0.1:5432/x", ...stateEnv }, "--status");
-    const httpsEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: "https://example.supabase.co", ...stateEnv }, "--status");
-    const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--dry-run", "--limit", "0");
-    // The = form and a trailing value flag passed the refusal and were then ignored — `--limit=2` ran the whole table
-    // (review pass 2, both readers).
-    const eqForm = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit=1", ...ENRICH_FLAGS);
-    const trailing = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit");
-    const fraction = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "1.5");
-    const scheme = /^ERROR: SUPABASE_URL must be a postgres:\/\/ connection string; the value's scheme is "(https|mysql):"/m;
-    assert(oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(fraction, /^ERROR: --limit must be an integer of at least 1; got "1\.5"$/m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(eqForm, /^ERROR: --limit takes its value as the next argument, not after "="$/m) && !/\[DRY\]/.test(eqForm.out) && oneLine(trailing, /^ERROR: --limit needs a value$/m) && !/\[DRY\]/.test(trailing.out),
-      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); --limit 0 and --limit 1.5, --limit=1 and a trailing --limit (both ran unbounded) are one line each (${mistyped.code}; ${httpsEnrich.code}; ${zero.code}; ${fraction.code}; ${eqForm.code}; ${trailing.code})`);
-
-    // The README's grants, proved: a metadata change fires 008/055's audit trigger, which needs SELECT and INSERT on thought_audit — the message
-    // names that table, the README's entry for it, and the grant cures it (review pass 1, cold read: the README had
-    // promised SELECT, UPDATE on thoughts alone; probed, then held here). A fourteenth row, planted after the snapshot
-    // above. The same two guards as the denied block.
-    if (probeUrl === URL_ || !mayCreateProbe) {
-      skip("…a role with the README's grants is refused metadata until thought_audit is granted", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
-    } else {
-      await dropProbe();
-      try {
-        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT, UPDATE ON thoughts TO ${PROBE_ROLE}`);
-        await sql`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES ('granted row: a decision', '{"type":"decision"}', 'reference', 'standard', content_fingerprint_of('granted row: a decision'), 'planted-model')`;
-        const enrichedCount = async () => ((await sql`SELECT count(*) FILTER (WHERE enriched)::int AS n FROM thoughts`) as { n: number }[])[0].n;
-        const state2 = { ...model, ENRICH_STATE_DIR: join(scratch, "state2") };
-        const markAudit = stubCalls;
-        const before = await enrichedCount();
-        const auditDenied = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
-        const mid = await enrichedCount();
-        await sql.unsafe(`GRANT SELECT, INSERT ON thought_audit TO ${PROBE_ROLE}`);
-        const auditOk = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
-        const after = await enrichedCount();
-        assert(oneLine(auditDenied, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thought_audit$/m) && mid === before && stubCalls - markAudit === 2 && auditOk.code === 0 && auditOk.out.includes("Enriched:       1") && after === before + 1,
-          `…a role with SELECT, UPDATE on thoughts: its first metadata write is refused with 42501 on thought_audit (the audit trigger's table), exit 1; with SELECT, INSERT on thought_audit the same run enriches the row (${auditDenied.code}: ${errorLine(auditDenied.out).slice(0, 110)}; ${auditOk.code}: ${before} → ${mid} → ${after})`);
-      } finally {
-        await dropProbe();
+      const special = [...SPECIAL.entries()].find(([marker]) => body.includes(marker));
+      if (special) {
+        const [marker, answer] = special;
+        if (answer === 408) SPECIAL.delete(marker);
+        if (typeof answer === "number") return new Response("stub: not this time", { status: answer });
+        if (answer === "partial") return Response.json({ choices: [{ message: { content: JSON.stringify({ topics: ["p"], type: "idea" }) } }] });
+        if (answer === "slow") {
+          await Bun.sleep(1500);
+          return Response.json({ choices: [{ message: { content: JSON.stringify(ANSWER) } }] });
+        }
+        return Response.json({ choices: [{ message: { content: "Here are the tags you asked for, in prose." } }] });
       }
+      return Response.json({ choices: [{ message: { content: JSON.stringify(ANSWER) } }] });
+    } });
+    const base: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: "stub-meta" };
+    for (const k of ["OB1_CHAT_BASE_URL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY", "OB1_WORKER_KEY", "MCP_ACCESS_KEYS"]) delete base[k];
+    // The egress policy refusing one thought: the endpoint not declared local, allow mode, a deny term matching its text.
+    const gated = { ...base, OB1_LLM_LOCAL: "", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:secret-29" };
+    const JOB = retagKey("stub-meta", METADATA_PROMPT_VERSION);
+    const recipe = metadataRecipe(resolveEmbedConfig(base as Record<string, string>), ANSWER);
+    const retag = async (opts: Omit<RetagOptions, "writer" | "url">, env = base) => {
+      const outs: string[] = [], errs: string[] = [];
+      const code = await runRetag({ url: URL_!, env, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+      return { code, out: outs.join("\n"), err: errs.join("\n") };
+    };
+    const cli = (...flags: string[]) => runScript(["bun", join(HERE, "retag.ts"), "--url", URL_!, ...flags], { cwd: HERE, env: base as Record<string, string> });
+    const ids: string[] = [];
+    const plant = async (content: string, metadata: Record<string, unknown>) => {
+      const [{ id }] = (await sql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${content}, ${metadata}::jsonb, content_fingerprint_of(${content})) RETURNING id::text AS id`) as { id: string }[];
+      ids.push(id);
+      return id;
+    };
+    /** A capture's tags with their row: the patch through update_thought under the extractor's recipe. */
+    const tagged = async (content: string) => {
+      const id = await plant(content, {});
+      await sql`SELECT update_thought(p_id := ${id}::uuid, p_metadata_patch := ${{ topics: ["old"], type: "observation", people: [] }}::jsonb, p_lineage := ${{ metadata: recipe }}::jsonb)`;
+      return id;
+    };
+    const move = (id: string, content: string) => sql`UPDATE thoughts SET content = ${content}, content_fingerprint = content_fingerprint_of(${content}) WHERE id = ${id}::uuid`;
+    type TagsRow = { fp_ok: boolean; marked: boolean; recipe: Record<string, unknown> } | undefined;
+    const tagsRow = async (id: string): Promise<TagsRow> => ((await sql`
+      SELECT d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) AS fp_ok, d.stale_since IS NOT NULL AS marked, d.recipe
+        FROM derivations d JOIN thoughts t ON t.id = d.artifact_id WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND d.artifact_id = ${id}::uuid`) as TagsRow[])[0];
+    /** An object's top-level keys in order, so a jsonb read back (its keys in jsonb's order) compares with the one sent. */
+    const canon = (o: Record<string, unknown> | undefined) => JSON.stringify(Object.entries(o ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+    const settled = (r: TagsRow) => r !== undefined && r.fp_ok && !r.marked && canon(r.recipe) === canon(recipe);
+    const claims = async () => (await sql`SELECT thought_id::text AS id, status, last_error FROM thought_work_claims WHERE work_type = ${JOB}`) as { id: string; status: string; last_error: string | null }[];
+    const configured = async () => ((await sql`SELECT value FROM ob1_config WHERE key = 'retag_key'`) as { value: string }[])[0]?.value;
+    const meta = async (id: string) => ((await sql`SELECT metadata FROM thoughts WHERE id = ${id}::uuid`) as { metadata: Record<string, unknown> }[])[0].metadata;
+    const stampOf = async (id: string) => (await sql`SELECT updated_at, (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${id}::uuid) AS events FROM thoughts WHERE id = ${id}::uuid`)[0] as { updated_at: Date; events: number };
+    const line = (s: string, has: string) => s.split("\n").find((l) => l.includes(has))?.trim();
+    try {
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'retag:%'`;
+      await sql`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+      // The backlog, one of each kind: A captured with the recipe, its text moved raw and rebuild_derived marking the
+      // row (the Verify's path); M's row marked by hand at its own text; S's text moved with no rebuild (the row at
+      // other text); B tagged with the stub's own answer and no row (before 061); E a capture that fell back.
+      const A = await tagged("[29] A, the text the tags were made from");
+      await move(A, "[29] A, the text moved under its tags");
+      const [{ r: rebuilt }] = (await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move') AS r`) as { r: { ok: boolean; unqueued: number } }[];
+      const M = await tagged("[29] M, marked at its own text");
+      await sql`UPDATE derivations SET stale_since = now(), stale_reason = 'live: marked by hand' WHERE artifact_kind = 'metadata' AND artifact_id = ${M}::uuid`;
+      const S = await tagged("[29] S, the tags' text");
+      await move(S, "[29] S, moved with no rebuild");
+      const B = await plant("[29] B, tagged before 061", ANSWER);
+      const E = await plant("[29] E, a capture that fell back", { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" });
+      // F, kept from the model at capture (the egress refusal's marker alone), is in the backlog too: nothing else re-tags it.
+      const F = await plant("[29] F, kept from the model at capture", metadataRefused());
+      // Not in the backlog: C current (tags and their row at its text), U no tags.
+      const C = await tagged("[29] C, current");
+      const U = await plant("[29] U, no tags at all", {});
+      const bBefore = await stampOf(B);
+      assert(rebuilt.ok && Number(rebuilt.unqueued) === 1 && (await tagsRow(A))?.marked === true && (await tagsRow(M))?.marked === true && (await tagsRow(S))?.fp_ok === false && (await tagsRow(B)) === undefined && settled(await tagsRow(C)),
+        `the planted backlog: A's row marked by rebuild_derived after a raw move (unqueued: nothing requeues the tags yet), M's marked by hand, S's at other text, B with no row, C settled (${JSON.stringify(rebuilt)})`);
+
+      // --status and --dry-run write nothing: no key, no claim, no lineage moved, no call.
+      const lineage = async () => JSON.stringify(await sql`SELECT artifact_id::text, input_fingerprints, stale_since, recipe FROM derivations WHERE artifact_kind = 'metadata' ORDER BY artifact_id`);
+      const lineage0 = await lineage();
+      const status0 = await cli("--status");
+      const dry = await retag({ dryRun: true });
+      const backlog0 = "backlog: 6 thought(s) — 1 tagged with no tags row (before 061), 2 with the row marked stale, 1 with the row at other text, 2 whose capture fell back; 6 not yet in the pool, 0 re-tagged before and due again";
+      assert(status0.code === 0 && status0.out.includes(`job:    ${JOB}`) && status0.out.includes(backlog0) && status0.out.includes("status: 0 re-tagged, 0 failed, 0 in flight, 0 pending") && status0.out.includes("ob1_config.retag_key is not set")
+          && dry.code === 0 && dry.out.includes(`would: record ${JOB} in ob1_config.retag_key; add 6 thought(s) to the pool and put 0 back; send up to 6 thought(s) to stub-meta`) && dry.out.includes("Nothing was written.")
+          && (await configured()) === undefined && (await claims()).length === 0 && (await lineage()) === lineage0 && bodies.length === 0,
+        `bun db/retag.ts --status names the key and the backlog by kind, six, none pooled; --dry-run says what it would do; neither records the key, pools, moves a tags row or calls the model (${status0.code}/${dry.code}: ${line(status0.out, "backlog:")}; ${bodies.length} call(s))`);
+
+      // Another key recorded: refused without --switch-key, before anything is pooled or sent.
+      await sql`INSERT INTO ob1_config (key, value) VALUES ('retag_key', 'retag:other-model@p1')`;
+      const other = await retag({});
+      await sql`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+      assert(other.code === 2 && other.err.includes("Refusing to re-tag under a key other than the one ob1_config records without --switch-key") && (await claims()).length === 0 && bodies.length === 0,
+        `a run under ${JOB} with retag:other-model@p1 recorded is refused, exit 2, nothing pooled or sent (${other.code}: ${line(other.err, "Refusing")})`);
+
+      // --limit 1: the backlog pooled, one thought re-tagged, the rest left pending; the key recorded.
+      const one = await retag({ limit: 1 });
+      const afterOne = await claims();
+      // Which of the six --limit 1 took is a tie (one statement pooled them): B, answered with the stub's own tags, is
+      // the gated run's one "the same" only when it was still pending (review pass 2: asserted as fixed, it flaked).
+      const bTookFirst = afterOne.find((c) => c.id === B)?.status === "succeeded";
+      assert(one.code === 0 && one.out.includes("pool: 6 thought(s) added, 0 re-tagged before and put back") && bodies.length === 1 && afterOne.filter((c) => c.status === "succeeded").length === 1 && afterOne.filter((c) => c.status === "pending").length === 5 && (await configured()) === JOB,
+        `--limit 1 pools the six, re-tags one with one call, leaves five pending, exit 0, and records ${JOB} (${one.code}: ${bodies.length} call(s), ${afterOne.map((c) => c.status).join(",")})`);
+
+      // The rest under a policy refusing one thought's text, beside an edit landing while another's call is out.
+      const R = await plant("[29] R carries secret-29 and is tagged", { topics: ["t"], type: "idea" });
+      raceId = await plant("[29] race, tagged with no row", { topics: ["t"], type: "idea" });
+      const gatedRun = await retag({}, gated);
+      const byId = new Map((await claims()).map((c) => [c.id, c]));
+      const [aMeta, eMeta, bMeta, fMeta] = [await meta(A), await meta(E), await meta(B), await meta(F)];
+      const bAfter = await stampOf(B);
+      assert(gatedRun.code === 1 && gatedRun.out.includes("pool: 2 thought(s) added") && /\n {2}6 re-tagged \(/.test(gatedRun.out) && gatedRun.out.includes("1 failed (1 refused by the egress policy, nothing sent), 1 changed while re-tagged and re-queued") && new RegExp(`6 re-tagged \\(${bTookFirst ? 6 : 5} with the tags changed, ${bTookFirst ? 0 : 1} the same`).test(gatedRun.out)
+          && byId.get(R)?.status === "failed" && /^the egress policy refused it: OB1_EGRESS_DENY marker:secret-29 matches this retag/.test(byId.get(R)?.last_error ?? "") && !bodies.some((b) => b.includes("secret-29")) && (await tagsRow(R)) === undefined,
+        `under OB1_EGRESS_DENY=marker:secret-29 the run re-tags the rest and fails R naming the term, nothing of it sent, exit 1 (${gatedRun.code}: ${line(gatedRun.out, "re-tagged (")}; R ${byId.get(R)?.status}: ${byId.get(R)?.last_error?.slice(0, 90)})`);
+      assert(JSON.stringify(aMeta.topics) === '["ledger"]' && aMeta.type === "task" && JSON.stringify(aMeta.people) === '["Ada"]' && settled(await tagsRow(A)) && settled(await tagsRow(M)) && settled(await tagsRow(S)),
+        `A's tags rewritten from its moved text, and A's, M's and S's rows re-recorded at the text under the extractor's recipe, stale_since NULL (${JSON.stringify(await tagsRow(A))})`);
+      assert(settled(await tagsRow(B)) && canon(bMeta) === canon(ANSWER) && bAfter.events === bBefore.events && bAfter.updated_at.getTime() === bBefore.updated_at.getTime(),
+        `B, tagged before 061 with the stub's own answer, gets its row (148), its tags, updated_at and audit events as they were (${bBefore.events} → ${bAfter.events} event(s))`);
+      assert(eMeta.metadata_extraction_failed === null && JSON.stringify(eMeta.topics) === '["ledger"]' && settled(await tagsRow(E)),
+        `E, whose capture fell back, is re-tagged: its marker nulled (tagsOverExisting) and its row recorded (${JSON.stringify(eMeta)})`);
+      const raceRow = await tagsRow(raceId);
+      assert(raced && byId.get(raceId)?.status === "succeeded" && settled(raceRow) && bodies.filter((b) => b.includes("[29] race")).length === 2,
+        `the thought edited while its call was out met STALE_READ, went back to the pool, and was re-tagged from its new text in the same run: two calls, the row at the edited text (${JSON.stringify(raceRow)})`);
+      assert(fMeta.metadata_extraction_failed === null && JSON.stringify(fMeta.topics) === '["ledger"]' && settled(await tagsRow(F)) && byId.get(F)?.status === "succeeded",
+        `F, kept from the model at capture and allowed under this policy, is re-tagged: its marker nulled and its row recorded (${JSON.stringify(fMeta)})`);
+      assert(![C, U].some((id) => byId.has(id)) && !bodies.some((b) => /\[29\] (C|U),/.test(b)),
+        "a current thought and one with no tags are never pooled nor sent");
+
+      // --status after: R alone in the backlog, failed (its row listed); then A moved again and marked, due again.
+      const status1 = await cli("--status");
+      await move(A, "[29] A, moved a second time");
+      await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move again')`;
+      const status2 = await cli("--status");
+      assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
+          && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && status2.out.includes("backlog: 2 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again"),
+        `--status after: seven re-tagged, R failed and listed, R alone in the backlog; A moved and marked again reads as re-tagged before and due again (${line(status1.out, "backlog:")} | ${line(status2.out, "backlog:")})`);
+
+      // --retry-failed with the policy lifted: R re-tagged, and A put back in the pool and re-tagged at its newest text.
+      const mark = bodies.length;
+      const retry = await retag({ retryFailed: true });
+      assert(retry.code === 0 && retry.out.includes("--retry-failed: 1 failed row(s) returned to the pool") && retry.out.includes("pool: 0 thought(s) added, 1 re-tagged before and put back") && bodies.length - mark === 2 && bodies.slice(mark).some((b) => b.includes("secret-29"))
+          && settled(await tagsRow(R)) && settled(await tagsRow(A)) && (await claims()).every((c) => c.status === "succeeded"),
+        `--retry-failed returns R, re-tagged once the policy lets its text go; A, re-tagged before and marked again, is put back and settled at its newest text; exit 0 (${retry.code}: ${bodies.length - mark} call(s))`);
+
+      // Review pass 1. The provider's answers: a 408 is paused for, then answered; a 413 and an answer in prose are the
+      // thought's, failed with nothing written. A thought whose metadata is SQL NULL is failed before any call. Old tags
+      // the answer leaves out are cleared. A pooled thought no longer due is released with no call.
+      const P408 = await plant("[29] P408 tagged, its first call answered 408", { topics: ["t"], type: "idea" });
+      const P413 = await plant("[29] P413 tagged, too large for the provider", { topics: ["t"], type: "idea" });
+      const PJSON = await plant("[29] PJSON tagged, answered in prose", { topics: ["t"], type: "idea" });
+      const O = await plant("[29] O, tagged long ago", { people: ["OldPerson"], type: "meeting", type_raw: "meeting notes", topics: ["old"] });
+      const N = await tagged("[29] N, a raw writer nulled its metadata");
+      await sql`UPDATE derivations SET stale_since = now(), stale_reason = 'live: marked' WHERE artifact_kind = 'metadata' AND artifact_id = ${N}::uuid`;
+      await sql`UPDATE thoughts SET metadata = NULL WHERE id = ${N}::uuid`;
+      const P400 = await plant("[29] P400 tagged, refused by its content", { topics: ["t"], type: "idea" });
+      const TONLY = await plant("[29] TONLY, a type and no topics", { type: "idea" });
+      const PONLY = await plant("[29] PONLY, topics and no type", { topics: ["x"] });
+      const O2 = await plant("[29] O2, tagged in full long ago", { people: ["Zed"], action_items: ["file it"], dates_mentioned: ["2026-01-01"], topics: ["old"], type: "meeting" });
+      const FN = await plant("[29] FN, its tags nulled by a fallback", { people: null, action_items: null, dates_mentioned: null, topics: ["uncategorized"], type: "observation", type_raw: null, metadata_extraction_failed: "provider_500" });
+      const C2 = await tagged("[29] C2, current but pooled by hand");
+      await sql`SELECT enqueue_thoughts(${JOB}, ARRAY[${C2}::uuid])`;
+      for (const [marker, answer] of [["[29] P408", 408], ["[29] P413", 413], ["[29] PJSON", "prose"], ["[29] P400", 400], ["[29] O2", "partial"]] as const) SPECIAL.set(marker, answer);
+      const before1 = new Map([P413, PJSON].map((id) => [id, ""]));
+      for (const id of before1.keys()) before1.set(id, JSON.stringify(await meta(id)));
+      const mark1 = bodies.length;
+      const answers = await retag({ pausesMs: [10] });
+      const st = new Map((await claims()).map((c) => [c.id, c]));
+      const sent1 = bodies.slice(mark1);
+      const oMeta = await meta(O);
+      assert(answers.code === 1 && st.get(P408)?.status === "succeeded" && settled(await tagsRow(P408)) && sent1.filter((b) => b.includes("[29] P408")).length === 2
+          && st.get(P413)?.status === "failed" && /provider_413/.test(st.get(P413)?.last_error ?? "") && st.get(PJSON)?.status === "failed" && /no tags/.test(st.get(PJSON)?.last_error ?? "")
+          && JSON.stringify(await meta(P413)) === before1.get(P413) && JSON.stringify(await meta(PJSON)) === before1.get(PJSON) && (await tagsRow(P413)) === undefined && (await tagsRow(PJSON)) === undefined,
+        `a 408 is paused for and the thought re-tagged; a 413 and an answer in prose fail their thought, nothing written, exit 1 (${answers.code}: P408 ${st.get(P408)?.status} in ${sent1.filter((b) => b.includes("[29] P408")).length} call(s); P413 ${st.get(P413)?.last_error?.slice(0, 60)}; PJSON ${st.get(PJSON)?.last_error?.slice(0, 60)})`);
+      assert(st.get(N)?.status === "failed" && /its metadata is null/.test(st.get(N)?.last_error ?? "") && !sent1.some((b) => b.includes("[29] N,")) && (await tagsRow(N))?.marked === true
+          && oMeta.people !== undefined && JSON.stringify(oMeta.people) === '["Ada"]' && oMeta.type === "task" && oMeta.type_raw === null && JSON.stringify(oMeta.topics) === '["ledger"]' && settled(await tagsRow(O))
+          && st.get(C2)?.status === "succeeded" && !sent1.some((b) => b.includes("[29] C2")) && /, 1 already current,/.test(answers.out)
+          && st.get(P400)?.status === "failed" && /provider_400/.test(st.get(P400)?.last_error ?? "") && (await tagsRow(P400)) === undefined
+          && settled(await tagsRow(TONLY)) && settled(await tagsRow(PONLY))
+          && ((m) => JSON.stringify([m.people, m.action_items, m.dates_mentioned, m.topics, m.type]) === '[[],[],[],["p"],"idea"]')(await meta(O2))
+          && ((m) => JSON.stringify([m.people, m.action_items, m.dates_mentioned, m.type_raw, m.metadata_extraction_failed]) === '[["Ada"],[],[],null,null]')(await meta(FN)),
+        `a thought whose metadata is null is failed with no call, its row still marked; old tags the answer leaves out (type_raw) are cleared; a pooled thought no longer due is released with no call; a 400 fails its thought, nothing written; a type alone or topics alone with no row is in the backlog; a partial answer clears the list keys it leaves out to []; a full answer's [] lands over a fallback's JSON null (N ${st.get(N)?.last_error?.slice(0, 50)}; O ${JSON.stringify(oMeta)}; ${line(answers.out, "already current")})`);
+
+      // The edit's audit event names the worker: the actor `retag` (no worker key here), the door db/retag.ts.
+      const [oEvent] = (await sql`SELECT actor_name, origin FROM thought_audit WHERE thought_id = ${O}::uuid ORDER BY seq DESC LIMIT 1`) as { actor_name: string | null; origin: string | null }[];
+      assert(oEvent?.actor_name === "retag" && oEvent.origin === "db/retag.ts", `a re-tag that moved the tags is one audit event naming the worker (${JSON.stringify(oEvent)})`);
+
+      // The egress gate reads the thought's metadata, not its text alone: a deny term on a topic keeps the thought's text home.
+      const H = await plant("[29] H, a thought on a held subject", { topics: ["hush"], type: "idea" });
+      const hushFrom = bodies.length;
+      const hushRun = await retag({ pausesMs: [10] }, { ...gated, OB1_EGRESS_DENY: "topic:hush" });
+      const hClaim = (await claims()).find((c) => c.id === H);
+      assert(hushRun.code === 1 && hClaim?.status === "failed" && /topic:hush/.test(hClaim.last_error ?? "") && !bodies.slice(hushFrom).some((b) => b.includes("[29] H,")),
+        `under OB1_EGRESS_DENY=topic:hush a thought with that topic fails naming the term, nothing of it sent (${hushRun.code}: ${hClaim?.last_error?.slice(0, 80)})`);
+
+      // A call past --timeout is the thought's: failed, the run going on, exit 1.
+      const PS = await plant("[29] PSLOW tagged, the model slow", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] PSLOW", "slow");
+      const slowRun = await retag({ timeout: 1, pausesMs: [10] });
+      SPECIAL.delete("[29] PSLOW");
+      const psClaim = (await claims()).find((c) => c.id === PS);
+      assert(slowRun.code === 1 && psClaim?.status === "failed" && /timed out after 1 s/.test(psClaim.last_error ?? "") && (await tagsRow(PS)) === undefined,
+        `a call past --timeout 1 fails its thought, nothing written (${slowRun.code}: ${psClaim?.last_error?.slice(0, 80)})`);
+
+      // The CLI's --dry-run writes nothing (the door, not run() alone).
+      const claimsBefore = JSON.stringify(await claims());
+      const keyBefore = await configured();
+      const cliDry = await cli("--dry-run");
+      assert(cliDry.code === 0 && cliDry.out.includes("Nothing was written.") && JSON.stringify(await claims()) === claimsBefore && (await configured()) === keyBefore,
+        `bun db/retag.ts --dry-run writes nothing: no claim moved, the key as it was (${cliDry.code})`);
+
+      // Review pass 2. A STALE_READ under --limit 1 counts again: the thought re-tagged from its new text in the same run.
+      const RL = await plant("[29] race RL, tagged with no row", { topics: ["t"], type: "idea" });
+      raceId = RL;
+      raced = false;
+      const rlFrom = bodies.length;
+      await retag({ limit: 1, pausesMs: [10] });
+      const rlRow = await tagsRow(RL);
+      assert(raced && settled(rlRow) && bodies.slice(rlFrom).filter((b) => b.includes("[29] race")).length === 2 && (await claims()).find((c) => c.id === RL)?.status === "succeeded",
+        `under --limit 1 a thought edited while its call is out is re-tagged from its new text in the same run, two calls (${JSON.stringify(rlRow)})`);
+
+      // A 400 or 422 to three thoughts in a row, none answered between, is the request's shape: the run stops, exit 2.
+      const S422 = await Promise.all(["a", "b", "c"].map((k) => plant(`[29] S422 ${k}, tagged`, { topics: ["t"], type: "idea" })));
+      SPECIAL.set("[29] S422", 422);
+      const shapeRun = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] S422");
+      const sClaims = (await claims()).filter((c) => S422.includes(c.id));
+      assert(shapeRun.code === 2 && /answered 422 to 3 thoughts in a row/.test(shapeRun.err) && /re-run with --retry-failed/.test(shapeRun.err) && sClaims.length === 3 && sClaims.every((c) => c.status === "failed"),
+        `a 422 to three thoughts in a row stops the run, exit 2, naming the request's shape; the three failed for --retry-failed (${shapeRun.code}: ${sClaims.map((c) => c.status).join(",")})`);
+
+      // The streak is "in a row": a 413 is never the request's, and an answer between resets it. The pool's order pinned
+      // (claims go oldest first): two 413s, then 400, ok, 400, ok, 400 — no three in a row, so the run goes on.
+      const order = [
+        await plant("[29] I413 a, too large", { topics: ["t"], type: "idea" }), await plant("[29] I413 b, too large", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 a, refused", { topics: ["t"], type: "idea" }), await plant("[29] IOK a, answered", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 b, refused", { topics: ["t"], type: "idea" }), await plant("[29] IOK b, answered", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 c, refused", { topics: ["t"], type: "idea" }),
+      ];
+      await sql`SELECT enqueue_thoughts(${JOB}, ${sql.array(order, "TEXT")}::uuid[])`;
+      for (const [i, id] of order.entries()) await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(mins => ${60 - i}) WHERE work_type = ${JOB} AND thought_id = ${id}::uuid`;
+      SPECIAL.set("[29] I413", 413);
+      SPECIAL.set("[29] I400", 400);
+      const interleaved = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] I413");
+      SPECIAL.delete("[29] I400");
+      const iClaims = new Map((await claims()).filter((c) => order.includes(c.id)).map((c) => [c.id, c.status]));
+      assert(interleaved.code === 1 && !/in a row/.test(interleaved.err) && order.every((id, i) => iClaims.get(id) === (i === 3 || i === 5 ? "succeeded" : "failed")),
+        `two 413s, then a 400 between answers three times: no three in a row, so the run goes on, exit 1, the answered two re-tagged (${interleaved.code}: ${order.map((id) => iClaims.get(id)).join(",")})`);
+
+      // Review pass 3: an answered call that is no tags (prose) took the request's shape, so it resets the streak too.
+      const order2 = [
+        await plant("[29] J400 a, refused", { topics: ["t"], type: "idea" }), await plant("[29] JPROSE a, in prose", { topics: ["t"], type: "idea" }),
+        await plant("[29] J400 b, refused", { topics: ["t"], type: "idea" }), await plant("[29] JPROSE b, in prose", { topics: ["t"], type: "idea" }),
+        await plant("[29] J400 c, refused", { topics: ["t"], type: "idea" }),
+      ];
+      await sql`SELECT enqueue_thoughts(${JOB}, ${sql.array(order2, "TEXT")}::uuid[])`;
+      for (const [i, id] of order2.entries()) await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(mins => ${60 - i}) WHERE work_type = ${JOB} AND thought_id = ${id}::uuid`;
+      SPECIAL.set("[29] J400", 400);
+      SPECIAL.set("[29] JPROSE", "prose");
+      const proseBetween = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] J400");
+      SPECIAL.delete("[29] JPROSE");
+      const jClaims = (await claims()).filter((c) => order2.includes(c.id));
+      assert(proseBetween.code === 1 && !/in a row/.test(proseBetween.err) && jClaims.length === 5 && jClaims.every((c) => c.status === "failed"),
+        `a 400, then an answer in prose, three times: the prose was an answer, so no three in a row; the run goes on, every one failed as its own, exit 1 (${proseBetween.code}: ${jClaims.map((c) => c.status).join(",")})`);
+
+      // A 401 is the request's: the run stops, exit 2, nothing marked failed, the thought pending for the next run.
+      const P401 = await plant("[29] P401 tagged, the key refused", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] P401", 401);
+      const refusedRun = await retag({ pausesMs: [10] });
+      const p401 = (await claims()).find((c) => c.id === P401);
+      SPECIAL.delete("[29] P401");
+      assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
+        `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
+
+      // --switch-key: a run under another key goes ahead and records it.
+      const OTHER = retagKey("stub-meta", METADATA_PROMPT_VERSION + 1);
+      const switched = await retag({ job: OTHER, switchKey: true, pausesMs: [10] });
+      const statusOther = await retag({ status: true });
+      const badJob = await retag({ dryRun: true, job: "extract:x@p1" });
+      const shownJob = await retag({ status: true, job: "retag:x@p7" });
+      assert(switched.code !== 2 && (await configured()) === OTHER && switched.out.includes(`ob1_config.retag_key = ${OTHER}`)
+          && statusOther.code === 0 && statusOther.out.includes(`ob1_config.retag_key is ${OTHER}; this run uses ${JOB}`)
+          && badJob.code === 2 && /--job names a re-tag pool/.test(badJob.err) && shownJob.code === 0 && shownJob.out.includes("job:    retag:x@p7")
+          && retagKey("qwen3:8b", 1) === "retag:qwen3:8b@p1" && JSON.stringify(parseRetagKey("retag:qwen3:8b@p1")) === '{"model":"qwen3:8b","promptVersion":1}'
+          && parseRetagKey("retag:m@p01") === null && parseRetagKey("extract:m@p1") === null,
+        `--switch-key: a run under another key goes ahead and records it; --status under another recorded key says so, exit 0; --job of another shape refused, exit 2, and one of this shape used; the key builds and parses back, p01 and another prefix refused (${switched.code}: ${await configured()}; ${statusOther.code}; ${badJob.code})`);
+    } finally {
+      stub.stop(true);
+      await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'retag:%'`;
+      await sql`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+      if (ids.length) {
+        await sql`DELETE FROM derivations WHERE artifact_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+      }
+      await sql.close();
     }
-  } finally {
-    stub.stop(true);
-    rmSync(scratch, { recursive: true, force: true });
-    await sql`DELETE FROM thoughts`;
-    const after27 = await catalog27();
-    for (const v of after27.views) if (!before27.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
-    for (const tb of after27.tables) if (!before27.tables.has(tb)) await sql.unsafe(`DROP TABLE IF EXISTS ${tb} CASCADE`);
-    for (const f of after27.fns) if (!before27.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
-    await sql.close();
-  }
+  })();
 }
 
 if (want("30")) {
@@ -29204,9 +29283,9 @@ if (want("38r")) {
 // and 3); each wait is probed on a fixed interval, nothing carried between them. Its body a function's, as [26]'s: the
 // module body is at TS2563's limit for control-flow analysis.
 if (want("38p")) await (async () => {
-  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated");
+  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated; under a steady inflow of thoughts with no vector, re-embed and the claim passes take turns in the one period, each handing over sooner once caught up, a re-embed set down for an outage tried again at a turn's end, and re-embed's turns re-embed every thought (SMD-4384)");
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, EMBED_JOB, sw, env, capture, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
+  const { EX, EMBED_JOB, modelCalls, sw, env, capture, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
   // Every wait probes once a second (the scheduler's fixed probe, reembedThoughtProbeMs, at 1 s, and OUTAGE_MS for the
   // rest): with embedCrashProbes 2 the provider is back at a wait's second or third probe, 2-3 s on, which the
   // scheduler's 250 ms poll sees many times over — a set-down at the first sight would leave the thought pending and
@@ -29245,7 +29324,7 @@ if (want("38p")) await (async () => {
     /** Such an outage met while the back-off runs: set down at once, and the seconds left of it. */
     const BACKED_OFF = /re-embed's provider stopped answering after an outage that made the thought in hand a suspect, while re-embed backs off from a try's wait on such an outage that ended at a limit — set down at once, backing off: (\d+) s more, then the first such outage is waited out once more/;
     /** The outage's suspects moved behind the pool at a limit's set-down or a backed-off one (review pass 3). */
-    const MOVED = /^ {2}(\d+) suspect\(s\) of the outage moved behind re-embed's pool — the next period re-embeds the backlog before claiming them again$/;
+    const MOVED = /^ {2}(\d+) suspect\(s\) of the outage moved behind re-embed's pool — its next turn re-embeds the backlog before claiming them again$/;
 
     // The provider back in seconds: the thought failed at its third outage alone, its fourth crash, the backlog behind
     // it re-embedded, all in the one period — re-embed drained, never set down.
@@ -29683,7 +29762,10 @@ if (want("38p")) await (async () => {
         manLimit = await pollUntil(async () => lines.some((l) => PAST_BOUND.test(l)), 30_000);
         manLine = lines.find((l) => PAST_BOUND.test(l)) ?? "";
         manPaused = lines.some((l) => /^ {2}resumed: no live write/.test(l));
-        const b = ((await beat()) as { reembedBackoff?: { until: string } } | null)?.reembedBackoff;
+        // The row's mark, once stamped: the limit's line is said before re-embed's end and the set-down that stamp it, so
+        // a read at once could beat the stamp (SMD-4384 review pass 2: once in eight runs, the mark read missing).
+        let b: { until: string } | undefined;
+        await pollUntil(async () => (b = ((await beat()) as { reembedBackoff?: { until: string } } | null)?.reembedBackoff) !== undefined, 5000);
         const [{ now }] = (await sql`SELECT now() AS now`) as { now: Date }[];
         manAhead = b ? (Date.parse(b.until) - new Date(now).getTime()) / 1000 : -1;
         if (manLimit) {
@@ -29705,6 +29787,330 @@ if (want("38p")) await (async () => {
         `a pause before a try's limit: the back-off runs its whole window from the limit on the scheduler's clock, not on re-embed's, which the pause held back (left ${manLeft}; paused ${manPaused}; limit ${manLimit}: ${manLine.trim().slice(0, 160)}; the row's until ${manAhead.toFixed(1)} s ahead; the left wait's start ${manWaitAge.toFixed(1)} s old at the resume; exit ${manCode})`);
       assert(manTry && manTryLines.some((l) => LEFT.test(l)) && manTryLines.some((l) => BACKS_OFF.exec(l)?.[1] === "60" && PAST_BOUND.test(l)) && !manTryLines.some((l) => BACKED_OFF.test(l)),
         `a period begun just past the back-off's end, after a pause: a try, left waiting, its limit backing off 60 s — the back-off read on the scheduler's clock, not on re-embed's, which the pause holds behind (${told(manTryLines) || "nothing said"}${manTry ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    }
+
+    // A steady inflow of thoughts with no vector (SMD-4384): one every 300 ms, each embedding 400 ms and each extraction
+    // 400 ms, so neither re-embed's pool nor extraction's ever drains. Before the share, re-embed ran alone the whole
+    // period, extraction never starting (0 of 64 in 240 s at the shipped settings); with a one-way share (review pass 1's
+    // run) the claim passes then ran until the inflow stopped, a vector 131-202 s late. A 3 s share, the turns
+    // alternating (the maintainer's choice): re-embed gives way, extraction takes a note, the claim passes' turn ends and
+    // they wait at their turn gate while re-embed, in the same period, re-embeds a thought captured after the first
+    // give-way — all while the inflow goes on; once it ends, every thought gets its vector, never set down, in the one
+    // period (review pass 2: the first cut of the turns ended the period at each).
+    {
+      const SHARE = /^ {2}re-embed has had its share — ([\d.]+) s alone(?:, besides \d+ s isolating outages)? — (\d+) thought\(s\) left for its next turn, once the claim passes have had theirs or drained — extracting$/;
+      const TURN = /^ {2}the claim passes have had their turn — ([\d.]+) s — with (\d+) thought\(s\) waiting for re-embed: they wait between thoughts while re-embed runs alone again$/;
+      const RETRIED = /^ {2}re-embed, set down earlier in this period \([a-z-]+\), is tried again at the claim passes' turn's end$/;
+      sw.embedSlowMs = 400;
+      sw.slowExtract = 400;
+      const inflow: string[] = [];
+      let flowing = true;
+      const flow = (async () => {
+        for (let i = 0; flowing; i++) {
+          inflow.push(await vectorless(`An inflow note with no vector, number ${i}.`));
+          await Bun.sleep(300);
+        }
+      })();
+      const shareMeanwhile = await capture("A note extraction takes while vectorless thoughts keep arriving.", "sync-sleep", 0, 33);
+      let gave = false, extractedInFlow = false, turned = false, laterVectored = false, resumed = false, flowed = 0, vectored = 0, shareCode = -9, downSaid = false, endedInFlow = true;
+      /** The inflow's notes extraction has taken. */
+      const extractedCount = async () => (await Promise.all(inflow.map(exSucceeded))).filter(Boolean).length;
+      const shareStop = follow({ reembedShareMs: 3000 });
+      // Each line with when it came, read every 25 ms: re-embed's mid-period turn runs from the claim passes' turn line
+      // to its share line after it (review pass 2).
+      const stampedLines: { line: string; at: number }[] = [];
+      let stamping = true;
+      const stampLines = (async () => {
+        for (let k = 0; stamping; await Bun.sleep(25)) while (k < lines.length) stampedLines.push({ line: lines[k++], at: Date.now() });
+      })();
+      try {
+        try {
+          gave = await pollUntil(async () => lines.some((l) => SHARE.test(l)), 30_000);
+          // The thoughts captured from the first give-way on: one re-embedded while the inflow goes on is a turn back.
+          const after = inflow.length;
+          extractedInFlow = gave && await pollUntil(() => exSucceeded(shareMeanwhile), 20_000);
+          turned = extractedInFlow && await pollUntil(async () => lines.some((l) => TURN.test(l)), 30_000);
+          laterVectored = turned && await pollUntil(async () => (await allAtEmbed(inflow.slice(after))) > 0, 30_000);
+          // Re-embed's second turn over, the claim passes go on from their gate: extraction takes another note.
+          if (laterVectored && await pollUntil(async () => lines.filter((l) => SHARE.test(l)).length >= 2, 30_000)) {
+            const before = await extractedCount();
+            resumed = await pollUntil(async () => (await extractedCount()) > before, 30_000);
+          }
+          // The turns are the period's own: none ended it (review pass 2).
+          endedInFlow = lines.some((l) => /— the period ends$/.test(l));
+        } finally {
+          stamping = false;
+          await stampLines;
+          flowing = false;
+          await flow;
+        }
+        flowed = inflow.length;
+        await pollUntil(async () => (vectored = await allAtEmbed(inflow)) === inflow.length, 120_000);
+      } finally {
+        sw.embedSlowMs = 0;
+        sw.slowExtract = 0;
+        downSaid = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+        shareCode = await shareStop();
+      }
+      const shareLine = lines.find((l) => SHARE.test(l)) ?? "";
+      const turnLine = lines.find((l) => TURN.test(l)) ?? "";
+      // Re-embed alone in its mid-period turn: no extraction call begun from a second after the claim passes' turn
+      // ended — the call in hand then, 400 ms, runs out — until re-embed's share line after it (review pass 2).
+      const turnAt = stampedLines.find((x) => TURN.test(x.line))?.at ?? 0;
+      const backAt = stampedLines.find((x) => x.at > turnAt && SHARE.test(x.line))?.at ?? 0;
+      const extractsInTurn = turnAt && backAt ? modelCalls.filter((c) => c.kind === "extract" && c.at > turnAt + 1000 && c.at < backAt - 100).length : -1;
+      assert(gave && SHARE.exec(shareLine)?.[1] === "3" && Number(SHARE.exec(shareLine)?.[2]) > 0 && extractedInFlow && turned && TURN.exec(turnLine)?.[1] === "3" && laterVectored && resumed && !endedInFlow && extractsInTurn === 0 && backAt - turnAt > 2000 && vectored === flowed && !downSaid && shareCode === 0,
+        `a steady inflow of thoughts with no vector, neither re-embed's pool nor extraction's ever drained: the turns alternate — re-embed gives way at its 3 s share, extraction takes a note, the claim passes' 3 s turn holds them at their gate and re-embed, in the same period, re-embeds a thought captured after the give-way, alone, extraction waiting at its gate, then gives way again and extraction goes on, all while the inflow goes on, no period ended — and once it ends every thought gets its vector, never set down (gave way ${gave}: ${shareLine.trim().slice(0, 140)}; extracted during the inflow ${extractedInFlow}; turn ${turned}: ${turnLine.trim().slice(0, 140)}; a later thought re-embedded during the inflow ${laterVectored}; extraction going on after re-embed's second turn ${resumed}; ${extractsInTurn} extraction call(s) begun in re-embed's ${((backAt - turnAt) / 1000).toFixed(1)} s turn; a period ended during it ${endedInFlow}; ${vectored} of ${flowed} re-embedded; set down ${downSaid}; exit ${shareCode}${gave && turned && laterVectored && vectored === flowed ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+
+      // Review pass 1 (cold read): a share spent with no claim pass's work waiting gives way to nothing — re-embed runs on
+      // until its pool drains. Ten thoughts with no vector at 300 ms each, about 3 s, past a 1 s share, every other
+      // pass's pending claim taken as done — theirs and what the rows above left (thought_work_claims is no audited
+      // table, so nothing pauses): one period, drained, no share.
+      sw.embedSlowMs = 300;
+      const alone: string[] = [];
+      for (let i = 0; i < 10; i++) alone.push(await vectorless(`A note with no vector and nothing else to do, number ${i}.`));
+      await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+      const othersLeft = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type <> ${EMBED_JOB} AND status IN ('pending', 'claimed')`)[0].c);
+      let aloneDone = false, aloneCode = -9;
+      const aloneStop = follow({ reembedShareMs: 1000 });
+      try {
+        aloneDone = await pollUntil(async () => (await allAtEmbed(alone)) === alone.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 30_000);
+      } finally {
+        sw.embedSlowMs = 0;
+        aloneCode = await aloneStop();
+      }
+      const aloneShared = lines.some((l) => SHARE.test(l));
+      assert(othersLeft === 0 && aloneDone && !aloneShared && aloneCode === 0,
+        `a share spent with no claim pass's work waiting: re-embed runs on until its pool drains, never giving way to nothing (${othersLeft} other claim(s) left; drained ${aloneDone}; gave way ${aloneShared}; exit ${aloneCode}${aloneDone && !aloneShared ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+
+      // Review pass 1 (cold read): the share does not count re-embed's isolation of an outage. A thought crashing the
+      // provider 4 s a crash, three pooled behind it, scaled as the oleander row, four waits of about 4 s, a note
+      // waiting for extraction; once the thought is recorded failed, eight more with no vector at 300 ms each, so
+      // re-embed has work past the isolation's end. Past an 8 s share by its waits alone (about 18 s), not by the rest
+      // (about 4 s): re-embed fails the thought, re-embeds the eleven and drains, the share never spent. Counted, the
+      // share was spent at the first poll after the isolation, the eight left.
+      {
+        const restoreShared = shortenOutage(500, 30_000);
+        sw.embedCrashOn = "hellebore";
+        sw.embedCrashMs = 4000;
+        sw.embedCrashes = 0;
+        const crasher = await vectorless("A hellebore note whose embedding keeps the provider down 4 s a crash.");
+        const crasherBehind: string[] = [];
+        // None of the three names the crashing word: an embedding of any would crash the provider too.
+        for (let i = 1; i <= 3; i++) crasherBehind.push(await vectorless(`A note pooled behind the one whose share test crashes, number ${i}.`));
+        await poolFirst(crasher, crasherBehind);
+        await capture("A note extraction waits for while re-embed isolates the crashing one.", "sync-sleep", 0, 35);
+        let isoDone = false, isoClaim: Awaited<ReturnType<typeof reClaim>>, isoCode = -9;
+        const isoAfter: string[] = [];
+        // Slow from the start, so the three behind still hold re-embed when the eight come.
+        sw.embedSlowMs = 300;
+        const isoStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 12_000, reembedThoughtPeriodMs: 24_000, reembedShareMs: 8000 });
+        try {
+          if (await pollUntil(async () => (await reClaim(crasher))?.status === "failed", 60_000)) {
+            for (let i = 1; i <= 8; i++) isoAfter.push(await vectorless(`A note with no vector come after the isolation, number ${i}.`));
+            isoDone = await pollUntil(async () => (await allAtEmbed([...crasherBehind, ...isoAfter])) === crasherBehind.length + isoAfter.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 60_000);
+          }
+          isoClaim = await reClaim(crasher);
+        } finally {
+          sw.embedCrashOn = null;
+          sw.embedCrashMs = 0;
+          sw.embedCrashUntil = 0;
+          sw.embedSlowMs = 0;
+          isoCode = await isoStop();
+          restoreShared();
+        }
+        const isoShared = lines.some((l) => SHARE.test(l));
+        const isoDown = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+        assert(isoDone && isoClaim?.status === "failed" && !isoShared && !isoDown && isoCode === 0,
+          `an isolation longer than the share: its waits and retries not counted, re-embed fails the crashing thought, re-embeds the three behind it and the eight come after the isolation and drains, the share never spent, never set down (done ${isoDone}; ${JSON.stringify(isoClaim)}; gave way ${isoShared}; set down ${isoDown}; ${sw.embedCrashes} crash(es); exit ${isoCode}${isoDone && !isoShared ? "" : `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 2 (the maintainer's choice): a side caught up hands over at its next pooling, not after the share. A
+      // thought with no vector every 500 ms, embeddings and extractions at once, a 20 s share: each side keeps up, so
+      // each is caught up within a pooling (1 s here), and a vector waits a few seconds, not the share's 20.
+      {
+        const CAUGHT = /^ {2}re-embed has caught up — \d+ s alone — \d+ thought\(s\) not yet in its pool left for its next turn, once the claim passes have had theirs or drained — extracting$/;
+        const CLAIMS_CAUGHT = /^ {2}the claim passes have caught up — \d+ s — with \d+ thought\(s\) waiting for re-embed: they wait between thoughts while re-embed runs alone again$/;
+        const seen = new Map<string, { at: number; vectorAt?: number }>();
+        let flowingC = true;
+        const flowC = (async () => {
+          for (let i = 0; flowingC; i++) {
+            const at = Date.now();
+            seen.set(await vectorless(`A note with no vector both sides keep up with, number ${i}.`), { at });
+            await Bun.sleep(500);
+          }
+        })();
+        const watchC = (async () => {
+          while (flowingC) {
+            for (const [id, v] of seen) if (v.vectorAt === undefined && (await atEmbed(id))) v.vectorAt = Date.now();
+            await Bun.sleep(200);
+          }
+        })();
+        let bothCaught = false, caughtCode = -9, endAt = 0;
+        const caughtStop = follow({ reembedShareMs: 20_000 });
+        try {
+          bothCaught = await pollUntil(async () => lines.some((l) => CAUGHT.test(l)) && lines.some((l) => CLAIMS_CAUGHT.test(l)), 30_000);
+          // A stretch of the inflow under the turns, longer than a share would hold a side.
+          if (bothCaught) await Bun.sleep(12_000);
+        } finally {
+          flowingC = false;
+          endAt = Date.now();
+          await flowC;
+          await watchC;
+          caughtCode = await caughtStop();
+        }
+        const waited = [...seen.values()].filter((v) => v.vectorAt !== undefined).map((v) => v.vectorAt! - v.at);
+        const longest = Math.max(0, ...waited);
+        // Captured 6 s or more before the inflow ended, and no vector by then: under the share's whole turns a vector
+        // waits up to 20 s, and with the claim passes caught up only by an empty pool, which 016's trigger never leaves
+        // under an inflow, 9.5-11.4 s; caught up by a claim's age, 2.1-2.2 s at most in four runs.
+        const stale = [...seen.values()].filter((v) => v.vectorAt === undefined && endAt - v.at >= 6000).length;
+        assert(bothCaught && longest < 6000 && stale === 0 && caughtCode === 0,
+          `both sides keeping up with an inflow, a 20 s share: each hands over caught up at its next pooling — re-embed's and the claim passes' lines said — and no vector waits the share (both said ${bothCaught}; ${waited.length} of ${seen.size} vectored, the longest wait ${(longest / 1000).toFixed(1)} s; ${stale} captured 6 s or more before the end with none; exit ${caughtCode}${bothCaught && stale === 0 ? "" : `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 2's run: a re-embed set down at a turn's start — its endpoint not answering — is tried again at the
+      // claim passes' whole turn's end, as a period's start would; before, it stayed down while the inflow went on, the
+      // period never ending, and no vector came until the inflow stopped. A thought with no vector every 300 ms,
+      // embeddings and extractions 400 ms (neither side keeps up), a 3 s share; the endpoint down from the first
+      // give-way until re-embed is set down, then back.
+      {
+        sw.embedSlowMs = 400;
+        sw.slowExtract = 400;
+        const flowedB: string[] = [];
+        let flowingB = true;
+        const flowB = (async () => {
+          for (let i = 0; flowingB; i++) {
+            flowedB.push(await vectorless(`A note with no vector while re-embed's endpoint goes down, number ${i}.`));
+            await Bun.sleep(300);
+          }
+        })();
+        let downB = false, retried = false, laterB = false, codeB = -9;
+        const stopB = follow({ reembedShareMs: 3000 });
+        try {
+          try {
+            if (await pollUntil(async () => lines.some((l) => SHARE.test(l)), 30_000)) {
+              sw.embedDown = true;
+              downB = await pollUntil(async () => lines.some((l) => DOWN.test(l)), 30_000);
+            }
+          } finally {
+            sw.embedDown = false;
+          }
+          const after = flowedB.length;
+          retried = downB && await pollUntil(async () => lines.some((l) => RETRIED.test(l)), 30_000);
+          laterB = retried && await pollUntil(async () => (await allAtEmbed(flowedB.slice(after))) > 0, 30_000);
+        } finally {
+          flowingB = false;
+          await flowB;
+          sw.embedSlowMs = 0;
+          sw.slowExtract = 0;
+          codeB = await stopB();
+        }
+        assert(downB && retried && laterB && codeB === 0,
+          `re-embed set down at a turn's start, its endpoint not answering, under an inflow: tried again at the claim passes' whole turn's end, and a thought captured once the endpoint is back gets its vector while the inflow goes on (set down ${downB}; tried again ${retried}; a later thought re-embedded ${laterB}; exit ${codeB}${downB && retried && laterB ? "" : `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 2's run: on a fresh brain no extraction key is recorded until extraction's first pass, so no trigger
+      // pools a capture and no claim row shows extraction's work; re-embed gives way to it all the same, extraction's
+      // pool read whole. Ten thoughts with no vector at 300 ms each past a 1 s share, the key removed, every other
+      // pass's pending claim taken as done: re-embed gives way, and extraction records the key and takes them.
+      {
+        sw.embedSlowMs = 300;
+        await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+        await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+        const fresh: string[] = [];
+        for (let i = 0; i < 10; i++) fresh.push(await vectorless(`A note with no vector on a brain with no extraction key, number ${i}.`));
+        const freshRows = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ANY(${sql.array(fresh, "TEXT")}::uuid[])`)[0].c);
+        let freshGave = false, freshExtracted = false, freshCode = -9;
+        const freshStop = follow({ reembedShareMs: 1000 });
+        try {
+          freshGave = await pollUntil(async () => lines.some((l) => SHARE.test(l)), 20_000);
+          freshExtracted = freshGave && await pollUntil(async () => (await Promise.all(fresh.map(exSucceeded))).some(Boolean), 30_000);
+        } finally {
+          sw.embedSlowMs = 0;
+          freshCode = await freshStop();
+        }
+        assert(freshRows === 0 && freshGave && freshExtracted && freshCode === 0,
+          `a brain with no extraction key recorded, its captures in no claim row: re-embed gives way at its share all the same, extraction's pool read whole, and extraction takes them (${freshRows} claim row(s) before; gave way ${freshGave}; extracted ${freshExtracted}; exit ${freshCode}${freshGave && freshExtracted ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 1, held since review pass 2: a period that ends — its claim passes drained before a turn floor — with
+      // re-embed's share having left work begins the next at the next idle poll, by a whole read of its own: no poll
+      // between reads re-embed's claims, so the rest waited for a vector's whole read (a minute) or the rescan. Twelve
+      // thoughts with no vector at 100 ms each — beside what the rows above left unvectored, dozens — past a 1 s share,
+      // the followers' poll and the turn floor at 5 s, the claim passes' work each thought's extraction, at once:
+      // re-embed gives way, they drain, the period ends, and the next re-embeds the rest, all within 45 s — under the
+      // minute a vector's whole read waits.
+      {
+        sw.embedSlowMs = 100;
+        await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+        const leftOver: string[] = [];
+        for (let i = 0; i < 12; i++) leftOver.push(await vectorless(`A note with no vector a period leaves to the next, number ${i}.`));
+        let leftGave = false, leftEnded = false, leftDone = false, leftCode = -9;
+        const leftStop = follow({ reembedShareMs: 1000, passFollowS: 5 });
+        try {
+          leftGave = await pollUntil(async () => lines.some((l) => SHARE.test(l)), 20_000);
+          leftEnded = leftGave && await pollUntil(async () => lines.some((l) => /^ {2}the pools drained — the period ends$/.test(l)), 20_000);
+          leftDone = leftEnded && await pollUntil(async () => (await allAtEmbed(leftOver)) === leftOver.length, 45_000);
+        } finally {
+          sw.embedSlowMs = 0;
+          leftCode = await leftStop();
+        }
+        const leftPeriods = lines.filter((l) => /^ {2}working:/.test(l)).length;
+        assert(leftGave && leftEnded && leftDone && leftPeriods >= 2 && leftCode === 0,
+          `a period ending with re-embed's share having left work: the next begins at once by a whole read of its own and re-embeds the rest (gave way ${leftGave}; the period ended ${leftEnded}; all ${leftOver.length} re-embedded within 45 s ${leftDone}; ${leftPeriods} period(s); exit ${leftCode}${leftGave && leftEnded && leftDone ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 3 (cold read, run-it): a re-embed set down is tried again at a whole turn's end for an outage alone,
+      // and not while SMD-4254's back-off sets such an outage down at once — a crashing thought claimed again at each
+      // turn crashed the provider every two minutes — nor for a refusal, which the next period or the rescan tries.
+      {
+        /** Fifteen notes for extraction at 500 ms each, about 7.5 s of the claim passes' work, past several 2 s turns. */
+        const extractWork = async (word: string) => {
+          sw.slowExtract = 500;
+          await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+          for (let i = 0; i < 15; i++) await capture(`A note extraction takes while re-embed is ${word}, number ${i}.`, "sync-sleep", 0, 36);
+        };
+        // The back-off: a thought that brings the provider down for good, a 3 s bound, a 30 s back-off. Set down at the
+        // bound, backing off; the claim passes' 2 s turns run out several times inside the window, and none tries it.
+        sw.embedCrashOn = "baneberry";
+        sw.embedCrashProbes = Infinity;
+        sw.embedCrashes = 0;
+        await poolFirst(await vectorless("A baneberry note whose embedding brings the provider down for good."), []);
+        await extractWork("backing off");
+        let boLimit = false, boTried = true, boCode = -9;
+        const boStop = follow({ reembedShareMs: 2000, reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 3000, reembedThoughtBackoffMs: 30_000 });
+        try {
+          boLimit = await pollUntil(async () => lines.some((l) => PAST_BOUND.test(l)), 30_000);
+          if (boLimit) await Bun.sleep(8000);
+          boTried = lines.some((l) => RETRIED.test(l));
+        } finally {
+          sw.embedCrashOn = null;
+          sw.embedCrashLeft = null;
+          sw.slowExtract = 0;
+          boCode = await boStop();
+        }
+        assert(boLimit && !boTried && boCode === 0,
+          `a re-embed set down at its bound, backing off: no claim passes' turn's end tries it again inside the back-off's window, where each would claim the crashing thought again (the limit ${boLimit}; tried again ${boTried}; exit ${boCode}${boLimit && !boTried ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+        // A refusal: the embedding key refused at re-embed's start sets it down (provider); the claim passes' 2 s turns
+        // run out several times, and none tries it — the next period or the rescan does.
+        await vectorless("A note with no vector while the embedding key is refused.");
+        await extractWork("refused");
+        sw.embedKeyRefused = true;
+        let keyLimit = false, keyTried = true, keyCode = -9;
+        const keyStop = follow({ reembedShareMs: 2000 });
+        try {
+          keyLimit = await pollUntil(async () => lines.some((l) => /re-embed set down for this period — the embedding provider refused it/.test(l)), 20_000);
+          if (keyLimit) await Bun.sleep(8000);
+          keyTried = lines.some((l) => RETRIED.test(l));
+        } finally {
+          sw.embedKeyRefused = false;
+          sw.slowExtract = 0;
+          keyCode = await keyStop();
+        }
+        assert(keyLimit && !keyTried && keyCode === 0,
+          `a re-embed set down for a refusal — its key — is not tried again at the claim passes' turns' ends, only by the next period or the rescan (set down ${keyLimit}; tried again ${keyTried}; exit ${keyCode}${keyLimit && !keyTried ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
     }
   } finally {
     sw.embedCrashOn = null;
@@ -34537,7 +34943,7 @@ if (want("51")) {
       await sql`SELECT set_agent_kind('imp-3318', 'ingested')`;
       const hadColumns = (await columns()).length > 0;
       if (hadColumns) {
-        skip("…the first phase, a brain without the enhanced-thoughts columns", "an earlier section of this run added them (only an unsharded run reaches [51] after [29])");
+        skip("…the first phase, a brain without the enhanced-thoughts columns", "an earlier section of this run added them (only an unsharded run reaches [51] after [18], which leaves them)");
       } else {
         const ids = {
           caseOnly: await plant("[51] plain words one", { type: "Task" }),

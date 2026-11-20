@@ -13,20 +13,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BriefTicket, buildBrief, fence, ticketProblem } from "./brief.ts";
 import { prepareClone } from "./clone.ts";
+import { fixtureGit } from "./fixture-git.ts";
 
 const BOT = { name: "Agent Runner Bot", email: "bot@agent-runner.invalid" };
-
-/** The git to run the clone fixtures with: on macOS the active developer git, on Linux (CI) plain `git` from PATH. */
-function developerGit(): string {
-  try {
-    const r = Bun.spawnSync(["/usr/bin/xcode-select", "-p"], { stdout: "pipe", stderr: "ignore" });
-    const git = `${r.stdout.toString().trim()}/usr/bin/git`;
-    if (r.exitCode === 0 && existsSync(git)) return git;
-  } catch {
-    // No xcode-select (Linux): fall back to PATH git.
-  }
-  return "git";
-}
 
 /** A clean ticket for the brief tests; each case overrides a field. */
 const cleanTicket = (over: Partial<BriefTicket> = {}): BriefTicket => ({
@@ -56,7 +45,7 @@ export async function selfCheck(): Promise<number> {
     }
   };
 
-  const GIT = developerGit();
+  const GIT = fixtureGit();
   const fixture = mkdtempSync(join(tmpdir(), "obr-brief-"));
   try {
     section("ticketProblem refuses what can't be briefed", () => {

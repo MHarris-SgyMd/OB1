@@ -390,6 +390,129 @@ free:
   others. Each has about half for calls well under five minutes. A call is
   never cut short, so a brain of minute-long calls has a little more (0.54
   of the time for 71 s calls beside 50 ms ones).
+- **A model that isn't loaded waits its turn** (SMD-3379 PR 3c-1), on a
+  server whose registry entry names `ps`, its list of loaded models. A model
+  server holds only so many models at once. A call for one that isn't loaded
+  may put another out, and that waits for every call on the other to end,
+  with each later load queued behind it. Measured before this rule: a load
+  waited 24 minutes for a model background calls kept busy, and live
+  embeddings queued behind it. So, for background calls only:
+  - **A call for a loaded model** goes as above.
+  - **A call for a model that isn't loaded** is taken at once where the
+    server has no model loaded, and granted once no background runs there.
+    Otherwise it first waits out `stay_s` (60 s unset) from the end of the
+    server's last background load, which is when the list first names that
+    load's model. So a model that background loaded stays at least that
+    long, whatever another brain's asks say.
+    After that it goes when either holds:
+    - the loaded models are idle: no background call for 5 s and no live
+      call for two minutes;
+    - it has waited its `max_wait_s` (the pass's `--max-wait`, 60 s unset)
+      and no live call is running on the server at that moment.
+  - **The drain.** The broker then grants the server's other models no
+    background calls. Once those running have ended, it grants the waiting
+    call, and the others stay paused until the list names its model. One
+    model loads at a time.
+  - **A live call for a model that isn't loaded** is granted at once, as
+    every live call is, and pauses the server's other background calls the
+    same way until its model is loaded.
+  - **Two bounds, 120 s each.**
+    - A drain that isn't done by then (a background call that long, or one
+      never given back) is given up. The other models' background goes on,
+      and the broker begins no drain for another 120 s. It never grants a
+      load while background still runs on a model the load may put out.
+    - A load holds the server's other background that long. Past it the
+      model is left out of the rule for 120 s, then held to again while its
+      calls still run, turn about, and the log says so. So a load waiting
+      on a model that live calls keep busy has the server's background out
+      of its way half the time. The other half is the loaded models': no
+      load for another model begins while a load is left out and its calls
+      still run. The model's own waiting asks are not granted either until
+      the load ends, and its time left out ends with the load.
+  - **A load whose calls all end without the list ever naming its model**
+    is judged once, by the list as the load began and as it is at the next
+    read after its last call ends, whether or not it was left out at its
+    120 s bound meanwhile. Once one of its calls has ended, or it has
+    been left out at that bound, no more of that model's asks join the
+    load. Until it is judged the model takes no background, so one failed
+    read of the list delays its next load and nothing else.
+    - **A model a brain was using is gone from the list, and none has
+      come** (but ones some brain asks for by name): the load put that
+      model out and loaded nothing. The model's next load waits 60 s more
+      for each such load in a row, up to ten minutes, and the log says so.
+      None of its background asks is granted meanwhile. Such a load begins
+      no stay, and what it put out is taken for due for the next two
+      minutes, whatever its asks' age. A model no brain had used in the
+      two minutes before the load doesn't count: the server's own idle
+      timer may have unloaded it. Nor is anything held against a load
+      that began while another model's was under way or not yet judged.
+    - **Otherwise** nothing is held against it, and that count starts
+      again.
+
+    Either way the model stays under the rule. A model the list never
+    names is a misconfiguration: the server lists it under another name,
+    or doesn't know it. Each call to it waits its turn as a load, so it
+    runs slowly (see the costs below).
+    From its third such load the log says so, with any model the server
+    lists that no brain asks for. Name the model in the brain's settings
+    as the server lists it.
+  - **A live call running two minutes or more** on a listed model holds
+    back no load. A brain gives a model call up at `OB1_LLM_TIMEOUT` (120 s
+    unset), so one older is taken for lost. A brain with that setting
+    raised has its longer live calls taken for lost too. A live call to a
+    model the list doesn't name is a load, with the bounds above.
+
+  What this costs:
+  - Where the loaded models can't share the server's memory, the next live
+    call after a background load waits for that model's running call to
+    end, then for its own to load.
+  - Two backlogs on models that can't share memory take turns of `stay_s`,
+    so each has part of the server's time, not all of it, and each turn
+    costs a load.
+  - A brain's call to a model that isn't listed pauses the server's other
+    background: up to 120 s a load, or until the list's next read where the
+    call ends first. A call that runs on unlisted for longer (one never
+    given back, say) pauses it every other 120 s until `lease_s`, and no
+    other model is loaded for background in all that time. The broker logs
+    each load at most once a minute a brain, with the count since, and
+    doesn't cap it, as with a brain's live calls.
+    An ask's age and `max_wait_s` are its brain's own word too: they order
+    the loads between brains, and `stay_s` keeps the turns.
+  - After one call to a model that put another out, that other's backlog
+    waits out `stay_s` before it is loaded again, even if the first has no
+    more work.
+  - A model named another way than the server lists it runs at a fraction
+    of its speed. It has one batch of calls a turn, and each turn waits
+    out `stay_s`, or its ask's `max_wait_s` where live calls leave no
+    quiet. Its turn begins no stay, so the model it put out waits the same
+    way to be loaded again, with nothing running meanwhile. In simulations
+    it had a tenth of the calls it had under the right name, and the
+    server sat idle a third of the time. Another brain's backlog on a
+    rightly named model was not slowed.
+  - A model that takes longer to load than its callers wait
+    (`OB1_LLM_TIMEOUT`, 120 s unset) reads as one that doesn't load. Its
+    callers give up, the broker backs it off and loads what it put out,
+    and the load, finished too late, is put out in turn. In a simulation
+    of two such models with 150 s loads, the brains had 47 and 24 calls in
+    half an hour, against 415 and 131 with no rule. For scale: 1,670
+    loads on one Mac (Ollama 0.33.3) took 4.6 s on average and 50 s at
+    most. Raise the timeout above the load time.
+  - Models that would all fit still load one per `stay_s`, since the broker
+    can't see the server's memory. After a server unloaded three idle
+    models, they came back with work waiting at 8, 68 and 136 s in a
+    simulation.
+  - While live calls overlap without a gap, no background load begins on
+    that server, so a backlog on a model that isn't loaded waits them out.
+  - Background calls longer than two minutes, running back to back on the
+    loaded model, can hold off another model's load for as long as they
+    keep coming: each drain is given up before the call ends. One long
+    call delays the other model by its own length, or by up to four
+    minutes where the drain was given up first.
+  - A background slot a brain never gives back holds off every drain on
+    that server until the broker takes it back at `lease_s` (900 s unset):
+    the broker can't tell it from a long call, and never loads a model
+    beside one. The loaded models' background goes on meanwhile, less the
+    120 s of each drain tried.
 
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
@@ -469,6 +592,60 @@ bun --no-env-file deploy/federated/federated.ts down
   `per_model: false`, and its slots are counted together. `reserve` (1 unless
   set) is kept for live calls, but background keeps at least one slot, so with
   `slots: 1` background and live share it.
+- **`ps` is where the server lists its loaded models**, read by the broker's
+  own container: `http://host.containers.internal:11434/api/ps` for the
+  host's Ollama (`host.docker.internal` under Docker Engine on Linux).
+  Optional, and for a `per_model` server only.
+  - **It is the broker that dials it,** from inside its container, so
+    write the address a brain reaches the server by, not the host's own
+    `127.0.0.1`. `check` and `up` warn about a loopback address, a host
+    that is none of the server's `bases`, a `ps` that is one of the bases,
+    and a path that isn't `/api/ps`.
+  - **Under podman machine** an Ollama listening on the host's loopback
+    answers at `host.containers.internal`. **Under Docker Engine on Linux**
+    Ollama must listen on the bridge's address (see "Local models"), and a
+    firewall must let the `ob1-federated` network reach its port. `up`
+    doesn't test this: the broker's log says within seconds whether the
+    list read.
+  - **What it must answer:** a 200 with `{"models": [{"name": …}, …]}`,
+    each entry a `name` or a `model`, as Ollama's `/api/ps` does. Ollama's
+    `/api/tags` has the same shape and lists every model on disk, which
+    would make every model look loaded.
+  - **The rule takes the list to name a model only once it has loaded.**
+    Ollama 0.33.3's log reads that way: over 1,670 loads on one Mac it
+    says `loaded runners` after `llama-server started`, 28 ms after at the
+    median and under a second at most. This has not been probed with a
+    read during a load. A server that lists a model from the start of its
+    load ends the hold on the others early, counts `stay_s` from the
+    load's start, and has its failed loads go unpaced. A server that
+    doesn't answer during a load reads as unreadable: past 10 s the rule
+    is off until the load ends.
+  - The broker reads it every 3 s, and every second while a model loads.
+    Unreadable for 10 s, the server has no residency rule until it reads
+    again. The log says `its loaded models could not be read (<why>): no
+    residency rule there until they can` when that begins and each hour
+    it lasts. The reasons are `no answer`, `no answer in 2 s`, `HTTP
+    <status>`, `a redirect, not followed`, `a list over 1 MiB` and `not a
+    list of models`.
+  - A model's name is matched as Ollama lists it: lower-cased, with
+    `:latest` where a brain names no tag. Where the two spellings differ
+    the log gives both: `ollama/Foo (foo:latest)`.
+- **`stay_s` is how long a model that background loaded stays** before
+  background loads another on that server (60 unset, 0 to 86400, fractions
+  allowed, with `ps` only), busy or idle. 0 means no stay. A turn costs a
+  load, so set it to several times the slowest model's load time. A
+  brain's `max_wait_s` decides when its own ask is due. `stay_s` is the
+  host's, so one brain asking with a small `max_wait_s` can't shorten
+  another brain's turn. A live call's load doesn't count: it is never held
+  back, and begins no stay.
+- **`max_wait_s` is each brain's own,** not the registry's: the sleep
+  scheduler's `OB1_SLEEP_MAX_WAIT` (60 s unset; the api's background calls
+  use 60). On a server with `ps` it is how long that brain's background
+  ask for a model that isn't loaded waits before the broker drains for
+  it. To keep one brain's background from putting out models another
+  brain's live calls use, raise that brain's `OB1_SLEEP_MAX_WAIT`: its
+  loads then wait for the server to be idle. No registry setting protects
+  a model that only live calls loaded, beyond the two-minute quiet.
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1` (`host.docker.internal` for a
   brain under Docker Engine on Linux). A call to any other base isn't
@@ -511,7 +688,39 @@ bun --no-env-file deploy/federated/federated.ts down
 - **Is it working:** `curl -s 127.0.0.1:8095/health` answers `ok`, and the
   broker's log (`bun --no-env-file deploy/federated/federated.ts logs`) says
   each brain's connections, and any server over its slots, at most once a
-  minute.
+  minute. `logs` shows each line's time. For a server with `ps`, the start
+  line says where its loaded models are to be read, and the broker says
+  `its loaded models read (N loaded): the residency rule is on` once they
+  read (`read again` after a failure, the broker starting before the model
+  server included). It says each load at most once a minute a brain:
+  - `not loaded, and brain <name>'s ask is N s old` as a drain begins that
+    has running background to wait for;
+  - `not loaded, and granted to brain <name> after N s` as background's
+    load is granted. A wait behind another model's turn shows only here,
+    in the N;
+  - `brain <name>'s live call to a model not loaded` for a live call;
+  - `re-registers a call to a model not loaded` for one a brain says it
+    already holds.
+
+  Once a minute a server it says `given up` for a drain not done in 120 s,
+  with the brain and model of the oldest call it waited on, and `listed
+  now, and under the residency rule again`. A line said once a minute
+  names one model. The next time it is said, a minute or more later, it
+  counts the ones it left unsaid (`and N more since the last said`).
+  Three lines are worth a look:
+  - `loads of it have ended and the server's loaded models never named
+    it`: the model's name in a brain's settings differs from the server's,
+    or the server doesn't know the model. The line names any model the
+    server lists that no brain asks for. Until the name is fixed each call
+    to it waits its turn as a load, so the line, said at the model's third
+    load, can take several minutes to appear.
+  - `left out of the residency rule 120 s`: a load waited two minutes on a
+    model that calls kept busy, or a call to it was never given back.
+  - `a model that does not load`: its load ended with a model that a brain
+    was using gone from the list, named in the line, and itself never
+    listed. The server may lack the memory for it. A call never given
+    back, taken back at `lease_s`, can print it too, where idle models
+    unloaded meanwhile.
 
 ## What is reachable from where
 
@@ -2529,7 +2738,10 @@ pass's two followers' work, and re-embed, in work periods: a period begins once
 a pass has work and no live call has landed for `OB1_SLEEP_CAPTURE` seconds
 (unset, 20), and runs the re-derive sweep, then re-embed when the brain has
 vectors not at `OB1_EMBEDDING_MODEL`, or thoughts with none (SMD-2679; none
-on a brain the server embeds at its own model, so no embedding call), then
+on a brain the server embeds at its own model, so no embedding call) — alone
+until its pool drains, or for `OB1_SLEEP_REEMBED_SHARE` seconds while
+extraction or consolidation has work (unset, 120; SMD-4384), the two then
+taking turns in the period as long each — then
 extraction, and
 consolidation beside it once extraction's pool is drained, so the backlog
 order above is built in. Beside consolidation runs the subject sweep
@@ -2584,10 +2796,14 @@ at two polls, or the ledger moved — stops its passes and ends it with exit
 re-embed — the embedding key, credit, the model not served — or its endpoint
 down sets it down for
 that period, said in its log and on `heartbeat:sleep`, and the other passes
-run on; the next period tries again. **Upgrading a
+run on; the next period tries again, an outage's sooner at the end of
+extraction and consolidation's turn (`OB1_SLEEP_REEMBED_SHARE`, below).
+**Upgrading a
 brain from before migration 021:** its unlabelled vectors are re-embedded and
-labelled by the first periods, one embedding call a row, before extraction;
-`bun db/reembed.ts --dry-run` says how many first. A brain recording another
+labelled by the first periods, one embedding call a row,
+`OB1_SLEEP_REEMBED_SHARE` (120 s) at a time in turns with extraction while it
+has work (0 re-embeds them all first); `bun db/reembed.ts --dry-run` says how
+many first. A brain recording another
 embedding model than the stack's sets re-embed aside, said in its log and on
 `heartbeat:sleep` (preflight's `sleep` row says it, with both ways out where
 it can print the model names), and the others run on: run
@@ -2631,7 +2847,15 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 
 The log says `working:` when a period begins, `extraction drained — consolidating
 beside it`, `paused:` with the live call that paused it and `resumed:` once
-the capture has passed, and `the pools drained — the period ends`; `budget:`
+the capture has passed, and `the pools drained — the period ends`; `share:`
+at its start names the turns, `re-embed has had its share — 120 s alone — N
+thought(s) left for its next turn …` when re-embed gives way to extraction,
+and `the claim passes have had their turn — 120 s — with N thought(s) waiting
+for re-embed: they wait between thoughts while re-embed runs alone again`
+when it takes its next turn — `caught up` in place of `had its share` or
+`had their turn` when a side hands over sooner, and `re-embed, set down
+earlier in this period (outage), is tried again at the claim passes' turn's
+end` (SMD-4384); `budget:`
 at its start names the session settings in force, and a statement past its
 timeout says `<pass>: a statement passed the pass's statement_timeout (300 s)`
 and `<pass> held until a restart`. Each period begins with the re-derive
@@ -2676,14 +2900,37 @@ its work whole, beside the claims each poll reads), `OB1_SLEEP_ABORT_AFTER`
 (60–86400, unset 60: how long a model call in hand may have run, counted from
 its start, when a pause aborts it, its thought set back; at least
 extraction's stall floor, so each abort counts as a long stop),
-`OB1_SLEEP_MAX_WAIT` (1–86400, unset 60: among the scheduler's own calls
+`OB1_SLEEP_REEMBED_SHARE` (0–86400, unset 120: each turn's length as re-embed
+and extraction with consolidation take turns in a period — re-embed alone
+first, at most this long while they have work, then they run as long while
+re-embed has work, waiting between thoughts in its turns as at a live call's
+pause, either side handing over sooner once caught up, after the followers'
+15 s poll — a pause and re-embed's isolation of an outage not counted; a
+re-embed set down in the period for an outage is tried again at their whole
+turn's end; the period ends, as before, once extraction and consolidation
+drain, and what re-embed left, if they drained within 15 s of its
+giving way, begins the next once the brain is quiet. Under a steady inflow of
+thoughts with no vector — an egress policy keeping captures from a remote
+embedding provider, a slow provider, a bulk import — neither pool drains:
+without the share nothing was extracted, and with a share one way only no
+vector came until the inflow stopped. A backlog longer than the share, a
+model switch's, is re-embedded across turns, consolidation judging some
+neighbours on the old vectors meanwhile. Raise it, or set 0 — no share, no
+turns, re-embed alone until its pool drains, as before — to finish a model
+switch before consolidation judges on the new vectors; lower it to start
+extraction sooner under such an inflow; SMD-4384), `OB1_SLEEP_MAX_WAIT`
+(1–86400, unset 60: among the scheduler's own calls
 waiting for a share of a model server's slots, consolidation's go first, and
 one queued this long goes first at the next turn — as the call ahead of it
 takes its slot — after older ones that go first; not a timeout. It orders, and
-the share is the same; the order matters once the scheduler's calls queue —
-consolidation's workers two or more past the share hold the other passes to
+each pass's slots are the same; the order matters once the scheduler's calls queue —
+consolidation's workers two or more past its slots hold the other passes to
 about a call a worker a max-wait — and a lower value gives them more turns;
-SMD-3379 PR 2c-2),
+SMD-3379 PR 2c-2. Where the host's slot broker reads a model server's loaded
+models (its registry's `ps`, PR 3c-1) it also decides when one of these calls
+for a model that isn't loaded is due a drain of the server: sooner where the
+server is idle, later while another model's stay runs, and a higher value
+leaves the loaded models to other brains for longer),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep
@@ -2728,11 +2975,14 @@ new key — is the scheduler's first period once the coordinator is back,
 its start reading the work whole. An embedding model change
 (`OB1_EMBEDDING_MODEL`) is `reembed.ts --switch-model`'s, run the same way:
 until it records the new model, `sleep` sets its re-embed pass aside and says
-so, and once it has, a period re-embeds whatever the switch left unfinished
-(SMD-2679) — unless the new name is one its heartbeat row cannot carry (ASCII
-letters, digits and `. _ : @ / + -`, `<name>@<width>` at most 120 characters),
-which keeps re-embed out of sleep: then `reembed.ts` run by hand finishes it
-(SMD-3486).
+so, and once it has, the periods re-embed whatever the switch left unfinished
+(SMD-2679), `OB1_SLEEP_REEMBED_SHARE` (120 s) at a time in turns with
+extraction and consolidation while they have work (SMD-4384), so consolidation
+judges some neighbours on the old model's vectors until the backlog is done;
+`OB1_SLEEP_REEMBED_SHARE=0` re-embeds it all first. A new name its heartbeat
+row cannot carry (ASCII letters, digits and `. _ : @ / + -`, `<name>@<width>`
+at most 120 characters) keeps re-embed out of sleep: then `reembed.ts` run by
+hand finishes it (SMD-3486).
 
 Since SMD-2752 it checks each claim pass's start
 once, before its first period — not re-embed's, which each period with work

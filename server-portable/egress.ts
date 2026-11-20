@@ -183,7 +183,7 @@ export function resolveEgressPolicy(env: EgressEnv): EgressPolicy {
  * and the text it sends.
  */
 export type EgressSubject = {
-  kind: "capture" | "edit" | "query" | "re-embed" | "judge" | "extraction" | "decision" | "digest" | "finding" | "lint" | "plugin";
+  kind: "capture" | "edit" | "query" | "re-embed" | "judge" | "extraction" | "decision" | "digest" | "finding" | "lint" | "retag" | "plugin";
   /** The access key's name — the `actor` unit. Absent for a pass with no worker key. */
   actor?: string;
   /** The row's metadata — the `source`, `type` and `topic` units. */

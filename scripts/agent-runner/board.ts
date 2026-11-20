@@ -15,6 +15,7 @@
 
 import { strict, type Gql } from "../../db/linear-api.ts";
 import type { Config } from "./facts.ts";
+import { oneLine as cut } from "./text.ts";
 
 /** A move's result: done, or the reason it couldn't be — never a thrown error. */
 export type MoveResult = { ok: true } | { ok: false; detail: string };
@@ -35,10 +36,7 @@ export const ISSUE_UPDATE = `mutation($id: String!, $input: IssueUpdateInput!) {
 export const COMMENT_CREATE = `mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }`;
 
 /** A one-line, shortened fragment of an error, for a result's detail. */
-const oneLine = (v: unknown): string => {
-  const t = String((v as Error)?.message ?? v).replace(/\s+/g, " ").trim();
-  return t.length > 200 ? `${t.slice(0, 199)}…` : t;
-};
+const oneLine = (v: unknown): string => cut(String((v as Error)?.message ?? v));
 
 /** The id of the team's one state of the wanted name and type, or the reason it isn't exactly one. */
 async function stateId(gql: Gql, cfg: Config, want: { name: string; type: string }): Promise<{ ok: true; id: string } | { ok: false; detail: string }> {

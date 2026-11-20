@@ -726,6 +726,9 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
     // N12's bound (SMD-3379 PR 1c-4a): at or above extraction's 60 s stall floor, a day at most.
     ["--abort-after under the stall floor", { url: AT, abortAfter: 59 }, ["--url", AT, "--abort-after", "59"], "--abort-after must be a decimal integer >= 60 and <= 86400"],
     ["--abort-after past a day", { url: AT, abortAfter: 86401 }, ["--url", AT, "--abort-after", "86401"], "--abort-after must be a decimal integer >= 60 and <= 86400"],
+    // Re-embed's share of a period (SMD-4384): 0 (none) to a day.
+    ["--reembed-share below 0", { url: AT, reembedShare: -1 }, ["--url", AT, "--reembed-share", "-1"], "--reembed-share must be a decimal integer >= 0 and <= 86400"],
+    ["--reembed-share past a day", { url: AT, reembedShare: 86401 }, ["--url", AT, "--reembed-share", "86401"], "--reembed-share must be a decimal integer >= 0 and <= 86400"],
     ["--statement-timeout past a day", { url: AT, statementTimeout: 86401 }, ["--url", AT, "--statement-timeout", "86401"], "--statement-timeout must be a decimal integer >= 0 and <= 86400"],
     ["--work-mem 0", { url: AT, workMem: 0 }, ["--url", AT, "--work-mem", "0"], "--work-mem must be a decimal integer >= 1 and <= 2097151"],
     ["--maintenance-work-mem past Postgres's bound", { url: AT, maintenanceWorkMem: 2097152 }, ["--url", AT, "--maintenance-work-mem", "2097152"], "--maintenance-work-mem must be a decimal integer >= 1 and <= 2097151"],
