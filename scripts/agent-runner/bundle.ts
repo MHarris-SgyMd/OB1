@@ -29,9 +29,6 @@ export type BundleInput = {
 
 export type BundleResult = { ok: boolean; problem: string | null };
 
-/** Trim and shorten git's stderr for a problem message. */
-const detail = (stderr: string): string => oneLine(stderr);
-
 /** The run's branch as a fully-qualified ref. */
 export const refOf = (branch: string): string => `refs/heads/${branch}`;
 
@@ -58,11 +55,11 @@ export function verifyBundle(input: BundleInput): BundleResult {
 
   // A valid bundle in the bare repository (its prerequisites present there).
   const verify = git(["-C", bareRepo, "bundle", "verify", bundlePath]);
-  if (verify.code !== 0) return { ok: false, problem: `git bundle verify failed: ${detail(verify.stderr)}` };
+  if (verify.code !== 0) return { ok: false, problem: `git bundle verify failed: ${oneLine(verify.stderr)}` };
 
   // Exactly one ref, the run's branch.
   const heads = git(["-C", bareRepo, "bundle", "list-heads", bundlePath]);
-  if (heads.code !== 0) return { ok: false, problem: `git bundle list-heads failed: ${detail(heads.stderr)}` };
+  if (heads.code !== 0) return { ok: false, problem: `git bundle list-heads failed: ${oneLine(heads.stderr)}` };
   const refs = heads.stdout.split("\n").map((l) => l.trim()).filter((l) => l !== "").map((l) => l.split(/\s+/)[1] ?? "");
   if (refs.length !== 1) return { ok: false, problem: `the bundle must hold exactly one ref; it holds ${refs.length}${refs.length ? `: ${refs.join(", ")}` : ""}` };
   if (refs[0] !== refOf(branch)) return { ok: false, problem: `the bundle's ref is ${refs[0]}, not the run's branch ${refOf(branch)}` };
@@ -78,6 +75,6 @@ export function importBundle(input: BundleInput): BundleResult {
   const { bundlePath, bareRepo, branch, git } = input;
   const ref = refOf(branch);
   const fetched = git(["-C", bareRepo, "-c", "fetch.fsckObjects=true", "fetch", "--no-tags", bundlePath, `${ref}:${ref}`]);
-  if (fetched.code !== 0) return { ok: false, problem: `git fetch from the bundle failed: ${detail(fetched.stderr)}` };
+  if (fetched.code !== 0) return { ok: false, problem: `git fetch from the bundle failed: ${oneLine(fetched.stderr)}` };
   return { ok: true, problem: null };
 }

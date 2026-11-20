@@ -34,7 +34,7 @@ import { ticketProblem, type BriefTicket } from "./brief.ts";
 import { TICKET_ID, type Ticket } from "./select.ts";
 import { branchFor } from "./record.ts";
 import { run, type RunDeps, type RunInput, type RunLimits, type RunSession, type SessionRequest } from "./run.ts";
-import { liveRun, type LiveDeps, type LiveInput, type LiveResult } from "./live.ts";
+import { liveRun, type LiveDeps, type LiveResult } from "./live.ts";
 import { REAL_DEPS, runSession, type Pinned } from "./session.ts";
 import { profileHashes, settingsText, type SessionLimits, type SessionPaths } from "./profile.ts";
 import { PROBES, STAMP_FILE, developerGit, hostStamp, stampProblem } from "./probes.ts";
