@@ -23915,6 +23915,7 @@ if (want("29")) {
       const TONLY = await plant("[29] TONLY, a type and no topics", { type: "idea" });
       const PONLY = await plant("[29] PONLY, topics and no type", { topics: ["x"] });
       const O2 = await plant("[29] O2, tagged in full long ago", { people: ["Zed"], action_items: ["file it"], dates_mentioned: ["2026-01-01"], topics: ["old"], type: "meeting" });
+      const FN = await plant("[29] FN, its tags nulled by a fallback", { people: null, action_items: null, dates_mentioned: null, topics: ["uncategorized"], type: "observation", type_raw: null, metadata_extraction_failed: "provider_500" });
       const C2 = await tagged("[29] C2, current but pooled by hand");
       await sql`SELECT enqueue_thoughts(${JOB}, ARRAY[${C2}::uuid])`;
       for (const [marker, answer] of [["[29] P408", 408], ["[29] P413", 413], ["[29] PJSON", "prose"], ["[29] P400", 400], ["[29] O2", "partial"]] as const) SPECIAL.set(marker, answer);
@@ -23934,8 +23935,9 @@ if (want("29")) {
           && st.get(C2)?.status === "succeeded" && !sent1.some((b) => b.includes("[29] C2")) && /, 1 already current,/.test(answers.out)
           && st.get(P400)?.status === "failed" && /provider_400/.test(st.get(P400)?.last_error ?? "") && (await tagsRow(P400)) === undefined
           && settled(await tagsRow(TONLY)) && settled(await tagsRow(PONLY))
-          && ((m) => JSON.stringify([m.people, m.action_items, m.dates_mentioned, m.topics, m.type]) === '[[],[],[],["p"],"idea"]')(await meta(O2)),
-        `a thought whose metadata is null is failed with no call, its row still marked; old tags the answer leaves out (type_raw) are cleared; a pooled thought no longer due is released with no call; a 400 fails its thought, nothing written; a type alone or topics alone with no row is in the backlog; a partial answer clears the list keys it leaves out to [] (N ${st.get(N)?.last_error?.slice(0, 50)}; O ${JSON.stringify(oMeta)}; ${line(answers.out, "already current")})`);
+          && ((m) => JSON.stringify([m.people, m.action_items, m.dates_mentioned, m.topics, m.type]) === '[[],[],[],["p"],"idea"]')(await meta(O2))
+          && ((m) => JSON.stringify([m.people, m.action_items, m.dates_mentioned, m.type_raw, m.metadata_extraction_failed]) === '[["Ada"],[],[],null,null]')(await meta(FN)),
+        `a thought whose metadata is null is failed with no call, its row still marked; old tags the answer leaves out (type_raw) are cleared; a pooled thought no longer due is released with no call; a 400 fails its thought, nothing written; a type alone or topics alone with no row is in the backlog; a partial answer clears the list keys it leaves out to []; a full answer's [] lands over a fallback's JSON null (N ${st.get(N)?.last_error?.slice(0, 50)}; O ${JSON.stringify(oMeta)}; ${line(answers.out, "already current")})`);
 
       // The edit's audit event names the worker: the actor `retag` (no worker key here), the door db/retag.ts.
       const [oEvent] = (await sql`SELECT actor_name, origin FROM thought_audit WHERE thought_id = ${O}::uuid ORDER BY seq DESC LIMIT 1`) as { actor_name: string | null; origin: string | null }[];
@@ -24002,6 +24004,23 @@ if (want("29")) {
       const iClaims = new Map((await claims()).filter((c) => order.includes(c.id)).map((c) => [c.id, c.status]));
       assert(interleaved.code === 1 && !/in a row/.test(interleaved.err) && order.every((id, i) => iClaims.get(id) === (i === 3 || i === 5 ? "succeeded" : "failed")),
         `two 413s, then a 400 between answers three times: no three in a row, so the run goes on, exit 1, the answered two re-tagged (${interleaved.code}: ${order.map((id) => iClaims.get(id)).join(",")})`);
+
+      // Review pass 3: an answered call that is no tags (prose) took the request's shape, so it resets the streak too.
+      const order2 = [
+        await plant("[29] J400 a, refused", { topics: ["t"], type: "idea" }), await plant("[29] JPROSE a, in prose", { topics: ["t"], type: "idea" }),
+        await plant("[29] J400 b, refused", { topics: ["t"], type: "idea" }), await plant("[29] JPROSE b, in prose", { topics: ["t"], type: "idea" }),
+        await plant("[29] J400 c, refused", { topics: ["t"], type: "idea" }),
+      ];
+      await sql`SELECT enqueue_thoughts(${JOB}, ${sql.array(order2, "TEXT")}::uuid[])`;
+      for (const [i, id] of order2.entries()) await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(mins => ${60 - i}) WHERE work_type = ${JOB} AND thought_id = ${id}::uuid`;
+      SPECIAL.set("[29] J400", 400);
+      SPECIAL.set("[29] JPROSE", "prose");
+      const proseBetween = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] J400");
+      SPECIAL.delete("[29] JPROSE");
+      const jClaims = (await claims()).filter((c) => order2.includes(c.id));
+      assert(proseBetween.code === 1 && !/in a row/.test(proseBetween.err) && jClaims.length === 5 && jClaims.every((c) => c.status === "failed"),
+        `a 400, then an answer in prose, three times: the prose was an answer, so no three in a row; the run goes on, every one failed as its own, exit 1 (${proseBetween.code}: ${jClaims.map((c) => c.status).join(",")})`);
 
       // A 401 is the request's: the run stops, exit 2, nothing marked failed, the thought pending for the next run.
       const P401 = await plant("[29] P401 tagged, the key refused", { topics: ["t"], type: "idea" });

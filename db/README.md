@@ -6179,12 +6179,14 @@ worker's own gate fails it naming the rule while the policy refuses it, and
 pools it under `retag:<metadata model>@p<METADATA_PROMPT_VERSION>`
 (`db/config.mjs`'s `retagKey`, recorded in `ob1_config.retag_key` by the first
 run that writes): `enqueue_thoughts` for the thoughts not pooled, and
-`requeue_thought_work` for one re-tagged before and back in the backlog; a
+`requeue_thought_work`'s reset, guarded to a row still `succeeded`, for one
+re-tagged before and back in the backlog; a
 failed row waits for `--retry-failed`. A claimed thought still in the backlog
 goes to `server-portable/metadata.ts`'s `extractMetadata`, the capture's call,
 through the egress gate (kind `retag`, the worker key's name as the actor),
 and its answer is written through the 11-argument `update_thought` with
-`tagsOverExisting`'s patch, the row's stamp as `p_if_unchanged_since`, and
+a patch that makes the row's tags the answer's, key by key, the row's stamp
+as `p_if_unchanged_since`, and
 `p_lineage = {"metadata": metadataRecipe(…)}` — under 148 that records the
 tags row at the text, the mark cleared, even when the tags came out the same
 (no event then). The run is refused before 148. A thought the policy refuses

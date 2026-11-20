@@ -84,10 +84,10 @@ Only extract what's explicitly there.`;
  * (the tag set dressed as an extraction the marker exists to prevent); a full
  * answer nulls a stale marker, or fresh tags would stand under one. A merge
  * cannot remove a key; null is the nearest, and a patch compare that treats
- * null and absent as one writes nothing when there was none. One definition
- * for every writer that edits a tagged row (db/sync-linear.ts, SMD-1954; the
- * re-tag worker, db/retag.ts, SMD-2298, which also clears every tag key a full
- * answer leaves out, its answer being the thought's tags).
+ * null and absent as one writes nothing when there was none. The writer that
+ * edits a tagged row with a fresh answer over it, board-sync (db/sync-linear.ts,
+ * SMD-1954), uses it; the re-tag worker (db/retag.ts, SMD-2298) builds its own
+ * patch, key by key, since its answer is the thought's whole tag set.
  */
 export function tagsOverExisting(answer: Record<string, unknown>): Record<string, unknown> {
   if (!("metadata_extraction_failed" in answer)) return { metadata_extraction_failed: null, ...answer };
