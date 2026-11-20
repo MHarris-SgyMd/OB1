@@ -1,0 +1,74 @@
+# Not to merge: a probe for SMD-2435 PR 3b-2. The changes job's new classifier,
+# run on a real runner as that job would run it: a shallow, blobless, sparse
+# checkout of the pull request's merge commit, and the run's own token.
+name: Probe SMD-2435 PR 3b-2 (never merged)
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  with-actions-read:
+    name: The classifier, its token reading Actions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: |
+            .github/ci
+            probe
+      - name: The answer, how long it took, and what the clone holds after
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          command -v gh unzip timeout awk
+          start=$(date +%s%N)
+          bash probe/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
+          echo "took $(( ($(date +%s%N) - start) / 1000000 )) ms"
+          echo "shallow: $(git rev-parse --is-shallow-repository); commits here: $(git rev-list --all --count)"
+          cat "$GITHUB_OUTPUT"
+
+  contents-read-alone:
+    name: The classifier, its token as the workflow gives it
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: |
+            .github/ci
+            probe
+      - name: The answer with contents read alone, and with no token
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "--- contents: read alone"
+          start=$(date +%s%N)
+          bash probe/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
+          echo "took $(( ($(date +%s%N) - start) / 1000000 )) ms"
+          echo "--- no token"
+          start=$(date +%s%N)
+          GH_TOKEN='' bash probe/changes.sh "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
+          echo "took $(( ($(date +%s%N) - start) / 1000000 )) ms"
