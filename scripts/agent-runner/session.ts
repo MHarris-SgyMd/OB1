@@ -19,7 +19,7 @@
 
 import { spawn as nodeSpawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { closeSync, constants, existsSync, openSync, readFileSync, readdirSync, writeSync } from "node:fs";
-import { TOOLS, shownText, type Role } from "./guard.ts";
+import { TOOLS, isObject, shownText, type Role } from "./guard.ts";
 import { guardLog, pathsProblem, sessionArgs, sessionEnv, settingsFile, type SessionLimits, type SessionPaths } from "./profile.ts";
 
 /** The pinned Claude Code: the runner's copy, its recorded checksum, and the version its init event must show. */
@@ -215,8 +215,6 @@ function appendNoFollow(path: string, text: string): void {
     closeSync(fd);
   }
 }
-
-const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Starts the session, watches its stream, and returns how it went. It never throws for the session's sake: a refusal or failure is an outcome. */
 export async function runSession(spec: SessionSpec, deps: SessionDeps = REAL_DEPS): Promise<SessionOutcome> {
