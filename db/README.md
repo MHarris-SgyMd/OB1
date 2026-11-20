@@ -5224,19 +5224,20 @@ of `db/sleep.ts` holds the mechanics; this is what an operator needs.
 bun sleep.ts --url … --follow      # a period whenever there is work, for ever
 bun sleep.ts --url …               # one period, if there is work, until its pools drain, pausing for live writes
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
-#   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
+#   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --reembed-share SECONDS (120; 0 to 86,400, 0: alone until its pool drains)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
 #   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
 #   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
-#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
+#   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share, or caught up, with its pool left, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
 ```
 
 **Running it.** On the compose stack, as a pass of the coordinator: `sleep`
 in `deploy/.env`'s `OB1_PASSES` runs `sleep.ts --follow` as its child
 (`db/coordinator.ts`, SMD-3476), with `OB1_SLEEP_CAPTURE`,
-`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_MAX_WAIT`, `OB1_SLEEP_RESCAN`,
-`OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its six numbers, and
+`OB1_SLEEP_ABORT_AFTER`, `OB1_SLEEP_REEMBED_SHARE`, `OB1_SLEEP_MAX_WAIT`,
+`OB1_SLEEP_RESCAN`, `OB1_SLEEP_POLL` and `OB1_SLEEP_WORKERS` for its seven
+numbers, and
 `OB1_SLEEP_STATEMENT_TIMEOUT`, `OB1_SLEEP_WORK_MEM` and
 `OB1_SLEEP_MAINTENANCE_WORK_MEM` for its budget, digits only, and
 `OB1_SLEEP_DUMP_DIR` for `--dump-dir`, passed only when set (SMD-2678, SMD-3203;
@@ -5371,23 +5372,72 @@ without `EXECUTE` on the function is told once at the start and sweeps
 nothing; the function is `SECURITY INVOKER` over four groups' tables, so a
 role short of one of those grants meets 42501 at the first call, said with
 the grant, and the sweeps end for the process. Then re-embed (SMD-2679),
-alone, so the vectors consolidation judges neighbours by are current — only
+alone, so the vectors consolidation judges neighbours by are current
+(within its share, below: a longer backlog, a model switch's, is re-embedded
+across turns, and consolidation judges some neighbours on the old or
+unlabelled vectors meanwhile; `--reembed-share 0` re-embeds it all first): only
 when its backlog has work (rows pending or in flight under the configured
 model's own key — another process's live lease not counted — thoughts not at
 the model or with no vector, finished rows whose thought has moved;
 `--dry-run` prints it, counting every lease, a hand run's too), so
 a brain with nothing to re-embed starts no pass and calls no embedding
 endpoint at all: re-embed's start is not among those the scheduler checks.
-Until its pool drains; anything else that ends it sets it down for that
-period — refused (a key, credit, the model not served, the egress policy, a
-refusal mid-pass), its provider not answering — said, on the row (`aside`,
-its kind; a thrown error's reason in the log), and the other passes run on;
-the next period tries it again. An outage that made the thought in hand a
+Until its pool drains, or until it has had its share alone:
+`--reembed-share` (`OB1_SLEEP_REEMBED_SHARE`, 120 s; SMD-4384, the
+maintainer's choices of 2026-11-19), on re-embed's clock, which a live
+write's pause stops, its start counted, its isolation of an outage (below)
+not — that has its own cap — and never ended mid-isolation. Under a steady
+inflow of thoughts with no vector (an egress policy that keeps captures from
+a remote embedding provider, a provider too slow for captures, a bulk import)
+its pool never drains, since its follower pools every 15 s, and before the
+share it held extraction and consolidation the whole period: extraction ran
+0 of 64 thoughts in 240 s. At its share it gives way after the thought in
+hand, said ("re-embed has had its share"), a model switch's backlog too, but
+only while a claim pass has work — a claim pending or in hand, or thoughts
+not yet in extraction's pool: on a brain with
+nothing else to do it runs on until its pool drains (review pass 1); nothing
+is set down or backed off. Then the two take turns in the period (review
+pass 1, the maintainer's choice): under an inflow the claim passes' pools
+never drain either — extraction's follower pools every 15 s too — and with a
+share one way only no vector came until the inflow stopped (131-202 s late
+over a 5-minute inflow, main 15 s). So once the claim passes have run as long
+as the share with re-embed's pool not drained, they wait at a gate of their
+own between thoughts, windows and pairs, as at a live write's pause ("the
+claim passes have had their turn"), and re-embed runs alone again for its
+share; then they go on, consolidation still joined — in a period whose
+start found re-embed not set aside: one taken up at a poll mid-period waits
+for the next period, as before. Either side hands over
+sooner once caught up — re-embed with nothing pending or in hand, only
+thoughts its follower has yet to pool; the claim passes with nothing in hand
+and nothing pending since before the last turn floor, as each capture is pooled
+for extraction at once — after a turn floor of the followers' own poll (15
+s), so under an inflow both keep up turn by turn and a vector waits about
+that, not the share (review pass 2, the maintainer's choice; "re-embed has
+caught up", "the claim passes have caught up"). The claim passes' work is
+their claims, and on a brain with no extraction key yet — no trigger pools a
+capture until extraction's first pass records it — extraction's pool read
+whole, at most once a turn floor. Each re-embed turn has its own isolation
+cap (below), as a period had, and a re-embed set down in the period for an
+outage is tried again at the claim passes' whole turn's end, as a period's
+start would — not while SMD-4254's back-off sets such an outage down at once,
+and no other kind (review passes 2 and 3). The period ends as before, once
+the claim passes drain: drained a turn floor or more into their turn,
+re-embed has had a turn first and, with nothing to give way to, drained;
+drained sooner, what re-embed left begins the next period, by the next idle
+poll's whole read of its own — no poll between reads re-embed's claims —
+re-embed first again, and a one-shot run exits 1, its pool left. `0` is no
+share and no turns, re-embed alone until its pool drains, as before. Anything
+else that ends re-embed sets it down for that period — refused (a key, credit,
+the model not served, the egress policy, a refusal mid-pass), its provider not
+answering — said, on the row (`aside`, its kind; a thrown error's reason in the
+log), and the other passes run on; the next period tries it again, or for an
+outage the claim passes' whole turn's end (above). An outage that made the
+thought in hand a
 suspect, or a suspect's alone — as when a thought's call crashes the provider —
 is waited out instead, said, the provider probed every 5 s from the wait's
 start (no doubling, nothing carried from the last wait), up to 2 minutes a wait
-and 4 minutes of isolation a period (SMD-4254, the maintainer's choices of
-2026-11-18) — the isolation counted from its first such wait's start until its
+and 4 minutes of isolation a re-embed turn (a period before SMD-4384;
+SMD-4254, the maintainer's choices of 2026-11-18) — the isolation counted from its first such wait's start until its
 suspects settle, the retries' calls and probes between the waits included:
 once the provider answers, re-embed retries the outage's suspects one at a
 time and fails the thought at its third outage alone, as a `--follow` run by
@@ -5475,7 +5525,8 @@ instead means recreating `sleep` (and `api`): the scheduler reads its
 environment once.
 **Unlabelled vectors:** a brain from before migration 021 carries vectors
 with no model, and its first periods re-embed and label them, one embedding
-call a row, before they extract; the start line and `--dry-run` count them
+call a row, `--reembed-share` at a time in turns with extraction while it
+has work; the start line and `--dry-run` count them
 (a later period's line counts only rows not yet claimed, so follow the
 `re-embed pass` row), and `reembed.ts --dry-run` before upgrading says how
 many. Then extraction alone until its
@@ -7769,7 +7820,8 @@ bun test-schema.ts                          # PGlite, no container
 OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its Brain Checks cell runs it — [1] and every section SHARDS does not list (SMD-3048)
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
-OB1_LIVE_SHARD=sweep ./with-postgres.sh bun test-live.ts    # [38s] alone, the subject sweep under sleep (SMD-3306 PR 6b-2)
+OB1_LIVE_SHARD=sweep ./with-postgres.sh bun test-live.ts    # [38s], the subject sweep under sleep, alone at first (SMD-3306 PR 6b-2)
+OB1_LIVE_SHARD=claims ./with-postgres.sh bun test-live.ts   # [10] from the rest, which was the longest cell by ~110 s, and [38b] from long (SMD-4366)
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout they run side by side, each on a Postgres of its own, as db/ci-parity.sh runs them (SMD-3688): never two in one Postgres, since each drops the schema and roles are the cluster's
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

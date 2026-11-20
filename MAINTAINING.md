@@ -90,8 +90,8 @@ MINOR, with an upgrade line. Two things sit outside it:
 - **Maintainer tooling**, which a release neither attaches nor builds into an
   image: `deploy/compose.host-ports.yaml`, the edge (`deploy/edge/`), the
   federated coordinator (`deploy/federated/`), the scripts under `deploy/`
-  (`canary.sh`, `tier.sh`, `instance.ts`, `smoke.sh`) and the `db/` scripts
-  the migrator does not carry.
+  (`canary.sh` and its `canary-env.py`, `tier.sh`, `instance.ts`, `smoke.sh`)
+  and the `db/` scripts the migrator does not carry.
 - **Vendored code**: `integrations/`, `extensions/` and the `recipes/` servers,
   which no image carries.
 
