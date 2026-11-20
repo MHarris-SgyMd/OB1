@@ -812,15 +812,15 @@ export function ticketsIn(text, teams) {
  * The ask is blanked as the summary blanks it, on one line (`redactEpisode` blanks each prompt flattened): blanked as
  * written, a quoted secret whose closing quote is on the next line (`password = "hunter22⏎QQZ-9876"`) was cut at its
  * first space, so its ticket-shaped part headed the summary while the prompt showed it blanked (review pass 1, secrets
- * adversary). Only tickets the raw ask names are kept: blanking can join a word to a marker into a ticket shape (`XY-12`
- * before a Slack webhook's URL), which it must not add (review pass 1, cold read). The scan runs once per ask (the session's rollup, the
- * segmenter and the episode each read it), and only for an ask naming a ticket-shaped word. Measured on 3,000 asks of
- * 2 KB each naming one, the worst case: 43 ms to summarise before, 161 ms now (233 ms scanned three times each); an
- * ask naming none costs nothing more.
+ * adversary). Only tickets the raw ask names, as the same teams read it, are kept: blanking can join a word to a marker
+ * into a ticket shape (`XY-12` before a Slack webhook's URL), which it must not add (review pass 1, cold read), and a
+ * lower-case mention of that key before any team is known is no ticket (review pass 3, mutant).
+ * The scan runs once per ask (cached per event: the segmenter and the episode both read it), and only for an ask whose
+ * raw text names a ticket. It grows with the bytes of such asks, about 20 ms per MB; an ask naming none costs nothing.
  */
 const blankedAsks = new WeakMap();
 const askTickets = (ev, teams) => {
-  const raw = ticketsIn(ev.text);
+  const raw = ticketsIn(ev.text, teams);
   if (!raw.length) return [];
   let text = blankedAsks.get(ev);
   if (text === undefined) { text = redactSecrets(oneLine(ev.text)).text; blankedAsks.set(ev, text); }
