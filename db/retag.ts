@@ -694,7 +694,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
           },
           failed: finished.outcome === "failed" ? finished.error : null,
           doing: "re-tagged",
-          lapsedWhy: `its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker`,
+          // A rebuild's requeue (150) that left the text as this worker read it — --force, or a raw move read before the
+          // rebuild — lets the write through and takes the claim: the row settled, re-tagged again at its next claim
+          // (SMD-2298 PR 2 review pass 2: the line named only a lapse or a hand).
+          lapsedWhy: `a rebuild requeued it (db/rebuild.ts, migration 150), its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker`,
           succeeded: () => {
             if (finished.outcome === "retagged") {
               retagged++;

@@ -33,7 +33,11 @@
 --   * A requeue revokes a live lease on the thought, as every arm's does:
 --     db/retag.ts's write in flight meets STALE_READ (the text moved under
 --     it), and the worker, finding the claim pending again, re-tags the
---     thought from its new text in the same run (review pass 1).
+--     thought from its new text in the same run (review pass 1). With the
+--     text as the worker read it (--force, or a raw move read before the
+--     rebuild) its write settles the row, its release finds the claim gone,
+--     and the thought is re-tagged once more at its next claim (review
+--     pass 2).
 --   * thought_validity (149, SMD-3887) still answers no_pool for a stale
 --     tags row; with a retag key recorded the row has a pool now (named on
 --     SMD-3887, review pass 1).
