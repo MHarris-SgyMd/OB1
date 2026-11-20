@@ -1527,8 +1527,8 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
-| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500 — or its refusal is the brain's own embedding provider failing, `EMBEDDING_PROVIDER_ERROR`, SMD-2892); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED`, `STORE_UNAVAILABLE` or `EMBEDDING_PROVIDER_ERROR`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
-| `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which); the REST core's from its 4xx or 5xx answer |
+| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500 — or its refusal is the brain's own embedding provider failing, `EMBEDDING_PROVIDER_ERROR`, SMD-2892); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED`, `STORE_UNAVAILABLE` or `EMBEDDING_PROVIDER_ERROR`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok` (but a listen refused at a bound, on a server that holds listen streams, is `refused` with its code, though it too is a 200, or the 202 of a notification). A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
+| `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which), or at a bound on listen streams, `LISTEN_SERVER_FULL` or `LISTEN_CALLER_FULL` (on a server that holds them: none yet, SMD-4347); the REST core's from its 4xx or 5xx answer |
 | `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
 | `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
 | `trace` | the W3C trace id of the request's span (below): its own, or with `OB1_OTEL_TRUST_TRACEPARENT=1` — or at the REST core, for a request its forwarder carried — an incoming `traceparent`'s, continued — and with no collector set, a trusted incoming `traceparent`'s alone, so a line can still be found beside a trusted proxy's; absent otherwise. 32 hex digits, checked like any value |
@@ -1847,6 +1847,67 @@ profile's Postgres exporter reads them from the database
 passes (entity extraction, the consolidation judge, the re-embeds) make the
 heaviest provider and database calls, and install no OpenTelemetry, so a
 provider-latency panel shows the servers' calls alone (SMD-2910).
+
+A server that holds listen streams (the MCP server, once SMD-4347's last PR
+turns them on; none does yet) says how many are open, in two places (SMD-4458).
+A server that holds none sends no such series and has no such field. A stream
+is open from the answer that holds it until its connection ends or the server
+stops. Whether its client still reads it, and whether its key still stands, are
+not asked: a client that has gone quiet without closing keeps its place, and so
+does a key revoked since.
+
+As a metric, `ob1.mcp.listen_streams`: the total, with no label of its own, an
+up-down counter, `ob1_mcp_listen_streams` in the profile's Prometheus (measured
+on its image). It carries neither bound: `listen`, below, says both. It is a
+sample: the first one export interval after the start, then at each export
+(every 60 s unless `OTEL_METRIC_EXPORT_INTERVAL` says), and once more at the
+stop's flush. From the end of the stop's drain it reads 0, so that the series
+ends on 0: the stop then serves nothing new and is about to close every stream,
+after its flush where the drain finished, which a collector that is slow to
+answer can make 5 s. Each start is a new series, told from the last by
+`service.instance.id` (and, across an upgrade, the version). Three things
+follow. After a restart a sum over servers reads 0 until the new server's first
+export, though its clients may be back in seconds. A server that stops inside
+its first interval sends that 0 and nothing else, so one that restarts more
+often than it exports reads 0, or nothing, however many streams each life held.
+And a stop whose flush does not get its last export out (a collector that does
+not answer, or is still answering the export before it when the flush's bound
+runs out; a kill) leaves the count before it as its series' last. Prometheus
+goes on reading that for its lookback, five minutes unless set otherwise, and a
+sum over servers is too high for as long (measured on the image: three streams
+open at a kill were still counted beside the next server's one 286 s on, and no
+longer at 302 s).
+
+On its keyed `/health`, as `listen`, read as the route answers: `open`, the two
+bounds (`max` for the server and `perCaller` for one caller) and `callers`, one
+`{ name, open }` for each caller that holds a stream, the most first and equal
+counts in name order; `open` is their sum. It rides on the brain's record,
+so where the route answers `ok` there is no count, and the metric is the only
+reading: with the REST core away (that request's line is `error`, `FAILED`),
+with the key not cleared within the deadline, and for a key that may not read
+the record (each of those a line `refused`, with no code). Any key that may
+call `brain_info`, a read key included, sees every caller's name. A token is
+shown `ok` there and never the record, and so is a capture key, whose own
+streams are listed all the same. A caller is a name, and every session of one
+key is one caller: a key's is the name it has in `MCP_ACCESS_KEYS`; a token's is
+`oauth:` and its subject, with `+` and its client where it signed in through
+one, and that client may be an https URL. A line's `agent` is that name as a
+log line carries one, its first 64 characters with anything outside printable
+ASCII as `?`, so a long name is matched by its start.
+
+A listen refused at a bound is a line whose `outcome` is `refused` and whose
+`code` is `LISTEN_SERVER_FULL` or `LISTEN_CALLER_FULL`. A request's client was
+told "Subscription limit reached" in a JSON-RPC error; a notification's was
+told nothing, its answer a 202. The server's bound is asked first, so a caller
+at its own bound on a full server is `LISTEN_SERVER_FULL`. `listen` is what to
+read the line against, as it is when asked, not as it was at the refusal. No
+setting changes the bounds. A place comes back when a client closes its stream
+or its connection ends, and not before: a caller at its bound has that many
+streams open, or left open. Restarting `mcp` ends every stream, and is no lever
+to pull twice. What a client does when its stream ends is its own: Claude Code
+asks again 6, 8 and 12 seconds on and then stops asking (measured, SMD-4347),
+its documentation says five reopens in an hour make it wait about six hours,
+and no other client has been measured.
 
 `bun preflight.ts --deep` makes each provider probe a span and a point under
 the same names, marked `ob1.probe` (`preflight`) so a backend tells them from
