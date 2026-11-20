@@ -91,8 +91,8 @@ MAP_LISTS="portable-server db-schema replay-gate data-layer preflight-rest db-li
 # without opening what is not there: one added above a file a job read counts
 # against the job, though no list could hold it. Beside them by_map counts
 # .env and every .env.<name>, which Bun loads from the folder it is run in;
-# a file whose name, less its extensions, is a folder the job read through,
-# which an import of that folder would now find first; and .gitattributes,
+# a file whose name, less one or more of its extensions, is a folder the job
+# read through, which an import of that folder would now find first; and .gitattributes,
 # whatever becomes of it, an edit too: the checkout applies it before any
 # marker is made, so no list holds it, and it sets the bytes of every file
 # under it.
@@ -285,14 +285,17 @@ limit() { if command -v timeout > /dev/null 2>&1; then timeout "$@"; else shift;
 # job running until it had it. Fails with none of them or no such run. Each
 # download is tried three times: on the probe one of eleven failed once, and
 # its job ran for it; a list that still does not arrive is by_map's to miss.
-# Bounded: the gated jobs wait on this job, about two seconds for all of it.
+# Bounded: the gated jobs wait on this job, about two seconds for all of it,
+# and every call over the network here and in by_map has a limit, 135 s when
+# each runs to its own (15, 15 and 45 here; 30 for the commit and 15 for each
+# read of the workflow there), well inside the job's five minutes.
 fetch_lists() {
   local dir=$1 default=$2 run id arts name ids=''
   if ! command -v gh > /dev/null 2>&1 || ! command -v unzip > /dev/null 2>&1 || [ -z "${GH_TOKEN:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "$default" ]; then return 1; fi
-  run=$(limit 30 gh api "repos/$GITHUB_REPOSITORY/actions/workflows/${WORKFLOW##*/}/runs?branch=$default&event=push&status=success&per_page=1" --jq '.workflow_runs[0].id' 2> /dev/null) || return 1
+  run=$(limit 15 gh api "repos/$GITHUB_REPOSITORY/actions/workflows/${WORKFLOW##*/}/runs?branch=$default&event=push&status=success&per_page=1" --jq '.workflow_runs[0].id' 2> /dev/null) || return 1
   id=${run%%[!0-9]*}
   if [ -z "$id" ] || [ "$id" != "$run" ]; then return 1; fi
-  arts=$(limit 30 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | "\(.name) \(.id)"' 2> /dev/null) || return 1
+  arts=$(limit 15 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | "\(.name) \(.id)"' 2> /dev/null) || return 1
   # A run whose failed jobs were run again can hold a name twice, the failed attempt's list and the
   # passing one's: the newest, the highest id, is the one the run's success stands on.
   for name in $MAP_LISTS; do
@@ -300,7 +303,7 @@ fetch_lists() {
   done
   # Each artifact is a zip of the one list; all at once, a second or so in all.
   # shellcheck disable=SC2086,SC2016 # ids split on purpose; sh expands $REPO and $DIR
-  printf '%s\n' $ids | REPO=$GITHUB_REPOSITORY DIR=$dir limit 90 xargs -P 12 -I '{}' sh -c 'for try in 1 2 3; do
+  printf '%s\n' $ids | REPO=$GITHUB_REPOSITORY DIR=$dir limit 45 xargs -P 12 -I '{}' sh -c 'for try in 1 2 3; do
       if gh api "repos/$REPO/actions/artifacts/{}/zip" > "$DIR/{}.zip" 2> /dev/null && unzip -q -o -j -d "$DIR" "$DIR/{}.zip" "*.txt" > /dev/null 2>&1; then exit 0; fi
       sleep 1
     done; exit 1' || true
@@ -367,7 +370,7 @@ by_map() {
     f=''
     if [ "$(git rev-parse --is-shallow-repository 2> /dev/null)" = true ]; then f=--depth=1; fi
     # shellcheck disable=SC2086 # $f is one flag or none
-    if ! limit 60 git fetch -q --no-tags $f origin "$x" > /dev/null 2>&1 || ! GIT_NO_LAZY_FETCH=1 git cat-file -e "$x^{commit}" 2> /dev/null; then
+    if ! limit 30 git fetch -q --no-tags $f origin "$x" > /dev/null 2>&1 || ! GIT_NO_LAZY_FETCH=1 git cat-file -e "$x^{commit}" 2> /dev/null; then
       no_map "main's jobs read at ${x:0:12}, which is not here to compare with"; return
     fi
   fi
@@ -398,12 +401,12 @@ by_map() {
     if j=$(charges "$p"); then charged="$charged $j"; fi
   done < "$d/raw"
   # The workflow is outside the job's sparse cone, a blob fetched when it is read: bounded, as the lists are.
-  if ! limit 30 git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null; then
+  if ! limit 15 git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null; then
     no_map "$WORKFLOW could not be read by job"; return
   fi
   if [ "$wf" = 1 ]; then
     if [ -n "$held" ]; then no_map "$WORKFLOW differs since ${x:0:12} beside $held, which holds how it is read by job"; return; fi
-    if ! limit 30 git show "$x:$WORKFLOW" > "$d/base.yml" 2> /dev/null || ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null; then
+    if ! limit 15 git show "$x:$WORKFLOW" > "$d/base.yml" 2> /dev/null || ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null; then
       no_map "$WORKFLOW at ${x:0:12} could not be read by job"; return
     fi
     changed=$(changed_ids "$d")
@@ -444,8 +447,10 @@ by_map() {
           if (b == ".gitattributes" && (q in above)) { print p " sets how the files it read are checked out, and differs"; done = 1; exit }
           if (s == "M") next
           if (((b in lookedfor) || b ~ /^\.env(\..*)?$/) && (q in above)) { print p " is looked for above files it read"; done = 1; exit }
-          stem = b; sub(/\..*$/, "", stem)
-          if (stem != "" && (((q == "" ? "" : q "/") stem) in above)) { print p " came or went beside " shown((q == "" ? "" : q "/") stem) ", a folder it read through"; done = 1; exit }
+          for (stem = b; match(stem, /\.[^.]*$/); ) {
+            stem = substr(stem, 1, RSTART - 1)
+            if (stem != "" && (((q == "" ? "" : q "/") stem) in above)) { print p " came or went beside " shown((q == "" ? "" : q "/") stem) ", a folder it read through"; done = 1; exit }
+          }
           for (;;) {
             if (q in listed) { print "it listed " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
             if (q in worked) { print "it read files in " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
@@ -756,6 +761,7 @@ EOF
     # A file named for a folder a job read through: an import of the folder would find the file first.
     BASE_OPS="$mb && mkdir -p lib/core && echo c > lib/core/index.ts" LISTS="$std; list db-schema 'f db/migrations/1.sql' 'd db/migrations/' 'f lib/core/index.ts'" SKIP='data-layer db-live' run true pull_request main 'echo c > lib/core.ts'
     BASE_OPS="$mb && mkdir -p lib/core && echo c > lib/core/index.ts" LISTS="$std; list db-schema 'f db/migrations/1.sql' 'd db/migrations/' 'f lib/core/index.ts'" SKIP='db-schema data-layer db-live' run true pull_request main 'echo c > lib/other.ts'
+    BASE_OPS="$mb && mkdir -p lib/core.v2 && echo c > lib/core.v2/index.ts" LISTS="$std; list db-schema 'f db/migrations/1.sql' 'd db/migrations/' 'f lib/core.v2/index.ts'" SKIP='data-layer db-live' run true pull_request main 'echo c > lib/core.v2.d.ts'
     # The workflow since then: a job's own block, a path CHARGES gives a job, and what stops every skip.
     BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; sub "echo db-schema" "echo db-schema2"'
     BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; mkdir -p changes && echo x > changes/smd-1.md'
