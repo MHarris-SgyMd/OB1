@@ -507,7 +507,7 @@ function coordinatorUp(pass) {
  * key follows the judge model, so the job is named beside it.
  */
 export function restartCommand(worker, job) {
-  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_MAX_WAIT, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
+  if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_REEMBED_SHARE, OB1_SLEEP_MAX_WAIT, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
   if (worker === "board-sync") return `${coordinatorUp("board-sync")}; from a checkout, cd db && OB1_PASSES=board-sync bun coordinator.ts, or one pass: bun sync-linear.ts --url $DATABASE_URL)`;
   // Named beside sleep, workers is left out (planPasses): the advice says so.
   const service = `${coordinatorUp("workers and not sleep")}); from a checkout, `;
@@ -1241,6 +1241,37 @@ export function poolModelFor(key) {
  * one to reembed.ts, without importing the prompt module.
  */
 export const CONSOLIDATE_KEY_PREFIX = "consolidate:";
+
+/**
+ * The shape of a re-tag pool key (SMD-2298): `retag:<metadata model>@p<prompt
+ * version>`, the tags' extractor's model and server-portable/metadata.ts's
+ * METADATA_PROMPT_VERSION, so a change of either is a new pool, as
+ * `extract:` and `consolidate:` are. Built and read here: the version is the
+ * caller's argument, not a copy of the constant, so this plain-JS module
+ * imports no prompt module and cannot drift from it. The model may itself
+ * contain ":" or "@" (qwen3:8b), so the version is read after the LAST "@p".
+ * db/retag.ts records its key in ob1_config.retag_key.
+ */
+export const RETAG_KEY_PREFIX = "retag:";
+
+/**
+ * @param {string} model
+ * @param {number} promptVersion
+ * @returns {string}
+ */
+export function retagKey(model, promptVersion) {
+  return `${RETAG_KEY_PREFIX}${model}@p${promptVersion}`;
+}
+
+/**
+ * @param {string} key
+ * @returns {{model: string, promptVersion: number} | null}
+ */
+export function parseRetagKey(key) {
+  if (!key.startsWith(RETAG_KEY_PREFIX)) return null;
+  const m = /^(.+)@p(0|[1-9][0-9]*)$/.exec(key.slice(RETAG_KEY_PREFIX.length));
+  return m ? { model: m[1], promptVersion: Number(m[2]) } : null;
+}
 
 /**
  * The corpus by the model its vectors carry (migration 021): one row per

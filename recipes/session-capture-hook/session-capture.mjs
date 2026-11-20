@@ -2867,6 +2867,18 @@ const releaseDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "ut
 /** Whether this process still holds the lock, its age reset: false once another has taken it back — the drain stops, the copy left to it. */
 const holdDrainLock = () => { try { if (Number(readFileSync(DRAIN_LOCK(), "utf8").trim()) !== process.pid) return false; const t = new Date(); utimesSync(DRAIN_LOCK(), t, t); return true; } catch { return false; } };
 
+/**
+ * Whether a queued file holds a copy as the hook writes one: an object whose `tool` is one the fan-out copies
+ * (FANOUT_TOOLS: a mistyped one was held a week, the log saying to mint a write key that was fine — review pass 2), an
+ * object `args`, an `at` that parses as a date, and the names the drain reads — `args.client_key`, `args.id`, `alt` — each a string or absent.
+ * Anything else, a hand edit or a corrupt file, is given up as one that does not parse: it threw on every drain, ahead
+ * of the week's give-up, or, with no date, was never given up once a fault kept it, and every copy behind it waited
+ * for good (SMD-4412). A name that is no string (`{"toString":1}`) threw wherever a template or String() met it — the
+ * log's label, a forget's note, its drop of dead/ copies — so it is refused here, before any of them (review passes 1, 2).
+ */
+const isCopy = (op) => FANOUT_TOOLS.includes(op?.tool) && op.args !== null && typeof op.args === "object" && !Array.isArray(op.args)
+  && Number.isFinite(Date.parse(op.at)) && [op.args.client_key, op.args.id, op.alt].every((n) => n === undefined || typeof n === "string");
+
 /** A copy as the log names it: the tool and the id or key it names, never its text. */
 const opLabel = (op) => `${op.tool}${op.tool === "capture_thought" ? ` (client_key ${op.args.client_key})` : ` of ${op.args.id}`}`;
 
@@ -3015,6 +3027,11 @@ export async function drainWrites(cfg) {
           const o = { dead: true, name, line: `not copied (given up): ${name} does not parse` };
           log(o.line); outcomes.push(o); continue;
         }
+        if (!isCopy(op)) {
+          moveWrite(path, WRITES_DEAD(), name);
+          const o = { dead: true, name, line: `not copied (given up): ${name} is not a copy${op?.tool === "forget_thought" ? " — a forget: its text stays on this brain until forgotten there by hand" : ""}` };
+          log(o.line); outcomes.push(o); continue;
+        }
         // A send may reach the brain whatever it answers: the copy says so in its own file before it goes (`sending`),
         // and a forget's drop leaves it — dropped, a capture committed after the forget's NOT_FOUND kept its text for
         // good (review pass 7). One a drain killed mid-send left `sending` is read as having been sent (review pass 8).
@@ -3028,7 +3045,12 @@ export async function drainWrites(cfg) {
         // send a copy its successor may have sent, and a forget after (review pass 9). Narrowed, not closed: the gap is
         // the microseconds to the request.
         if (!holdDrainLock()) { stopped = true; break; }
-        let o = await postWrite(cfg, op);
+        // A throw on one copy (an answer of a shape the hook cannot read: the url not the brain's /mcp, or a server and
+        // hook out of step) keeps it, as a fault does, rather than ending the drain: its send may have reached the brain,
+        // and after a week it is given up like any other (SMD-4412).
+        let o;
+        try { o = await postWrite(cfg, op); }
+        catch (e) { o = { keep: true, unknown: true, line: `kept: ${opLabel(op)} — the brain's answer could not be read (${oneLine(String(e?.message ?? e)).slice(0, 160)}): check that the url is this brain's /mcp, and that its server and this hook are current` }; }
         // A lock taken back while this copy was in flight: the queue is its new holder's, and this drain touches no
         // file of it — not this copy's, which the holder may be sending again (review pass 8: a stale holder's
         // write-back put a copy back after the forget that followed it).
