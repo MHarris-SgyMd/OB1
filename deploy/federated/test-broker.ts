@@ -953,13 +953,13 @@ const askM = (c: Client, id: string, model: string, cls: "live" | "background", 
 const BIG = "qwen3.8:27b", SMALL = "qwen2.5:7b";
 type Res = ReturnType<Broker["residency"]>["ollama"];
 /** A broker whose `ollama` names the list, on a clock the row moves (`move` turns it too); the list read once before the row begins. */
-async function withResidency(models: string[], fn: (x: { b: Broker; ps: ReturnType<typeof fakeList>; lines: string[]; move(ms: number): void; res(): Res }) => Promise<void>, over: { slots?: number; reserve?: number; staleMs?: number; offSayMs?: number; status?: number; stay?: number; lease?: number; idle?: number; keepMs?: number } = {}): Promise<void> {
+async function withResidency(models: string[], fn: (x: { b: Broker; ps: ReturnType<typeof fakeList>; lines: string[]; move(ms: number): void; res(): Res }) => Promise<void>, over: { slots?: number; reserve?: number; staleMs?: number; offSayMs?: number; psMs?: number; status?: number; stay?: number; lease?: number; idle?: number; keepMs?: number } = {}): Promise<void> {
   const ps = fakeList(models);
   if (over.status) ps.status = over.status;
   const lines: string[] = [];
   let t = 1_000_000;
   const reg = registry({ slots: over.slots ?? 3, reserve: over.reserve ?? 1, lease: over.lease, idle: over.idle, extra: `    ps: ${ps.url}\n${over.stay === undefined ? "" : `    stay_s: ${over.stay}\n`}` });
-  const b = startBroker(reg, { port: 0, log: (l) => lines.push(l), now: () => t, keepMs: over.keepMs ?? 0, psMs: 3_600_000, psStaleMs: over.staleMs ?? 10_000, ...(over.offSayMs === undefined ? {} : { psOffSayMs: over.offSayMs }) });
+  const b = startBroker(reg, { port: 0, log: (l) => lines.push(l), now: () => t, keepMs: over.keepMs ?? 0, psMs: over.psMs ?? 3_600_000, psStaleMs: over.staleMs ?? 10_000, ...(over.offSayMs === undefined ? {} : { psOffSayMs: over.offSayMs }) });
   try { await b.refresh(); await fn({ b, ps, lines, move: (ms) => { t += ms; b.turn(); }, res: () => b.residency().ollama }); } finally { await b.stop(); ps.stop(); }
 }
 const quiet = () => sleep(40);
@@ -1197,7 +1197,7 @@ await withResidency([SMALL], async ({ b, lines, move, res }) => {
   ok(!s.seen("go", "e3") && res().loading.length === 1, "the load, never listed, holds the other background 119 s — a live call joining it does not begin the count again", res());
   move(2_000);
   ok(!!(await s.next("go", "e3", SOON)) && res().unlisted.join() === BIG && res().loading.length === 0, "past HOLD_S its model is left out of the rule, and the others go on", res());
-  ok(lines.filter((l) => l.includes(`ollama/${BIG}: a call to it has run 120 s and the server's loaded models do not name it: left out of the residency rule 120 s, or until it is listed`)).length === 1, "said", lines);
+  ok(lines.filter((l) => l.includes(`ollama/${BIG}: its load has run 120 s and the server's loaded models do not name it: left out of the residency rule 120 s, or until it is listed — the server's other background goes on, and none of its own asks is granted until its calls end`)).length === 1, "said", lines);
   move(119_000); await quiet();
   ok(res().unlisted.join() === BIG && res().loading.length === 0, "left out 119 s", res());
   move(2_000);
@@ -1267,8 +1267,8 @@ await withResidency([SMALL, "odd-real:1"], async ({ b, ps, lines, move, res }) =
   await load("o1"); await load("o2");
   ok(said().length === 0, "two loads of it ended and the list never named it: not yet said", lines);
   await load("o3");
-  ok(said().length === 1 && said()[0].startsWith("ollama/odd-name:latest: 3 loads of it have ended") && said()[0].includes("(it lists odd-real:1, which no brain asks for)") && said()[0].endsWith("each call to it waits its turn as a load until a brain names it as the server does"),
-    "the third is said, with the name the server lists that no brain asks for, and what to do", said());
+  ok(said().length === 1 && said()[0].startsWith("ollama/odd-name (odd-name:latest): 3 loads of it have ended") && said()[0].includes("(it lists odd-real:1, which no brain asks for)") && said()[0].endsWith("each call to it waits its turn as a load until a brain names it as the server does"),
+    "the third is said, by the name its brain asks for and the list's spelling of it, with the name the server lists that no brain asks for, and what to do", said());
   ok(res().unlisted.length === 0, "it is not left out of the rule", res());
   askM(s, "e1", SMALL, "background"); await s.next("go", "e1");
   askM(c, "o4", "odd-name", "background", { max_wait_s: 600 }); await c.next("queued", "o4");
@@ -1535,16 +1535,16 @@ await withResidency([SMALL], async ({ b, move, res }) => {
   ok(!!(await s.next("go", "e1", SOON)) && res().want === null && res().unlisted.join() === BIG, "a load left out at HOLD_S: the loaded model's background goes, and no drain is begun for another model's ask, though it is due", res());
   move(60_000); await quiet();
   ok(res().want === null, "nor a minute on", res());
-  // A second call to it, granted while it is left out, then both ended once it is held to again, the list the same
-  // throughout: quiet misses, and no back-off (it was read as a change).
-  askM(c, "k2", BIG, "background"); await c.next("go", "k2");
+  // A second ask for it while it is left out waits for the load's end (review pass 6: granted into the load, as each
+  // of its calls failed, with nothing judged between), held to again or not; the load over with the list as it was,
+  // nothing is held against the model, and the ask is its next load.
+  askM(c, "k2", BIG, "background", { max_wait_s: 0 }); await c.next("queued", "k2"); await quiet();
+  ok(!c.seen("go", "k2") && res().unlisted.join() === BIG, "a second ask for a model left out at its bound is not granted into the load", res());
   move(61_000); await quiet();
-  ok(res().loading.join() === `ollama/${BIG}`, "held to again at HOLD_S more", res());
-  done(s, "e1"); done(c, "k"); done(c, "k2"); t.send({ op: "done", id: "x" });
+  ok(res().loading.join() === `ollama/${BIG}` && res().unlisted.length === 0 && !c.seen("go", "k2"), "held to again at HOLD_S more, the ask waiting still", res());
+  done(s, "e1"); done(c, "k"); t.send({ op: "done", id: "x" });
   await until(() => res().loading.length === 0); await b.refresh();
-  move(6_000);
-  askM(c, "k3", BIG, "background", { max_wait_s: 600 });
-  ok(!!(await c.next("go", "k3", SOON)), "calls granted while it was left out and ended with the list as it was are no change: its next ask, on the idle server, is not backed off", res());
+  ok(!!(await c.next("go", "k2", SOON)) && res().loading.join() === `ollama/${BIG}`, "the load over with the list as it was: the ask that waited is the model's next load, not backed off", res());
   await s.close(); await c.close(); await t.close();
 });
 
@@ -1569,9 +1569,13 @@ await withResidency([SMALL], async ({ b, ps, move, res }) => {
   move(121_000);
   ok(res().unlisted.join() === BIG, "not listed in 120 s: left out", res());
   move(10_000); ps.models = [SMALL, BIG]; await b.refresh();
+  const t = await connect(b, KEYS.third);
+  askM(t, "x", "x:1", "background", { max_wait_s: 0 }); await t.next("queued", "x");
   move(59_000); await quiet();
-  ok(res().want === null && res().loaded?.includes(BIG) === true, "listed 10 s later: its stay begins then, and nothing is drained for 59 s after", res());
-  await s.close(); await c.close();
+  ok(res().want === null && res().unlisted.length === 0, "listed 10 s later, its time left out over: its stay begins then, and another model's ask, due, is not drained for 59 s after", res());
+  move(2_000); await quiet();
+  ok(res().want === "ollama/x:1", "and is at 61 s, the listed load's call running on: it bars no other load", res());
+  await s.close(); await c.close(); await t.close();
 });
 
 await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
@@ -1601,8 +1605,10 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
   await use(s, "u0", SMALL); move(6_000);
   askM(c, "f1", "fail:1", "background"); await c.next("go", "f1");
   ps.models = []; await b.refresh();
-  move(121_000); move(121_000);
-  ok(res().loading.join() === "ollama/fail:1" && res().unlisted.length === 0, "a load left out 120 s and held to again, its call running on", res());
+  move(121_000);
+  const out = res().unlisted.join();
+  move(121_000);
+  ok(out === "fail:1" && res().loading.join() === "ollama/fail:1" && res().unlisted.length === 0, "a load left out 120 s and held to again, its call running on", res());
   move(8_000);
   { const h = ps.hits; done(c, "f1"); await until(() => ps.hits > h); await b.refresh(); }
   ok(lines.some((l) => l.includes(`ollama/fail:1: a load of it ended with ${SMALL} gone`)), "its call ends 250 s after it began: judged by the list as the load began, and by the model used then", lines.slice(-3));
@@ -1619,9 +1625,10 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
   ps.status = 500; await sleep(400); await b.refresh();
   ok(res().loaded === null, "the list unreadable past its bound as its call runs on: no rule", res());
   ps.status = 200; ps.models = []; await b.refresh();
+  const out = res().unlisted.length;
   { const h = ps.hits; done(c, "f1"); await until(() => ps.hits > h); await b.refresh(); }
   askM(c, "f2", "fail:1", "background", { max_wait_s: 600 });
-  ok(!!(await c.next("go", "f2", SOON)) && !lines.some((l) => l.includes("does not load")), "read again with nothing loaded, its call ending then: not read against the old list, and its model asked for at once", res());
+  ok(out === 0 && !!(await c.next("go", "f2", SOON)) && !lines.some((l) => l.includes("does not load")), "read again with nothing loaded, its call ending then: left out no more, not read against the old list, and its model asked for at once", res());
   await s.close(); await c.close();
 }, { staleMs: 100, stay: 0 });
 
@@ -1656,6 +1663,314 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
   ok(!lines.some((l) => l.includes("does not load")), "a call to another model, begun and ended meanwhile with the loaded model gone: nothing is said against it", lines.slice(-3));
   await s.close(); await c.close(); await t.close();
 });
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // Review pass 6, the claims audit. Every line that names a model names it as its brain asks for it, the list's
+  // spelling beside it where the two differ (the lines of a leave-out, a listing and a failed load gave the list's
+  // alone: the name to fix in a brain's settings was the one spelling not shown).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  askM(c, "f1", "Fail", "background"); await c.next("go", "f1");
+  move(121_000);
+  ok(lines.some((l) => l.startsWith("ollama/Fail (fail:latest): its load has run 120 s")), "a load left out at its bound is said by the name its brain asks for, and the list's", lines.slice(-2));
+  ps.models = [SMALL, "fail:latest"]; await b.refresh();
+  ok(lines.some((l) => l.startsWith("ollama/Fail (fail:latest): listed now, and under the residency rule again")) && res().unlisted.length === 0 && !lines.some((l) => l.includes("other background waits for the")), "and so is its listing, which ends its time left out; no drain was said, nothing having run to wait for", lines.slice(-2));
+  done(c, "f1"); await quiet();
+  askM(c, "f2", "fail:latest", "background"); await c.next("go", "f2"); done(c, "f2"); await quiet();
+  ps.models = [SMALL]; await b.refresh();
+  move(200_000);
+  askM(c, "f3", "fail:latest", "background");
+  ok(!!(await c.next("go", "f3", SOON)), "asked for since by the list's own spelling, and loaded again on the idle server", res());
+  move(121_000);
+  ok(lines.some((l) => l.startsWith("ollama/fail:latest: its load has run 120 s")), "it is named by that spelling alone", lines.slice(-2));
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move }) => {
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "f1", "Fail", "background"); await c.next("go", "f1");
+  ps.models = [];
+  { const h = ps.hits; done(c, "f1"); await until(() => ps.hits > h); await b.refresh(); }
+  ok(lines.some((l) => l.startsWith(`ollama/Fail (fail:latest): a load of it ended with ${SMALL} gone`)), "a model that does not load is said by the name its brain asks for too", lines.slice(-2));
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // Review pass 6, the cold read. A load in hand is over where the list names its model or goes unreadable, however
+  // it stood: left out at its bound with a call ended, then the list gone and back, a pool kept its flags — its asks
+  // refused with the model listed, idle and room to spare, and a drain for it later stopped the server's background.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "k1", BIG, "background"); askM(c, "k2", BIG, "background"); await c.next("go", "k2");
+  askM(c, "k3", BIG, "background"); await c.next("queued", "k3");
+  move(30_000); done(c, "k1"); await quiet();
+  move(91_000); await quiet();
+  ok(res().unlisted.join() === BIG && !c.seen("go", "k3"), "a load of two calls, one ended, left out at its bound: its waiting ask is not granted", res());
+  ps.status = 500; await sleep(400); await b.refresh();
+  ok(res().loaded === null && !!(await c.next("go", "k3", SOON)), "the list unreadable past its bound: no rule, and the ask goes by the room", res());
+  ps.status = 200; ps.models = [SMALL, BIG]; await b.refresh();
+  askM(c, "k4", BIG, "background"); await c.next("queued", "k4");
+  done(c, "k2"); done(c, "k3");
+  ok(!!(await c.next("go", "k4", SOON)), "read again with the model listed, its calls ended: its next ask goes — nothing of the load is left on its pool", res());
+  ps.models = [SMALL]; await b.refresh(); done(c, "k4"); await quiet();
+  askM(s, "e1", SMALL, "background");
+  ok(!!(await s.next("go", "e1", SOON)) && !lines.some((l) => l.includes("does not load")), "and the loaded model's background goes on after it", res());
+  await s.close(); await c.close();
+}, { staleMs: 100 });
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // ...and listed while left out, with a call of the load ended, the model is under the rule again as the line says:
+  // its waiting ask goes by the room (it waited the 300 s its other call ran on).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  askM(c, "k1", BIG, "background"); askM(c, "k2", BIG, "background"); await c.next("go", "k2");
+  askM(c, "k3", BIG, "background"); await c.next("queued", "k3");
+  move(30_000); done(c, "k1"); await quiet();
+  move(91_000); await quiet();
+  ok(res().unlisted.join() === BIG && !c.seen("go", "k3"), "a load with a call ended, left out at its bound, its ask waiting", res());
+  ps.models = [SMALL, BIG]; await b.refresh();
+  ok(!!(await c.next("go", "k3", SOON)) && lines.some((l) => l.includes("listed now, and under the residency rule again")), "listed: its ask goes by the room, its other call running on", res());
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // A call's end while the load is left out does not let the next ask in, and the load's end ends its time left out:
+  // the model is not taken for loaded after it (its next ask went by the room, with no drain, no hold and no line,
+  // and kept the model the failed load had put out from loading; the back-off never passed 60 s).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  for (const id of ["f1", "f2", "f3"]) askM(c, id, "fail:1", "background", { max_wait_s: 0 });
+  await c.next("go", "f2"); await c.next("queued", "f3");
+  ps.models = []; await b.refresh();
+  move(121_000); await quiet();
+  ok(res().unlisted.join() === "fail:1" && !c.seen("go", "f3"), "a load left out at its bound, an ask of its model waiting", res());
+  move(9_000); done(c, "f1"); await quiet();
+  ok(!c.seen("go", "f3"), "one of its calls ends: the ask is not granted into the load in its place", res());
+  { const h = ps.hits; done(c, "f2"); await until(() => ps.hits > h); await b.refresh(); }
+  ok(res().unlisted.length === 0 && lines.some((l) => l.includes(`ollama/fail:1: a load of it ended with ${SMALL} gone`)) && !c.seen("go", "f3"), "the load over: judged once, its time left out over with it, and its ask backing off", res());
+  askM(s, "e1", SMALL, "background", { max_wait_s: 600 });
+  ok(!!(await s.next("go", "e1", SOON)), "what it put out is loaded again at once, no call of the failing model in its way", res());
+  ps.models = [SMALL]; await b.refresh(); done(s, "e1"); await quiet();
+  const said = () => lines.filter((l) => l.includes("ollama/fail:1: not loaded, and granted to brain canary")).length;
+  const n = said();
+  move(61_000);
+  ok(!!(await c.next("go", "f3", SOON)) && res().loading.join() === "ollama/fail:1" && said() === n + 1, "its back-off over, its ask is a load as any: drained for, held to and said — not granted as a loaded model's", res());
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // One failed read at a load's end leaves the load unjudged, and its model shut until it is judged (its next load
+  // began at once, was running when the judgement said "does not load", and lost its stay to it).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "k1", "slow:1", "background"); await c.next("go", "k1");
+  ps.models = []; ps.status = 500;
+  { const h = ps.hits; done(c, "k1"); await until(() => ps.hits > h); await quiet(); }
+  askM(c, "k2", "slow:1", "background", { max_wait_s: 0 }); await c.next("queued", "k2");
+  move(1_000); await quiet();
+  ok(!c.seen("go", "k2") && res().loading.length === 0, "the read after a load's end fails: the model's next ask, due, waits for the load to be judged", res());
+  askM(s, "e1", SMALL, "background");
+  ok(!!(await s.next("go", "e1", SOON)), "the server's other background goes on meanwhile, by the last list", res());
+  ps.status = 200; await b.refresh();
+  ok(lines.some((l) => l.includes(`ollama/slow:1: a load of it ended with ${SMALL} gone`)) && !c.seen("go", "k2"), "the next read judges it: a model that does not load, and its ask backs off", lines.slice(-2));
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // A load begun before the read that judges another's end has no word: the list it began under was of before that
+  // end (a live call begun in the gap was charged with what the other had put out).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "f1", "fail:1", "background"); await c.next("go", "f1");
+  ps.models = []; ps.delay = 200;
+  const h = ps.hits;
+  done(c, "f1");
+  await until(() => ps.hits > h);
+  askM(s, "T", "third:1", "live"); await s.next("go", "T");
+  await sleep(300); ps.delay = 0; await b.refresh(); await quiet();
+  move(5_000);
+  { const h2 = ps.hits; done(s, "T"); await until(() => ps.hits > h2); await b.refresh(); }
+  askM(s, "T2", "third:1", "background", { max_wait_s: 0 });
+  ok(!!(await s.next("go", "T2", SOON)) && lines.filter((l) => l.includes("does not load")).length === 1, "a live call begun before the read that judged a failed load, and ended unlisted: the model that load put out is not laid to it, and its model does not back off", lines.slice(-3));
+  await s.close(); await c.close();
+}, { stay: 0 });
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // One model under two spellings is two pools: where one's call ends unlisted while the other's still runs, the
+  // load is not over (one brain's call given up, another's live call still loading the model: "does not load").
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "a", "Nomic", "background"); await c.next("go", "a");
+  askM(s, "L", "nomic:latest", "live"); await s.next("go", "L");
+  ps.models = [];
+  move(20_000);
+  { const h = ps.hits; done(c, "a"); await sleep(300); await b.refresh(); void h; }
+  ok(!lines.some((l) => l.includes("does not load")), "a call to a model ends unlisted while another's, under the list's own spelling of it, runs on: nothing is judged", lines.slice(-2));
+  ps.models = ["nomic:latest"]; await b.refresh(); done(s, "L"); await quiet();
+  askM(c, "a2", "Nomic", "background");
+  ok(!!(await c.next("go", "a2", SOON)), "the other's call loads it: listed, and the first brain's next ask goes by the room", res());
+  await s.close(); await c.close();
+}, { stay: 0 });
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // What a failed load put out is taken for due for RECENT_S, and no longer (owed with no age, an ask 61 s into its
+  // 600 put out a model at work an hour on).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary), t = await connect(b, KEYS.third);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "f1", "fail:1", "background"); await c.next("go", "f1");
+  ps.models = [];
+  { const h = ps.hits; done(c, "f1"); await until(() => ps.hits > h); await b.refresh(); }
+  move(121_000);
+  askM(t, "k", BIG, "background"); await t.next("go", "k");
+  ps.models = [BIG]; await b.refresh(); await quiet();
+  askM(s, "e1", SMALL, "background", { max_wait_s: 600 }); await s.next("queued", "e1");
+  move(61_000); await quiet();
+  ok(res().want === null && !s.seen("go", "e1"), "121 s after a failed load put it out, nobody having asked for it: its ask waits as any model's, 61 s into its 600 with another model at work", res());
+  await s.close(); await c.close(); await t.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, move, res }) => {
+  // Review pass 6, the mutation tester's rows. No model is chosen while a load is under way (chosen at a tick, it was
+  // drained for as the load ended, inside the stay).
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  askM(s, "e1", SMALL, "background"); await s.next("go", "e1");
+  askM(c, "k1", BIG, "background", { max_wait_s: 0 });
+  await until(() => res().want === `ollama/${BIG}`, SOON);
+  done(s, "e1"); await c.next("go", "k1");
+  ps.models = []; await b.refresh();
+  askM(s, "e2", SMALL, "background", { max_wait_s: 0 }); await s.next("queued", "e2");
+  move(1_000); await quiet();
+  ok(res().want === null, "no model is chosen at a tick while a load is under way", res());
+  ps.models = [BIG]; await b.refresh();
+  done(c, "k1"); await quiet();
+  move(30_000); await quiet();
+  ok(!s.seen("go", "e2") && res().want === null, "the model just loaded stays its 60 s, though the model it put out had an ask due during its load", res());
+  move(31_000);
+  ok(!!(await s.next("go", "e2", SOON)), "and is put out for it at 60 s", res());
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move }) => {
+  // A load whose one call ended before the list named it, the list naming it at the judging read: a load done.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "k1", BIG, "background"); await c.next("go", "k1");
+  ps.models = [BIG];
+  const h = ps.hits;
+  done(c, "k1");
+  askM(c, "k2", BIG, "background");
+  await until(() => ps.hits > h); await b.refresh();
+  ok(!!(await c.next("go", "k2", SOON)) && !lines.some((l) => l.includes("does not load")), "a load that ended before the list named it, named at the next read with its next ask waiting: no back-off, and the ask goes", lines.slice(-3));
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL, "embed:4b"], async ({ b, ps, lines, move }) => {
+  // A failed load beside a model still listed that no brain asks for: it was there before, and is none come.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "f1", "fail:1", "background"); await c.next("go", "f1");
+  ps.models = ["embed:4b"];
+  { const h = ps.hits; done(c, "f1"); await until(() => ps.hits > h); await b.refresh(); }
+  ok(lines.some((l) => l.includes(`ollama/fail:1: a load of it ended with ${SMALL} gone`)), "a load ended with the model in use gone, itself never named, and an idle model still listed that no brain asks for: a model that does not load all the same", lines.slice(-3));
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // A model backing off that the list comes to name backs off no more.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "f1", "fail:1", "background"); await c.next("go", "f1");
+  ps.models = [];
+  { const h = ps.hits; done(c, "f1"); await until(() => ps.hits > h); await b.refresh(); }
+  askM(s, "L", "fail:1", "live"); await s.next("go", "L");
+  ps.models = ["fail:1"]; await b.refresh();
+  done(s, "L"); await quiet();
+  askM(c, "f2", "fail:1", "background");
+  ok(lines.some((l) => l.includes("does not load")) && !!(await c.next("go", "f2", SOON)), "a model backing off, listed since (a live call loaded it): its back-off is over, and background to it goes by the room", res());
+  await s.close(); await c.close();
+});
+
+await withResidency(Array.from({ length: 70 }, (_, i) => `m${i}:1`).concat(SMALL), async ({ b, res }) => {
+  // Pools gone leave the server's count of them: past TURN_NOW of them a turn waits for the tick.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  for (let i = 0; i < 70; i++) { askM(s, `g${i}`, `m${i}:1`, "background"); await s.next("go", `g${i}`); done(s, `g${i}`); }
+  await quiet();
+  askM(s, "e1", SMALL, "background"); await s.next("go", "e1");
+  askM(c, "k", BIG, "background", { max_wait_s: 0 }); await c.next("queued", "k"); await quiet();
+  ok(res().want === `ollama/${BIG}`, "70 models asked for and done, two pools left: an ask due at once is chosen at the ask, not the tick", res().want);
+  await s.close(); await c.close();
+});
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // With no list there is no rule, a back-off included; and a second outage is said, however soon after the first.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "f1", "fail:1", "background"); await c.next("go", "f1");
+  ps.models = [];
+  { const h = ps.hits; done(c, "f1"); await until(() => ps.hits > h); await b.refresh(); }
+  ps.status = 500; await sleep(200); await b.refresh();
+  askM(c, "f2", "fail:1", "background");
+  ok(res().loaded === null && lines.some((l) => l.includes("does not load")) && !!(await c.next("go", "f2", SOON)), "the list unreadable past its bound: with no rule, the model that was backing off goes by the room", res());
+  ps.status = 200; await b.refresh();
+  ps.status = 500; await sleep(200); await b.refresh();
+  ok(lines.filter((l) => l.includes("could not be read")).length === 2 && lines.some((l) => l.includes("read again")), "read again, then unreadable again within the hour: said both times", lines.slice(-3));
+  await s.close(); await c.close();
+}, { staleMs: 100, stay: 0 });
+
+await withResidency([SMALL], async ({ b, move, res }) => {
+  // On a quiet server, of two models asked for and neither due, the one asked for first is loaded first.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary), t = await connect(b, KEYS.third);
+  await use(s, "u0", SMALL);
+  askM(c, "x", "x:1", "background", { max_wait_s: 600 }); await c.next("queued", "x");
+  move(1_000);
+  askM(t, "y", "y:1", "background", { max_wait_s: 600 }); await t.next("queued", "y");
+  move(5_000);
+  ok(!!(await c.next("go", "x", SOON)) && !t.seen("go", "y"), "a quiet server, two models asked for, neither due: the one asked for first is loaded first", res());
+  await s.close(); await c.close(); await t.close();
+});
+
+await withResidency([SMALL], async ({ ps, res }) => {
+  // The list is read on its own, every PS_S (here 100 ms, at the broker's tick), with no call's end to ask for it.
+  ps.models = [SMALL, BIG];
+  ok(await until(() => res().loaded?.length === 2, 3_000), "a model the server loads on its own shows at the next read, unasked", res());
+}, { psMs: 100 });
+
+await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
+  // A drain in hand as the list goes unreadable is dropped with the rule, and is no drain given up when it returns.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary);
+  askM(s, "e1", SMALL, "background"); await s.next("go", "e1");
+  askM(c, "k", BIG, "background", { max_wait_s: 0 });
+  await until(() => res().want === `ollama/${BIG}`, SOON);
+  ps.status = 500; await sleep(200); await b.refresh();
+  ok(res().loaded === null && res().want === null && !!(await c.next("go", "k", SOON)), "the list unreadable past its bound mid-drain: no rule, no drain, and the ask goes by the room", res());
+  move(130_000);
+  ps.status = 200; ps.models = [SMALL, BIG]; await b.refresh();
+  ok(!lines.some((l) => l.includes("given up")), "read again 130 s on: no drain was given up", lines.slice(-2));
+  await s.close(); await c.close();
+}, { staleMs: 100 });
+
+await withResidency([SMALL], async ({ b, ps, move, res }) => {
+  // A background load in hand as the list went unreadable begins no stay later (a live call's load of the model an
+  // hour on began one), and what a failed load had put out is owed nothing after.
+  const s = await connect(b, KEYS.stable), c = await connect(b, KEYS.canary), t = await connect(b, KEYS.third);
+  await use(s, "u0", SMALL); move(6_000);
+  askM(c, "f1", "fail:1", "background"); await c.next("go", "f1");
+  ps.models = [];
+  { const h = ps.hits; done(c, "f1"); await until(() => ps.hits > h); await b.refresh(); }
+  askM(c, "k", BIG, "background"); await c.next("go", "k");
+  ps.status = 500; await sleep(200); await b.refresh();
+  done(c, "k"); await quiet();
+  ps.status = 200; ps.models = ["embed:4b"]; await b.refresh();
+  askM(s, "e1", SMALL, "background", { max_wait_s: 600 }); await s.next("queued", "e1");
+  move(1_000); await quiet();
+  ok(res().want === null && !s.seen("go", "e1"), "read again: what a failed load put out before the list went is taken for due no more — its ask waits for the server's quiet", res());
+  s.send({ op: "done", id: "e1" }); await quiet();
+  move(600_000);
+  askM(s, "L", BIG, "live"); await s.next("go", "L");
+  ps.models = ["embed:4b", BIG]; await b.refresh(); done(s, "L"); await quiet();
+  askM(t, "x", "x:1", "background", { max_wait_s: 0 });
+  ok(!!(await t.next("go", "x", SOON)), "and a live call's load of the model background was loading then begins no stay: another model's ask, due, goes", res());
+  await s.close(); await c.close(); await t.close();
+}, { staleMs: 100 });
 
 await withResidency([], async ({ b, lines, move, res }) => {
   // With no model listed, a drain given up is given up: the server is not chosen for it again in the same breath.
@@ -1904,7 +2219,7 @@ await withResidency([SMALL], async ({ b, ps, lines, move, res }) => {
   await until(() => res().loaded?.join() === BIG);
   askM(s, "e1", SMALL, "background", { max_wait_s: 0 }); await s.next("queued", "e1");
   move(59_000); await quiet();
-  ok(res().want === null && !lines.some((l) => l.includes("does not load")), "a read under way as the load's only call ended, its list of mid-load, judges nothing: the next names the model, its stay begins, and it is no failed load", res());
+  ok(res().want === null && !s.seen("go", "e1") && !lines.some((l) => l.includes("does not load")), "a read under way as the load's only call ended, its list of mid-load, judges nothing: the next names the model, its stay begins, and it is no failed load", res());
   move(2_000);
   ok(!!(await s.next("go", "e1", SOON)), "the model it put out is loaded again at 60 s");
   await s.close(); await c.close();
