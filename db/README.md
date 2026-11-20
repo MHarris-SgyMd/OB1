@@ -2521,8 +2521,8 @@ claim revoked as every arm's requeue does: its holder's write meets
 `STALE_READ` when the text moved under it, and the worker re-tags the thought
 from the new text in the same run; with the text as the worker read it
 (`--force`, or a raw move read before the rebuild) the write settles the row and
-the release finds the claim gone, so the thought is re-tagged once more at its
-next claim. With no key recorded the row is marked alone, as before. The
+the release finds the claim gone; the thought's next claim finds the row current,
+calls no model and settles the claim. With no key recorded the row is marked alone, as before. The
 worker still pools at each run what no rebuild marks: a thought tagged before
 061, a capture that fell back, a text moved raw with no rebuild.
 

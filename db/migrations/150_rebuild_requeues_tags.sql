@@ -35,9 +35,9 @@
 --     it), and the worker, finding the claim pending again, re-tags the
 --     thought from its new text in the same run (review pass 1). With the
 --     text as the worker read it (--force, or a raw move read before the
---     rebuild) its write settles the row, its release finds the claim gone,
---     and the thought is re-tagged once more at its next claim (review
---     pass 2).
+--     rebuild) its write settles the row and its release finds the claim
+--     gone; the thought's next claim finds the row current and calls no
+--     model (review passes 2 and 3).
 --   * thought_validity (149, SMD-3887) still answers no_pool for a stale
 --     tags row; with a retag key recorded the row has a pool now (named on
 --     SMD-3887, review pass 1).
