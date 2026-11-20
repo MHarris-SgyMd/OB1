@@ -5510,16 +5510,19 @@ call a row, `--reembed-share` at a time in turns with extraction while it
 has work; the start line and `--dry-run` count them
 (a later period's line counts only rows not yet claimed, so follow the
 `re-embed pass` row), and `reembed.ts --dry-run` before upgrading says how
-many. Then extraction alone until every thought dated before today (UTC)
-is extracted, then consolidation beside it — the order "Start `extract`
-alone on a backlog" asks of an operator (SMD-4468). A thought dated today is
-judged against neighbours captured on an earlier UTC date (029), all of them
-extracted by then — except across 00:00 UTC, as beside any running
-`extract`. A thought already extracted that an edit pools again during the
-period (board-sync re-rendering a ticket) keeps its entities until it is
-extracted again, so it holds nothing back; one edited before the period
-began is backlog until extracted again, as the period's re-derive sweep
-clears its entities. Until SMD-4468 the join waited for extraction's whole
+many. Then extraction alone until the thoughts captured before the period
+began are extracted, then consolidation beside it — the order "Start
+`extract` alone on a backlog" asks of an operator (SMD-4468). A thought
+captured since is judged against neighbours captured on an earlier UTC date
+(029), all of them in that backlog — except across 00:00 UTC, as beside any
+running `extract`. A write during the period dated today (board-sync's
+observation of the day, dated 00:00 UTC) is no neighbour of one, and holds
+nothing back; one dated an earlier day (a ticket created then, an import
+carrying its dates) is, and holds the join until extracted. A thought
+already extracted that an edit pools again during the period (board-sync
+re-rendering a ticket) keeps its entities until it is extracted again, so it
+holds nothing back; one edited before the period began is backlog until
+extracted again, as the period's re-derive sweep clears its entities. Until SMD-4468 the join waited for extraction's whole
 pool, which a steady inflow of writes that pause nothing (a sync key's, an
 `ingested` key's) kept from draining: the capture trigger pools each one as
 it is written, so one was pending or in hand at every poll, and

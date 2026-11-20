@@ -30055,11 +30055,12 @@ if (want("38p")) await (async () => {
 // Consolidation under a steady inflow (SMD-4468): extraction's pool, which 016's trigger fills as each capture is
 // written, never drains while captures keep coming faster than extraction takes them, and consolidation joined only
 // once it did — never while the inflow lasted (SMD-4384's review measured a judgement 158 s late at the median, 306 s
-// at most, at the shipped settings). It now joins once every thought dated before today (UTC) is extracted: a thought
-// dated today is judged against neighbours captured a UTC day or more before it (029). Its body a function's, as
+// at most, at the shipped settings). It now joins once the thoughts captured before the period began are extracted,
+// a write since dated today aside: a thought captured since is judged against neighbours captured a UTC day or more
+// before it (029). Its body a function's, as
 // [38p]'s: the module body is at TS2563's limit for control-flow analysis.
 if (want("38c")) await (async () => {
-  console.log("\n[38c] db/sleep.ts: consolidation under a steady inflow of writes that pause nothing (SMD-4468) — extraction's pool never drains while they come faster than it takes them, and consolidation joins once every thought dated before today (UTC) is extracted, judging the inflow's notes while it goes on, none claimed before that backlog is extracted, the subject sweep waiting for the whole pool; writes dated today and edits of thoughts already extracted hold nothing back (board-sync's); a backlog thought a pause has taken holds the join while the writes outpace extraction, a limit named, and no join past comes meanwhile");
+  console.log("\n[38c] db/sleep.ts: consolidation under a steady inflow of writes that pause nothing (SMD-4468) — extraction's pool never drains while they come faster than it takes them, and consolidation joins once the thoughts captured before the period began are extracted, judging the inflow's notes while it goes on, none claimed before that backlog is extracted, the subject sweep waiting for the whole pool; writes since dated today and edits of thoughts already extracted hold nothing back (board-sync's); a backlog thought a pause has taken holds the join while the writes outpace extraction, a limit named, and no join past comes meanwhile");
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, CO, sw, env, capture, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
   const unpoolSubjects = async () => {
@@ -30068,7 +30069,7 @@ if (want("38c")) await (async () => {
   };
   /** Of `ids`, those consolidation has judged: their claims under its key finished. */
   const judgedOf = async (ids: string[]) => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${CO} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...ids], "TEXT")}::uuid[])`)[0].c);
-  const JOINED = /^ {2}extraction has done every thought dated before today \(UTC\) — consolidating beside it while it extracts today's$/;
+  const JOINED = /^ {2}extraction has done the thoughts captured before the period began — consolidating beside it while it extracts the writes since$/;
   const DRAINED = /^ {2}extraction drained — consolidating beside it$/;
   const ANY_JOIN = /consolidating beside it|consolidating first/;
   const SWEEP = /^ {2}the subject sweep starts beside consolidation/;
@@ -30139,7 +30140,7 @@ if (want("38c")) await (async () => {
              (SELECT count(*)::int FROM thought_work_claims WHERE work_type = ${EX} AND status = 'succeeded' AND thought_id = ANY(${sql.array(backlog, "TEXT")}::uuid[])) AS done`) as { extracted: Date | null; judged: Date | null; done: number }[];
     const inOrder = order.extracted !== null && order.judged !== null && order.done === backlog.length && new Date(order.judged) >= new Date(order.extracted);
     assert(joined && judgedInFlow > 0 && pendingAtJudge > 0 && !drainedInFlow && inOrder && a.allJudged && a.code === 0,
-      `a capture every 300 ms, extraction's pool never drained while it lasted: consolidation joins once every thought dated before today is extracted, said so, and judges an inflow note while the inflow goes on — its first claim after the backlog's last extraction (joined ${joined}; ${judgedInFlow} inflow note(s) judged during it, ${pendingAtJudge} pending or in hand for extraction then; drained during it ${drainedInFlow}; backlog ${order.done} of ${backlog.length} extracted, the last at ${order.extracted ? new Date(order.extracted).toISOString() : "never"}, the first judgement claimed at ${order.judged ? new Date(order.judged).toISOString() : "never"}; ${a.inflow.length} captured, all judged once it ended ${a.allJudged}; exit ${a.code}${joined && judgedInFlow > 0 ? "" : lastLines()})`);
+      `a capture every 300 ms, extraction's pool never drained while it lasted: consolidation joins once the thoughts captured before the period began are extracted, said so, and judges an inflow note while the inflow goes on — its first claim after the backlog's last extraction (joined ${joined}; ${judgedInFlow} inflow note(s) judged during it, ${pendingAtJudge} pending or in hand for extraction then; drained during it ${drainedInFlow}; backlog ${order.done} of ${backlog.length} extracted, the last at ${order.extracted ? new Date(order.extracted).toISOString() : "never"}, the first judgement claimed at ${order.judged ? new Date(order.judged).toISOString() : "never"}; ${a.inflow.length} captured, all judged once it ended ${a.allJudged}; exit ${a.code}${joined && judgedInFlow > 0 ? "" : lastLines()})`);
     assert(!sweptInFlow && sweptAfter,
       `…and the subject sweep waits for extraction's whole pool, starting once the inflow has ended, not at the backlog's join (review pass 2, the maintainer's choice) (started during it ${sweptInFlow}; after ${sweptAfter}${sweptAfter ? "" : lastLines()})`);
     await unpoolSubjects();
@@ -30174,8 +30175,8 @@ if (want("38c")) await (async () => {
       `…and backlog thoughts a pause has taken, one stalled and one stopped once, dated behind the captures since, hold the join while they come faster than extraction takes them — no join past meanwhile — and consolidation judges every note once the inflow ends (joined during it ${joinedInFlowB}; held thoughts ${heldAtEnd.join(",")} at its end; ${b.inflow.length} captured, all judged after ${b.allJudged}; exit ${b.code}${!joinedInFlowB && b.allJudged ? "" : lastLines()})`);
 
     // Board-sync's writes (review pass 2): it dates an observation at 00:00 UTC of its day, and re-renders a ticket in
-    // place, which 016 pools again. Dated by the period's start both were backlog, and held the join as before: now a
-    // write dated today is none, and a thought already extracted that an edit pools again during the period keeps
+    // place, which 016 pools again. Both were backlog, and held the join as before: now a write during the period
+    // dated today is none, and a thought already extracted that an edit pools again during the period keeps
     // its entities, no backlog either (the period's re-derive sweep clears those of one edited before it began).
     // The journal's notes, all extracted above, are this case's older thoughts; once the period has begun one is
     // edited every 2 s while the inflow goes on, each edit pooling it again behind the captures, and
@@ -31099,7 +31100,7 @@ if (want("38b")) {
     lines.length = 0;
     const dry = await runSleep({ url: URL_!, subjects: false, env, capture: 1, poll: 1, dryRun: true, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
       .finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
-    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 093 not applied\) — consolidation joins only once every thought dated before today \(UTC\) is extracted, never past a stalled one/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
+    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 093 not applied\) — consolidation joins only once the thoughts captured before the period began are extracted, never past a stalled one/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
       `without the table the start says consolidation joins only once the period's backlog is extracted, and the dry run reads the pools (exit ${dry})`);
     // With it, the dry run beside the scheduler named the held thought and the pool it joins past.
     assert(dryHeld === 0 && dryLines.some((l) => new RegExp(`held back across stops \\(1 of 1\\): ${stuck}, no window kept over \\d+ stop\\(s\\), the last \\d+ with none gained`).test(l)) && dryLines.some((l) => /only 1 stalled thought\(s\), which consolidation would join past/.test(l)),
