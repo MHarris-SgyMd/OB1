@@ -100,7 +100,7 @@ The runner acts as itself, never as the maintainer: its own agent-kind brain key
 bun scripts/agent-runner/setup.ts dirs                      # make the directory (0700), idempotent
 bun scripts/agent-runner/setup.ts install linear            # copy the key first; this reads it from the clipboard (pbpaste)
 bun scripts/agent-runner/setup.ts install brain --stdin     # or read the key from stdin
-bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork)
+bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork); the probe stamp's binary and install
 bun scripts/agent-runner/setup.ts check-github <bot-login>  # the fork exists and the bot cannot push here (needs gh)
 ```
 
@@ -186,9 +186,9 @@ Each runner session, the worker's and the review's, runs inside the five layers 
   * Outside the stamp: **`text.ts`** has the one-line cut and `maskTokens`, the one mask for a claim token (`wc_…` and the markdown-escaped `wc\_…`); **`facts.ts`** has `jsonOf` and `NOT_JSON`; **`fixture-git.ts`** has the git the self-checks build fixtures with.
 
 ```bash
-mkdir -p ~/.local/share/open-brain/agent-runner/claude && chmod 700 ~/.local/share/open-brain/agent-runner/claude
-cp -p ~/.local/share/claude/versions/2.1.329 ~/.local/share/open-brain/agent-runner/claude/  # the runner's own copy: the updater prunes its own directory
-shasum -a 256 ~/.local/share/open-brain/agent-runner/claude/2.1.329                   # the pinned copy's checksum
+bun scripts/agent-runner/setup.ts claude ~/.local/share/claude/versions/2.1.329       # the runner's own copy; prints --claude --sha256 --version
+bun scripts/agent-runner/setup.ts checkout                                            # the runner's own checkout, at the main checkout's origin/main
+cd ~/.local/share/open-brain/agent-runner/install                                     # the probes and a run start from the install
 bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.329
 bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts … --state <dir> --only init,keychain --main-checkout ~/Projects/OB1
 bun scripts/agent-runner/probes.ts --self-check                                       # offline, no Claude Code; CI runs it
@@ -229,7 +229,13 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 
 **The brief probe passes on 2.1.329** (2026-11-20): the worker got past CLAUDE.md step 1 and edited the clone, in 17 turns for $0.21. The guard refused three of its sixteen calls, each for the command's shape (an `&`, a `git bundle` form other than `create`, an `ls`), none for a tool input it didn't know. A first try that day reached no model: the API answered 401 to the runner's Anthropic key, which the maintainer then replaced.
 
-**The stamp also names the checkout the probes ran from,** and a run must start from that checkout with the six hashed files as probed. Keep the runner's install a checkout that stays on one commit; a worktree that changes branch with each task refuses to run whenever its branch differs in one of them.
+**The stamp names two paths, and `setup.ts` makes both** (SMD-4491). A run starts only under a stamp whose Claude Code and whose checkout are still there and still as probed. Both were lost once: the binary to Claude Code's updater, the checkout to a worktree's removal.
+
+* **`setup.ts claude <path>`** copies that binary to `~/.local/share/open-brain/agent-runner/claude/<version>` (0500, in a 0700 directory), asking the binary its own version. It prints the three flags the probes and a run take. The same bytes again are left alone; other bytes under a version already there are refused, since a stamp may name the copy.
+* **`setup.ts checkout [--commit <sha>]`** makes `~/.local/share/open-brain/agent-runner/install`: a clone of the runner's bare repository on a detached HEAD, at the main checkout's `origin/main` unless a commit is given. No task works in it. Run again, it moves the install to the newer commit and names each probed file the move changed: any named means the probe sweep runs again from the install; none means the stamp still holds. A checkout with changes of its own is refused.
+* **`setup.ts verify`** and **`live-run.ts --plan`** say what the stamp makes of both, before a run is tried: a binary gone or changed, an install gone, each probed file that differs, a run started from another checkout, a new Bun, git or macOS build.
+
+Until the install is made and probed, the stamp names the checkout the last sweep ran from, and a run starts from there.
 
 ## The live run (`live-run.ts`)
 

@@ -10,7 +10,10 @@
  *   bun scripts/agent-runner/setup.ts dirs                       # make the directory (0700), idempotent
  *   bun scripts/agent-runner/setup.ts install linear            # copy the key to the clipboard first; this reads it
  *   bun scripts/agent-runner/setup.ts install brain --stdin     # or read the key from stdin
- *   bun scripts/agent-runner/setup.ts verify [--bot <login>]    # each secret present, 0600, right shape (+ the fork)
+ *   bun scripts/agent-runner/setup.ts verify [--bot <login>]    # each secret present, 0600, right shape (+ the fork),
+ *                                                               # and what the probe stamp says of its binary and install
+ *   bun scripts/agent-runner/setup.ts claude <path>             # the runner's own copy of that Claude Code (SMD-4491)
+ *   bun scripts/agent-runner/setup.ts checkout [--commit <sha>] # the runner's own checkout, made or moved (SMD-4491)
  *   bun scripts/agent-runner/setup.ts check-github <bot-login>  # the fork exists and the bot can't push here (needs gh)
  *   bun scripts/agent-runner/setup.ts --self-check              # offline
  *
@@ -33,9 +36,15 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { KEY_FILES, KEY_SHAPES, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
+import { KEY_FILES, KEY_SHAPES, parseConfig, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
+import { fixtureGit } from "./fixture-git.ts";
+import type { GitRun } from "./gate.ts";
+import { CLAUDE_DIR, INSTALL_DIR, claudeVersion, copyClaude, makeInstall, stampReport } from "./install.ts";
+import { BARE_REPO, STATE_DIR, ensureBareRepo, gitRunner, installDir } from "./live-run.ts";
+import { STAMP_FILE, developerGit, hostStamp, type Host } from "./probes.ts";
+import { PROFILE_FILES, sha256Hex } from "./profile.ts";
 
 /** This repo, as the config's `repo` defaults to it: the upstream the bot forks and must not be able to push to. */
 const OWNER_REPO = "MHarris-SgyMd/OB1";
@@ -150,6 +159,17 @@ export function checkGithub(bot: string): { ok: boolean; lines: string[] } {
   return { ok, lines };
 }
 
+/** The host as it is now, for the stamp's report, or null where there is no developer git to read (off macOS). */
+async function hostNow(): Promise<Host | null> {
+  let git: string | null = null;
+  try {
+    git = developerGit();
+  } catch {
+    // no xcode-select: not macOS, where no stamp is made
+  }
+  return git === null ? null : hostStamp(process.execPath, git);
+}
+
 /** Offline self-check: the shape gate, the 0600 write, the no-symlink write, the owner-only read, and the directory check — on a temp directory, no clipboard, no network. */
 export function selfCheck(): number {
   let passed = 0;
@@ -166,6 +186,15 @@ export function selfCheck(): number {
     } catch (e) {
       failed++;
       console.log(`  ✗ ${name}: it threw (${String((e as Error)?.message ?? e).slice(0, 160)})`);
+    }
+  };
+  /** The message a call throws, or "" when it doesn't. */
+  const refuses = (body: () => unknown): string => {
+    try {
+      body();
+      return "";
+    } catch (e) {
+      return String((e as Error)?.message ?? e);
     }
   };
   const FAKE: Record<Which, string> = {
@@ -242,6 +271,113 @@ export function selfCheck(): number {
       chmodSync(dir, 0o700);
     });
 
+    section("the version a Claude Code binary names", () => {
+      ok(claudeVersion("2.1.329 (Claude Code)\n") === "2.1.329", "the first word of its --version line");
+      ok(claudeVersion("claude 2.1.329") === null && claudeVersion("") === null && claudeVersion("2.1 (Claude Code)") === null, "anything else is no version");
+    });
+
+    section("the runner's own copy of Claude Code (SMD-4491)", () => {
+      const state = join(root, "state-claude");
+      const bin = join(root, "claude-bin");
+      writeFileSync(bin, "#!/bin/sh\necho one\n", { mode: 0o755 });
+      const first = copyClaude(state, bin, "2.1.329");
+      ok(first.copied && first.path === join(state, CLAUDE_DIR, "2.1.329") && first.sha256 === sha256Hex(readFileSync(bin)) && readFileSync(first.path, "utf8") === readFileSync(bin, "utf8"), "the binary is copied to <state>/claude/<version>, and its checksum answered");
+      ok((statSync(first.path).mode & 0o777) === 0o500 && (statSync(join(state, CLAUDE_DIR)).mode & 0o777) === 0o700, "the copy is 0500 in a 0700 directory");
+      const again = copyClaude(state, bin, "2.1.329");
+      ok(!again.copied && again.sha256 === first.sha256, "the same bytes again are left as they are");
+      const other = join(root, "claude-other");
+      writeFileSync(other, "#!/bin/sh\necho two\n", { mode: 0o755 });
+      const refusedOther = refuses(() => copyClaude(state, other, "2.1.329"));
+      ok(refusedOther.includes("other bytes") && readFileSync(first.path, "utf8").includes("one"), "other bytes under a version already there are refused, the copy a stamp may name left alone");
+      symlinkSync(join(root, "elsewhere-claude"), join(state, CLAUDE_DIR, "2.1.330"));
+      const refusedLink = refuses(() => copyClaude(state, bin, "2.1.330"));
+      ok(refusedLink !== "" && !existsSync(join(root, "elsewhere-claude")), "a symlink where the copy would go is refused, its target not written");
+      ok(refuses(() => copyClaude(state, bin, "latest")).includes("not a version") && refuses(() => copyClaude(state, join(root, "no-such-binary"), "2.1.331")).includes("not a file"), "a version that isn't x.y.z, and a source that isn't a file, are refused");
+    });
+
+    section("the runner's own checkout, made and moved (SMD-4491)", () => {
+      const GIT = fixtureGit();
+      const git: GitRun = (args) => {
+        const r = spawnSync(GIT, ["-c", "user.name=t", "-c", "user.email=t@t.invalid", "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...args], { encoding: "utf8", env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+        return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+      };
+      const src = join(root, "src");
+      mkdirSync(join(src, "scripts", "agent-runner"), { recursive: true });
+      git(["init", "--quiet", src]);
+      for (const f of PROFILE_FILES) writeFileSync(join(src, f), `// ${f}\n`);
+      writeFileSync(join(src, "notes.txt"), "one\n");
+      git(["-C", src, "add", "-A"]);
+      git(["-C", src, "commit", "--quiet", "-m", "one"]);
+      const c1 = git(["-C", src, "rev-parse", "HEAD"]).stdout.trim();
+      writeFileSync(join(src, "notes.txt"), "two\n");
+      git(["-C", src, "commit", "--quiet", "-am", "two"]);
+      const c2 = git(["-C", src, "rev-parse", "HEAD"]).stdout.trim();
+      writeFileSync(join(src, PROFILE_FILES[0]), "// a probed file, changed\n");
+      git(["-C", src, "commit", "--quiet", "-am", "three"]);
+      const c3 = git(["-C", src, "rev-parse", "HEAD"]).stdout.trim();
+      const state = join(root, "state-install");
+      const made = makeInstall(git, state, src, c1);
+      const path = join(state, INSTALL_DIR);
+      ok(made.ok && made.from === null && made.changed.length === 0 && made.path === path && readFileSync(join(path, "notes.txt"), "utf8") === "one\n", "a checkout is made at the commit asked for");
+      ok(git(["-C", path, "symbolic-ref", "-q", "HEAD"]).code !== 0, "on a detached HEAD: no branch to drift");
+      const moved = makeInstall(git, state, src, c2);
+      ok(moved.ok && moved.from === c1 && moved.changed.length === 0 && readFileSync(join(path, "notes.txt"), "utf8") === "two\n", "a move that changes no probed file says so");
+      const probed = makeInstall(git, state, src, c3);
+      ok(probed.ok && probed.from === c2 && probed.changed.length === 1 && probed.changed[0] === PROFILE_FILES[0], "a move that changes a probed file names it");
+      const same = makeInstall(git, state, src, c3);
+      ok(same.ok && same.from === c3 && same.changed.length === 0, "the commit it is on already is no move");
+      writeFileSync(join(path, "notes.txt"), "edited in place\n");
+      const dirty = makeInstall(git, state, src, c1);
+      ok(!dirty.ok && dirty.problem.includes("changes of its own") && readFileSync(join(path, "notes.txt"), "utf8") === "edited in place\n", "a checkout with changes of its own is refused and left as it is");
+      const notRepo = join(root, "state-not-a-repo");
+      mkdirSync(join(notRepo, INSTALL_DIR), { recursive: true });
+      const refusedDir = makeInstall(git, notRepo, src, c1);
+      ok(!refusedDir.ok && refusedDir.problem.includes("not a checkout"), "a directory there that is no checkout is refused");
+      const short = makeInstall(git, join(root, "state-short"), src, c1.slice(0, 12));
+      ok(!short.ok && short.problem.includes("full commit id") && !existsSync(join(root, "state-short")), "a commit id that isn't whole is refused before anything is made");
+    });
+
+    section("what the probe stamp says of its binary and its install (SMD-4491)", () => {
+      const state = join(root, "state-stamp");
+      const install = join(root, "an-install");
+      mkdirSync(join(install, "scripts", "agent-runner"), { recursive: true });
+      for (const f of PROFILE_FILES) writeFileSync(join(install, f), `// ${f}\n`);
+      const bin = join(root, "probed-bin");
+      writeFileSync(bin, "the probed binary\n", { mode: 0o755 });
+      const claude = copyClaude(state, bin, "2.1.329");
+      const host: Host = { bunSha: "b".repeat(64), gitSha: "c".repeat(64), osBuild: "26A1" };
+      const write = (over: Record<string, unknown> = {}): void => {
+        const profile = Object.fromEntries(PROFILE_FILES.map((f) => [f, sha256Hex(readFileSync(join(install, f)))]));
+        writeFileSync(join(state, STAMP_FILE), JSON.stringify({ at: "t", claude: { path: claude.path, sha256: claude.sha256, version: claude.version }, host, install, profile, probes: [], ...over }));
+      };
+      const texts = (r: { lines: { ok: boolean; text: string }[] }): string => r.lines.filter((l) => !l.ok).map((l) => l.text).join(" | ");
+      ok(!stampReport(join(root, "state-none"), install, host).ok && texts(stampReport(join(root, "state-none"), install, host)).includes("no probe stamp"), "no stamp is said");
+      write();
+      const good = stampReport(state, install, host);
+      ok(good.ok && good.lines.length === 3 && good.lines[0].text.includes("as probed") && !good.lines[0].text.includes("outside"), "a stamp whose binary, install and host are as probed: three lines, all good");
+      ok(stampReport(state, install, null).lines.length === 2 && stampReport(state, install, null).ok, "with no host to read, Bun, git and the macOS build are left unread");
+      const elsewhere = stampReport(state, join(root, "another-checkout"), host);
+      ok(!elsewhere.ok && texts(elsewhere).includes("not the stamp's install") && texts(elsewhere).includes(install), "from another checkout it says a run starts from the install");
+      const bunMoved = stampReport(state, install, { ...host, bunSha: "d".repeat(64) });
+      ok(!bunMoved.ok && texts(bunMoved).startsWith("Bun changed"), "a new Bun is named, alone");
+      writeFileSync(join(install, PROFILE_FILES[2]), "// edited since the probes\n");
+      const edited = stampReport(state, install, host);
+      ok(!edited.ok && texts(edited).includes(`1 of the install's probed files differ`) && texts(edited).includes(PROFILE_FILES[2]) && !texts(edited).includes(PROFILE_FILES[0]), "a probed file edited since is named, and only it");
+      write();
+      rmSync(join(install, PROFILE_FILES[1]));
+      ok(texts(stampReport(state, install, host)).includes(PROFILE_FILES[1]), "a probed file gone from the install is named as differing");
+      writeFileSync(join(install, PROFILE_FILES[1]), `// ${PROFILE_FILES[1]}\n`);
+      write({ install: join(root, "removed-install") });
+      ok(texts(stampReport(state, join(root, "removed-install"), host)).includes("install is gone"), "an install that is gone is said");
+      write({ claude: { path: bin, sha256: sha256Hex(readFileSync(bin)), version: "2.1.329" } });
+      const outside = stampReport(state, install, host);
+      ok(outside.ok && outside.lines[0].text.includes("outside the runner's directory"), "a binary outside the runner's directory is as probed, with a word that an updater can remove it");
+      rmSync(bin);
+      ok(texts(stampReport(state, install, host)).includes("is gone") && texts(stampReport(state, install, host)).includes("setup.ts claude"), "a binary that is gone is said, with the step that copies it again");
+      write({ claude: { path: claude.path, sha256: "0".repeat(64), version: "2.1.329" } });
+      ok(texts(stampReport(state, install, host)).includes("its bytes changed"), "a binary whose bytes are not the probed ones is said");
+    });
+
     section("install rewrites the mode of an existing world-readable file to 0600", () => {
       const dir = join(root, "fix-mode");
       mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -307,8 +443,56 @@ if (import.meta.main) {
       for (const line of g.lines) console.log(line);
       if (!g.ok) failed++;
     }
-    console.log(failed ? `${failed} not ready` : "all four identities present and valid");
+    // The probe stamp's binary and install, as they are now: what a run from this checkout would be refused for (SMD-4491).
+    const report = stampReport(STATE_DIR, installDir(), await hostNow());
+    for (const line of report.lines) console.log(`${line.ok ? "✓" : "✗"} stamp: ${line.text}`);
+    failed += report.lines.filter((l) => !l.ok).length;
+    console.log(failed ? `${failed} not ready` : "all four identities present and valid, and the probe stamp covers a run from this checkout");
     process.exit(failed ? 1 : 0);
+  }
+
+  if (cmd === "claude") {
+    const source = rest[0];
+    if (!source || rest.length !== 1) fail("usage: claude <path to a Claude Code binary>");
+    try {
+      const said = spawnSync(source as string, ["--version"], { encoding: "utf8", timeout: 20_000 });
+      const version = claudeVersion(said.stdout ?? "");
+      if (said.status !== 0 || version === null) throw new Error(`${source} --version did not answer a version (x.y.z)`);
+      const copy = copyClaude(STATE_DIR, source as string, version);
+      console.log(`✓ ${copy.copied ? "copied to" : "already at"} ${copy.path} (0500), Claude Code ${copy.version}`);
+      console.log(`  --claude ${copy.path} --sha256 ${copy.sha256} --version ${copy.version}`);
+      console.log("  Give the probes and a run these three; a stamp made on another path does not cover this copy.");
+      process.exit(0);
+    } catch (e) {
+      console.error(`✗ ${(e as Error).message}`);
+      process.exit(1);
+    }
+  }
+
+  if (cmd === "checkout") {
+    const at = rest.indexOf("--commit");
+    if (rest.length !== (at >= 0 ? 2 : 0) || (at >= 0 && at !== 0)) fail("usage: checkout [--commit <full commit id>]");
+    try {
+      const configPath = join(RUNNER_DIR, "config.json");
+      const text = readOwnedFile(configPath, false);
+      if (text === null) throw new Error(`no config at ${configPath}`);
+      const cfg = parseConfig(text, homedir());
+      if ("error" in cfg) throw new Error(`${configPath}: ${cfg.error}`);
+      const git = gitRunner(homedir());
+      // The runner's bare repository, brought to the main checkout's origin/main: the one source the install clones.
+      const bare = ensureBareRepo(git, BARE_REPO, cfg.mainCheckout);
+      if (!bare.ok) throw new Error(bare.problem);
+      const made = makeInstall(git, STATE_DIR, BARE_REPO, at >= 0 ? (rest[1] as string) : bare.base);
+      if (!made.ok) throw new Error(made.problem);
+      console.log(`✓ ${made.path} is at ${made.commit}${made.from === null ? " (made)" : made.from === made.commit ? " (as it was)" : ` (moved from ${made.from})`}`);
+      if (made.from === null) console.log("  Run the probes from it before a run: no stamp names it yet.");
+      else if (made.changed.length) console.log(`  The move changed ${made.changed.length} probed file(s): ${made.changed.join(", ")}. Run the probes again from it.`);
+      else if (made.from !== made.commit) console.log("  The move changed no probed file: a stamp made from it still holds.");
+      process.exit(0);
+    } catch (e) {
+      console.error(`✗ ${(e as Error).message}`);
+      process.exit(1);
+    }
   }
 
   if (cmd === "check-github") {
@@ -323,6 +507,8 @@ if (import.meta.main) {
   bun scripts/agent-runner/setup.ts dirs
   bun scripts/agent-runner/setup.ts install <${WHICHES.join("|")}> [--stdin]
   bun scripts/agent-runner/setup.ts verify [--bot <login>]
+  bun scripts/agent-runner/setup.ts claude <path to a Claude Code binary>
+  bun scripts/agent-runner/setup.ts checkout [--commit <full commit id>]
   bun scripts/agent-runner/setup.ts check-github <bot-login>
   bun scripts/agent-runner/setup.ts --self-check`);
 }

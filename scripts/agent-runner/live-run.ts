@@ -37,7 +37,8 @@ import { run, type RunDeps, type RunInput, type RunLimits, type RunSession, type
 import { liveRun, type LiveDeps, type LiveResult } from "./live.ts";
 import { REAL_DEPS, runSession, type Pinned } from "./session.ts";
 import { profileHashes, settingsText, type SessionLimits, type SessionPaths } from "./profile.ts";
-import { PROBES, STAMP_FILE, developerGit, hostStamp, stampProblem } from "./probes.ts";
+import { PROBES, STAMP_FILE, developerGit, hostStamp, stampProblem, type Host } from "./probes.ts";
+import { stampReport } from "./install.ts";
 import type { Commitlint, GitRun, ScanSecrets } from "./gate.ts";
 
 /** The commit identity a run's sessions use. The real bot (SMD-4089's GitHub machine account) is cut 3; until then a run commits as this placeholder and never publishes, so no real identity is needed. */
@@ -137,6 +138,17 @@ export async function ticketFor(gql: Gql, row: Ticket): Promise<{ ok: true; tick
   const problem = ticketProblem(ticket);
   if (problem) return { ok: false, problem: `${row.identifier} can't be briefed: ${problem}` };
   return { ok: true, ticket };
+}
+
+/** The host as it is now, for the stamp's report, or null where there is no developer git to read (off macOS). */
+async function hostNow(): Promise<Host | null> {
+  let git: string | null = null;
+  try {
+    git = developerGit();
+  } catch {
+    // no xcode-select: not macOS, where no stamp is made
+  }
+  return git === null ? null : hostStamp(process.execPath, git);
 }
 
 /** The install: the checkout this script lives in (its guard.ts runs the sessions' hook, its profile templates configure them). A real deploy keeps it at ~/.local/share/open-brain/agent-runner/install; for a hand-run it is the working tree. */
@@ -358,6 +370,8 @@ export async function main(io: Io): Promise<number> {
       `  Verify:   ${t.verify.length} item(s)${t.verify.length ? `\n${t.verify.map((v, i) => `    ${i + 1}. ${v}`).join("\n")}` : ""}`,
       `  names:    ${t.named.length ? t.named.join(", ") : "(none)"}`,
       `  stable:   ${cfg.restUrl}`,
+      // What --execute would be refused for by the probe stamp, said here before it is tried (SMD-4491).
+      ...stampReport(STATE_DIR, installDir(), await hostNow()).lines.map((l) => `  stamp:    ${l.ok ? "" : "NO — "}${l.text}`),
       "",
       "--plan only: no session, no claim, no Linear write, no spend. --execute claims, runs the sessions (~$13) and hands back; no PR.",
     ].join("\n")));
