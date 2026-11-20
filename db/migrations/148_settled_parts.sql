@@ -28,10 +28,12 @@
 --     beside them: the two tables do not read each other. Two rows of one
 --     pair may not hold the same statement in the same thought. The statement
 --     is a part's identity as 016's fingerprint reads it
---     (content_fingerprint_of: case and runs of white space folded, as a
---     thought's text is), so a statement a reviewer rejected is not proposed
---     on that pair again in other capitals or spacing, while another
---     statement of the pair may be. The fold is that much and no more. A
+--     (content_fingerprint_of: case, runs of white space and white space at
+--     either end folded, as a thought's text is), so a statement a reviewer
+--     rejected is not proposed on that pair again in other capitals or
+--     spacing, while another statement of the pair may be. The fold is that
+--     much and no more, and what counts as a capital or as white space is
+--     the database's own (its ctype). A
 --     quote that differs by a word or a full stop is another part. So is one
 --     that differs by a character a reader does not see, a no-break space, a
 --     zero-width space or an accent typed as two characters: of 20 spellings
@@ -47,22 +49,28 @@
 --     reason, judge key, both fingerprints, recipe, agent) is the pass's one
 --     write. It refuses a part of the wrong shape with a RAISE, and a call
 --     above READ COMMITTED, as the decision does. It takes the supersession
---     advisory lock, which a decision on a proposal or a part, a rebuild, a
---     delete and a forget each take first, so no rebuild at READ COMMITTED,
---     which is how every caller in the repository runs one, runs between
---     its read of the two texts and its commit (rebuild_derived has no
---     guard of its own: above READ COMMITTED, one that waited on the lock
+--     advisory lock, which a decision on a proposal or a part, a rebuild,
+--     delete_thought and forget_thought each take first, so no rebuild at
+--     READ COMMITTED runs between its read of the two texts and its commit.
+--     (rebuild_derived has no guard of its own. A forget refuses above READ
+--     COMMITTED; db/rebuild.ts and the sleep scheduler's sweep run at their
+--     session's level, which is READ COMMITTED unless the database or the
+--     role defaults higher. Above it, a rebuild that waited on the lock
 --     reads the store as its transaction first saw it, and misses the
---     part). It locks no thought's row for itself (its foreign keys take a
+--     part.) It locks no thought's row for itself (its foreign keys take a
 --     key share on each, which no edit waits for): an edit does not wait for
 --     it, and one that commits while it runs is as one that commits after it
---     (the next paragraph but one). It refuses a judgement of a text that
---     had moved when it read it: that is answered EDITED_SINCE with the
---     side, nothing written, for the pass to put the thought back (PR 2).
---     Otherwise it answers {ok, action, id, status}: `recorded`, with the
---     new row's id and `replaced` (the next paragraph), or `stands`, with
---     the id and status of the row that already holds the statement, which
---     it keeps locked to its transaction's end.
+--     (the next paragraph but one). A thought that is not there when it
+--     reads the two is answered NOT_FOUND with the side (older_gone,
+--     newer_gone), nothing written and no fingerprint compared: a delete or
+--     a forget while the judge was out is the pass's to step over (PR 2).
+--     It refuses a judgement of a text that had moved when it read it: that
+--     is answered EDITED_SINCE with the side, nothing written, for the pass
+--     to put the thought back (PR 2). Otherwise it answers {ok, action, id,
+--     status}: `recorded`, with the new row's id and `replaced` (the next
+--     paragraph), or `stands`, with the id and status of the row that
+--     already holds the statement, which it keeps locked to its
+--     transaction's end.
 --   * A part's row is one judgement, and none is written over another. When
 --     the pass names a statement again and the row that holds it is
 --     undecided and no longer a judgement of the texts as they stand (stale,
@@ -73,18 +81,24 @@
 --     and so does a decided one, whatever its texts have done since: the
 --     judgement given is then not recorded. So, through the two functions
 --     and against any UPDATE, an id names one judgement: a decision on the
---     id of a row judged again finds nothing (NOT_FOUND), and cannot land on
---     words its reviewer did not read. (By hand, a role holding DELETE and
---     INSERT can remove a row and write another under its id, as one
---     holding UPDATE can move a status: the table does not hold a raw write
---     to the functions' rules.)
+--     id of a row a later judgement replaced finds nothing (NOT_FOUND), and
+--     cannot land on words its reviewer did not read. An undecided part's
+--     id ends when it is replaced: a table that refers to a part refers to
+--     a decided one, or lets its reference go with the row, since a foreign
+--     key that refused the delete would refuse the write. (By hand, a role
+--     holding DELETE and INSERT can remove a row and write another under
+--     its id, as one holding UPDATE can move a status: the table does not
+--     hold a raw write to the functions' rules. A status moved by hand
+--     under a write is the one way `stands` answers stale.)
 --   * An edit is not followed by a rebuild: rebuild_derived is the
 --     operator's door (db/rebuild.ts), forget's, and the sleep scheduler's
 --     sweep, which deletes orphans and marks nothing. Until one runs for the
 --     thought, a part recorded before the edit stands pending at the old
 --     text. An accept of it is refused (EDITED_SINCE) unless forced, the
---     next judgement of its statement replaces it, and a rebuild sets it
---     stale and queues its newer thought.
+--     next judgement of its statement replaces it, and a rebuild of either
+--     thought sets it stale and queues its newer thought. A part already
+--     stale is queued again by each later rebuild while a text stays
+--     moved, and counted stale once.
 --   * review_settled_part(id, accept or reject, note, actor, force, was) is
 --     the reviewer's decision. An accept is refused when either text has
 --     moved since it was judged (EDITED_SINCE), unless forced. A decision
@@ -96,13 +110,20 @@
 --     decision, as 036 lets one reverse a proposal's, and may decide a stale
 --     row as one may a stale proposal: reject it, or accept it, which a
 --     moved text refuses unless forced. The row keeps the last decision
---     alone, and the reply's `was` says the status it replaced. A decision
---     asks no actor, as a proposal's asks none: one made with no envelope is
---     made, and names no reviewer. It runs under READ COMMITTED alone (068's
---     rule): above it, an accept that waited on the lock would read the two
---     texts as they were before the wait. The reviewer columns are stamped
---     from the actor envelope by 114's trigger function, which reads only
---     the columns the two tables share.
+--     alone, its note or none with it, and the reply's `was` says the
+--     status it replaced. A forced accept is recorded as any accept is: the
+--     row says neither that it was forced nor at which texts, and whether a
+--     decision should record them is to settle before the first is made
+--     (PR 3). A decision asks no actor, as a proposal's asks none: one made
+--     with no envelope is made, and names no reviewer unless its
+--     transaction or session had already set one (a second decision in one
+--     transaction, given no actor, is stamped with the first's, as a
+--     proposal's is). A caller's p_was is the status alone: decisions in
+--     between that leave the status as read are not seen. It runs under READ
+--     COMMITTED alone (068's rule): above it, an accept that waited on the
+--     lock would read the two texts as they were before the wait. The
+--     reviewer columns are stamped from the actor envelope by 114's trigger
+--     function, which reads only the columns the two tables share.
 --   * A part keeps its judgement (settled_parts_keep_judgement): no UPDATE
 --     changes its pair, its holder, its quotes, its word, its reason, its
 --     fingerprints, its judge or the time it was judged. A part goes with
@@ -122,9 +143,11 @@
 --     text moves, a pending part goes stale and its newer thought is queued
 --     again under the part's judge key. A decided part stands. A lineage row
 --     whose part is gone is deleted. The result gains stale_parts and
---     cascading.parts; that count, like cascading.proposals, is taken at the
---     walk, so a part committed between the walk and the row's delete goes
---     with the cascade uncounted.
+--     cascading.parts; that count, like cascading.proposals, is of the
+--     lineage rows the walk held: a part written by hand with no lineage
+--     row, or one recorded between a rebuild run on its own
+--     (db/rebuild.ts --gone) and the delete, goes with the cascade
+--     uncounted. Within a forget the write waits on the lock.
 --   * Deleting either thought takes its parts (ON DELETE CASCADE), and a
 --     part's lineage rows go with the part (settled_parts_drop_derivation),
 --     as a proposal's does. forget_thought (139) removes a thought through
@@ -136,13 +159,15 @@
 --     forgotten thought's quotes would outlast it.
 --
 -- UNLIKE A PROPOSAL
---   A part has no confidence and no similarity: the judge gives a word. Its
+--   A part has no confidence and no similarity: the judge gives a word, and
+--   a reason, which a proposal's write does not require. Its
 --   write reads the two texts and refuses a judgement of one that has moved,
---   where 063's write of a proposal records it (SMD-4480). A part judged
---   again is another row, where 063 replaces a stale proposal in place, so a
---   decision by a part's id cannot land on another judgement (a proposal's
---   can: SMD-4477). Nothing settles a part the pass no longer names, so
---   067's reopening of a rejection the pass itself made has no arm here: the
+--   where 063's write of a proposal records it (SMD-4480). An undecided
+--   part judged again once stale, or at other texts, is replaced by another
+--   row, where 063 rewrites a stale proposal in place, so a decision by a
+--   part's id cannot land on another judgement (a proposal's can:
+--   SMD-4477). Nothing settles a part the pass no longer names, so 067's
+--   reopening of a rejection the pass itself made has no arm here: the
 --   settle and its reopening are PR 2's. A repeat of a decision is refused,
 --   where a proposal's second reject is stamped again.
 --
@@ -156,6 +181,17 @@
 --   proposer's accept of its own proposal, 029's review has neither, and a
 --   part's follows 029's until the maintainer says otherwise. And no index
 --   serves a listing: PR 3's brings the one its listing is measured to need.
+--   Nothing an operator reads counts a part yet. `db/rebuild.ts --status`
+--   prints the stale proposals and no stale part, and preflight, brain_info
+--   and the dashboard say nothing of parts. Both censuses of stale lineage
+--   rows leave a part's row out, as they do a proposal's, so a pending part
+--   at a moved text shows nowhere until a rebuild or the next judgement.
+--   The sweep's census (db/rebuild.ts --orphans, the sleep scheduler,
+--   preflight) names four kinds and finds neither a proposal's orphaned
+--   lineage row nor a part's: a rebuild of one of its thoughts deletes it.
+--   And preflight's lineage coverage reads no settled_parts. These are for
+--   the pass and the review surfaces to bring (PR 2, PR 3): no part exists
+--   before the pass writes one.
 --
 -- NOT CHANGED
 --   supersession_proposals, thoughts.supersedes and every reader of them.
@@ -171,7 +207,21 @@
 --   pass's role may also delete a part, which is how an undecided one is
 --   replaced, and which the write asks for on every call that gets past
 --   its refusals, whether a row goes or not. Nothing runs at apply time
---   but the DDL and the grant: no row moves.
+--   but the DDL and the grant, and no row moves: the lineage table's kind
+--   CHECK is dropped, added and validated over every lineage row, at the
+--   first apply and at each re-apply (the whole file applied in 0.09 s on
+--   400,000 lineage rows).
+--   The file takes `thoughts` (its two foreign keys), then `derivations`
+--   (the kind's CHECK), in its one transaction, which is the order a
+--   capture and an edit take them. A forget, and a write of a generated
+--   page section, take them the other way: one in flight as the file
+--   applies can be the deadlock's victim and fail with 40P01, to be run
+--   again. With two forgets looping, 14 and 12 of 20 applies cost one; with
+--   a page write looping, 12 of 12; the migrator applied every time (review
+--   pass 4). 064 and 084 took the two tables in one file the same way. The
+--   kind's CHECK first deadlocked captures and edits instead; in a file of
+--   its own it cost nothing (0 of 20, 0 of 12): not taken, put to the
+--   maintainer.
 --   record_settled_part holds the supersession advisory lock until its
 --   transaction ends. A caller makes the write as a statement of its own,
 --   as db/consolidate.ts writes a proposal today: no thought's or claim's
@@ -184,17 +234,25 @@
 --   (review pass 3). The lock also makes the write single file with every
 --   call that takes it.
 --   rebuild_derived now reads settled_parts when a thought's walk holds a
---   part's lineage row, so a role that runs it needs SELECT there. The worker
---   and server groups hold it, and this file gives it to every role that
---   decides or records proposals. A role outside those is refused (42501) on
---   such a thought where it was not before: measured for one holding capture,
---   extraction and structure, which ran the orphan sweep until the thought
---   held a part.
+--   part's lineage row, and locks and updates a pending part whose text has
+--   moved: a role that runs it needs SELECT there for the orphan rule, and
+--   UPDATE to set a part stale. The worker and server groups hold both, and
+--   this file gives both to every role holding SELECT and UPDATE on the
+--   proposals. A role that ran it before and holds neither is refused
+--   (42501) on such a thought, and on no other: the part's orphan test is a
+--   statement of its own, so a plan that walks no part's row reads no
+--   settled_parts (as an arm of the other kinds' CASE it was refused on
+--   thoughts with no part, under a generic plan: review pass 4). Measured
+--   for one holding capture, extraction, structure and, by hand, SELECT on
+--   ob1_config, which ran the orphan sweep until the thought held a part.
+--   (As `--grant` gives those three groups alone, the function is refused
+--   at ob1_config before its walk, a part or none.)
 --   A `part` lineage row is one more that an earlier file's kind list does
 --   not admit. `migrate.ts --reapply` already fails at 064 on a brain holding
---   a `relation` or `subject` row (SMD-4474); a part does not change that,
---   and this file re-applied alone validates over its own kind.
---   MINOR under FORK.md's version rules. test-schema [133],
+--   a `relation` or `subject` row (SMD-4474), and now fails there on one
+--   holding a part and neither of those; this file re-applied alone
+--   validates over its own kind.
+--   MINOR under MAINTAINING.md's version rules. test-schema [133],
 --   test-upgrade [20ck].
 --
 -- Prerequisites
@@ -203,12 +261,14 @@
 --   (derivation_descendants, rebuild_derived), 111 (ob1_record_derivation)
 --   and 114 (ob1_stamp_proposal_reviewer). Applied by `bun db/migrate.ts`.
 --   Re-applied: the table, its indexes and its constraints stand, the
---   triggers are dropped and made again, and the functions are replaced as
+--   triggers are dropped and made again, the lineage table's kind CHECK is
+--   dropped, added and validated again, and the functions are replaced as
 --   they were.
 -- =============================================================================
 
--- Refused up front, by name, on a schema the ledger records but does not
--- hold (052's shape).
+-- Refused up front on a schema the ledger records but does not hold (052's
+-- shape): a missing function by its own name, either table in one message
+-- that names both.
 DO $qc$
 DECLARE
   v_need text[][] := ARRAY[
@@ -305,7 +365,7 @@ COMMENT ON TABLE settled_parts IS
 COMMENT ON COLUMN settled_parts.holder IS
   'Which thought of the pair holds the statement: older or newer, by capture order. The other thought holds shown_by. holder_id is that thought''s id.';
 COMMENT ON COLUMN settled_parts.statement IS
-  'The statement, as the judge quoted it from the holder''s text at the fingerprint recorded. With the pair and the holder it is the part''s identity, read as 016''s content_fingerprint_of reads a text: case and runs of white space folded (settled_parts_one_statement).';
+  'The statement, as the judge quoted it from the holder''s text at the fingerprint recorded. With the pair and the holder it is the part''s identity, read as 016''s content_fingerprint_of reads a text: case, runs of white space and white space at either end folded (settled_parts_one_statement).';
 COMMENT ON COLUMN settled_parts.shown_by IS
   'The words of the other thought that show the statement is no longer true or no longer open, as the judge quoted them from its text at the fingerprint recorded.';
 COMMENT ON COLUMN settled_parts.word IS
@@ -313,7 +373,7 @@ COMMENT ON COLUMN settled_parts.word IS
 COMMENT ON COLUMN settled_parts.word_group IS
   'The word''s group: no_longer_holds (corrects, reverses, revises, withdraws) or done_or_settled (implements, resolves, updates, prioritizes). Each of the eight has one, and a row whose word has none is refused (settled_parts_word_group).';
 COMMENT ON COLUMN settled_parts.judged_at IS
-  'When the judgement the row holds was recorded. A row is one judgement: a later judgement of its statement is another row with its own time, or is not recorded (record_settled_part).';
+  'When the transaction that recorded the row''s judgement began (now()). A row is one judgement: a later judgement of its statement is another row with its own time, or is not recorded (record_settled_part). It is not the order rows commit in: a listing that pages by it can pass over a row whose transaction began before the page was read and committed after.';
 COMMENT ON COLUMN settled_parts.status IS
   'pending: the part awaits a reviewer. accepted or rejected: a decision (review_settled_part). stale: rebuild_derived found one of the pair''s texts moved since the judge saw them, or was called with p_force; the row stays stale if the text moves back, and the next judgement of its statement replaces it with a new row. A pending row whose texts have moved with no rebuild since is replaced the same way. Migration 148.';
 COMMENT ON COLUMN settled_parts.reviewed_by IS
@@ -323,6 +383,15 @@ COMMENT ON COLUMN settled_parts.reviewed_by IS
 -- text: the same words in other capitals or spacing are the same statement.
 -- A hash, since a statement may be 2,000 characters, past what a btree key
 -- holds.
+-- The index is built on content_fingerprint_of, and holds what that
+-- function read when each row was written. A later file that changes what
+-- it folds leaves the index at the old fold and says nothing: the write's
+-- ON CONFLICT probes it, so a statement a reviewer rejected was recorded
+-- again beside its rejection, and a REINDEX then failed on the pair (10 of
+-- 10 each, review pass 4). Such a file rebuilds this index in its own
+-- transaction, as it must 023's on the same function, and says what
+-- becomes of two rows the new fold reads as one. A fold for parts alone is
+-- a function of its own.
 CREATE UNIQUE INDEX IF NOT EXISTS settled_parts_one_statement
   ON settled_parts (older_id, newer_id, holder, content_fingerprint_of(statement));
 -- The newer side, for the cascade and for the pass, which asks from it.
@@ -334,8 +403,9 @@ CREATE INDEX IF NOT EXISTS settled_parts_newer_idx
 -- delete of the row clears: a forgotten thought's quote would stand there
 -- until the next ANALYZE. The four columns hold a thought's words, or a
 -- reviewer's about them; the index's fourth column is the statement's
--- fingerprint. Nothing plans by them: a part is found by its pair, its
--- holder or its status.
+-- fingerprint. No plan needs their statistics: the identity index is
+-- unique, and the write finds its row through all four of its columns;
+-- anything else finds a part by its pair, its holder or its status.
 ALTER TABLE settled_parts
   ALTER COLUMN statement   SET STATISTICS 0,
   ALTER COLUMN shown_by    SET STATISTICS 0,
@@ -499,7 +569,7 @@ COMMENT ON TABLE derivations IS
   'Lineage for every derived artifact (SMD-1731, Phase 1b of SMD-1729): one row per artifact per producing pass, written in the transaction that writes the artifact. artifact_kind names the tier — chunks (a thought''s window set), entities (a thought''s extraction under one extraction_key), proposal (one supersession proposal), vector (a thought''s embedding), metadata (a thought''s capture-time tags), since 064 section (a page section a machine wrote — SMD-1812), since 084 relation (a judged relation between two thoughts, a `relation` facet — SMD-1873), since 111 subject (a thought''s own subject, a `subject` facet — SMD-3306), and since 148 part (a settled part of a pair of thoughts — SMD-4446); artifact_id is the thought''s id for the four keyed by a thought, the proposal''s id for a proposal, the section''s id for a section, the facet''s id for a relation or a subject, the part''s id for a part. input_ids and input_fingerprints are parallel arrays naming what the artifact was computed from and the text it was computed from — a row whose fingerprints no longer match its inputs'' is stale, which is a read (preflight counts them), not a trigger. produced_by is the pass; recipe is a JSON object carrying a boolean `deterministic` (what rebuild_derived reads, migration 063: a re-derivation the database owns against a re-run a worker owns) and the producer''s own record — model, prompt_version, prompt_hash, window parameters; `legacy: true` on a row 061 backfilled, `declared: false` where a caller sent no recipe. stale_since and stale_reason (063) carry a rebuild''s request for a re-run until the producer writes the row again. No foreign key: thoughts_drop_derivations, supersession_proposals_drop_derivation, page_sections_drop_derivations, thought_facets_drop_relation_derivation, thought_facets_drop_subject_derivation and settled_parts_drop_derivation drop the rows a deleted thought, proposal, section, relation, subject or part keyed; rebuild_derived deletes a row whose artifact is gone while its thought stands. Migrations 061, 063, 064, 084, 111, 148 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306, SMD-4446.';
 
 COMMENT ON FUNCTION ob1_stamp_proposal_reviewer() IS
-  'BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind on supersession_proposals (supersession_proposals_stamp_reviewer, 114): the one writer of the reviewer columns. reviewed_at NULL clears them; otherwise they are the envelope present (ob1.actor: its name, its agent in the server''s id form, and for an agent the registry''s kind), never the statement''s values. review_supersession_proposal sets the envelope from p_actor, so its accept and reject, and 067''s settle through it, are stamped with the key that decided; 067''s reopen clears them. Migration 114 / SMD-2608. Since 148 (SMD-4446) the same function stamps settled_parts (settled_parts_stamp_reviewer), whose three reviewer columns are these: review_settled_part sets the envelope from p_actor. Nothing clears them on a part but a status taken back by hand: a part judged again is another row.';
+  'BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind on supersession_proposals (supersession_proposals_stamp_reviewer, 114): the one writer of the reviewer columns. reviewed_at NULL clears them; otherwise they are the envelope present (ob1.actor: its name, its agent in the server''s id form, and for an agent the registry''s kind), never the statement''s values. review_supersession_proposal sets the envelope from p_actor, so its accept and reject, and 067''s settle through it, are stamped with the key that decided; 067''s reopen clears them. Migration 114 / SMD-2608. Since 148 (SMD-4446) the same function stamps settled_parts (settled_parts_stamp_reviewer), whose three reviewer columns are these: review_settled_part sets the envelope from p_actor. On a part a later decision replaces them, with nothing when it carries no envelope, as a write of the note by hand does, and a status taken back by hand clears them; a part a later judgement replaces is another row, unreviewed.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The walk: 063's body verbatim, `part` in its kind order beside
@@ -641,7 +711,11 @@ BEGIN
   -- thought's words. No message echoes an argument either, the holder and
   -- the word included: a pass that crossed its fields would put a quote
   -- there, and its caller keeps a refusal's message (thought_work_claims'
-  -- last_error), which outlives the thought. A length is said instead.
+  -- last_error), which goes with the claim's own thought and so outlives
+  -- the pair's other one. A length is said instead. (A text bound to the
+  -- uuid or the jsonb parameter is refused by Postgres's own cast before
+  -- this function runs, in words that carry it: a caller keeps only the
+  -- messages that begin with this function's name.)
   IF p_older_id IS NULL OR p_newer_id IS NULL OR p_older_id = p_newer_id THEN
     RAISE EXCEPTION USING
       MESSAGE = 'record_settled_part: a part is of two different thoughts',
@@ -704,9 +778,11 @@ BEGIN
   -- commit: a rebuild that follows an edit either ends before this write
   -- has the lock, and the read below sees the edit, or has the lock after
   -- this write's commit, and finds the part. That is a rebuild at READ
-  -- COMMITTED, as db/rebuild.ts, the sleep scheduler's sweep and a forget
-  -- each run one. rebuild_derived (067's body) has no guard of its own: one
-  -- whose transaction is REPEATABLE READ or SERIALIZABLE, having waited
+  -- COMMITTED: a forget refuses above it, and db/rebuild.ts and the sleep
+  -- scheduler's sweep run at their session's level, which is that unless
+  -- the database or the role defaults higher (preflight's `transaction
+  -- isolation` row). rebuild_derived (067's body) has no guard of its own:
+  -- one whose transaction is REPEATABLE READ or SERIALIZABLE, having waited
   -- here, reads the store as its transaction first saw it and misses the
   -- part, 20 times in 20 (review pass 3).
   -- No thought's row is locked here; the insert's foreign keys take a key
@@ -728,15 +804,25 @@ BEGIN
   -- itself is read, not the row's stored fingerprint, which a raw UPDATE of
   -- the text leaves behind. An edit that commits after this read is as one
   -- that commits after the write: the part stands pending at the old text
-  -- (ob1:a-judgement-is-a-row, below, for what becomes of it). A thought
-  -- that is gone is the foreign key's to refuse, below.
+  -- (ob1:a-judgement-is-a-row, below, for what becomes of it).
+  -- A thought that is not there when this reads it is answered too,
+  -- NOT_FOUND with the side, before a fingerprint is compared: the judge is
+  -- out for seconds, and a delete or a forget of either thought meanwhile is
+  -- the pass's to step over, not an error for it to keep. Were the
+  -- fingerprints compared first, a gone thought beside a moved one would be
+  -- answered EDITED_SINCE with the gone side said unmoved. delete_thought
+  -- and forget_thought take the lock above, so neither lands between this
+  -- read and the insert; a DELETE by hand can, and is then the foreign
+  -- key's to refuse, which names the id alone.
   SELECT p_older_fingerprint IS DISTINCT FROM content_fingerprint_of(t.content) INTO v_old_edited
     FROM thoughts t WHERE t.id = p_older_id;
   SELECT p_newer_fingerprint IS DISTINCT FROM content_fingerprint_of(t.content) INTO v_new_edited
     FROM thoughts t WHERE t.id = p_newer_id;
-  IF COALESCE(v_old_edited, false) OR COALESCE(v_new_edited, false) THEN
-    RETURN jsonb_build_object('ok', false, 'error', 'EDITED_SINCE',
-                              'older_edited', COALESCE(v_old_edited, false), 'newer_edited', COALESCE(v_new_edited, false));
+  IF v_old_edited IS NULL OR v_new_edited IS NULL THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'NOT_FOUND', 'older_gone', v_old_edited IS NULL, 'newer_gone', v_new_edited IS NULL);
+  END IF;
+  IF v_old_edited OR v_new_edited THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'EDITED_SINCE', 'older_edited', v_old_edited, 'newer_edited', v_new_edited);
   END IF;
   -- ob1:a-judgement-is-a-row — a CONTRACT SENTINEL (the 014 convention), read
   -- by db/test-schema.ts. One statement of one thought, once a pair, as
@@ -771,8 +857,11 @@ BEGIN
   IF v_id IS NULL THEN
     -- The statement stands on the pair, pending at these texts or decided:
     -- said with the row's status, so the pass can tell a statement a
-    -- reviewer rejected from one that waits. The row is this holder's: the
-    -- pair's other thought may hold the same words in a row of its own.
+    -- reviewer rejected from one that waits. (A status moved by hand
+    -- between the delete above and this insert can show here as stale, a
+    -- raw UPDATE taking no advisory lock: 381 of 600 free runs, review pass
+    -- 3. Written again, such a row is replaced.) The row is this holder's:
+    -- the pair's other thought may hold the same words in a row of its own.
     SELECT s.id, s.status INTO v_held FROM settled_parts s
      WHERE s.older_id = p_older_id AND s.newer_id = p_newer_id AND s.holder = p_holder
        AND content_fingerprint_of(s.statement) = content_fingerprint_of(p_statement);
@@ -790,7 +879,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid) IS
-  'The consolidation pass''s one write of a settled part (148, SMD-4446): the pair, which thought holds the statement, the statement and the words of the other thought that show it, the word, the reason, the judge''s key, the fingerprint of each text as judged and the judge''s recipe. Refuses with a RAISE (invalid_parameter_value) a holder that is not older or newer, a word outside the eight settling labels, a statement or showing words missing, of white space alone or past 2000 characters, a reason so or past 1000, a missing key, fingerprint or recipe, and a pair that is one thought; and (feature_not_supported) a call above READ COMMITTED. No refusal echoes an argument: a length is said. A thought that does not exist fails the foreign key, whose error names the id alone. Answers {ok: false, error: EDITED_SINCE, older_edited, newer_edited} with nothing written when a fingerprint given is not its text''s as it stands: a judgement of a text that has moved is not recorded, and its caller is to put the thought back for its new text. Otherwise returns {ok, action, id, status}: action recorded with the new row''s id, pending, and replaced, the id of the row it took the place of or null; or stands, with the id and status of the row that already holds that statement of that thought on the pair, the statement read as 016''s fingerprint reads a text (case and runs of white space folded); that row is locked until the write''s transaction ends, and nothing is written to it. A row is one judgement, and none is written over another: an undecided row holding the statement that is no longer a judgement of these texts (stale, or pending at other fingerprints) is deleted with its lineage row and the judgement recorded as a new row, replaced naming the row that went; a pending row at these fingerprints stands, and a decided row stands whatever its texts have done, and then the judgement given is not recorded. The part''s lineage row (kind part) commits with it. It does not check that the words are in the texts, nor the pair''s order: the quote check is the pass''s (SMD-4442). Takes the supersession advisory lock, which every decision on a proposal or a part, every rebuild and every delete takes first, so that no rebuild at READ COMMITTED runs between its read of the two texts and its commit (rebuild_derived has no guard of its own, and one above READ COMMITTED that waited on the lock misses the part); it locks no thought''s row beyond its foreign keys'' key share, so no edit waits for it; the lock is held to the end of the caller''s transaction, so call it as a statement of its own, with no thought''s or claim''s row held when it is called and nothing awaited before the commit. Writes no thought. Migration 148 / SMD-4446.';
+  'The consolidation pass''s one write of a settled part (148, SMD-4446): the pair, which thought holds the statement, the statement and the words of the other thought that show it, the word, the reason, the judge''s key, the fingerprint of each text as judged and the judge''s recipe. Refuses with a RAISE (invalid_parameter_value) a holder that is not older or newer, a word outside the eight settling labels, a statement or showing words missing, of white space alone or past 2000 characters, a reason so or past 1000, a missing key, fingerprint or recipe, and a pair that is one thought or lacks one; and (feature_not_supported) a call above READ COMMITTED. No refusal echoes an argument: a length is said. Three answers write nothing and are values. {ok: false, error: NOT_FOUND, older_gone, newer_gone} when either thought is not there as it reads them, said before a fingerprint is compared (a thought deleted by hand after that read fails the foreign key, whose error names the id alone). {ok: false, error: EDITED_SINCE, older_edited, newer_edited} when a fingerprint given is not its text''s as it stands: a judgement of a text that has moved is not recorded, and its caller is to put the thought back for its new text. {ok: true, action: stands, id, status}, the id and status of the row that already holds that statement of that thought on the pair, the statement read as 016''s fingerprint reads a text (case, runs of white space and white space at either end folded): a pending row at these fingerprints, or a decided row whatever its texts have done since (stale only where a status was moved by hand under the write: write again); that row is locked until the write''s transaction ends, nothing is written to it, and the judgement given is not recorded. Otherwise {ok: true, action: recorded, id, status: pending, replaced}: a new row, replaced being the id of the row it took the place of, or null. A row is one judgement, and none is written over another: an undecided row holding the statement that is no longer a judgement of these texts (stale, or pending at other fingerprints) is deleted with its lineage row and the judgement recorded as a new row. An undecided part''s id ends there, and a foreign key to it that does not let the reference go would refuse the write. The part''s lineage row (kind part) commits with it. It does not check that the words are in the texts, nor the pair''s order: the quote check is the pass''s (SMD-4442). Takes the supersession advisory lock, which a decision on a proposal or a part, a rebuild, delete_thought and forget_thought each take first, so that no rebuild at READ COMMITTED runs between its read of the two texts and its commit (rebuild_derived has no guard of its own, and one above READ COMMITTED that waited on the lock misses the part); it locks no thought''s row beyond its foreign keys'' key share, so no edit waits for it; the lock is held to the end of the caller''s transaction, so call it as a statement of its own, with no thought''s or claim''s row held when it is called and nothing awaited before the commit. Writes no thought. Migration 148 / SMD-4446.';
 
 -- ---------------------------------------------------------------------------
 -- 5. review_settled_part — the reviewer's decision
@@ -842,8 +931,10 @@ BEGIN
   -- supersession advisory lock first, then the row. rebuild_derived takes the
   -- same lock before it moves a part, delete_thought before the cascade
   -- that takes one, and record_settled_part before it reads the two texts.
-  -- This function takes no thought's row: it reads the two texts unlocked,
-  -- after its own locks, as 036's review does.
+  -- This function takes no thought's row, where 036's review locks the one
+  -- it writes: a part's decision writes none. It reads the two texts
+  -- unlocked, after its own locks, as 036's review reads the thought it
+  -- does not write.
   PERFORM pg_advisory_xact_lock(hashtext('ob1:supersession-review'));
 
   SELECT * INTO r FROM settled_parts WHERE id = p_id FOR UPDATE;
@@ -853,12 +944,16 @@ BEGIN
 
   -- ob1:a-decision-is-on-the-row-as-read — a CONTRACT SENTINEL (the 014
   -- convention), read by db/test-schema.ts. The id names one judgement: a
-  -- row judged again is another row (record_settled_part), so the words
-  -- here are the words the caller read, or the id found nothing above. What
+  -- row a later judgement replaced is gone, that judgement another row
+  -- (record_settled_part), so the words here are the words the caller
+  -- read, or the id found nothing above. What
   -- can have changed under a reader is the status: a second reviewer may
   -- have decided, a rebuild may have set the row stale. A caller that gives
   -- the status it read is refused when the row's is another, and told the
-  -- row's.
+  -- row's. The status is all it compares: decisions made in between that
+  -- leave the row in the status the caller read are not seen (a rejection
+  -- read, then an accept and a second rejection by others, and the first
+  -- caller's accept landed on the second, 10 of 10: review pass 4).
   IF p_was IS NOT NULL AND r.status <> p_was THEN
     RETURN jsonb_build_object('ok', false, 'error', 'STALE_READ', 'id', p_id, 'status', r.status);
   END IF;
@@ -899,13 +994,15 @@ END;
 $$;
 
 COMMENT ON FUNCTION review_settled_part(uuid, text, text, jsonb, boolean, text) IS
-  'The reviewer''s decision on one settled part (148, SMD-4446): accept or reject, with a note. Refuses, as values: NOT_FOUND, which is also the answer for the id of a part since judged again (a row is one judgement: record_settled_part makes another row); STALE_READ, with the row''s status, when p_was is given and the row''s status is another (a second reviewer decided, or a rebuild set it stale, since the caller read it); ALREADY_ACCEPTED and ALREADY_REJECTED, for a decision that repeats the row''s status; EDITED_SINCE for an accept when either text has moved since it was judged, unless p_force. A reviewer may reverse a decision, and may decide a stale row as one may a stale proposal: reject it, or accept it, which a moved text refuses unless p_force. The row keeps the last decision alone. The decision asks no actor: made with no envelope, it names no reviewer. A decision that gives no p_was is made on the row in whatever status it stands. An acceptance updates the part''s own row and writes no thought: no supersedes pointer is set and nothing is demoted. p_actor is set on ob1.actor, from which settled_parts_stamp_reviewer stamps who decided. Raises (invalid_parameter_value) on a decision that is neither, or a p_was that is no status, without echoing either, and (feature_not_supported) above READ COMMITTED, where an accept that waited would read the texts as they were. Takes the supersession advisory lock, then the row, as review_supersession_proposal does. Returns {ok, id, status, was}. Migration 148 / SMD-4446.';
+  'The reviewer''s decision on one settled part (148, SMD-4446): accept or reject, with a note. Refuses, as values, each {ok: false, error, id}: NOT_FOUND, which is also the answer for the id of a part a later judgement has replaced (a row is one judgement: record_settled_part deletes an undecided row that is no longer a judgement of the texts as they stand, and records another); STALE_READ, with status, the row''s, when p_was is given and the row''s status is another (a second reviewer decided, or a rebuild set it stale, since the caller read it); ALREADY_ACCEPTED and ALREADY_REJECTED, for a decision that repeats the row''s status; EDITED_SINCE, with older_edited and newer_edited, for an accept when either text has moved since it was judged, unless p_force. A reject reads no text. A reviewer may reverse a decision, and may decide a stale row as one may a stale proposal: reject it, or accept it, which a moved text refuses unless p_force. The row keeps the last decision alone, its note or none with it. A forced accept is recorded as any accept is: the row says neither that it was forced nor at which texts. The decision asks no actor: made with no envelope, in a transaction and a session that set none, it names no reviewer. A decision that gives no p_was is made on the row in whatever status it stands, and p_was is the status alone: decisions in between that leave it as the caller read it are not seen. An acceptance updates the part''s own row and writes no thought: no supersedes pointer is set and nothing is demoted. p_actor is set on ob1.actor, from which settled_parts_stamp_reviewer stamps who decided. Raises (invalid_parameter_value) on a decision that is neither, or a p_was that is no status, without echoing either, and (feature_not_supported) above READ COMMITTED, where an accept that waited would read the texts as they were. Takes the supersession advisory lock, then the row, as review_supersession_proposal does. Returns {ok, id, status, was}. Migration 148 / SMD-4446.';
 
 -- ---------------------------------------------------------------------------
--- 6. The primitive: 067's body verbatim, the part beside the proposal. Three
---    places: a part's lineage row is an orphan when the part is gone, it is
---    counted for the cascade when the input leaves, and a moved text stales
---    a pending part.
+-- 6. The primitive: 067's body verbatim, the part beside the proposal. Four
+--    places: the artifact's thought is not read for a part's row, as it is
+--    not for a proposal's; a part's lineage row is an orphan when the part
+--    is gone (a statement after the other kinds' CASE, not an arm of it);
+--    it is counted for the cascade when the input leaves; and a moved text
+--    stales a pending part.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION rebuild_derived(
   p_input        uuid,
@@ -1055,8 +1152,17 @@ BEGIN
       WHEN 'vector'   THEN NOT v_a_found OR v_a.embedding IS NULL
       WHEN 'metadata' THEN NOT v_a_found OR NOT COALESCE(v_a.metadata ? 'type' OR v_a.metadata ? 'topics', false)
       WHEN 'proposal' THEN NOT EXISTS (SELECT 1 FROM supersession_proposals p WHERE p.id = v_row.artifact_id)
-      WHEN 'part'     THEN NOT EXISTS (SELECT 1 FROM settled_parts s WHERE s.id = v_row.artifact_id)
       ELSE false END;
+    -- 148: a part's row, tested in a statement of its own. One arm more in
+    -- the CASE above would have every caller's plan read settled_parts:
+    -- under a generic plan Postgres checks each arm's table, whichever
+    -- kind the row is, so a role without SELECT there was refused on
+    -- thoughts that hold no part, from its sixth call of a session (25
+    -- of 30 sweeps on a small brain, none before this file: review pass
+    -- 4). A statement is planned when it first runs.
+    IF v_row.artifact_kind = 'part' THEN
+      v_orphan := NOT EXISTS (SELECT 1 FROM settled_parts s WHERE s.id = v_row.artifact_id);
+    END IF;
     IF v_orphan THEN
       DELETE FROM derivations WHERE id = v_row.derivation_id;
       v_deleted := v_deleted + 1;
@@ -1398,31 +1504,43 @@ END;
 $$;
 
 COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
-  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not), and for a pending settled part its status set stale and its newer thought queued under the part''s judge key (148; stale_parts; a decided part is kept, a rejection included: nothing settles a part yet); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass, a person''s decision on a proposal and a decided part are kept; a generated page section (064) is marked with no pool, as the tags are; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals, the parts and the vector''s and tags'' rows counted for the cascade, as the walk saw them. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, stale_parts, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067, 148 / SMD-1732, SMD-2297, SMD-4446.';
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not), and for a pending settled part its status set stale and its newer thought queued under the part''s judge key (148; stale_parts; a part already stale is queued again and not counted again; a decided part is kept, a rejection included: nothing settles a part yet); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass, a person''s decision on a proposal and a decided part are kept; a generated page section (064) is marked with no pool, as the tags are; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals, the parts and the vector''s and tags'' rows counted for the cascade, as the walk saw them. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, stale_parts, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067, 148 / SMD-1732, SMD-2297, SMD-4446.';
 
 -- ---------------------------------------------------------------------------
 -- 7. supersession_proposals' grants, copied
 -- ---------------------------------------------------------------------------
--- A role that decides or records proposals does the same for parts. One
--- holding UPDATE on supersession_proposals (the server group's reviewer, the
--- worker group's pass) gains SELECT and UPDATE on settled_parts, and one
--- holding INSERT there (the pass) gains INSERT and DELETE: an undecided
--- part judged again is deleted and the judgement recorded as a new row. A
--- role that only reads the proposal queue (the structure group's
--- board-sync) gains nothing: it has no use for a part. The owner holds
--- every privilege already; a re-apply grants what is held, which changes
--- nothing.
+-- A role that decides or records proposals does the same for parts, and no
+-- role gains what its grants on the proposals do not already amount to.
+-- One holding SELECT and UPDATE on supersession_proposals (the server
+-- group's reviewer, the worker group's pass) gains SELECT and UPDATE on
+-- settled_parts. One holding INSERT there besides (the pass) gains INSERT
+-- and DELETE too: an undecided row that is no longer a judgement of the
+-- texts as they stand is deleted, and the judgement recorded as a new row.
+-- A role holding less gains nothing. One that only reads the proposal
+-- queue (the structure group's board-sync) has no use for a part; and one
+-- holding UPDATE or INSERT there alone, which no group gives, can neither
+-- decide nor record a proposal. Copied privilege by privilege, such a role
+-- read a part's statement where it could read no proposal, or deleted
+-- every part with INSERT alone (review pass 4).
+-- Each grantee is read from its own entry in the proposals' ACL, PUBLIC's
+-- included: a privilege held through membership is not followed. The owner
+-- holds every privilege already. A re-apply copies the grants again: a
+-- privilege on parts taken back by hand from a role that still holds the
+-- proposals' comes back with it.
 DO $grant$
 DECLARE
   v_item record;
 BEGIN
   FOR v_item IN
-    SELECT DISTINCT a.grantee, a.privilege_type
+    SELECT a.grantee, bool_or(a.privilege_type = 'SELECT') AS reads, bool_or(a.privilege_type = 'UPDATE') AS updates,
+           bool_or(a.privilege_type = 'INSERT') AS inserts
       FROM pg_class c, aclexplode(c.relacl) AS a
-     WHERE c.oid = 'supersession_proposals'::regclass AND a.grantee <> c.relowner AND a.privilege_type IN ('UPDATE', 'INSERT')
+     WHERE c.oid = 'supersession_proposals'::regclass AND a.grantee <> c.relowner
+     GROUP BY a.grantee
   LOOP
+    CONTINUE WHEN NOT (v_item.reads AND v_item.updates);
     EXECUTE format('GRANT %s ON settled_parts TO %s',
-                   CASE v_item.privilege_type WHEN 'UPDATE' THEN 'SELECT, UPDATE' ELSE 'INSERT, DELETE' END,
+                   CASE WHEN v_item.inserts THEN 'SELECT, INSERT, UPDATE, DELETE' ELSE 'SELECT, UPDATE' END,
                    CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
   END LOOP;
 END

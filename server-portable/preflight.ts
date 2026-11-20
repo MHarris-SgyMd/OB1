@@ -2747,8 +2747,9 @@ if (configFailed) {
                            -- (SMD-2726 adds its arm); a closed one's row stays as history (SMD-1873 PR 2 review pass 1).
                            -- 111: a subject off its text is the subject pass's to find again — its pool reads the fingerprint —
                            -- until rebuild_derived gains its arm (SMD-3306).
-                           -- 148: a settled part's status is its mark, as a proposal's is, and a decided part keeps the
-                           -- fingerprints it was judged at for good (SMD-4446).
+                           -- 148: a settled part's row is left out, as a proposal's is. Once a rebuild has run its status is
+                           -- its mark, and a decided part keeps the fingerprints it was judged at for good. (A pending part at
+                           -- a moved text with no rebuild since is so far counted nowhere: SMD-4446's later cuts.)
                            WHERE d.artifact_kind NOT IN ('proposal', 'part', 'relation', 'subject')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d

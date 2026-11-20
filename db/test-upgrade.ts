@@ -7171,7 +7171,7 @@ console.log("\n[20cj] Migration 145: onto a populated brain at the file before i
 
   await sql.close();
 }
-console.log("\n[20ck] Migration 148: onto a populated brain at the file before it — refused by name without each of the six functions and two tables it needs, the table not made and the lineage kinds as they were; then applied: the pending proposal and its lineage row as they were; a part recorded beside it on the same pair and accepted, no pointer written; the roles that decide and record proposals hold the same on parts, the recording role a delete besides, a reader of the queue nothing; a moved text stales a pending part and the proposal, the accepted part standing; ANALYZE keeps no statistics on a part's words; a re-apply with parts standing a no-op; a decision waits on the supersession lock before it takes the part's row, behind a write on that lock and behind a status written by hand on the row, and finds nothing where its statement was judged again meanwhile; a write keeps the row it answers as standing from a delete by hand; a write holds that lock to its commit and none an edit waits for: an edit under it is made at once and the edit's rebuild waits, then finds the part; a write does not wait for an edit, and its part stands at the old text until a rebuild; a write reads its texts after it has the lock; a rebuild counts a part as its row stands under its lock (SMD-4446)");
+console.log("\n[20ck] Migration 148: onto a populated brain at the file before it — refused without each of the six functions and two tables it needs, a function by name and either table in a message naming both, the table not made and the lineage kinds as they were; then applied: the pending proposal and its lineage row as they were; a part recorded beside it on the same pair and accepted, no pointer written; the roles that decide and record proposals hold the same on parts, the recording role a delete besides, a reader of the queue nothing; a moved text stales a pending part and the proposal, the accepted part standing; ANALYZE keeps no statistics on a part's words; a re-apply with parts standing a no-op; a decision waits on the supersession lock before it takes the part's row, behind a write on that lock and behind a status written by hand on the row, and finds nothing where its statement was judged again meanwhile; a write keeps the row it answers as standing from a delete by hand; a write holds that lock to its commit and none an edit waits for: an edit under it is made at once and the edit's rebuild waits, then finds the part; a write does not wait for an edit, and its part stands at the old text until a rebuild; a write reads its texts after it has the lock; a rebuild counts a part as its row stands under its lock; a second write and a second decision each wait behind a first (SMD-4446)");
 {
   const the148 = MIGRATIONS.find((f) => /^\d{3}_settled_parts\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   const NUM = the148.slice(0, 3);
@@ -7185,8 +7185,11 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   const KEY = "consolidate:stub@p4d5";
   const pid = String((await sql`SELECT record_supersession_proposal(${O}::uuid, ${N}::uuid, 'newer_supersedes_older', 0.9, 'the plan is done', 0.8, ${KEY}, NULL, NULL, NULL, '{"deterministic": false, "model": "stub"}'::jsonb) AS id`)[0].id);
   const REVIEWER = "ob1_upgrade_148_reviewer", PASS = "ob1_upgrade_148_pass", READER = "ob1_upgrade_148_reader";
-  await sql.unsafe(`CREATE ROLE ${REVIEWER} NOLOGIN; CREATE ROLE ${PASS} NOLOGIN; CREATE ROLE ${READER} NOLOGIN;
-                    GRANT SELECT, UPDATE ON supersession_proposals TO ${REVIEWER}; GRANT SELECT, INSERT, UPDATE ON supersession_proposals TO ${PASS}; GRANT SELECT ON supersession_proposals TO ${READER}`);
+  // Two shapes no group gives: one write privilege on the proposals and no read. Neither decides or records a proposal.
+  const UPD_ONLY = "ob1_upgrade_148_updonly", INS_ONLY = "ob1_upgrade_148_insonly";
+  await sql.unsafe(`CREATE ROLE ${REVIEWER} NOLOGIN; CREATE ROLE ${PASS} NOLOGIN; CREATE ROLE ${READER} NOLOGIN; CREATE ROLE ${UPD_ONLY} NOLOGIN; CREATE ROLE ${INS_ONLY} NOLOGIN;
+                    GRANT SELECT, UPDATE ON supersession_proposals TO ${REVIEWER}; GRANT SELECT, INSERT, UPDATE ON supersession_proposals TO ${PASS}; GRANT SELECT ON supersession_proposals TO ${READER};
+                    GRANT UPDATE ON supersession_proposals TO ${UPD_ONLY}; GRANT INSERT ON supersession_proposals TO ${INS_ONLY}`);
   const kinds = async () => String((await sql`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check'`)[0].d);
   const proposal = async () => JSON.stringify((await sql`SELECT p.status, p.judge_key, p.reviewed_at,
       (SELECT count(*)::int FROM derivations d WHERE d.artifact_kind = 'proposal' AND d.artifact_id = p.id) AS lineage FROM supersession_proposals p WHERE p.id = ${pid}::uuid`)[0]);
@@ -7219,7 +7222,7 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
     if (!got.startsWith(`migration ${NUM} needs 029 and 061 (supersession_proposals, derivations); this schema lacks one`) || (await made())) unrefused.push(`${table}: ${got.slice(0, 80)}`);
   }
   assert(unrefused.length === 0 && !(await made()) && (await kinds()) === kindsBefore && !/'part'/.test(kindsBefore) && (await proposal()) === proposalBefore,
-    `without any one of the six functions or two tables it needs, the file is refused by that name; the table not made, the lineage kinds and the proposal as they were (${unrefused.join(" | ") || `${needs.length} functions and 2 tables tried`})`);
+    `without any one of the six functions or two tables it needs, the file is refused, a function by its own name and either table in the one message that names both; the table not made, the lineage kinds and the proposal as they were (${unrefused.join(" | ") || `${needs.length} functions and 2 tables tried`})`);
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the148 });
   assert((await made()) && /'part'/.test(await kinds()) && (await proposal()) === proposalBefore,
@@ -7241,10 +7244,11 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
     `a part recorded beside the proposal on the same pair and accepted by a reviewer who says the status it read, pending, one who says another refused: no pointer written, the proposal still pending, the reviewer and the lineage row recorded (${misread.error} on ${misread.status}, ${accepted.error ?? "accepted"}; ${JSON.stringify(after)})`);
 
   // The grants carried from the proposals' table.
-  const may = async (role: string) => ((await sql`SELECT p, has_table_privilege(${role}, 'settled_parts', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p`) as unknown as { p: string; y: boolean }[]).filter((r) => r.y).map((r) => r.p).join();
-  const grants = async () => `${await may(REVIEWER)} | ${await may(PASS)} | ${await may(READER)}`;
-  assert((await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE,DELETE | ",
-    `a role that decides proposals reads and updates parts, the pass's role also inserts and deletes, which is how an undecided part is judged again, and a reader of the queue gains nothing (${await grants()})`);
+  const may = async (role: string) => ((await sql`SELECT p, has_table_privilege(${role}, 'settled_parts', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) AS p`) as unknown as { p: string; y: boolean }[]).filter((r) => r.y).map((r) => r.p).join();
+  const grants = async () => `${await may(REVIEWER)} | ${await may(PASS)} | ${await may(READER)} | ${await may(UPD_ONLY)} | ${await may(INS_ONLY)}`;
+  const GRANTS = "SELECT,UPDATE | SELECT,INSERT,UPDATE,DELETE |  |  | ";
+  assert((await grants()) === GRANTS,
+    `a role that decides proposals reads and updates parts, the pass's role also inserts and deletes, which is how an undecided part is judged again; a reader of the queue gains nothing, and nor does a role holding UPDATE or INSERT there alone (${await grants()})`);
 
   // The newer text moves: rebuild_derived sets a pending part stale, and the pending proposal, and leaves the accepted part.
   const pending = await record("the plan is to ship", "shipped on Thursday", "resolves");
@@ -7273,7 +7277,7 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   const again = (await sql`SELECT (SELECT string_agg(status, ',' ORDER BY status) FROM settled_parts) AS parts,
       (SELECT count(*)::int FROM pg_trigger WHERE tgrelid = 'settled_parts'::regclass AND NOT tgisinternal) AS triggers,
       (SELECT convalidated FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check') AS valid`)[0] as { parts: string; triggers: number; valid: boolean };
-  assert(again.parts === "accepted,stale" && again.triggers === 3 && again.valid === true && (await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE,DELETE | ",
+  assert(again.parts === "accepted,stale" && again.triggers === 3 && again.valid === true && (await grants()) === GRANTS,
     `a re-apply with parts standing is a no-op: the rows, three triggers, the kind's CHECK validated over their lineage rows, the grants (${JSON.stringify(again)})`);
 
   const other = new SQL({ url: URL_, max: 1 });
@@ -7415,6 +7419,26 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   });
   const afterQueue = await queued;
   const behindLock = Number((await sql`SELECT count(*)::int AS c FROM settled_parts WHERE statement = 'a statement written behind the lock'`)[0].c);
+  // (8) One at a time: a write and a decision each take the lock whole, as every other taker does. A second write waits
+  // behind a first not yet committed, and a second decision, of another part, behind a first. Taken shared, each would
+  // run beside its like: nothing above would see it (a rebuild, a delete and a decision of the other kind would still
+  // wait), the writes would no longer be single file, and two decisions would rest on the row's lock alone.
+  const [ofpFile, nfpFile] = [await fp(O), await fp(N)];
+  const fileA = await record("a statement decided first of two", "words that show it", "updates");
+  const fileB = await record("a statement decided second of two", "words that show it", "updates");
+  let secondWriteWaitedOn = "", secondDecisionWaitedOn = "", secondWrite: Promise<Written> = Promise.resolve({ ok: false }), secondDecision: Promise<Decided> = Promise.resolve({ ok: false });
+  await other.begin(async (held) => {
+    await held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement written first of two', 'words that show it', 'updates', 'judged', ${KEY}, ${ofpFile}, ${nfpFile}, (${RECIPE}::text)::jsonb) AS r`;
+    secondWrite = (async () => (await third`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'a statement written second of two', 'words that show it', 'updates', 'judged', ${KEY}, ${ofpFile}, ${nfpFile}, (${RECIPE}::text)::jsonb) AS r`)[0].r as Written)();
+    secondWriteWaitedOn = await waitOf(secondWrite);
+  });
+  const afterSecondWrite = await secondWrite;
+  await other.begin(async (held) => {
+    await held`SELECT review_settled_part(${fileA}::uuid, 'reject', 'the first of two', '{"name": "upgrade-148-op"}'::jsonb) AS r`;
+    secondDecision = (async () => (await third`SELECT review_settled_part(${fileB}::uuid, 'reject', 'the second of two', '{"name": "upgrade-148-op"}'::jsonb) AS r`)[0].r as Decided)();
+    secondDecisionWaitedOn = await waitOf(secondDecision);
+  });
+  const afterSecondDecision = await secondDecision;
   await third.close();
   await other.close();
   assert(waitedOn === "advisory" && rowWhileWaiting === "free" && afterLock.ok === true && afterLock.status === "rejected",
@@ -7435,8 +7459,10 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
     `a rebuild reads a part under its row's lock: behind a reject written by hand and not yet committed it waits for the row, then counts the part as it stands, decided, and sets nothing stale (waited on ${waitedOnPart}; stale_parts ${rebuiltN.stale_parts}, the part ${rebuildPartNow})`);
   assert(writeWaitedOn === "advisory" && thoughtsWhileWaiting === "free" && afterQueue.ok === false && afterQueue.error === "EDITED_SINCE" && afterQueue.older_edited === false && afterQueue.newer_edited === true && behindLock === 0,
     `a write reads its texts after it has the supersession lock: held elsewhere, the write waits on it with both thoughts' rows free to an edit; the newer text edited meanwhile, the write is answered by its side once the lock is let go, and writes nothing (waited on ${writeWaitedOn}, the rows ${thoughtsWhileWaiting}, then ${afterQueue.error ?? afterQueue.action}, newer ${afterQueue.newer_edited}; ${behindLock} rows)`);
+  assert(secondWriteWaitedOn === "advisory" && afterSecondWrite.ok === true && afterSecondWrite.action === "recorded" && secondDecisionWaitedOn === "advisory" && afterSecondDecision.ok === true && afterSecondDecision.status === "rejected",
+    `writes go one at a time, and so do decisions: a second write waits on the supersession lock behind a first not yet committed, and a second decision, of another part, behind a first; each is made once the first commits (the write waited on ${secondWriteWaitedOn}, then ${afterSecondWrite.action ?? afterSecondWrite.error}; the decision waited on ${secondDecisionWaitedOn}, then ${afterSecondDecision.status ?? afterSecondDecision.error})`);
 
-  await sql.unsafe(`DROP OWNED BY ${REVIEWER}; DROP ROLE ${REVIEWER}; DROP OWNED BY ${PASS}; DROP ROLE ${PASS}; DROP OWNED BY ${READER}; DROP ROLE ${READER}`);
+  for (const role of [REVIEWER, PASS, READER, UPD_ONLY, INS_ONLY]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
   await sql.close();
 }
 

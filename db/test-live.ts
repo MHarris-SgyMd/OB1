@@ -24254,14 +24254,18 @@ if (want("31")) {
     const accept = (await sql`SELECT review_settled_part(${acceptedPart}::uuid, 'accept', 'right', ${JSON.stringify(ACTOR)}::text::jsonb) AS r`)[0].r as { ok: boolean };
     await sql`UPDATE thoughts SET content = '148 live: the importer shipped on Wednesday', content_fingerprint = content_fingerprint_of('148 live: the importer shipped on Wednesday') WHERE id = ${pn.id}::uuid`;
     const movedPart = await rebuildTs("--input", pn.id, "--reason", "live: a part's text moved");
-    assert(accept.ok === true && movedPart.code === 0 && /marked:[^\n]*1 settled part\(s\) set stale, as a proposal is/.test(movedPart.out) && /kept:[^\n]*a person's decision on a proposal or a settled part stands/.test(movedPart.out)
+    // The counts are read whole: "; 1 settled" is not the end of 11 or 21, and the kept line's number is the one
+    // accepted part, which the line's fixed words alone would not say.
+    assert(accept.ok === true && movedPart.code === 0 && /marked:[^\n]*; 1 settled part\(s\) set stale, as a proposal is \(148\)/.test(movedPart.out)
+        && /kept:\s+1 \(a structured pass reads its source, not the text; a person's decision on a proposal or a settled part stands\)/.test(movedPart.out)
         && (await partStatus(pendingPart)) === "stale" && (await partStatus(acceptedPart)) === "accepted",
-      `the door reports a pending part set stale by a moved text, and keeps a person's accept (exit ${movedPart.code}: ${movedPart.out.split("\n").find((l) => /marked:/.test(l))?.trim().slice(0, 200)}; ${await partStatus(pendingPart)}, ${await partStatus(acceptedPart)})`);
+      `the door reports a pending part set stale by a moved text, and counts a person's accept kept (exit ${movedPart.code}: ${movedPart.out.split("\n").find((l) => /marked:/.test(l))?.trim().slice(0, 200)}; ${movedPart.out.split("\n").find((l) => /kept:/.test(l))?.trim().slice(0, 60)}; ${await partStatus(pendingPart)}, ${await partStatus(acceptedPart)})`);
     const leavingPart = await rebuildTs("--input", pn.id, "--gone", "--dry-run");
-    assert(leavingPart.code === 0 && /cascade:\s+0 proposal\(s\), 2 settled part\(s\) and/.test(leavingPart.out) && (await partStatus(acceptedPart)) === "accepted",
-      `a leaving thought's two parts are counted for the cascade, the dry run keeping them (exit ${leavingPart.code}: ${leavingPart.out.split("\n").find((l) => /cascade:/.test(l))?.trim()})`);
-    // The census (--status) counts a lineage row whose first input's text moved. A part's status is its mark, as a
-    // proposal's is, and a decided part keeps the fingerprints it was judged at: its row is no stale row to count. The
+    assert(leavingPart.code === 0 && /cascade:\s+0 proposal\(s\), 2 settled part\(s\) and \d+ lineage row\(s\) go with the row delete \(029's, 148's and 061's triggers\)/.test(leavingPart.out)
+        && (await partStatus(pendingPart)) === "stale" && (await partStatus(acceptedPart)) === "accepted",
+      `a leaving thought's two parts are counted for the cascade under their file's trigger, and both stand after the dry run (exit ${leavingPart.code}: ${leavingPart.out.split("\n").find((l) => /cascade:/.test(l))?.trim()})`);
+    // The census (--status) counts a lineage row whose first input's text moved. A part's row is left out, as a
+    // proposal's is: once a rebuild has run its status is its mark, and a decided part keeps the fingerprints it was judged at. The
     // older thought is the first input of both parts' rows, so its text moving adds its own rows to the count and neither part's.
     const staleCount = async () => Number(/stale:\s+(\d+) row\(s\)/.exec((await rebuildTs("--status")).out)?.[1] ?? NaN);
     const staleBefore = await staleCount();

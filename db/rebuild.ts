@@ -20,7 +20,7 @@
  * pools under their CURRENT keys, the reason marked on each lineage row),
  * deleted (a row whose artifact is gone; under --gone the windows, the graph
  * and the snapshot rows too), marked with no pool (the tags), kept (a
- * structured pass, a decided proposal), current (nothing moved), and the
+ * structured pass, a decided proposal or settled part), current (nothing moved), and the
  * derived_from children it cannot reproduce. The reason defaults to the flag
  * that asked ('operator: edit', 'operator: force', 'operator: forget'); say
  * a better one. The sweep marks no row, so it takes no --reason (its call
