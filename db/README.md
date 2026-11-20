@@ -5520,21 +5520,26 @@ an earlier day that lands after the join, which no read waits for. A write
 during the period dated today (board-sync's observation of the day, dated
 00:00 UTC) is no neighbour of one, and holds nothing back; one dated an
 earlier day (a ticket created then, an import carrying its dates) is, and
-holds the join until extracted, if it lands before it. A thought already
-extracted that an edit pools again (board-sync re-rendering a ticket) keeps
-its entities until it is extracted again, so it holds nothing back, whenever
-the edit came; one whose extraction found no entity counts. Until SMD-4468
-the join waited for extraction's whole pool, which a steady inflow of writes
-that pause nothing (an `ingested` key's, board-sync's among them) kept from
-draining: the capture trigger pools each one as
-it is written, so one was pending or in hand at every poll, and
-consolidation never joined while they came. The subject sweep still waits
+holds the join until extracted, if it lands before the join. A thought
+already extracted that an edit pools again (board-sync re-rendering a
+ticket) keeps its entities until it is extracted again, so it holds nothing
+back, whenever the edit came; one whose extraction found no entity counts,
+and so does one whose entities are another extraction key's, as after a
+model's switch, which drains first as `extract`'s own rule asks. A thought
+captured today before the period that the period itself first pools (a
+fresh brain, a key's switch) counts as a write since: no one's neighbour,
+but consolidation may then start beside it. Until SMD-4468 the join waited
+for extraction's whole pool, which a steady inflow of writes that pause
+nothing (an `ingested` key's, board-sync's among them) seldom let drain: the
+capture trigger pools each one as it is written, so one was pending or in
+hand at nearly every poll, and consolidation joined mostly once they
+stopped. The subject sweep still waits
 for the whole pool (below): beside consolidation, its judge calls slowed
 extraction on a model server of one slot. A limit stands: a backlog thought
 a pause has taken goes behind the newer writes (below), so while they come
 faster than extraction takes them it is not reached, and the join waits for
 it, as before; a stalled one is joined past only once extraction holds
-nothing else. Under a steady inflow the period does not end until the
+nothing else. Under a steady inflow the period need not end until the
 writes stop. A live write pauses the passes (above),
 a call in hand a minute old aborted while paused and its thought set back. A
 long thought's answered windows are kept (093, [Long thoughts
