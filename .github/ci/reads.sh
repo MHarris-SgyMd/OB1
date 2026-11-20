@@ -32,6 +32,11 @@
 #   or a mode read): no access time moves, so a path added, removed or made
 #   executable can matter to a job whose list has neither it nor its folder;
 # - a second read, which relatime leaves alone, so only "read at all";
+# - a file copied where the filesystem makes the copy as a clone (btrfs, xfs,
+#   APFS by `cp -c` and Bun.write): no byte is read and no time moves. A
+#   runner's ext4 clones nothing: on one, cp, `cat a > b`, dd and Bun's
+#   copyFileSync, cpSync and Bun.write each moved their source's time. The
+#   self-check copies a file, and on a runner fails if that does not show;
 # - a path with a tab or a newline in its name, counted in odd= and left out;
 # - a filesystem that records no access times at all: list reads a file of
 #   its own first, and says sight=blind when that read does not show. That
@@ -150,6 +155,8 @@ list() {
 
 self_check() {
   local dir fails=0 out v under=${GIT_DIR:+yes}
+  # The caller's, which a list would write in its header where the cases expect none.
+  unset JOB_STATUS
   # git exports GIT_DIR and its like to whatever it runs, a hook above all, and under them every git command
   # below would act on the caller's repository, not the scratch one: `commit` on its branch, `add -A` on its index.
   for v in $(git rev-parse --local-env-vars); do unset "$v"; done
@@ -160,7 +167,8 @@ self_check() {
   trap "rm -rf $(printf '%q' "$dir")" EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
-  g() { git -c user.email=ci@example.invalid -c user.name=ci -c init.defaultBranch=main "$@"; }
+  # The scratch commits under no setting of the caller's that could stop one: a signature asked of every commit, a hook.
+  g() { git -c user.email=ci@example.invalid -c user.name=ci -c init.defaultBranch=main -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
   # has LINE / hasnt LINE: the list holds the line, whole; or does not.
   has() { grep -qxF -- "$1" "$out" || { echo "reads.sh: the list lacks '$1' (${2:-})" >&2; fails=$((fails + 1)); }; }
   hasnt() { ! grep -qxF -- "$1" "$out" || { echo "reads.sh: the list holds '$1' (${2:-})" >&2; fails=$((fails + 1)); }; }
@@ -220,17 +228,26 @@ self_check() {
     && RUNNER_TEMP="$dir" bash tool/reads.sh list job late > /dev/null 2>&1) || { echo "reads.sh: a list with a late sight file did not exit 0" >&2; fails=$((fails + 1)); }
   grep -q '^# reads v1 job=job cell=late .* sight=blind files=0 ' "$dir/reads/job.late.txt" 2> /dev/null \
     || { echo "reads.sh: with a sight file written after the marker the header is '$(head -1 "$dir/reads/job.late.txt" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
+  # A copy reads its source, unless the filesystem makes it as a clone (btrfs, xfs), which reads no byte and moves
+  # no time: a job's copies would be in no list. A runner's ext4 clones nothing; where one does, that is the news.
+  rm -rf "$dir/work" && (cd "$dir" && g clone -q repo work) > /dev/null 2>&1
+  (cd "$dir/work" && bash tool/reads.sh mark > /dev/null && cp top.txt "$dir/copied" && RUNNER_TEMP="$dir" bash tool/reads.sh list job copy > /dev/null 2>&1) \
+    || { echo "reads.sh: mark, a copy and list did not all exit 0" >&2; fails=$((fails + 1)); }
+  if grep -q 'sight=ok' "$dir/reads/job.copy.txt" 2> /dev/null && ! grep -qxF -- "$(printf 'f\ttop.txt')" "$dir/reads/job.copy.txt"; then
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "reads.sh: a file copied is not in the list: the checkout's filesystem makes a copy as a clone, so every job's copies would be missing" >&2; fails=$((fails + 1))
+    else echo "reads.sh: this filesystem makes a copy as a clone, which reads nothing; the case for a file copied is not run here"; fi
+  fi
   # A cell that is no plain name is written with _ for each other character, and the list still exits 0.
   (cd "$dir/work" && RUNNER_TEMP="$dir" bash tool/reads.sh list job 'a/b c') > /dev/null 2>&1 || { echo "reads.sh: list with a cell named 'a/b c' did not exit 0" >&2; fails=$((fails + 1)); }
   grep -q '^# reads v1 job=job cell=a_b_c ' "$dir/reads/job.a_b_c.txt" 2> /dev/null || { echo "reads.sh: a cell named 'a/b c' did not go to job.a_b_c.txt under that name" >&2; fails=$((fails + 1)); }
   # No job named is the one refusal.
   if (cd "$dir/work" && RUNNER_TEMP="$dir" bash tool/reads.sh list) > /dev/null 2>&1; then echo "reads.sh: list took no job" >&2; fails=$((fails + 1)); fi
-  # Under an exported GIT_DIR, as a hook runs: these cases again, from a repository of one commit that must still be
-  # of one commit, its files as they were. Not from inside that run, which would have no end.
+  # Under an exported GIT_DIR, as a hook runs, and a JOB_STATUS of the caller's: these cases again, from a repository
+  # of one commit that must still be of one commit, its files as they were. Not from inside that run, which would have no end.
   if [ -z "$under" ]; then
     (cd "$dir" && g init -q outer && cd outer && echo k > keep.txt && g add -A && g commit -qm outer) > /dev/null 2>&1
-    (cd "$dir/outer" && GIT_DIR="$dir/outer/.git" bash "$dir/work/tool/reads.sh" --self-check) > "$dir/said" 2>&1 \
-      || { echo "reads.sh: under an exported GIT_DIR the cases did not hold: $(tail -1 "$dir/said")" >&2; fails=$((fails + 1)); }
+    (cd "$dir/outer" && GIT_DIR="$dir/outer/.git" JOB_STATUS=failure bash "$dir/work/tool/reads.sh" --self-check) > "$dir/said" 2>&1 \
+      || { echo "reads.sh: under an exported GIT_DIR and JOB_STATUS the cases did not hold: $(tail -1 "$dir/said")" >&2; fails=$((fails + 1)); }
     if [ "$(g -C "$dir/outer" log --format=%s | tr '\n' ' ')" != 'outer ' ] || [ -n "$(g -C "$dir/outer" status --short)" ]; then
       echo "reads.sh: under an exported GIT_DIR the cases wrote to the repository it names: $(g -C "$dir/outer" log --format=%s | tr '\n' ' ')" >&2; fails=$((fails + 1))
     fi

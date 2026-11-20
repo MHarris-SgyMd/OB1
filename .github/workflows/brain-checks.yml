@@ -842,7 +842,8 @@ jobs:
       # files gone by now, after a failed step too, its header saying how the
       # job stood. Not where the marker step never ran, a checkout that failed:
       # there is no script to run then, and nothing to list. Kept on a push to
-      # main alone, the run whose lists PR 3b-2 gathers into the map.
+      # main alone, the run whose lists PR 3b-2 gathers into the map; an upload
+      # that fails does not fail the job, as the list does not.
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list portable-server
@@ -851,6 +852,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-portable-server
@@ -1001,6 +1003,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-db-schema
@@ -1134,6 +1137,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-replay-gate
@@ -1308,6 +1312,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-db-live-${{ matrix.shard }}
@@ -1835,6 +1840,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-data-layer
@@ -1970,6 +1976,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-preflight-rest
@@ -3315,6 +3322,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-deploy-stack
@@ -4190,6 +4198,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-deploy-stack-brains
@@ -5021,6 +5030,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-deploy-stack-auth
@@ -5407,6 +5417,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-deploy-stack-observability
@@ -5498,6 +5509,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-auth-poc
@@ -5639,6 +5651,7 @@ jobs:
 
       - name: Keep the job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: reads-compat-shim

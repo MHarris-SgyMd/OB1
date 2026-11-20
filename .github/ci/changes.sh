@@ -258,7 +258,8 @@ self_check() {
   # under them the scratch repository's commits would land on the caller's
   # branch (reads.sh's self-check has a case for its own; SMD-2435 PR 3b-1).
   for v in $(git rev-parse --local-env-vars); do unset "$v"; done
-  dir=$(mktemp -d)
+  # With none, the cases below would work at the filesystem's root: `rm -rf /repo`.
+  dir=$(mktemp -d) || { echo "changes.sh: no scratch directory" >&2; return 1; }
   # check EXPECT EVENT PATH...: decide on the paths as a pull request's
   # change, each a regular file's edit (OLDMODE=… and MODE=… set its modes).
   check() {
@@ -331,7 +332,8 @@ self_check() {
   # branch, and whose second is the pull request's head. Each must write one
   # code= line, and the right one.
   local repo="$dir/repo" out="$dir/out" lines
-  g() { git -c user.email=ci@example.invalid -c user.name=ci -c init.defaultBranch=main "$@"; }
+  # Under no setting of the caller's that could stop a scratch commit: a signature asked of every commit, a hook.
+  g() { git -c user.email=ci@example.invalid -c user.name=ci -c init.defaultBranch=main -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
   # run EXPECT EVENT BASE OPS: OPS on a branch, main moved, merged --no-ff, then the run.
   run() {
     expect=$1 event=$2 base=$3 ops=$4

@@ -642,8 +642,8 @@
  *      placed: one checkout, the marker straight after it and nowhere else,
  *      the list as the job's last step but its upload, named for the job and
  *      its matrix cell and run after a failed step too where the marker was
- *      made, and the upload named for the job and kept on a push to main
- *      alone; and
+ *      made, and the upload named for the job, kept on a push to main alone
+ *      and failing no job; and
  *      the job that runs changes.sh's cases runs reads.sh's, where a runner
  *      that records no access times fails (SMD-2435 PR 3b-1). Its probe pins
  *      what it refuses and passes
@@ -11940,7 +11940,8 @@ checkProductName();
 // last step but the upload of it, named for the job and kept on a push to
 // main alone. The list and the upload run after a failed step too, but only
 // where the marker step succeeded: after a checkout that failed there is no
-// script to run, and the step would fail a second time for it. The job that
+// script to run, and the step would fail a second time for it. Neither fails
+// its job: the script exits 0, and the upload continues on its error. The job that
 // runs changes.sh's cases runs reads.sh's, where a runner whose filesystem
 // records no access times fails.
 const READS_SCRIPT = ".github/ci/reads.sh";
@@ -11998,6 +11999,7 @@ function readsProblems(text: string, gated: readonly string[], selfCheckJob: str
     if (w.name !== wantName) problems.push(`job ${key} uploads its list as ${JSON.stringify(w.name)}, not ${wantName} — upload-artifact fails a second upload of one name, and only on a push to main (check 55, SMD-2435)`);
     if (String(w.path ?? "").trim() !== READS_DIR) problems.push(`job ${key} uploads its list from ${JSON.stringify(w.path ?? null)}, not ${READS_DIR}, where ${READS_SCRIPT} writes it (check 55, SMD-2435)`);
     if (String(upload.if ?? "").trim() !== READS_KEEP_IF) problems.push(`job ${key}'s upload of its list runs if: ${JSON.stringify(upload.if ?? null)}, not ${READS_KEEP_IF} — the lists are kept from a push to main alone, the run whose every job runs, and where a marker was made (check 55, SMD-2435)`);
+    if (upload["continue-on-error"] !== true) problems.push(`job ${key}'s upload of its list sets continue-on-error: ${JSON.stringify(upload["continue-on-error"] ?? null)}, not true — no job fails for its list, and an upload the artifact service refuses would fail one on main (check 55, SMD-2435)`);
   }
   const selfCheck = stepsOf(mapping(jobs[selfCheckJob])).find((s) => runOf(s) === READS_SELF_CHECK);
   if (!selfCheck) problems.push(`job ${selfCheckJob} has no step that runs \`${READS_SELF_CHECK}\` — its cases are where a runner that records no access times fails, and every list would be empty unseen (check 55, SMD-2435)`);
@@ -12008,7 +12010,7 @@ function checkReadsRecorded() {
   const CHECKOUT = "      - uses: actions/checkout@v7\n";
   const MARK = `      - name: mark\n        id: ${READS_MARK_ID}\n        run: ${READS_MARK}\n`;
   const LIST = (key: string, cell = "") => `      - name: list\n        if: ${READS_LIST_IF}\n        run: ${READS_LIST} ${key}${cell ? ` ${cell}` : ""}\n        env:\n          JOB_STATUS: ${READS_STATUS}\n`;
-  const KEEP = (name: string, o: { path?: string; cond?: string } = {}) => `      - uses: actions/upload-artifact@v7\n        if: ${o.cond ?? READS_KEEP_IF}\n        with:\n          name: ${name}\n          path: ${o.path ?? READS_DIR}\n`;
+  const KEEP = (name: string, o: { path?: string; cond?: string } = {}) => `      - uses: actions/upload-artifact@v7\n        if: ${o.cond ?? READS_KEEP_IF}\n        continue-on-error: true\n        with:\n          name: ${name}\n          path: ${o.path ?? READS_DIR}\n`;
   const RUN = "      - run: bun test.ts\n";
   const TEARDOWN = "      - name: down\n        if: always()\n        run: docker rm -f x\n";
   const job = (key: string, steps: string, head = "") => `  ${key}:\n    runs-on: ubuntu-24.04\n${head}    steps:\n${steps}`;
@@ -12048,6 +12050,7 @@ function checkReadsRecorded() {
     ["a matrix job's upload with no cell", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a", SHARD) + KEEP("reads-a"), MATRIX), good("b")), ["job a uploads its list as \"reads-a\", not reads-a-${{ matrix.shard }}"]],
     ["an upload from another directory", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a") + KEEP("reads-a", { path: "/tmp/reads/" })), good("b")), ["job a uploads its list from \"/tmp/reads/\""]],
     ["an upload on every run", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a") + KEEP("reads-a", { cond: "always()" })), good("b")), ["job a's upload of its list runs if: \"always()\""]],
+    ["an upload whose failure fails its job", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a") + KEEP("reads-a").replace("        continue-on-error: true\n", "")), good("b")), ["job a's upload of its list sets continue-on-error: null"]],
     ["a gated job gone", wf(lint(), good("a")), ["has no job b"]],
     ["no self-check", wf(lint(""), good("a"), good("b")), ["job lint has no step that runs"]],
     ["a self-check that may be skipped", wf(lint(`      - if: github.event_name == 'push'\n        run: ${READS_SELF_CHECK}\n`), good("a"), good("b")), ["job lint's `bash .github/ci/reads.sh --self-check` step sets if:"]],
