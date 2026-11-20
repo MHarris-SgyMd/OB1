@@ -47,6 +47,7 @@ import {
   type Fetch,
   type Runner,
 } from "./facts.ts";
+import { printable, shownText } from "./guard.ts";
 import {
   HIDDEN_TEXT,
   boardReasons,
@@ -264,18 +265,10 @@ export function hasAclEntry(lsOutput: string): boolean {
   return /^\s*\d+: /m.test(lsOutput);
 }
 
-/** Untrusted text for a terminal: each code point that doesn't show, or changes how text shows, as <U+XXXX>. */
-export function printable(s: string): string {
-  let out = "";
-  for (const ch of s) out += HIDDEN_TEXT.test(ch) ? `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>` : ch;
-  return out;
-}
-
-/** Untrusted text on one line: printable, every whitespace run closed to one space, and cut at `max` code points, so it can't wrap into a line of its own. */
-export function shown(s: string, max: number): string {
-  const flat = [...printable(s.replace(/\s+/g, " ").trim())];
-  return flat.length > max ? `${flat.slice(0, max - 1).join("")}…` : flat.join("");
-}
+// Untrusted text for a terminal, and on one line: guard.ts's (SMD-4325), under the names this module's callers know.
+export { printable };
+/** Untrusted text on one line, cut at `max` code points: guard.ts's shownText. */
+export const shown = (s: string, max: number): string => shownText(s, max);
 
 /** A function that writes "<a key>" for each of `secrets` wherever it appears in a text. */
 export function masker(secrets: (string | null)[]): (text: string) => string {
