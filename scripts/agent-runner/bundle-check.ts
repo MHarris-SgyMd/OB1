@@ -15,7 +15,6 @@ import { importBundle, verifyBundle } from "./bundle.ts";
 import { BriefTicket, buildReviewBrief, fence } from "./brief.ts";
 import { fixtureGit } from "./fixture-git.ts";
 
-
 export async function selfCheck(): Promise<number> {
   let passed = 0;
   let failed = 0;

@@ -8,7 +8,7 @@
  * probes must run again before a real session. They import only each other, brief.ts and record.ts, and this module
  * is not one of them: nothing hashed imports it, so an edit here voids no stamp. What the hashed files need they keep
  * among themselves, and the rest of the runner imports it from them:
- *   - guard.ts: isObject, printable and shownText (hidden code points as <U+XXXX>, the one-line cut by code points);
+ *   - guard.ts: isObject, codePointName, printable and shownText (hidden code points as <U+XXXX>, the one-line cut by code points);
  *   - session.ts: readNoFollow and writeNoFollow, which record.ts hands on;
  *   - probes.ts: developerGit, which fixture-git.ts wraps for the checks.
  * facts.ts keeps jsonOf and NOT_JSON, for claims.ts beside it.

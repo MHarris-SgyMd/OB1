@@ -17,7 +17,7 @@
 
 import { closeSync, constants, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { SAFE_REQUEST, TIME_LIMITS, type Config, type Fetch, NOT_JSON, jsonOf } from "./facts.ts";
+import { NOT_JSON, SAFE_REQUEST, TIME_LIMITS, jsonOf, type Config, type Fetch } from "./facts.ts";
 import { isObject } from "./guard.ts";
 import { maskTokens, oneLine } from "./text.ts";
 

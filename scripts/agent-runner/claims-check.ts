@@ -110,6 +110,8 @@ export async function selfCheck(): Promise<number> {
       ok(unread.kind === "renewed" && unread.revived?.unreadable === true && unread.revived.others.length === 0, "a revived lapse whose meanwhile-claims are null is marked unreadable");
       const listed = await renewClaim(stub(() => ({ body: { claim: row(), lapsed: [] } })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
       ok(listed.kind === "renewed" && listed.revived === null, "a lapsed field that is an array is no lapse the runner knows, as a string there is none (SMD-4325: it read as a lapse at no time)");
+      const renewList = await renewClaim(stub(() => ({ body: [{ claim: row() }] })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
+      ok(renewList.kind === "error" && renewList.detail.includes("the brain answered 200"), "a 200 renewal whose body is a JSON array is an error reply naming the status");
       const ended = await renewClaim(stub(() => ({ status: 409, body: { code: "CLAIM_RELEASED", ticketClosed: true } })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
       ok(ended.kind === "ended" && ended.ticketClosed === true, "409 CLAIM_RELEASED with ticketClosed=true means board-sync closed the ticket");
       const notYours = await renewClaim(stub(() => ({ status: 403, body: { code: "CLAIM_NOT_YOURS" } })).fetch, BASE, KEY, { id: "i", token: "wc_x", lease_seconds: 86400 });
@@ -121,6 +123,8 @@ export async function selfCheck(): Promise<number> {
     });
 
     await section("releaseClaim maps each reply", async () => {
+      const releaseList = await releaseClaim(stub(() => ({ body: [{ outcome: "released", claim: row() }] })).fetch, BASE, KEY, { id: "i", token: "wc_x", reason: "r" });
+      ok(releaseList.kind === "error" && releaseList.detail.includes("the brain answered 200"), "a 200 release whose body is a JSON array is an error reply naming the status, never a release");
       const released = await releaseClaim(stub(() => ({ body: { outcome: "released", claim: row({ state: "released" }) } })).fetch, BASE, KEY, { id: "i", token: "wc_x", reason: "merged" });
       ok(released.kind === "released" && released.alreadyEnded === false, "a 200 released reply");
       const already = await releaseClaim(stub(() => ({ body: { outcome: "already_released", claim: row({ state: "released" }) } })).fetch, BASE, KEY, { id: "i", token: "wc_x", reason: "merged" });

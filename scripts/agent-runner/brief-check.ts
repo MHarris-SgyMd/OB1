@@ -17,7 +17,6 @@ import { fixtureGit } from "./fixture-git.ts";
 
 const BOT = { name: "Agent Runner Bot", email: "bot@agent-runner.invalid" };
 
-
 /** A clean ticket for the brief tests; each case overrides a field. */
 const cleanTicket = (over: Partial<BriefTicket> = {}): BriefTicket => ({
   identifier: "SMD-9",

@@ -23,7 +23,6 @@ import { parseFindings, resumeDecision, run, type RunDeps, type RunLimits, type 
 import type { Ended, InitSummary, SessionOutcome } from "./session.ts";
 import { fixtureGit } from "./fixture-git.ts";
 
-
 /** A full SessionOutcome from a few fields; the rest are the empty defaults runSession would return. */
 function outcome(p: { ended?: Ended; report?: string; cost?: number | null; turns?: number | null; sessionId?: string | null }): SessionOutcome {
   const ended = p.ended ?? "result";

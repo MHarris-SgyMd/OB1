@@ -81,10 +81,13 @@ const SCRIPT = /\.(ts|tsx|mts|cts|js|mjs|cjs)$/;
 /** A package script's name, for `bun run <name>`: no path, no option. */
 const SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:_.-]*$/;
 
-/** Untrusted text for a terminal: each code point that doesn't show, or changes how text shows, as <U+XXXX>. The runner's one writing of it (SMD-4325). */
+/** A code point by its number, `<U+XXXX>`: how the runner writes one that doesn't show (SMD-4325: one writing of it). */
+export const codePointName = (ch: string): string => `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>`;
+
+/** Untrusted text for a terminal: each code point that doesn't show, or changes how text shows, as <U+XXXX>. */
 export function printable(s: string): string {
   let out = "";
-  for (const ch of s) out += HIDDEN_TEXT.test(ch) ? `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>` : ch;
+  for (const ch of s) out += HIDDEN_TEXT.test(ch) ? codePointName(ch) : ch;
   return out;
 }
 

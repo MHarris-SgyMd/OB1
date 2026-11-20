@@ -47,6 +47,7 @@ import {
   type Fetch,
   type Runner,
 } from "./facts.ts";
+import { printable, shownText } from "./guard.ts";
 import {
   HIDDEN_TEXT,
   boardReasons,
@@ -66,7 +67,6 @@ import {
   type Ticket,
   type Verdict,
 } from "./select.ts";
-import { printable, shownText } from "./guard.ts";
 
 const KNOWN: Record<string, "value" | "flag"> = { "--config": "value", "--json": "flag", "--self-check": "flag", "--help": "flag" };
 type Opts = { error?: string; [name: string]: string | true | undefined };
