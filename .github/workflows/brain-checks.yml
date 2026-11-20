@@ -322,6 +322,12 @@ jobs:
       # an empty change, a name holding a newline) is code=true.
       - name: The changes job's reading of what changed
         run: bash .github/ci/changes.sh --self-check
+      # SMD-2435 PR 3b-1: the record of what a job reads, on a scratch checkout —
+      # a file read and a folder listed after the marker are in the list, a file
+      # left alone is not, and a runner whose filesystem records no access
+      # times fails here, where every job's list would be empty.
+      - name: The record of what a job reads
+        run: bash .github/ci/reads.sh --self-check
 
   portable-server:
     name: Portable server
@@ -337,6 +343,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # What the job reads, for the map a pull request's jobs will skip by
+      # (SMD-2435 PR 3b-1): a marker here, straight after the checkout, and
+      # the list as the job's last step. .github/ci/reads.sh has how.
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -821,6 +833,25 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # The job's last step (SMD-2435 PR 3b-1): the tracked files it opened
+      # and the folders it listed since the marker, after a failed step too,
+      # its header saying how the job stood. Kept on a push to main alone, the
+      # run whose lists PR 3b-2 gathers into the map.
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list portable-server
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-portable-server
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   db-schema:
     name: Schema migrations
     runs-on: ubuntu-24.04
@@ -835,6 +866,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -950,6 +985,22 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list db-schema
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-db-schema
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   replay-gate:
     name: Retrieval replay gate
     runs-on: ubuntu-24.04
@@ -964,6 +1015,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -1062,6 +1117,22 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list replay-gate
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-replay-gate
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   db-live:
     name: "Schema against real Postgres (${{ matrix.shard }})"
     runs-on: ubuntu-24.04
@@ -1116,6 +1187,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -1215,6 +1290,22 @@ jobs:
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list db-live ${{ matrix.shard }}
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-db-live-${{ matrix.shard }}
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   data-layer:
     name: SQL data layer against real Postgres
     runs-on: ubuntu-24.04
@@ -1268,6 +1359,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -1721,6 +1816,22 @@ jobs:
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list data-layer
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-data-layer
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   # test-preflight.ts's rest shard (OB1_PREFLIGHT_SHARD=rest, SMD-3468), on
   # a runner of its own (SMD-3691). It was the data layer's third leg, but
   # that job was bound by its runner's 4 CPUs. Over five runs of OB1 PR 621
@@ -1769,6 +1880,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -1835,6 +1950,22 @@ jobs:
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list preflight-rest
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-preflight-rest
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   deploy-stack:
     name: Full stack, no Supabase
     runs-on: ubuntu-24.04
@@ -1848,6 +1979,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       # Bun runs the operator GUI's smokes against the stack in this job. (It also
       # built and drove the old SvelteKit dashboard until SMD-3310 retired it.)
@@ -3159,6 +3294,22 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list deploy-stack
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-deploy-stack
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   deploy-stack-brains:
     name: "Full stack: the tier refresh and the canary"
     runs-on: ubuntu-24.04
@@ -3172,6 +3323,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       # Bun on the runner, for this checkout's scripts run there: auth/provision.ts
       # and db/tier.ts --diff.
@@ -4013,6 +4168,22 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list deploy-stack-brains
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-deploy-stack-brains
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   deploy-stack-auth:
     name: "Full stack: a second brain, the edge proxy, the import runner and the authorization server"
     runs-on: ubuntu-24.04
@@ -4026,6 +4197,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       # Bun on the runner, for this checkout's scripts run there: deploy/instance.ts's
       # check, deploy/edge/edge.ts, auth/provision.ts, and the registered client's
@@ -4823,6 +4998,22 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list deploy-stack-auth
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-deploy-stack-auth
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   # SMD-3170: the observability profile's step, in a job of its own on a stack
   # of its own. In deploy-stack it was a median 134 s of that job's 360, the
   # run's critical path, and it needs nothing of that job's but a stack up
@@ -4840,6 +5031,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       # Bun on the runner, for auth/provision.ts, which
       # .github/ci/auth-settings.sh runs.
@@ -5188,6 +5383,22 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml --profile observability down -v
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list deploy-stack-observability
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-deploy-stack-observability
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   # SMD-2285: the authorization server's proof of concept, evals/auth/, run
   # against the deploy's own server image (deploy/auth/). The upstream of
   # oidc-provider declines Bun support, so the server runs on Bun only while
@@ -5209,6 +5420,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -5258,6 +5473,22 @@ jobs:
         working-directory: evals
         run: bun eval-auth.ts --down better-auth
 
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list auth-poc
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-auth-poc
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
+
   compat-shim:
     name: supabase-js compatibility shim
     runs-on: ubuntu-24.04
@@ -5283,6 +5514,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # portable-server's step after its checkout has why (SMD-2435).
+      - name: Mark the checkout, for the job's reads
+        run: bash .github/ci/reads.sh mark
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -5377,6 +5612,22 @@ jobs:
             echo "::group::$c's log"; docker logs "$c" 2>&1 || true; echo "::endgroup::"
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
+
+      # portable-server's last step has why (SMD-2435).
+      - name: The job's reads
+        if: ${{ !cancelled() }}
+        run: bash .github/ci/reads.sh list compat-shim
+        env:
+          JOB_STATUS: ${{ job.status }}
+
+      - name: Keep the job's reads
+        if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: reads-compat-shim
+          path: ${{ runner.temp }}/reads/
+          if-no-files-found: warn
+          retention-days: 14
 
   # ── The suites' counts, published (SMD-3614) ────────────────────────────────
   # A suite's assertion total is a fact about a commit's run, so it is written
