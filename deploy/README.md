@@ -2475,21 +2475,22 @@ taking turns in the period as long each — then
 extraction, and
 consolidation beside it once the thoughts captured before the period began
 are extracted, so the backlog order above is built in: a thought captured
-since is judged against neighbours captured on an earlier UTC date, all of
-them in that backlog, except across 00:00 UTC. Writes that pause nothing
-(board-sync's, an `ingested` key's) no longer keep consolidation out of a
-period for as long as they come, as they did while it waited for
-extraction's whole pool to drain (SMD-4468). Board-sync's observation of the
-day, dated 00:00 UTC, and a ticket it re-renders during the period (which
-keeps its entities until it is extracted again) hold nothing back. A ticket
-created on an earlier day that it first writes during the period, or one
-re-rendered before the period began (each period's re-derive sweep clears
-its entities), is backlog until extracted, as it should be. A backlog thought a
-pause has taken goes behind the newer writes, and waits for extraction to
-catch up with them, and the join with it, as before. Consolidation's judge
-calls now run while such writes arrive: on a model server of one slot they
-share it with extraction. Under a steady inflow the period does not end
-until the writes stop. Beside consolidation runs the subject sweep
+since is judged against neighbours captured on an earlier UTC date, and
+every one of them not yet extracted is in that backlog, except across 00:00
+UTC. Writes that pause nothing (an `ingested` key's, board-sync's among
+them) no longer keep consolidation out of a period for as long as they
+come, as they did while it waited for extraction's whole pool to drain
+(SMD-4468). Board-sync's observation of the day, dated 00:00 UTC, and a
+ticket it re-renders (which keeps its entities until it is extracted again)
+hold nothing back. A ticket created on an earlier day that it first writes
+during the period is backlog until extracted, as it should be — if it lands
+before consolidation joins; one landing after is judged without a wait, and
+a thought judged before it misses its pair with it. A backlog thought a
+pause has taken goes behind the newer writes, and the join waits until
+extraction reaches it, which under writes faster than extraction is once
+they slow, as before. Consolidation's judge calls now run while such writes
+arrive: on a model server of one slot they share it with extraction. Under
+a steady inflow the period does not end until the writes stop. Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
 model's: started once a period, once extraction's whole pool has drained or
@@ -2611,8 +2612,10 @@ sweep, which says `re-derive: N orphaned lineage row(s) swept` when it deletes
 any. A period that says `working:` and no consolidating line while writes keep
 arriving still has backlog to extract: a thought captured before the period
 began that extraction has not reached, such as one a pause took, behind the
-newer writes. `extract-entities.ts --status` shows extraction's pool going down;
-consolidation joins once extraction reaches it, or once the writes stop.
+newer writes. `extract-entities.ts --status` counts extraction's whole pool,
+not that backlog: while writes arrive faster than extraction takes them it
+grows, and the join waits until they slow (the limit above). `sleep.ts
+--dry-run` names a thought held back across stops.
 The settings go out as startup parameters, which a transaction pooler
 (PgBouncer, a managed host's pooled endpoint) refuses: the scheduler connects to
 Postgres directly, as the stack's own does. `extract-entities.ts

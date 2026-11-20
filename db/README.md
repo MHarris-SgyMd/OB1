@@ -5514,17 +5514,19 @@ many. Then extraction alone until the thoughts captured before the period
 began are extracted, then consolidation beside it — the order "Start
 `extract` alone on a backlog" asks of an operator (SMD-4468). A thought
 captured since is judged against neighbours captured on an earlier UTC date
-(029), all of them in that backlog — except across 00:00 UTC, as beside any
-running `extract`. A write during the period dated today (board-sync's
-observation of the day, dated 00:00 UTC) is no neighbour of one, and holds
-nothing back; one dated an earlier day (a ticket created then, an import
-carrying its dates) is, and holds the join until extracted. A thought
-already extracted that an edit pools again during the period (board-sync
-re-rendering a ticket) keeps its entities until it is extracted again, so it
-holds nothing back; one edited before the period began is backlog until
-extracted again, as the period's re-derive sweep clears its entities. Until SMD-4468 the join waited for extraction's whole
-pool, which a steady inflow of writes that pause nothing (a sync key's, an
-`ingested` key's) kept from draining: the capture trigger pools each one as
+(029), and every one of them not yet extracted is in that backlog — except
+across 00:00 UTC, as beside any running `extract`, and except a write dated
+an earlier day that lands after the join, which no read waits for. A write
+during the period dated today (board-sync's observation of the day, dated
+00:00 UTC) is no neighbour of one, and holds nothing back; one dated an
+earlier day (a ticket created then, an import carrying its dates) is, and
+holds the join until extracted, if it lands before it. A thought already
+extracted that an edit pools again (board-sync re-rendering a ticket) keeps
+its entities until it is extracted again, so it holds nothing back, whenever
+the edit came; one whose extraction found no entity counts. Until SMD-4468
+the join waited for extraction's whole pool, which a steady inflow of writes
+that pause nothing (an `ingested` key's, board-sync's among them) kept from
+draining: the capture trigger pools each one as
 it is written, so one was pending or in hand at every poll, and
 consolidation never joined while they came. The subject sweep still waits
 for the whole pool (below): beside consolidation, its judge calls slowed

@@ -30142,7 +30142,7 @@ if (want("38c")) await (async () => {
     assert(joined && judgedInFlow > 0 && pendingAtJudge > 0 && !drainedInFlow && inOrder && a.allJudged && a.code === 0,
       `a capture every 300 ms, extraction's pool never drained while it lasted: consolidation joins once the thoughts captured before the period began are extracted, said so, and judges an inflow note while the inflow goes on — its first claim after the backlog's last extraction (joined ${joined}; ${judgedInFlow} inflow note(s) judged during it, ${pendingAtJudge} pending or in hand for extraction then; drained during it ${drainedInFlow}; backlog ${order.done} of ${backlog.length} extracted, the last at ${order.extracted ? new Date(order.extracted).toISOString() : "never"}, the first judgement claimed at ${order.judged ? new Date(order.judged).toISOString() : "never"}; ${a.inflow.length} captured, all judged once it ended ${a.allJudged}; exit ${a.code}${joined && judgedInFlow > 0 ? "" : lastLines()})`);
     assert(!sweptInFlow && sweptAfter,
-      `…and the subject sweep waits for extraction's whole pool, starting once the inflow has ended, not at the backlog's join (review pass 2, the maintainer's choice) (started during it ${sweptInFlow}; after ${sweptAfter}${sweptAfter ? "" : lastLines()})`);
+      `…and the subject sweep waits for extraction's whole pool, not the backlog's join, starting here once the inflow has ended (review pass 2, the maintainer's choice) (started during it ${sweptInFlow}; after ${sweptAfter}${sweptAfter ? "" : lastLines()})`);
     await unpoolSubjects();
 
     // A limit the maintainer chose to name (review passes 1 and 2): a backlog thought a pause has taken — one stalled,
@@ -30177,36 +30177,39 @@ if (want("38c")) await (async () => {
     // Board-sync's writes (review pass 2): it dates an observation at 00:00 UTC of its day, and re-renders a ticket in
     // place, which 016 pools again. Both were backlog, and held the join as before: now a write during the period
     // dated today is none, and a thought already extracted that an edit pools again during the period keeps
-    // its entities, no backlog either (the period's re-derive sweep clears those of one edited before it began).
-    // The journal's notes, all extracted above, are this case's older thoughts; once the period has begun one is
-    // edited every 2 s while the inflow goes on, each edit pooling it again behind the captures, and
-    // four older notes not yet extracted are the backlog the join waits for meanwhile.
+    // its entities, no backlog either. The journal's notes, all extracted above, are this case's older thoughts;
+    // once the period has begun one is edited every 2 s under the sync key, which pauses nothing (review pass 3: a
+    // raw UPDATE, no actor, read as a live write and paused the period), while the inflow goes on, each edit pooling
+    // it again behind the captures; four older notes not yet extracted are the backlog the join waits for meanwhile.
     // The held thoughts out, which would hold this join as above.
     await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(held, "TEXT")}::uuid[])`;
     for (let i = 0; i < 4; i++) await capture(`An older note on the register, number ${i}.`, "sync-sleep", 2 + i, 62);
     const edited = older[0];
-    let editing = true, edits = 0, joinedD = false, judgedD = 0, editsAtJoin = 0, heldBack = "";
+    let editing = true, edits = 0, joinedD = false, judgedD = 0, editsAtJoin = 0, heldBack = "", editedAtJoin: string | undefined;
+    const startedD = new Date((await sql`SELECT now() AS now`)[0].now as string);
     let editor: Promise<void> = Promise.resolve();
     const d = await underInflow("register", 62, async (inflow) => {
       try {
         await pollUntil(async () => lines.some((l) => /^ {2}working:/.test(l)), 20_000);
         editor = (async () => {
-          for (; editing; edits++) {
-            await sql`UPDATE thoughts SET content = ${`An older note on the journal, number 0, re-rendered ${edits}.`} WHERE id = ${edited}::uuid`;
+          while (editing) {
+            await sql`SELECT update_thought(p_id := ${edited}::uuid, p_content := ${`An older note on the journal, number 0, re-rendered ${edits}.`}, p_embedding := ${unit(62)}::vector, p_embedding_model := 'stub-embed', p_actor := ${{ name: "sync-sleep", via: "test-live" }}::jsonb)`;
+            edits++;
             await Bun.sleep(2000);
           }
         })();
         joinedD = await pollUntil(async () => lines.some((l) => JOINED.test(l)), 30_000);
         editsAtJoin = edits;
-        if (!joinedD) heldBack = ((await sql`SELECT t.content, c.status, (SELECT count(*)::int FROM thought_entities te WHERE te.thought_id = t.id) AS ents, t.created_at FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE c.work_type = ${EX} AND c.status IN ('pending', 'claimed') AND (t.created_at AT TIME ZONE 'UTC')::date < (now() AT TIME ZONE 'UTC')::date`) as { content: string; status: string; ents: number; created_at: Date }[]).map((r) => `${r.content.slice(0, 40)} ${r.status} ${r.ents} ${new Date(r.created_at).toISOString()}`).join(" / ");
+        editedAtJoin = ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${edited}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
+        if (!joinedD) heldBack = ((await sql`SELECT t.content, c.status, (SELECT count(*)::int FROM thought_entities te WHERE te.thought_id = t.id) AS ents, t.created_at FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE c.work_type = ${EX} AND c.status IN ('pending', 'claimed') AND t.created_at < ${startedD}::timestamptz`) as { content: string; status: string; ents: number; created_at: Date }[]).map((r) => `${r.content.slice(0, 40)} ${r.status} ${r.ents} ${new Date(r.created_at).toISOString()}`).join(" / ");
         if (joinedD) await pollUntil(async () => (judgedD = await judgedOf(inflow)) > 0, 30_000);
       } finally {
         editing = false;
         await editor;
       }
     }, { stamp: async (id) => { await sql`UPDATE thoughts SET created_at = date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' WHERE id = ${id}::uuid`; } });
-    assert(joinedD && judgedD > 0 && editsAtJoin > 0 && d.allJudged && d.code === 0,
-      `…and writes dated 00:00 UTC today, as board-sync's observations, beside an older thought already extracted that an edit pools again every 2 s, as a re-rendered ticket: neither holds the join, and an inflow note is judged while the writes go on (joined ${joinedD}; ${judgedD} judged during it; ${editsAtJoin} edit(s) before the join, ${edits} in all; older ones pending then: ${heldBack || "none"}; its joins: ${lines.filter((l) => ANY_JOIN.test(l)).map((l) => l.trim().slice(0, 120)).join(" | ") || "none"}; ${d.inflow.length} captured, all judged after ${d.allJudged}; exit ${d.code}${joinedD ? "" : lastLines()})`);
+    assert(joinedD && judgedD > 0 && editsAtJoin > 0 && editedAtJoin !== "succeeded" && d.allJudged && d.code === 0,
+      `…and writes dated 00:00 UTC today, as board-sync's observations, beside an older thought already extracted that an edit pools again every 2 s, as a re-rendered ticket: neither holds the join, and an inflow note is judged while the writes go on (joined ${joinedD}; ${judgedD} judged during it; ${editsAtJoin} edit(s) before the join, ${edits} in all, the edited thought ${editedAtJoin ?? "unclaimed"} at it; older ones pending then: ${heldBack || "none"}; its joins: ${lines.filter((l) => ANY_JOIN.test(l)).map((l) => l.trim().slice(0, 120)).join(" | ") || "none"}; ${d.inflow.length} captured, all judged after ${d.allJudged}; exit ${d.code}${joinedD ? "" : lastLines()})`);
   } finally {
     await unpoolSubjects().catch(() => {});
     await done();
