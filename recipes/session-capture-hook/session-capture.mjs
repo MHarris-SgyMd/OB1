@@ -1833,8 +1833,8 @@ export async function postCapture(cfg, payload) {
   // rule, which the text alone leaves to guess — not with a model's summary,
   // whose prose has no header for the word to describe (review pass 4: a model
   // echoing the header it was shown would have its tickets keyed); and the
-  // version of the hook that prepared it (SMD-4378), so the brain can tell
-  // which rules wrote a header. A payload queued by a hook before 1.11.0 has
+  // version of the hook that prepared it (SMD-4378), so the brain can later
+  // tell which rules wrote a header. A payload queued by a hook before 1.11.0 has
   // none, and is sent without it: no hook can say which wrote it. A hook
   // before 1.11.0 sending a payload a later one queued (a rollback) drops it.
   // A stamp not in a version's shape (a hand edit, a corrupt file) is not sent:
@@ -3989,12 +3989,12 @@ function stdinIsPiped() {
 export async function main(argv) {
   const args = argv.slice(2);
   // First, whatever else is given and whether or not stdin is piped: an
-  // operator confirming an upgrade needs no config, no brain and no transcript (SMD-4378).
-  // With stdin a pipe or a socket, as a harness hands a hook, it may be a hook
-  // command's, which then does nothing at every run: the log says so, as it
-  // does for a flag no hook takes (review pass 1: it was silent). Not on a
-  // terminal or /dev/null, as an agent's or a script's shell runs it to confirm
-  // an upgrade, which then writes no log and makes no state dir (review pass 2).
+  // operator confirming an upgrade needs no config, no brain and no
+  // transcript (SMD-4378). A piped stdin may be a hook command's, which then
+  // does nothing at every run: the log says so, as it does for a flag no hook
+  // takes (review pass 1: it was silent). On a terminal or /dev/null, as an
+  // interactive shell or Claude Code's Bash tool runs it, nothing is logged
+  // and no state dir is made (review pass 2).
   if (has(args, "--version")) {
     if (stdinIsPiped()) log(`--version: printed session-capture ${HOOK_VERSION}; stdin unread, nothing captured, renewed or copied (if this is a hook command, it stops every run: remove --version)`);
     console.log(`session-capture ${HOOK_VERSION}`);

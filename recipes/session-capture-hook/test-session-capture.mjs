@@ -1351,7 +1351,7 @@ console.log("\n[6] The background half posts over MCP, records the id, retries a
   assert(received.at(-1).args.derived_from === undefined && received.at(-2).args.derived_from?.length === 1, "…two calls, the second bare — the one source was the one refused");
   const r1old = await postCapture(cfg, { text: "[[refuse-derived-old]] summary", harness: "codex", derived_from: [uuid(51), uuid(52)] });
   assert(r1old.id && /provenance dropped/.test(r1old.note) && received.at(-1).args.derived_from === undefined, "a server that names no position (before this pass) gets the whole list dropped");
-  // A queued payload is sent with the version of the hook that prepared it, not the one draining it (SMD-4378):
+  // A payload is sent with the version of the hook that prepared it, not the one draining it (SMD-4378):
   // one queued by a hook before 1.11.0 carries none, and none is sent; one an older hook stamped keeps its stamp.
   await postCapture(cfg, { text: "a summary queued before 1.11.0", harness: "codex", derived_from: [] });
   const unstamped = received.at(-1).args;
@@ -2761,12 +2761,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   // The flags are read before the transcript (third review pass: a transcript with no prompt returned 0 past every refusal).
   const quietBogus = await run(["--dry-run", join(TMP, "quiet.jsonl"), "--event", "bogus", "--trigger", "Whatever", "--min-interval", "5"]);
   const quietGood = await run(["--dry-run", join(TMP, "quiet.jsonl"), "--event", "PreCompact", "--trigger", "auto"]);
+  assert(quietBogus.code === 2 && /--event takes/.test(quietBogus.err) && !quietBogus.out.trim() && /would SKIP/.test(quietGood.out),
+    "--dry-run on a transcript with no prompt still refuses a bad flag, and with good ones says it would skip");
   assert(quietGood.out.startsWith(`--- ${VERSION_LINE}: `), `--dry-run's first line names the version on a transcript it would skip too (SMD-4378 review pass 2) (${quietGood.out.split("\n")[0]})`);
   const dryModel = await spawnScript(["--dry-run", CLAUDE_T], { env: { OB1_SESSION_CAPTURE_SUMMARY: "model", OB1_SESSION_CAPTURE_MODEL_URL: "http://127.0.0.1:9/v1", OB1_SESSION_CAPTURE_MODEL: "test-model" } });
   assert(dryModel.code === 0 && dryModel.out.split("\n")[0] === `--- ${VERSION_LINE}: what it would send; nothing is sent` && /^--- summary: model/m.test(dryModel.out.split("\n").slice(1).join("\n")),
     `…and in model mode, before the model's status line (SMD-4378 review pass 2) (${JSON.stringify(dryModel.out.split("\n").slice(0, 3))})`);
-  assert(quietBogus.code === 2 && /--event takes/.test(quietBogus.err) && !quietBogus.out.trim() && /would SKIP/.test(quietGood.out),
-    "--dry-run on a transcript with no prompt still refuses a bad flag, and with good ones says it would skip");
   // The `=` form (third review pass: unseen, so `--trigger=auto` previewed no trigger and `--min-interval=45` printed 20).
   const eqForm = await run(["--dry-run", CLAUDE_T, "--event=PreCompact", "--trigger=auto"]);
   assert(eqForm.code === 0 && /Checkpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(eqForm.out), `--event=PreCompact --trigger=auto reads as the space form does (${eqForm.err.trim().slice(0, 60)})`);
