@@ -589,6 +589,7 @@ const FUNCTIONS = [
   "record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)",
   "review_settled_part(uuid, text, text, jsonb, boolean, timestamptz)",
   "ob1_keep_part_judgement()",
+  "ob1_stamp_part_change()",
   "ob1_drop_part_derivation()",
 ];
 

@@ -2536,7 +2536,10 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
     // consolidate.ts's settled parts (SMD-4446): 148's record_settled_part
     // and review_settled_part run as the caller, as 029's do, and
-    // rebuild_derived sets a part stale as it does a proposal.
+    // rebuild_derived sets a part stale as it does a proposal. The write
+    // also holds its two thoughts' rows (FOR SHARE), for which Postgres
+    // asks the capture group's UPDATE on `thoughts`, as rebuild_derived's
+    // lock on its input does.
     Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "148" }),
     // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
     // forget: the forget arm removes the snapshot rows at a leaving thought's
