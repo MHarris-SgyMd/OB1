@@ -462,6 +462,11 @@ let episodesLines;
   const quotedSecond = blanked(CWD("/wt/ob1"), BR("main"), P("tidy the readme"), P('export DB_PASSWORD="hunter22 \\\nQQZ-9876" now'));
   assert(quoted.named === "" && quoted.head.from === null && !/QQZ-9876/.test(quoted.text) && quotedSecond.episodes === 1 && !/QQZ-9876/.test(quotedSecond.text),
     `a quoted secret across a line break is no ticket either, as the first ask or as a later one (${JSON.stringify([quoted, quotedSecond].map((x) => ({ episodes: x.episodes, named: x.named, head: x.head })))})`);
+  // Review pass 2 (secrets adversary): the title too is blanked as the summary shows it, on one line. Blanked as written,
+  // an ai-title's quoted value whose closing quote is on the next line was cut there and the rest was sent.
+  const titledSecret = redactEpisode(segment([CWD("/wt/ob1"), BR("main"), P("tidy the readme"), { t: "title", text: 'set password = "hunter22\nQQZ-9876" now' }]).episodes[0]);
+  assert(/^Title: set password = "?\[redacted:[^\]]+\]"? now$/m.test(titledSecret.text) && !/QQZ-9876|hunter22/.test(titledSecret.text),
+    `a title's quoted secret across a line break is blanked whole (${titledSecret.text.split("\n").find((l) => l.startsWith("Title:"))})`);
   assert(noTeam.named === "" && noTeam.head.from === null && !/ABC-1234/i.test(noTeam.text)
       && teamKey.named === "" && teamKey.head.from === "place" && teamKey.head.tickets.join() === "SMD-610" && !/4321/.test(teamKey.text)
       && noSplit.episodes === 1 && !/ABC-1234/i.test(noSplit.text)

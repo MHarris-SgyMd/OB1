@@ -1606,7 +1606,9 @@ export function redactEpisode(ep) {
   };
   // The DISTINCT prompts, as the summary lists them: a retried prompt is one
   // line in the text and one redaction in the count.
-  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
+  // The title as the summary shows it, on one line, as the prompts are (SMD-4292 review pass 2, secrets adversary: blanked
+  // as written, a quoted value whose closing quote is on the next line was cut there, and the rest shown).
+  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(typeof ep.title === "string" ? oneLine(ep.title) : ep.title, "the title") };
   const text = take(renderSummary(redacted), "the text");
   return { ep: redacted, text, redactions, blocks };
 }
