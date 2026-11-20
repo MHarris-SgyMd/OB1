@@ -489,7 +489,7 @@ const FORGOTTEN_TIMEOUT_MS = 10_000;
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "validity", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
@@ -3352,6 +3352,36 @@ if (configFailed) {
                 "Grant the deliverables group (SMD-1715): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups deliverables (db/README.md, Grants for a capturing role).");
           } else {
             add("deliverables", "ok", "record_deliverable, verify_deliverable, and deliverable_history present; the server's role holds the deliverables group");
+          }
+        }
+
+        /**
+         * Migration 149's validity read (SMD-3887 PR 2b): thought_validity under 149's signature, which the validity
+         * tool calls, and which of the tables it reads the server's role may SELECT. A table it may not leaves the axes
+         * resting on it unknown, named in each answer's `unread`; thoughts itself faults the tool. Nothing to read
+         * before 149: a skip.
+         */
+        {
+          const VALIDITY_TABLES = ["thoughts", "ob1_superseded_by", "supersession_proposals", "deliverable_events", "thought_facets", "derivations",
+            "thought_chunks", "thought_entities", "ob1_entity_edges", "thought_audit", "thought_forgotten"];
+          const vRows = await sql.unsafe(`
+            SELECT to_regprocedure('public.thought_validity(uuid[])') IS NOT NULL AS has_fn,
+                   -- CASE, not OR: the text form raises for a table not there.
+                   ARRAY(SELECT t FROM unnest(ARRAY[${VALIDITY_TABLES.map((t) => `'${t}'`).join(", ")}]) t
+                          WHERE CASE WHEN to_regclass('public.' || t) IS NULL THEN false ELSE NOT has_table_privilege('public.' || t, 'SELECT') END) AS unreadable`)
+            .then((r) => r as { has_fn: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const vl = Array.isArray(vRows) ? vRows[0] : null;
+          if (!vl) {
+            add("validity", "warn", `could not verify: ${(vRows as Error).message}`, "The check reads thought_validity and the tables it reads in public; the message says why it failed.");
+          } else if (!vl.has_fn) {
+            add("validity", "skip", "not checked — thought_validity does not exist (migration 149 not applied); the validity tool faults until it is");
+          } else if (vl.unreadable.includes("thoughts")) {
+            add("validity", "warn", "the server's role cannot SELECT thoughts: the validity tool faults", "Grant the server its read group (db/README.md, Grants).");
+          } else if (vl.unreadable.length) {
+            add("validity", "warn", `the server's role cannot SELECT ${vl.unreadable.join(", ")}: the validity read answers the axes resting on them unknown, naming them in unread`,
+                "Grant the server's role SELECT on them, if the read should see those records (db/README.md, Grants).");
+          } else {
+            add("validity", "ok", "thought_validity present; the server's role reads every table it reads");
           }
         }
 

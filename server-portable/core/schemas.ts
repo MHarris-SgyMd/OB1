@@ -12,6 +12,7 @@ import { EVIDENCE_LIMITS, META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal
 import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS } from "../priority-kinds.ts";
 import { VERIFY_STATUSES } from "../deliverables.ts";
+import { VALIDITY_CAP, VALIDITY_RAW_CAP } from "../validity.ts";
 import { AGENDA_ORDERS, RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN, type PriorityWeights } from "../store.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
@@ -990,6 +991,22 @@ export const SPECS = {
     annotations: { readOnlyHint: true },
     inputSchema: {
       id: UUID_ARG.describe("The deliverable's thought id"),
+    },
+  },
+  validity: {
+    title: "Thought Validity",
+    description:
+      "Read each thought's state on three axes, from the records the brain keeps: " +
+      "validity — does it still hold: superseded (a pointer names it), contested (a pending supersession proposal on it as the side that falls, both texts as judged, or a deliverable a verifier marked corrected at this text), unresolved (such a challenge made on a text that has since moved, or awaiting a re-judge), supported (an active citation whose source stands), else unchallenged — never supported for want of a record; " +
+      "review — did a key decide: pending, decided, checked (a deliverable's verification), unchecked, or none; " +
+      "freshness — have the views derived from its text caught up: stale, requested (a re-run asked), legacy, current, or none. " +
+      "Each axis gives the records it was read from, and reads unknown when a record it rests on was not readable (`unread` names what). A judge's confidence carries `calibrated: false`: it is raw model output. " +
+      `Each thought carries its version: its key now (fingerprint) and its newest audit seq. Up to ${VALIDITY_CAP} distinct ids, answered in the order given; a repeat is answered once. ` +
+      "An id that is no thought answers found false, forgotten true when the brain forgot it. It labels only: no ranking and no other read changes. " +
+      `Refused: more than ${VALIDITY_CAP} distinct ids (TOO_MANY, the cap and how many were given).`,
+    annotations: { readOnlyHint: true },
+    inputSchema: {
+      ids: z.array(UUID_ARG).min(1).max(VALIDITY_RAW_CAP).describe(`The thoughts' ids: up to ${VALIDITY_CAP} distinct, in the order the answer keeps`),
     },
   },
   item_history: {

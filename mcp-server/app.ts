@@ -379,6 +379,8 @@ const WORDS: Record<ToolName, Words> = {
   capture_deliverable: { render: (o) => say.renderCaptureDeliverable(o), fault: writeFault("capture_deliverable failed: ") },
   verify_deliverable: { render: (o) => say.renderVerifyDeliverable(o), fault: writeFault("verify_deliverable failed: ") },
   deliverable_history: { render: (o) => say.renderDeliverableHistory(o), fault: readFault() },
+  // The validity read (SMD-3887 PR 2b).
+  validity: { render: (o) => say.renderValidity(o), fault: readFault() },
   // The agenda (SMD-3669).
   agenda: { render: (o) => say.renderAgenda(o), fault: readFault(() => say.weightSettingHint) },
   // plan_context (SMD-2684).

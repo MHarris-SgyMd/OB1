@@ -1644,6 +1644,7 @@ it, each over REST and MCP alike:
 | `capture_deliverable` | `POST /v1/deliverables` | write | `{outcome: captured\|unchanged, deliverable, event, capture}`; `capture` null when nothing was captured |
 | `verify_deliverable` | `POST /v1/deliverables/{id}/verifications` | write | `{outcome: changed, deliverable, event, from, to}` |
 | `deliverable_history` | `GET /v1/deliverables/{id}` | read | `{deliverable, events}`; `deliverable` null when its thought was deleted |
+| `validity` | `GET /v1/validity?ids=…` (`ids` once per id) | read | `{cap, thoughts}`: each thought's validity, review and freshness with the records each was read from, its version, and `unread`; up to 100 distinct ids, over that `TOO_MANY` (400); labels only (migration 149, `docs/claim-validity.md`) |
 
 - **The capture is a capture_thought.** The output is captured as any thought is (its
   egress, embedding, chunks and tags), its `derived_from` the spec, its text closing

@@ -3394,6 +3394,15 @@ else {
       assert(/!  deliverables\s+the server's role holds no deliverable_events INSERT, deliverable_events_seq_seq USAGE, thought_facets INSERT, thought_facets UPDATE: capture_deliverable and verify_deliverable fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups deliverables/.test(missingBoth.out),
              `…and the deliverables group it lacks is a warning naming each write and the sequence, the two writers alone failing for it (${missingBoth.out.split("\n").find((l) => /!  deliverables\s/.test(l))?.trim().slice(0, 220)})`);
+      // 149's validity read (SMD-3887 PR 2b): a table it reads that the role may not SELECT is named, the axes resting on
+      // it read unknown — not a failure; with every table readable, ok.
+      const validityLine = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+validity\s/.test(l))?.trim() ?? "(no validity row)";
+      await claims.unsafe("REVOKE SELECT ON thought_audit FROM ob1_pf_capture");
+      const noAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe("GRANT SELECT ON thought_audit TO ob1_pf_capture");
+      assert(/!  validity\s+the server's role cannot SELECT thought_audit: the validity read answers the axes resting on them unknown, naming them in unread/.test(noAudit.out)
+             && (/✓  validity\s+thought_validity present; the server's role reads every table it reads/.test(missingBoth.out) || /!  validity\s+the server's role cannot SELECT /.test(missingBoth.out)),
+             `…and the validity row names a table its read cannot SELECT, a warning and not a failure (${validityLine(noAudit.out)} | ${validityLine(missingBoth.out)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });

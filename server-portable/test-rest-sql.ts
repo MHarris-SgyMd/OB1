@@ -3898,6 +3898,41 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
   }
 }
 
+console.log("\n[28] The validity read through both doors (SMD-3887 PR 2b, migration 149): GET /v1/validity?ids=… and MCP validity, a read key's — a thought under a pending proposal contested, the other side unchallenged, both review pending, the judge's number uncalibrated, an unknown id found false, a repeat answered once in the order given; the text names each thought's three states; over the cap of 100 distinct ids refused 400 TOO_MANY with the cap and the count (MCP isError, the same code); a malformed id refused 400 by the schema; a capture-only key refused 403");
+{
+  const ins = async (content: string) => String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, '{}'::jsonb) RETURNING id`)[0].id);
+  const older = await ins("[28] validity: the deploy window is noon"), newer = await ins("[28] validity: the deploy window is nine");
+  const ghost = "3887f028-0000-4000-8000-000000000028";
+  await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.83, '[28]', 0.9, 'consolidate:[28]@p1', NULL, NULL, NULL, NULL)`;
+  type T = { id: string; found: boolean; validity?: { state: string; records: { kind: string; judge?: { confidence: number; calibrated: boolean } }[] }; review?: { state: string } };
+  try {
+    const q = `/v1/validity?ids=${older}&ids=${newer}&ids=${older}&ids=${ghost}`;
+    const viaRest = await rest("GET", q, undefined, KEYS.reader);
+    const rt = (viaRest.body.thoughts ?? []) as T[];
+    const viaMcp = await mcp("validity", { ids: [older, newer, older, ghost] }, KEYS.reader);
+    const mt = (viaMcp.sc.thoughts ?? []) as T[];
+    const judge = rt[0]?.validity?.records.find((r) => r.kind === "proposal")?.judge;
+    assert(viaRest.status === 200 && viaRest.body.cap === 100 && rt.map((t) => t.id).join() === [older, newer, ghost].join()
+        && rt[0].validity?.state === "contested" && rt[1].validity?.state === "unchallenged" && rt[0].review?.state === "pending" && rt[1].review?.state === "pending"
+        && rt[2].found === false && Number(judge?.confidence) === 0.83 && judge?.calibrated === false
+        && !viaMcp.isError && same(mt, rt) && viaMcp.text.includes(`${older}: validity contested; review pending`) && viaMcp.text.includes(`${ghost}: not a thought`)
+        && viaMcp.text.includes("uncalibrated"),
+      `a read key reads both doors alike: the falling side contested, the other unchallenged, both pending, the judge's 0.83 uncalibrated, the unknown id found false, a repeat once in order (${viaRest.status} ${rt.map((t) => t.validity?.state ?? "missing").join("/")} ${JSON.stringify(judge)} ${viaMcp.isError})`);
+
+    const many = Array.from({ length: 101 }, (_, i) => `3887e028-0000-4000-8000-${String(i).padStart(12, "0")}`);
+    const tooRest = await rest("GET", `/v1/validity?${many.map((id) => `ids=${id}`).join("&")}`, undefined, KEYS.reader);
+    const tooMcp = await mcp("validity", { ids: many }, KEYS.reader);
+    const badId = await rest("GET", "/v1/validity?ids=not-a-uuid", undefined, KEYS.reader);
+    const byHook = await rest("GET", `/v1/validity?ids=${older}`, undefined, KEYS.hook);
+    assert(tooRest.status === 400 && tooRest.body.code === "TOO_MANY" && tooRest.body.cap === 100 && tooRest.body.given === 101
+        && tooMcp.isError && tooMcp.sc.code === "TOO_MANY" && /over the cap of 100 distinct ids a call/.test(tooMcp.text)
+        && badId.status === 400 && byHook.status === 403,
+      `over the cap refused 400 TOO_MANY (cap 100, given 101) and MCP the same code; a malformed id 400; a capture key 403 (${tooRest.status}/${String(tooRest.body.code)}/${String(tooRest.body.given)} ${String(tooMcp.sc.code)} ${badId.status} ${byHook.status})`);
+  } finally {
+    await sql`DELETE FROM supersession_proposals WHERE older_id = ${older}::uuid`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();
