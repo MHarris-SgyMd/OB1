@@ -89,7 +89,8 @@ db/ci-parity.sh	"
 MAP_LISTS="portable-server db-schema replay-gate data-layer preflight-rest db-live.rest db-live.sleep db-live.long db-live.extract db-live.sweep db-live.claims"
 # The names a runtime or git looks for in each folder above a file it loads,
 # without opening what is not there: one added above a file a job read counts
-# against the job, though no list could hold it.
+# against the job, though no list could hold it. Beside them by_map counts
+# .env and every .env.<name>, which Bun loads from the folder it is run in.
 MAP_LOOKED_FOR="package.json tsconfig.json jsconfig.json bunfig.toml bun.lock bun.lockb .npmrc .gitattributes .gitignore"
 
 # Not code: a path no gated job reads, builds or runs. An allowlist, so a new
@@ -287,8 +288,10 @@ fetch_lists() {
   id=${run%%[!0-9]*}
   if [ -z "$id" ] || [ "$id" != "$run" ]; then return 1; fi
   arts=$(limit 30 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | "\(.name) \(.id)"' 2> /dev/null) || return 1
+  # A run whose failed jobs were run again can hold a name twice, the failed attempt's list and the
+  # passing one's: the newest, the highest id, is the one the run's success stands on.
   for name in $MAP_LISTS; do
-    ids="$ids $(awk -v want="reads-${name//./-}" '$1 == want && $2 ~ /^[0-9]+$/ { print $2; exit }' <<< "$arts")"
+    ids="$ids $(awk -v want="reads-${name//./-}" '$1 == want && $2 ~ /^[0-9]+$/ && $2 + 0 > best { best = $2 + 0; id = $2 } END { if (id != "") print id }' <<< "$arts")"
   done
   # Each artifact is a zip of the one list; all at once, a second or so in all.
   # shellcheck disable=SC2086,SC2016 # ids split on purpose; sh expands $REPO and $DIR
@@ -334,26 +337,30 @@ by_map() {
     case "$name" in *.*) cell=${name#*.} ;; esac
     f="$d/lists/$name.txt" head=''
     if [ -f "$f" ]; then IFS= read -r head < "$f" || true; fi
-    re="^# reads v1 job=$job cell=$cell commit=([0-9a-f]{40}) status=success sight=ok "
-    if [[ "$head" =~ $re ]]; then
+    # A list is whole when its rows are as many of each kind as its header counted: one cut short in its
+    # download would pass for a job that read less.
+    re="^# reads v1 job=$job cell=$cell commit=([0-9a-f]{40}) status=success sight=ok files=([0-9]+) dirs=([0-9]+) gone=([0-9]+) "
+    if [[ "$head" =~ $re ]] && [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]}" = "$(awk -F '\t' 'NR > 1 { n[$1]++ } END { print n["f"] + 0, n["d"] + 0, n["g"] + 0 }' "$f")" ]; then
       if [ -n "$x" ] && [ "$x" != "${BASH_REMATCH[1]}" ]; then no_map "main's lists of what its jobs read are of more than one commit"; return; fi
       x=${BASH_REMATCH[1]}
       sed 1d "$f" >> "$d/rows.$job"
       case " $jobs " in *" $job "*) ;; *) jobs="$jobs $job" ;; esac
     else
       bad="$bad $job"
-      echo "changes.sh: $job runs: its list $name is not here, or is not one a passing job with sight wrote" >&2
+      echo "changes.sh: $job runs: its list $name is not here, is not whole, or is not one a passing job with sight wrote" >&2
     fi
   done
   for job in $jobs; do case " $bad " in *" $job "*) ;; *) ok="$ok $job" ;; esac; done
   if [ -z "$ok" ]; then no_map "no list of what main's jobs read to skip by"; return; fi
   # X is the base's tip unless main has run since: fetched alone then, one commit deep where the clone is
-  # shallow already (the changes job's) and whole where it is not, so no full clone is left shallow.
-  if ! git cat-file -e "$x^{commit}" 2> /dev/null; then
+  # shallow already (the changes job's) and whole where it is not, so no full clone is left shallow. Asked
+  # after with lazy fetching off: the job's clone is a partial one, and git would answer for a commit it
+  # lacks by fetching it with every commit and tree behind it, 12 MB and no time limit (review pass 1).
+  if ! GIT_NO_LAZY_FETCH=1 git cat-file -e "$x^{commit}" 2> /dev/null; then
     f=''
     if [ "$(git rev-parse --is-shallow-repository 2> /dev/null)" = true ]; then f=--depth=1; fi
     # shellcheck disable=SC2086 # $f is one flag or none
-    if ! limit 60 git fetch -q --no-tags $f origin "$x" > /dev/null 2>&1 || ! git cat-file -e "$x^{commit}" 2> /dev/null; then
+    if ! limit 60 git fetch -q --no-tags $f origin "$x" > /dev/null 2>&1 || ! GIT_NO_LAZY_FETCH=1 git cat-file -e "$x^{commit}" 2> /dev/null; then
       no_map "main's jobs read at ${x:0:12}, which is not here to compare with"; return
     fi
   fi
@@ -383,12 +390,13 @@ by_map() {
     case " $HOLDS_THE_CUT " in *" $p "*) held=$p ;; esac
     if j=$(charges "$p"); then charged="$charged $j"; fi
   done < "$d/raw"
-  if ! git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null; then
+  # The workflow is outside the job's sparse cone, a blob fetched when it is read: bounded, as the lists are.
+  if ! limit 30 git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null; then
     no_map "$WORKFLOW could not be read by job"; return
   fi
   if [ "$wf" = 1 ]; then
     if [ -n "$held" ]; then no_map "$WORKFLOW differs since ${x:0:12} beside $held, which holds how it is read by job"; return; fi
-    if ! git show "$x:$WORKFLOW" > "$d/base.yml" 2> /dev/null || ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null; then
+    if ! limit 30 git show "$x:$WORKFLOW" > "$d/base.yml" 2> /dev/null || ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null; then
       no_map "$WORKFLOW at ${x:0:12} could not be read by job"; return
     fi
     changed=$(changed_ids "$d")
@@ -426,7 +434,8 @@ by_map() {
           if (s != "A" && (p in opened)) { print "it read " p ", which differs"; done = 1; exit }
           if (s == "M") next
           q = dirname(p)
-          if ((basename(p) in lookedfor) && (q in above)) { print p " is looked for above files it read"; done = 1; exit }
+          b = basename(p)
+          if (((b in lookedfor) || b ~ /^\.env(\..*)?$/) && (q in above)) { print p " is looked for above files it read"; done = 1; exit }
           for (;;) {
             if (q in listed) { print "it listed " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
             if (q in worked) { print "it read files in " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
@@ -668,13 +677,16 @@ EOF
       printf '  repo-consistency:\n    steps:\n      - run: bun scripts/check-consistency.ts\n'
     } > "$dir/wfm.yml"
     # list NAME ROW...: NAME's list, each ROW "f path", "d folder/" or "g path", recorded at AT (HEAD^1, the
-    # base's tip, unless set); STATUS, SIGHT, COMMIT and AS (the job its header names) say otherwise.
+    # base's tip, unless set); STATUS, SIGHT, COMMIT, AS (the job its header names) and FILES (the files its
+    # header counts, where not its rows') say otherwise.
     # shellcheck disable=SC2317,SC2329 # called from the cases' LISTS, which run() evals
     list() {
       local name=$1 cell=- row; shift
       case "$name" in *.*) cell=${name#*.} ;; esac
+      local nf=0 nd=0 ng=0
+      for row in "$@"; do case "$row" in f\ *) nf=$((nf + 1)) ;; d\ *) nd=$((nd + 1)) ;; g\ *) ng=$((ng + 1)) ;; esac; done
       {
-        printf '# reads v1 job=%s cell=%s commit=%s status=%s sight=%s files=0 dirs=0 gone=0 odd=0\n' "${AS:-${name%%.*}}" "$cell" "${COMMIT:-$(git rev-parse "${AT:-HEAD^1}")}" "${STATUS:-success}" "${SIGHT:-ok}"
+        printf '# reads v1 job=%s cell=%s commit=%s status=%s sight=%s files=%s dirs=%s gone=%s odd=0\n' "${AS:-${name%%.*}}" "$cell" "${COMMIT:-$(git rev-parse "${AT:-HEAD^1}")}" "${STATUS:-success}" "${SIGHT:-ok}" "${FILES:-$nf}" "$nd" "$ng"
         for row in "$@"; do printf '%s\t%s\n' "${row%% *}" "${row#* }"; done
       } > "$dir/map/$name.txt"
     }
@@ -702,6 +714,8 @@ EOF
     # shellcheck disable=SC2016 # as above
     BASE_OPS=$mb LISTS="$std"'; rm "$dir/map/db-live.sweep.txt"' SKIP='db-schema data-layer' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS="$std; AS=data-layer list db-schema" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    # …nor does one cut short: a header that counts two files over one row.
+    BASE_OPS=$mb LISTS="$std; FILES=2 list db-schema 'f db/migrations/1.sql'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     # Lists of two commits, or of one that is not here, skip nothing at all.
     BASE_OPS=$mb LISTS="$std; AT=HEAD^1~1 list db-schema" run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS="COMMIT=0123456789012345678901234567890123456789; $std" run true pull_request main 'echo x >> db/tool.sh'
@@ -722,6 +736,8 @@ EOF
     # A name tools look for, added above a file read: db-schema's migration is under db/, where db-live works too.
     BASE_OPS=$mb LISTS=$std SKIP='data-layer' run true pull_request main 'echo "{}" > db/package.json'
     BASE_OPS=$mb LISTS=$std run true pull_request main 'echo "{}" > tsconfig.json'
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer' run true pull_request main 'echo A=1 > db/.env.test'
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer' run true pull_request main 'echo A=1 > db/env.txt'
     # The workflow since then: a job's own block, a path CHARGES gives a job, and what stops every skip.
     BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; sub "echo db-schema" "echo db-schema2"'
     BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; mkdir -p changes && echo x > changes/smd-1.md'

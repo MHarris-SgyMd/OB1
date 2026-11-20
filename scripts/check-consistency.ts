@@ -12109,8 +12109,12 @@ const MAP_ALWAYS_RUN: Record<string, string> = {
   "auth-poc": "runs a compose stack of its own through evals/eval-auth.ts",
   "compat-shim": "greps the whole tree and has git read it back, so its list is nearly every file",
 };
-/** A command whose reads of the checkout no list holds: compose, an image build, a container given a path. */
-const MAP_HIDES_READS = /\b(?:docker|podman)\s+(?:compose|build|buildx)\b|\bdocker-compose\b|\b(?:docker|podman)\s+run\b[^\n]*\s(?:-v|--volume|--mount)[\s=]/;
+/**
+ * A command whose reads of the checkout no list holds: compose, an image build, a container made with a path
+ * (`-v` alone or among short flags, `--volume`, `--mount`, `--volumes-from`). Matched against a command with its
+ * continuation lines joined. Lexical: a container a script the step runs makes is not seen.
+ */
+const MAP_HIDES_READS = /\b(?:docker|podman)\s+(?:image\s+)?(?:compose|build|buildx)\b|\bdocker-compose\b|\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b[^\n]*\s(?:-[a-zA-Z]*v[a-zA-Z]*|--volume|--mount|--volumes-from)[\s=]/;
 /** MAP_LISTS as CHANGES_SCRIPT prints it, or why it could not be read. */
 function mapLists(): string[] | string {
   const r = Bun.spawnSync(["bash", join(ROOT, CHANGES_SCRIPT), "--map-lists"]);
@@ -12136,7 +12140,8 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
     const matrix = mapping(job.strategy)?.matrix;
     const axes = matrix === undefined ? [] : matrixAxes(matrix);
     let want: string[];
-    if (axes === null || axes.length > 1) { problems.push(`MAP_LISTS names ${key}, whose matrix check 56 cannot read as one written-out axis — its cells' lists cannot be told to be all there (check 56, SMD-2435)`); continue; }
+    const beside = ["include", "exclude"].filter((k) => mapping(matrix)?.[k] !== undefined);
+    if (axes === null || axes.length > 1 || beside.length) { problems.push(`MAP_LISTS names ${key}, whose matrix check 56 cannot read as one written-out axis${beside.length ? ` (it sets ${beside.join(" and ")}, which add and take cells no axis lists)` : ""} — its cells' lists cannot be told to be all there (check 56, SMD-2435)`); continue; }
     else if (axes.length === 0) want = [key];
     else {
       const values = mapping(matrix)?.[axes[0]];
@@ -12146,7 +12151,7 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
     if (missing.length || extra.length) problems.push(`MAP_LISTS names ${mine.join(", ")} for job ${key}, whose lists are ${want.join(", ")} — ${missing.length ? `without ${missing.join(", ")} the job would skip by its other cells' reads` : `${extra.join(", ")} is no list of its`} (check 56, SMD-2435)`);
     (Array.isArray(job.steps) ? job.steps : []).forEach((st, i) => {
       const run = mapping(st)?.run;
-      const hit = typeof run === "string" ? run.split("\n").find((l) => !/^\s*#/.test(l) && MAP_HIDES_READS.test(l)) : undefined;
+      const hit = typeof run === "string" ? run.replace(/\s*\\\n\s*/g, " ").split("\n").find((l) => !/^\s*#/.test(l) && MAP_HIDES_READS.test(l)) : undefined;
       if (hit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${hit.trim().slice(0, 80)}\` in step ${i + 1} — a container reads the checkout where no access time moves, so the job's list would say less than it read; take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
     });
   }
@@ -12177,6 +12182,12 @@ function checkMapLists() {
     ["a mapped job that runs compose", ["a", "m.x", "m.y", "s"], good, ["a", "m", "s"], {}, ["job s, which MAP_LISTS names, runs `docker compose up -d`"]],
     ["a mapped job that mounts a path into a container", ["a", "m.x", "m.y"], wf(job("a", step("docker run --rm -v \"$PWD/db:/db:ro\" image psql")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker run --rm -v"]],
     ["a mapped job that builds an image", ["a", "m.x", "m.y"], wf(job("a", step("docker build -t x .")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker build -t x .`"]],
+    ["a mount on a continuation line", ["a", "m.x", "m.y"], wf(job("a", "      - run: |\n          docker run -d --name postgres \\\n            -v \"$PWD/db/seed:/seed:ro\" \\\n            image\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker run -d --name postgres -v"]],
+    ["a mount among short flags, by docker container run", ["a", "m.x", "m.y"], wf(job("a", step("docker container run -dv /w:/w image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker container run -dv"]],
+    ["a container made with another's volumes", ["a", "m.x", "m.y"], wf(job("a", step("docker create --volumes-from data image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker create --volumes-from"]],
+    ["an image built by docker image build", ["a", "m.x", "m.y"], wf(job("a", step("docker image build -t x .")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker image build"]],
+    ["a matrix with a cell added by include", ["a", "m.x", "m.y"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x, y]\n        include:\n          - shard: z\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["it sets include, which add and take cells no axis lists"]],
+    ["a matrix with a cell taken by exclude", ["a", "m.x", "m.y"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x, y]\n        exclude:\n          - shard: y\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["it sets exclude, which add and take cells no axis lists"]],
     ["a compose line in a comment", ["a", "m.x", "m.y"], wf(job("a", "      - run: |\n          # docker compose up is the stack jobs'\n          bun test.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a matrix of two axes", ["a", "m.x", "m.y"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x, y]\n        pg: [16, 17]\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["whose matrix check 56 cannot read as one written-out axis"]],
     ["a job left out that is gated no longer", ["a", "m.x", "m.y"], good, ["a", "m"], ALWAYS, ["MAP_ALWAYS_RUN names s, which is no gated job"]],
@@ -12189,7 +12200,8 @@ function checkMapLists() {
   const lists = mapLists();
   if (typeof lists === "string") { fail(CHANGES_SCRIPT, `${lists} — check 56 reads MAP_LISTS from it (SMD-2435)`); return; }
   if (!lists.length) fail(CHANGES_SCRIPT, "--map-lists printed nothing — MAP_LISTS names the lists a job may skip by (check 56, SMD-2435)");
-  for (const msg of mapListsProblems(lists, readFileSync(join(ROOT, WORKFLOW), "utf8"), AGGREGATE_GATED, MAP_ALWAYS_RUN)) fail(msg.startsWith("job ") ? WORKFLOW : CHANGES_SCRIPT, msg);
+  // Each message is its file's: MAP_LISTS is changes.sh's, MAP_ALWAYS_RUN and the choice between the two this file's, the rest the workflow's.
+  for (const msg of mapListsProblems(lists, readFileSync(join(ROOT, WORKFLOW), "utf8"), AGGREGATE_GATED, MAP_ALWAYS_RUN)) fail(msg.startsWith("MAP_LISTS") ? CHANGES_SCRIPT : msg.startsWith("MAP_ALWAYS_RUN") || msg.startsWith("gated job") ? SELF : WORKFLOW, msg);
 }
 checkMapLists();
 
