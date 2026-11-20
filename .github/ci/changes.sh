@@ -253,7 +253,11 @@ answer() {
 }
 
 self_check() {
-  local dir fails=0 expect event got
+  local dir fails=0 expect event got v
+  # git exports GIT_DIR and its like to whatever it runs, a hook above all, and
+  # under them the scratch repository's commits would land on the caller's
+  # branch (reads.sh's self-check has a case for its own; SMD-2435 PR 3b-1).
+  for v in $(git rev-parse --local-env-vars); do unset "$v"; done
   dir=$(mktemp -d)
   # check EXPECT EVENT PATH...: decide on the paths as a pull request's
   # change, each a regular file's edit (OLDMODE=… and MODE=… set its modes).

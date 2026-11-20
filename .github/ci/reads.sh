@@ -34,7 +34,10 @@
 # - a second read, which relatime leaves alone, so only "read at all";
 # - a path with a tab or a newline in its name, counted in odd= and left out;
 # - a filesystem that records no access times at all: list reads a file of
-#   its own first, and says sight=blind when that read does not show.
+#   its own first, and says sight=blind when that read does not show. That
+#   file is in the git directory, so the test sees for its filesystem: a
+#   checkout whose files are on another (a linked worktree on another volume,
+#   a --separate-git-dir) is not tested, here or by the self-check.
 # What it holds beyond the job's own reads: every file git read back to
 # compare (a `git diff` or `git status` re-reads a file written in the same
 # second as the index), which only adds.
@@ -42,8 +45,8 @@ set -uo pipefail
 
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")
 # The marker and the file list reads to test its own sight, in the checkout's
-# git directory (a linked worktree's is its own, and its .git a file): the
-# filesystem the tracked files are on, and no path git tracks.
+# git directory (a linked worktree's is its own, and its .git a file): no
+# path git tracks, and on a runner the filesystem the tracked files are on.
 if ! top=$(git rev-parse --show-toplevel 2> /dev/null) || ! gitdir=$(git rev-parse --absolute-git-dir 2> /dev/null); then echo "reads.sh: not in a git checkout" >&2; exit 2; fi
 state="$gitdir/ob1-reads"
 
@@ -62,10 +65,12 @@ mark() {
 # checkout's top, those whose access time is later than the marker's, each
 # as ./path, NUL-separated. Each goes to find behind ./, so a name that
 # opens with - or is ( or ! is a path and not an expression that fails the
-# batch; a path no longer there is find's error, and gone_now's row.
+# batch; a path no longer there is find's error, and gone_now's row. In
+# batches of 200: the loop makes its arguments again for each path, so a
+# whole batch of a checkout's 2,000 took a second in dash, and these 0.13 s.
 later_than_marker() {
   # shellcheck disable=SC2016 # sh expands "$@", "$0" and "$p", not this shell
-  (cd "$top" && xargs -0 sh -c '[ "$#" -gt 0 ] || exit 0; m=$0; for p do set -- "$@" "./$p"; shift; done; find "$@" -maxdepth 0 -neweram "$m" -print0 2> /dev/null' "$state/marker") || true
+  (cd "$top" && xargs -0 -n 200 sh -c '[ "$#" -gt 0 ] || exit 0; m=$0; for p do set -- "$@" "./$p"; shift; done; find "$@" -maxdepth 0 -neweram "$m" -print0 2> /dev/null' "$state/marker") || true
 }
 # gone_now: of the NUL-separated paths on stdin, those no longer in the checkout, NUL-separated.
 gone_now() {
@@ -144,9 +149,17 @@ list() {
 }
 
 self_check() {
-  local dir fails=0 out
+  local dir fails=0 out v under=${GIT_DIR:+yes}
+  # git exports GIT_DIR and its like to whatever it runs, a hook above all, and under them every git command
+  # below would act on the caller's repository, not the scratch one: `commit` on its branch, `add -A` on its index.
+  for v in $(git rev-parse --local-env-vars); do unset "$v"; done
   # On the checkout's own filesystem, whose access times the jobs' lists rest on: /tmp can be another mount.
   dir=$(mktemp -d "$gitdir/ob1-reads-check.XXXXXX") || { echo "reads.sh: no scratch directory in $gitdir" >&2; return 1; }
+  # Gone however this ends, an interrupt included: it holds two repositories, inside the caller's git directory.
+  # shellcheck disable=SC2064 # $dir as it is now: it is local, and unset by the time the script exits
+  trap "rm -rf $(printf '%q' "$dir")" EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   g() { git -c user.email=ci@example.invalid -c user.name=ci -c init.defaultBranch=main "$@"; }
   # has LINE / hasnt LINE: the list holds the line, whole; or does not.
   has() { grep -qxF -- "$1" "$out" || { echo "reads.sh: the list lacks '$1' (${2:-})" >&2; fails=$((fails + 1)); }; }
@@ -212,6 +225,16 @@ self_check() {
   grep -q '^# reads v1 job=job cell=a_b_c ' "$dir/reads/job.a_b_c.txt" 2> /dev/null || { echo "reads.sh: a cell named 'a/b c' did not go to job.a_b_c.txt under that name" >&2; fails=$((fails + 1)); }
   # No job named is the one refusal.
   if (cd "$dir/work" && RUNNER_TEMP="$dir" bash tool/reads.sh list) > /dev/null 2>&1; then echo "reads.sh: list took no job" >&2; fails=$((fails + 1)); fi
+  # Under an exported GIT_DIR, as a hook runs: these cases again, from a repository of one commit that must still be
+  # of one commit, its files as they were. Not from inside that run, which would have no end.
+  if [ -z "$under" ]; then
+    (cd "$dir" && g init -q outer && cd outer && echo k > keep.txt && g add -A && g commit -qm outer) > /dev/null 2>&1
+    (cd "$dir/outer" && GIT_DIR="$dir/outer/.git" bash "$dir/work/tool/reads.sh" --self-check) > "$dir/said" 2>&1 \
+      || { echo "reads.sh: under an exported GIT_DIR the cases did not hold: $(tail -1 "$dir/said")" >&2; fails=$((fails + 1)); }
+    if [ "$(g -C "$dir/outer" log --format=%s | tr '\n' ' ')" != 'outer ' ] || [ -n "$(g -C "$dir/outer" status --short)" ]; then
+      echo "reads.sh: under an exported GIT_DIR the cases wrote to the repository it names: $(g -C "$dir/outer" log --format=%s | tr '\n' ' ')" >&2; fails=$((fails + 1))
+    fi
+  fi
   rm -rf "$dir"
   if [ "$fails" -gt 0 ]; then echo "reads.sh: $fails case(s) wrong" >&2; return 1; fi
   echo "reads.sh: every case holds"

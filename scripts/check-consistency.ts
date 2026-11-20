@@ -640,9 +640,10 @@
  *      more naming the lines and fewer failing as stale (SMD-3773)
  *  55. every gated job records what it read as .github/ci/reads.sh needs it
  *      placed: one checkout, the marker straight after it and nowhere else,
- *      the list as the job's last `run` step, named for the job and its
- *      matrix cell and run after a failed step too, and the list's upload
- *      after it, named for the job and kept on a push to main alone; and
+ *      the list as the job's last step but its upload, named for the job and
+ *      its matrix cell and run after a failed step too where the marker was
+ *      made, and the upload named for the job and kept on a push to main
+ *      alone; and
  *      the job that runs changes.sh's cases runs reads.sh's, where a runner
  *      that records no access times fails (SMD-2435 PR 3b-1). Its probe pins
  *      what it refuses and passes
@@ -11932,11 +11933,14 @@ checkProductName();
 // after the checkout, then every tracked path accessed since. That holds only
 // as the steps are placed. A marker made later misses the reads before it; a
 // second checkout, or a second marker, hides what was read before it; a list
-// that is not the last step to run misses what runs after it; a list that
-// names another job, or no cell in a matrix job, overwrites or is overwritten.
-// So each gated job has one checkout, the marker straight after it and
-// nowhere else, the list as its last `run` step, and the upload of the list
-// after that, named for the job and kept on a push to main alone. The job that
+// that is not the last step to run misses what runs after it, an action's
+// reads as much as a command's; a list that names another job, or no cell in
+// a matrix job, overwrites or is overwritten. So each gated job has one
+// checkout, the marker straight after it and nowhere else, the list as its
+// last step but the upload of it, named for the job and kept on a push to
+// main alone. The list and the upload run after a failed step too, but only
+// where the marker step succeeded: after a checkout that failed there is no
+// script to run, and the step would fail a second time for it. The job that
 // runs changes.sh's cases runs reads.sh's, where a runner whose filesystem
 // records no access times fails.
 const READS_SCRIPT = ".github/ci/reads.sh";
@@ -11945,8 +11949,11 @@ const READS_LIST = `bash ${READS_SCRIPT} list`;
 const READS_SELF_CHECK = `bash ${READS_SCRIPT} --self-check`;
 const READS_ARTIFACT = "reads-";
 const READS_DIR = "${{ runner.temp }}/reads/";
-const READS_LIST_IF = "${{ !cancelled() }}";
-const READS_KEEP_IF = "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+const READS_MARK_ID = "reads-mark";
+const READS_LIST_IF = `\${{ !cancelled() && steps.${READS_MARK_ID}.outcome == 'success' }}`;
+const READS_KEEP_IF = `\${{ !cancelled() && steps.${READS_MARK_ID}.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}`;
+/** A command line that runs reads.sh's `mark` or `list`, however the script is reached: `bash .github/ci/reads.sh mark`, `cd .github/ci && bash reads.sh mark`. */
+const readsRuns = (run: string | null, verb: "mark" | "list") => new RegExp(`(^|[\\s/])reads\\.sh["']?\\s+${verb}\\b`).test(run ?? "");
 const READS_STATUS = "${{ job.status }}";
 /** What check 55 reports of a workflow's text: each gated job's checkout, marker, list and upload, and the self-check's step. */
 function readsProblems(text: string, gated: readonly string[], selfCheckJob: string): string[] {
@@ -11966,30 +11973,31 @@ function readsProblems(text: string, gated: readonly string[], selfCheckJob: str
     if (checkouts.length !== 1) { problems.push(`job ${key} has ${checkouts.length} actions/checkout steps, not one — the marker follows the one checkout, and a second rewrites the files and the access times the list reads (check 55, SMD-2435)`); continue; }
     const mark = steps[checkouts[0] + 1];
     if (!mark || runOf(mark) !== READS_MARK) problems.push(`job ${key}'s step after its checkout is not \`${READS_MARK}\` — a read before the marker is in no list, so the marker is the first thing after the checkout (check 55, SMD-2435)`);
-    else if (extraKeys(mark, ["name", "run"]).length) problems.push(`job ${key}'s marker step sets ${extraKeys(mark, ["name", "run"]).join(", ")} — name and run alone, since an if: or a working-directory can leave no marker, or one outside the checkout (check 55, SMD-2435)`);
-    steps.forEach((s, i) => { if (i !== checkouts[0] + 1 && (runOf(s) ?? "").includes(`${READS_SCRIPT} mark`)) problems.push(`job ${key} marks its reads again in step ${i + 1} — a second marker hides every read before it (check 55, SMD-2435)`); });
+    else if (extraKeys(mark, ["name", "id", "run"]).length) problems.push(`job ${key}'s marker step sets ${extraKeys(mark, ["name", "id", "run"]).join(", ")} — name, id and run alone, since an if: or a working-directory can leave no marker, or one outside the checkout (check 55, SMD-2435)`);
+    else if (mark.id !== READS_MARK_ID) problems.push(`job ${key}'s marker step has id ${JSON.stringify(mark.id ?? null)}, not ${READS_MARK_ID} — the list and its upload run where that step succeeded, by its id (check 55, SMD-2435)`);
+    steps.forEach((s, i) => { if (i !== checkouts[0] + 1 && readsRuns(runOf(s), "mark")) problems.push(`job ${key} marks its reads again in step ${i + 1} — a second marker hides every read before it (check 55, SMD-2435)`); });
     const matrix = mapping(job.strategy)?.matrix;
     const axes = matrix === undefined ? [] : matrixAxes(matrix);
     if (axes === null) { problems.push(`job ${key}'s matrix is built by an expression, so check 55 cannot tell its cells' lists apart — write the matrix out (check 55, SMD-2435)`); continue; }
     const cell = axes.map((a) => "${{ matrix." + a + " }}").join("-");
     const wantList = `${READS_LIST} ${key}${cell ? ` ${cell}` : ""}`;
-    const lists = steps.flatMap((s, i) => ((runOf(s) ?? "").includes(`${READS_SCRIPT} list`) ? [i] : []));
+    const lists = steps.flatMap((s, i) => (readsRuns(runOf(s), "list") ? [i] : []));
     if (lists.length !== 1) { problems.push(`job ${key} has ${lists.length} steps that run ${READS_SCRIPT} list, not one — its last \`run\` step is \`${wantList}\` (check 55, SMD-2435)`); continue; }
     const list = steps[lists[0]];
     if (runOf(list) !== wantList) problems.push(`job ${key}'s list step runs \`${runOf(list)}\`, not \`${wantList}\` — the list is named for the job${cell ? " and its cell, so one cell's does not overwrite another's" : ", so no other job's overwrites it"} (check 55, SMD-2435)`);
-    if (String(list.if ?? "").trim() !== READS_LIST_IF) problems.push(`job ${key}'s list step runs if: ${JSON.stringify(list.if ?? null)}, not ${READS_LIST_IF} — after a failed step too, its header saying how the job stood (check 55, SMD-2435)`);
+    if (String(list.if ?? "").trim() !== READS_LIST_IF) problems.push(`job ${key}'s list step runs if: ${JSON.stringify(list.if ?? null)}, not ${READS_LIST_IF} — after a failed step too, its header saying how the job stood, and not where no marker was made, a failed checkout, with no script to run (check 55, SMD-2435)`);
     if (mapping(list.env)?.JOB_STATUS !== READS_STATUS || extraKeys(mapping(list.env) ?? {}, ["JOB_STATUS"]).length) problems.push(`job ${key}'s list step has env ${JSON.stringify(list.env ?? null)}, not JOB_STATUS: ${READS_STATUS} alone — the list's header says whether the job had failed, and a list from a failed job is not a whole one (check 55, SMD-2435)`);
     if (extraKeys(list, ["name", "if", "run", "env"]).length) problems.push(`job ${key}'s list step sets ${extraKeys(list, ["name", "if", "run", "env"]).join(", ")} — name, if, run and env alone (check 55, SMD-2435)`);
-    const later = steps.findIndex((s, i) => i > lists[0] && runOf(s) !== null);
-    if (later !== -1) problems.push(`job ${key} runs step ${later + 1}${typeof steps[later].name === "string" ? ` (${JSON.stringify(steps[later].name)})` : ""} after its list — what that step reads is in no list, so the list is the job's last \`run\` step (check 55, SMD-2435)`);
     const wantName = `${READS_ARTIFACT}${key}${cell ? `-${cell}` : ""}`;
     const uploads = steps.flatMap((s, i) => (typeof s.uses === "string" && s.uses.startsWith("actions/upload-artifact@") && String(mapping(s.with)?.name ?? "").startsWith(READS_ARTIFACT) ? [i] : []));
+    const later = steps.findIndex((s, i) => i > lists[0] && !uploads.includes(i));
+    if (later !== -1) problems.push(`job ${key} runs step ${later + 1}${typeof steps[later].name === "string" ? ` (${JSON.stringify(steps[later].name)})` : ""} after its list — what that step reads, a command or an action, is in no list, so the list is the job's last step but its own upload (check 55, SMD-2435)`);
     if (uploads.length !== 1) { problems.push(`job ${key} has ${uploads.length} actions/upload-artifact steps named ${READS_ARTIFACT}…, not one — keep its list as ${wantName}, after the list step (check 55, SMD-2435)`); continue; }
     const upload = steps[uploads[0]], w = mapping(upload.with) ?? {};
     if (uploads[0] < lists[0]) problems.push(`job ${key} uploads its list in step ${uploads[0] + 1}, before the step that writes it — the upload follows the list (check 55, SMD-2435)`);
     if (w.name !== wantName) problems.push(`job ${key} uploads its list as ${JSON.stringify(w.name)}, not ${wantName} — upload-artifact fails a second upload of one name, and only on a push to main (check 55, SMD-2435)`);
     if (String(w.path ?? "").trim() !== READS_DIR) problems.push(`job ${key} uploads its list from ${JSON.stringify(w.path ?? null)}, not ${READS_DIR}, where ${READS_SCRIPT} writes it (check 55, SMD-2435)`);
-    if (String(upload.if ?? "").trim() !== READS_KEEP_IF) problems.push(`job ${key}'s upload of its list runs if: ${JSON.stringify(upload.if ?? null)}, not ${READS_KEEP_IF} — the lists are kept from a push to main alone, the run whose every job runs (check 55, SMD-2435)`);
+    if (String(upload.if ?? "").trim() !== READS_KEEP_IF) problems.push(`job ${key}'s upload of its list runs if: ${JSON.stringify(upload.if ?? null)}, not ${READS_KEEP_IF} — the lists are kept from a push to main alone, the run whose every job runs, and where a marker was made (check 55, SMD-2435)`);
   }
   const selfCheck = stepsOf(mapping(jobs[selfCheckJob])).find((s) => runOf(s) === READS_SELF_CHECK);
   if (!selfCheck) problems.push(`job ${selfCheckJob} has no step that runs \`${READS_SELF_CHECK}\` — its cases are where a runner that records no access times fails, and every list would be empty unseen (check 55, SMD-2435)`);
@@ -11998,7 +12006,7 @@ function readsProblems(text: string, gated: readonly string[], selfCheckJob: str
 }
 function checkReadsRecorded() {
   const CHECKOUT = "      - uses: actions/checkout@v7\n";
-  const MARK = `      - name: mark\n        run: ${READS_MARK}\n`;
+  const MARK = `      - name: mark\n        id: ${READS_MARK_ID}\n        run: ${READS_MARK}\n`;
   const LIST = (key: string, cell = "") => `      - name: list\n        if: ${READS_LIST_IF}\n        run: ${READS_LIST} ${key}${cell ? ` ${cell}` : ""}\n        env:\n          JOB_STATUS: ${READS_STATUS}\n`;
   const KEEP = (name: string, o: { path?: string; cond?: string } = {}) => `      - uses: actions/upload-artifact@v7\n        if: ${o.cond ?? READS_KEEP_IF}\n        with:\n          name: ${name}\n          path: ${o.path ?? READS_DIR}\n`;
   const RUN = "      - run: bun test.ts\n";
@@ -12013,17 +12021,25 @@ function checkReadsRecorded() {
     ["two gated jobs as written", wf(lint(), good("a"), good("b")), []],
     ["a matrix job, its list and its artifact named for the cell", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a", SHARD) + KEEP(`reads-a-${SHARD}`), MATRIX), good("b")), []],
     ["a step before the checkout", wf(lint(), job("a", `      - run: docker pull x\n${CHECKOUT}${MARK}${RUN}${LIST("a")}${KEEP("reads-a")}`), good("b")), []],
-    ["an upload of something else after the list", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a") + KEEP("reads-a") + "      - uses: actions/upload-artifact@v7\n        with:\n          name: counts-a\n          path: /tmp/c/\n"), good("b")), []],
+    ["an upload of something else before the list", wf(lint(), job("a", CHECKOUT + MARK + RUN + "      - uses: actions/upload-artifact@v7\n        with:\n          name: counts-a\n          path: /tmp/c/\n" + LIST("a") + KEEP("reads-a")), good("b")), []],
+    ["an upload of something else after the list", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a") + KEEP("reads-a") + "      - uses: actions/upload-artifact@v7\n        with:\n          name: counts-a\n          path: /tmp/c/\n"), good("b")), ["job a runs step 6 after its list"]],
+    ["an action between the list and its upload", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a") + "      - name: report\n        uses: ./.github/actions/report\n" + KEEP("reads-a")), good("b")), ["job a runs step 5 (\"report\") after its list"]],
     ["no marker", wf(lint(), job("a", CHECKOUT + RUN + LIST("a") + KEEP("reads-a")), good("b")), ["job a's step after its checkout is not"]],
     ["a step between the checkout and the marker", wf(lint(), job("a", CHECKOUT + RUN + MARK + LIST("a") + KEEP("reads-a")), good("b")), ["job a's step after its checkout is not", "job a marks its reads again in step 3"]],
     ["a marker under an if:", wf(lint(), job("a", CHECKOUT + MARK.replace("        run:", "        if: always()\n        run:") + RUN + LIST("a") + KEEP("reads-a")), good("b")), ["job a's marker step sets if"]],
     ["a second marker", wf(lint(), job("a", CHECKOUT + MARK + RUN + MARK + LIST("a") + KEEP("reads-a")), good("b")), ["job a marks its reads again in step 4"]],
+    ["a second marker, the script reached from its folder", wf(lint(), job("a", CHECKOUT + MARK + "      - run: cd .github/ci && bash reads.sh mark\n" + LIST("a") + KEEP("reads-a")), good("b")), ["job a marks its reads again in step 3"]],
+    ["a second list, the script reached from its folder", wf(lint(), job("a", CHECKOUT + MARK + "      - run: |\n          cd .github/ci\n          bash ./reads.sh list a\n" + LIST("a") + KEEP("reads-a")), good("b")), ["job a has 2 steps that run"]],
+    ["a step that only reads the script", wf(lint(), job("a", CHECKOUT + MARK + "      - run: shellcheck .github/ci/reads.sh\n" + LIST("a") + KEEP("reads-a")), good("b")), []],
+    ["a marker with no id", wf(lint(), job("a", CHECKOUT + MARK.replace(`        id: ${READS_MARK_ID}\n`, "") + RUN + LIST("a") + KEEP("reads-a")), good("b")), ["job a's marker step has id null"]],
+    ["a marker under another id", wf(lint(), job("a", CHECKOUT + MARK.replace(`id: ${READS_MARK_ID}`, "id: mark") + RUN + LIST("a") + KEEP("reads-a")), good("b")), ["job a's marker step has id \"mark\""]],
     ["two checkouts", wf(lint(), job("a", CHECKOUT + MARK + RUN + CHECKOUT + LIST("a") + KEEP("reads-a")), good("b")), ["job a has 2 actions/checkout steps"]],
     ["no checkout", wf(lint(), job("a", RUN + LIST("a") + KEEP("reads-a")), good("b")), ["job a has 0 actions/checkout steps"]],
     ["no list", wf(lint(), job("a", CHECKOUT + MARK + RUN + KEEP("reads-a")), good("b")), ["job a has 0 steps that run"]],
     ["a list naming another job", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("b") + KEEP("reads-a")), good("b")), ["job a's list step runs `bash .github/ci/reads.sh list b`"]],
     ["a matrix job's list with no cell", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a") + KEEP(`reads-a-${SHARD}`), MATRIX), good("b")), ["job a's list step runs `bash .github/ci/reads.sh list a`, not"]],
     ["a list that a failed step skips", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a").replace(`        if: ${READS_LIST_IF}\n`, "") + KEEP("reads-a")), good("b")), ["job a's list step runs if: null"]],
+    ["a list that runs with no marker made", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a").replace(READS_LIST_IF, "${{ !cancelled() }}") + KEEP("reads-a")), good("b")), ["job a's list step runs if: \"${{ !cancelled() }}\""]],
     ["a list with no job status", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a").replace(/        env:\n.*\n/, "") + KEEP("reads-a")), good("b")), ["job a's list step has env null"]],
     ["a step run after the list", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a") + TEARDOWN + KEEP("reads-a")), good("b")), ["job a runs step 5 (\"down\") after its list"]],
     ["no upload", wf(lint(), job("a", CHECKOUT + MARK + RUN + LIST("a")), good("b")), ["job a has 0 actions/upload-artifact steps named reads-"]],
