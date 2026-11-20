@@ -2577,10 +2577,12 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const ver = await spawnScript(["--version"]);
   const verPiped = await runHook({ session_id: "s-version", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--version"]);
   const verWith = await spawnScript(["--check", "--version", "--harness", "bogus"], { env: { OB1_CAPTURE_ON_SECRET: "x", OB1_SESSION_CAPTURE_CONFIG: join(TMP, "nope.json") } });
+  const versionLogged = (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "").split("\n").filter((l) => l.includes(`--version: printed ${VERSION_LINE}; stdin unread, nothing captured (in a hook command it stops every capture: remove it)`)).length;
+  assert(versionLogged === 3, `--version with stdin not a terminal, as in a hook command, says in the log that nothing was captured (SMD-4378 review pass 1: silent) (${versionLogged} line(s))`);
   assert([ver, verPiped, verWith].every((r) => r.code === 0 && r.out === `${VERSION_LINE}\n` && !r.err) && received.length === sentBefore,
     `--version prints "session-capture <version>" and exits 0, stdin piped or not, captures nothing, and is first: beside --check, a bad --harness, a misspelt mode and no config (SMD-4378) (${JSON.stringify([ver, verPiped, verWith].map((r) => [r.code, r.out, r.err.slice(0, 60)]))})`);
-  assert(ok.out.split("\n")[0] === VERSION_LINE && noCfgTypo.out.split("\n")[0] === VERSION_LINE && !printTypo.out.includes(VERSION_LINE),
-    `--check's first line names the version, a check that fails at once included; --print-hook's output, pasted as JSON, does not (SMD-4378) (${ok.out.split("\n")[0]})`);
+  assert(ok.out.split("\n")[0] === VERSION_LINE && noCfgTypo.out.split("\n")[0] === VERSION_LINE,
+    `--check's first line names the version, a check that fails at once on a misspelt mode included (SMD-4378) (${ok.out.split("\n")[0]})`);
   const wide = await run(["--check"], "write-key");
   assert(wide.code === 0 && /warning: the key can capture, and it can also/.test(wide.err) && /--scope capture/.test(wide.err), "--check with a write key: a warning naming the fix");
   // A capture key on a server since SMD-3664 sees the priority writers too, and since SMD-3665 the open-item writers: still a capture key, no warning.
@@ -2701,7 +2703,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const dry = await run(["--dry-run", CLAUDE_T]);
   assert(dry.code === 0 && dry.out.startsWith(`--- ${VERSION_LINE}: what it would send; nothing is sent\n\nSession summary — claude-code`) && /would send: source=claude-code, derived_from=3 id/.test(dry.out) && /secret scan: clean/.test(dry.out), "--dry-run prints the summary and what it would send");
   // Review pass 6 (mutant: a null word named lived): a summary whose header lists no ticket names no word.
-  assert(/^--- would send: source=claude-code, derived_from=3 id\(s\)(?: \[[^\]]*\])?$/m.test(dry.out), `…a header listing no ticket names no metadata.tickets_from (${dry.out.split("\n").find((l) => l.startsWith("--- would send"))})`);
+  assert(new RegExp(`^--- would send: source=claude-code, derived_from=3 id\\(s\\)(?: \\[[^\\]]*\\])?, metadata\\.hook_version=${META_VERSION.replaceAll(".", "\\.")}$`, "m").test(dry.out), `…a header listing no ticket names no metadata.tickets_from, and the line names metadata.hook_version, which every summary carries (SMD-4378 review pass 1) (${dry.out.split("\n").find((l) => l.startsWith("--- would send"))})`);
   assert(!/Checkpoint:/.test(dry.out), "…with no checkpoint line: a dry run has no event");
   // SMD-4292: the dry run's line per episode lists the tickets as the text would send them, so a ticket-shaped password
   // a blanked ask held is printed nowhere, the segmentation's lines included.
@@ -2739,7 +2741,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   // word, as its payload carries it; one with no ticket in its header names none.
   const sends = dryEp.out.split("\n").filter((l) => l.startsWith("--- would send"));
   const sentWords = sends.map((l) => l.replace(/^.*derived_from=[0-9]+ id\(s\)(?: \[[^\]]*\])?/, ""));
-  assert(JSON.stringify(sentWords) === JSON.stringify([", metadata.tickets_from=place", ", metadata.tickets_from=asks", ", metadata.tickets_from=asks", ", metadata.tickets_from=place"]),
+  assert(JSON.stringify(sentWords) === JSON.stringify(["place", "asks", "asks", "place"].map((w) => `, metadata.tickets_from=${w}, metadata.hook_version=${META_VERSION}`)),
     `--dry-run's would-send line names each episode's metadata.tickets_from (SMD-3306 review pass 5: ${JSON.stringify(sentWords)})`);
   const dryEpCp = await run(["--dry-run", EPISODES_T, "--event", "PreCompact", "--trigger", "manual"]);
   assert((dryEpCp.out.match(/Checkpoint: compacted/g) ?? []).length === 1 && /=== episode 4 ===[^]*Checkpoint: compacted at 2026-09-24 11:31 \(manual\)/.test(dryEpCp.out), "…with --event, the checkpoint line previews on the open episode alone");

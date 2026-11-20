@@ -96,7 +96,10 @@ import { fileURLToPath } from "node:url";
  * read of `metadata.json`, because the installed hook is a copy of this file
  * alone. The suite fails if it differs from `metadata.json`'s. `--version`
  * prints it, `--check` and `--dry-run` name it first, and each summary carries
- * it as `metadata.hook_version`.
+ * it as `metadata.hook_version`: the hook that prepared the payload, whose
+ * rules wrote its derived text and header. A model's summary is written when
+ * the payload is sent, which a later hook may do; its stamp names the hook
+ * that prepared the model's input.
  */
 export const HOOK_VERSION = "1.11.0";
 
@@ -1830,7 +1833,8 @@ export async function postCapture(cfg, payload) {
   // echoing the header it was shown would have its tickets keyed); and the
   // version of the hook that prepared it (SMD-4378), so the brain can tell
   // which rules wrote a header. A payload queued by a hook before 1.11.0 has
-  // none, and is sent without it: no hook can say which wrote it.
+  // none, and is sent without it: no hook can say which wrote it. A hook
+  // before 1.11.0 sending a payload a later one queued (a rollback) drops it.
   const meta = {};
   if (payload.summary_model) meta.summary_model = payload.summary_model;
   if (payload.redactions?.length) meta.redactions = payload.redactions.length;
@@ -3976,7 +3980,14 @@ export async function main(argv) {
   const args = argv.slice(2);
   // First, whatever else is given and whether or not stdin is piped: an
   // operator confirming an upgrade needs no config, no brain and no transcript (SMD-4378).
-  if (has(args, "--version")) { console.log(`session-capture ${HOOK_VERSION}`); return 0; }
+  // With stdin not a terminal it may be a hook command's, which then captures
+  // nothing at every run: the log says so, as it does for a flag no hook takes
+  // (review pass 1: it was silent).
+  if (has(args, "--version")) {
+    if (!process.stdin.isTTY) log(`--version: printed session-capture ${HOOK_VERSION}; stdin unread, nothing captured (in a hook command it stops every capture: remove it)`);
+    console.log(`session-capture ${HOOK_VERSION}`);
+    return 0;
+  }
   const harness = flag(args, "--harness");
   // Exit 1, not 2: on a Stop hook 2 would block the assistant's turn over a typo in the command line (seventh review pass).
   if (harness !== undefined && !HARNESSES.includes(harness)) { console.error(`--harness takes ${HARNESSES.join(" or ")}, not "${harness}" (omit it: the transcript's first line says which)`); return 1; }
@@ -4030,7 +4041,7 @@ export async function main(argv) {
     return 0;
   }
   if (has(args, "--check")) {
-    console.log(`session-capture ${HOOK_VERSION}`); // the copy being checked, before anything can fail (SMD-4378)
+    console.log(`session-capture ${HOOK_VERSION}`); // the copy being checked, before the mode and config checks (SMD-4378); a bad --harness is refused before it
     if (modeError) { console.error(`session-capture: ${modeError}`); return 1; } // before the config: a missing config must not hide the typo (first review pass)
     let brains;
     try { brains = loadBrains(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
@@ -4226,7 +4237,7 @@ export async function main(argv) {
       if (several) console.log(`\n=== episode ${ep.n} ===`);
       console.log(text);
       const from = headerTickets(cleaned.ep).from;
-      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}${from ? `, metadata.tickets_from=${from}` : ""}`);
+      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}${from ? `, metadata.tickets_from=${from}` : ""}, metadata.hook_version=${HOOK_VERSION}`);
       if (where.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}`); code = 1; }
       else if (redactions.length) console.log(`--- secret scan: ${countRedactions(redactions.length)} — ${describeRedactions(redactions)}; the text above is what would be sent`);
       else console.log("--- secret scan: clean");
