@@ -180,7 +180,7 @@ if (!URL_) {
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["5d", "10g", "26", "37b", "38"],
+  sleep: ["5d", "10g", "26", "37b", "38", "38c"],
   long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
   sweep: ["38s", "50", "51", "38p"],
@@ -30048,6 +30048,73 @@ if (want("38p")) await (async () => {
     sw.embedHangMs = 0;
     sw.embedHangUntil = 0;
     restoreOutage();
+    await done();
+  }
+})();
+
+// Consolidation under a steady inflow (SMD-4468): extraction's pool, which 016's trigger fills as each capture is
+// written, never drains while captures keep coming faster than extraction takes them, and consolidation joined only
+// once it did — never while the inflow lasted (SMD-4384's review measured a judgement 158 s late at the median, 306 s
+// at most, at the shipped settings). It now joins once the thoughts captured before the period began are extracted:
+// a capture since is judged against neighbours captured a UTC day or more before it (029), all of them in that
+// backlog. Its body a function's, as [38p]'s: the module body is at TS2563's limit for control-flow analysis.
+if (want("38c")) await (async () => {
+  console.log("\n[38c] db/sleep.ts: consolidation under a steady inflow of captures (SMD-4468) — extraction's pool never drains while captures come faster than it takes them, and consolidation joins once the thoughts captured before the period began are extracted, judging the inflow's notes while it goes on, none claimed before that backlog is extracted");
+  const sql = new SQL({ url: URL_, max: 4 });
+  const { EX, CO, sw, capture, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
+  try {
+    const JOINED = /^ {2}extraction has done the thoughts captured before the period began — consolidating beside it while it extracts the captures since$/;
+    const DRAINED = /^ {2}extraction drained — consolidating beside it$/;
+    // The backlog: six older notes on one axis, two to seven days old, each a neighbour a capture today is judged
+    // against (one entity, the stub's, and one vector), written by the sync key, which pauses nothing.
+    const backlog: string[] = [];
+    for (let i = 0; i < 6; i++) backlog.push(await capture(`An older note on the ledger, number ${i}.`, "sync-sleep", 2 + i, 63));
+    // One extraction worker, each call 400 ms, and a capture every 300 ms: the pool grows while the inflow lasts.
+    sw.slowExtract = 400;
+    const startedAt = new Date((await sql`SELECT now() AS now`)[0].now as string);
+    lines.length = 0;
+    const ac = new AbortController();
+    const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, workers: 1, signal: ac.signal });
+    const inflow: string[] = [];
+    let flowing = true;
+    const flow = (async () => {
+      for (let i = 0; flowing; i++) {
+        inflow.push(await capture(`An inflow note on the ledger, number ${i}.`, "sync-sleep", 0, 63));
+        await Bun.sleep(300);
+      }
+    })();
+    /** The inflow's notes consolidation has judged: their claims under its key finished. */
+    const judgedNotes = async () => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${CO} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...inflow], "TEXT")}::uuid[])`)[0].c);
+    let joined = false, judgedInFlow = 0, pendingAtJudge = 0, drainedInFlow = true, code = -9;
+    try {
+      try {
+        joined = await pollUntil(async () => lines.some((l) => JOINED.test(l)), 30_000);
+        if (joined && await pollUntil(async () => (judgedInFlow = await judgedNotes()) > 0, 30_000)) {
+          // Extraction's pool still not drained as the note is judged: the old rule would not have joined yet.
+          pendingAtJudge = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EX} AND status IN ('pending', 'claimed')`)[0].c);
+        }
+        drainedInFlow = lines.some((l) => DRAINED.test(l));
+      } finally {
+        flowing = false;
+        await flow;
+      }
+      // The inflow over, its notes extracted and judged before the run stops: the case after begins from a drained pool.
+      await pollUntil(async () => (await judgedNotes()) === inflow.length, 60_000);
+    } finally {
+      sw.slowExtract = 0;
+      ac.abort();
+      code = await bounded(run, ac);
+    }
+    // None judged before its neighbours were extracted: consolidation's first claim of the run after the backlog's last
+    // extraction finished.
+    const [order] = (await sql`
+      SELECT (SELECT max(finished_at) FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ANY(${sql.array(backlog, "TEXT")}::uuid[])) AS extracted,
+             (SELECT min(claimed_at) FROM thought_work_claims WHERE work_type = ${CO} AND claimed_at >= ${startedAt}::timestamptz) AS judged,
+             (SELECT count(*)::int FROM thought_work_claims WHERE work_type = ${EX} AND status = 'succeeded' AND thought_id = ANY(${sql.array(backlog, "TEXT")}::uuid[])) AS done`) as { extracted: Date | null; judged: Date | null; done: number }[];
+    const inOrder = order.extracted !== null && order.judged !== null && order.done === backlog.length && new Date(order.judged) >= new Date(order.extracted);
+    assert(joined && judgedInFlow > 0 && pendingAtJudge > 0 && !drainedInFlow && inOrder && code === 0,
+      `a capture every 300 ms, extraction's pool never drained while it lasted: consolidation joins once the thoughts captured before the period began are extracted, said so, and judges an inflow note while the inflow goes on — its first claim after the backlog's last extraction (joined ${joined}; ${judgedInFlow} inflow note(s) judged during it, ${pendingAtJudge} pending or in hand for extraction then; drained during it ${drainedInFlow}; backlog ${order.done} of ${backlog.length} extracted, the last at ${order.extracted ? new Date(order.extracted).toISOString() : "never"}, the first judgement claimed at ${order.judged ? new Date(order.judged).toISOString() : "never"}; ${inflow.length} captured; exit ${code}${joined && judgedInFlow > 0 ? "" : `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+  } finally {
     await done();
   }
 })();

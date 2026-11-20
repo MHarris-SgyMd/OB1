@@ -2473,8 +2473,12 @@ until its pool drains, or for `OB1_SLEEP_REEMBED_SHARE` seconds while
 extraction or consolidation has work (unset, 120; SMD-4384), the two then
 taking turns in the period as long each — then
 extraction, and
-consolidation beside it once extraction's pool is drained, so the backlog
-order above is built in. Beside consolidation runs the subject sweep
+consolidation beside it once the thoughts captured before the period began
+are extracted, so the backlog order above is built in: a capture since is
+judged against neighbours captured on an earlier UTC date, all of them in
+that backlog, and captures arriving all period no longer keep consolidation
+out of it, as they did while it waited for extraction's whole pool to drain
+(SMD-4468). Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
 model's: started once a period, its claims bounded by the period's start plus
@@ -2576,7 +2580,9 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 The log says `working:` when a period begins, `extraction drained — consolidating
-beside it`, `paused:` with the live call that paused it and `resumed:` once
+beside it` (or `extraction has done the thoughts captured before the period
+began — consolidating beside it while it extracts the captures since`, under
+an inflow, SMD-4468), `paused:` with the live call that paused it and `resumed:` once
 the capture has passed, and `the pools drained — the period ends`; `share:`
 at its start names the turns, `re-embed has had its share — 120 s alone — N
 thought(s) left for its next turn …` when re-embed gives way to extraction,

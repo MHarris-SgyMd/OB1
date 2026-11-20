@@ -5510,14 +5510,19 @@ call a row, `--reembed-share` at a time in turns with extraction while it
 has work; the start line and `--dry-run` count them
 (a later period's line counts only rows not yet claimed, so follow the
 `re-embed pass` row), and `reembed.ts --dry-run` before upgrading says how
-many. Then extraction alone until its
-pool drains, then consolidation beside it — the order "Start `extract` alone
-on a backlog" asks of an operator. A live write pauses the passes (above),
+many. Then extraction alone until the thoughts captured before the period
+began are extracted, then consolidation beside it — the order "Start
+`extract` alone on a backlog" asks of an operator. A capture since is judged
+against neighbours captured on an earlier UTC date (029), all of them in that
+backlog, but across 00:00 UTC, as beside any running `extract`; until
+SMD-4468 the join waited for extraction's whole pool, which captures
+arriving faster than it took them kept from draining, and consolidation
+never joined while they came. A live write pauses the passes (above),
 a call in hand a minute old aborted while paused and its thought set back. A
 long thought's answered windows are kept (093, [Long thoughts
 resume](#extract-entitiests)), so one longer than every pause's bound advances
 by the windows answered before each stop, and is done once its last is. Consolidation also
-joins once extraction holds nothing but thoughts that three or more long hard
+joins once that backlog holds nothing but thoughts that three or more long hard
 stops in a row took with no window saved between, and none saved since (093's
 `stalled` and `gained`, SMD-2694; long: the thought held a minute, provider
 pauses aside, so a busy day's short holds count none) — a single window
