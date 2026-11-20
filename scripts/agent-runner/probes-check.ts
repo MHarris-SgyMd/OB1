@@ -374,6 +374,8 @@ const res = { type: "user", message: { content: [{ type: "tool_result", tool_use
 if (scenario === "turn-first") {
   out(use);
   await Bun.sleep(30000);
+} else if (scenario === "result-first") {
+  out({ type: "result", subtype: "error_during_execution", is_error: true, num_turns: 0, result: "not a report", startup_failure_reason: "sandbox_required_unavailable", errors: ["Sandbox required but unavailable: the settings failed validation"] });
 } else if (scenario === "bad-init") {
   out({ ...init, permissionMode: "default" });
   await Bun.sleep(30000);
@@ -443,6 +445,12 @@ if (scenario === "turn-first") {
         clean();
         const turnFirst = await runSession(spec(), deps);
         await ok(() => turnFirst.ended === "init" && turnFirst.why.includes("before the init"), "a turn before the init ends the session");
+        // Claude Code 2.1.329 refuses a profile that fails validation with one error result and no init event (SMD-4489).
+        scenario("result-first");
+        clean();
+        const resultFirst = await runSession(spec(), deps);
+        await ok(() => resultFirst.ended === "init" && resultFirst.why.includes("before its init event") && resultFirst.why.includes("sandbox_required_unavailable") && resultFirst.why.includes("failed validation"), "a result before the init is a session that never started: it ends as init, with the startup failure's reason and first error");
+        await ok(() => resultFirst.report === "" && resultFirst.calls.length === 0 && resultFirst.results.length === 0, "and its text is not taken as a report");
         scenario("unlogged");
         clean();
         const unlogged = await runSession(spec(), deps);
