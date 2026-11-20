@@ -215,6 +215,9 @@ function definedIn(file: string): string[] {
  * agenda it needs ([110] drops both). 139 is 055's audit gate with the
  * redact arm (SMD-1723) and carries 055, whose diff rule, capture payload
  * and backfill it does not define; a re-apply of 046 reverts them ([51]).
+ * 149 is 067's rebuild_derived with the tags' arm feeding the re-tag pool
+ * (SMD-2298) and carries 067, whose settle function and comments it does
+ * not restate.
  * 141 is 061's record_thought_entities
  * with its prune sparing an entity someone stated a priority on (SMD-4241),
  * and carries 061: a restore of the writer re-applied 061, whose other
@@ -223,7 +226,7 @@ function definedIn(file: string): string[] {
  * merge_entities it also carries, are not carried: 056 runs the gate over the
  * rows at each apply.
  */
-const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"] };
+const CARRIES: Record<string, string[]> = { "148": ["073"], "149": ["067"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -9603,8 +9606,9 @@ console.log("\n[58] Migration 063: rebuild_derived — the walk over the lineage
     `one consolidation_candidates, 079 its last definer — 063's body, the stale clause kept, plus the lineage exclusion ([60]) and the ticket rule ([70]) (${lastDefinerOf("consolidation_candidates")})`);
   assert((await functionsNamed("ob1_record_derivation")) === 1 && lastDefinerOf("ob1_record_derivation").startsWith("111") && /ob1:rerun-clears-the-mark/.test(await src("ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)")),
     `one ob1_record_derivation, 111 its last definer — 063's body, the mark's clearing and its sentinel kept, plus the section kind ([59]), the relation kind ([74]) and the subject kind ([99]) (${lastDefinerOf("ob1_record_derivation")})`);
-  // rebuild_derived's last definer is 067 (SMD-2297: the proposal arm reopens a pass-settled row); [61] asserts it.
-  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("067"), `one rebuild_derived, 067 its last definer (${lastDefinerOf("rebuild_derived")})`);
+  // rebuild_derived's last definer is 149 (SMD-2298: the tags' arm feeds the re-tag pool), on 067's body (SMD-2297: the
+  // proposal arm reopens a pass-settled row); [134] holds 149's rule.
+  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived").startsWith("149"), `one rebuild_derived, 149 its last definer, on 067's body (${lastDefinerOf("rebuild_derived")})`);
   const REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)", WALK_SIG = "derivation_descendants(uuid, int, int)";
   assert(/ob1:rebuild-acts-on-a-held-frontier/.test(await src(REBUILD_SIG)) && /pg_advisory_xact_lock\(hashtext\('ob1:supersession-review'\)\)/.test(await src(REBUILD_SIG)) && /FOR NO KEY UPDATE/.test(await src(REBUILD_SIG)),
     "the primitive carries its sentinel, takes the supersession lock and the row lock in delete_thought's order");
@@ -10367,11 +10371,11 @@ console.log("\n[61] Migration 067: the consolidation pass settles a stale propos
   const KEY = "extract:stub@p1", JUDGE = "consolidate:stub@p1", JUDGE2 = "consolidate:stub@p2";
   const SETTLE_SIG = "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)", REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)";
 
-  // The shape: one settle function, 067 the last definer of both, the two
+  // The shape: one settle function, 067 its last definer (149 rebuild_derived's, carrying 067's body), the two
   // sentinels, the marker literal held to the TypeScript constant, the
   // comments naming 067.
-  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("067") && lastDefinerOf("rebuild_derived").startsWith("067"),
-    `one settle function; 067 is the last definer of it and of rebuild_derived (${lastDefinerOf("rebuild_derived")})`);
+  assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("067") && lastDefinerOf("rebuild_derived").startsWith("149"),
+    `one settle function; 067 is its last definer, and 149 rebuild_derived's, on 067's body (${lastDefinerOf("rebuild_derived")})`);
   const rebuildSrc = await src(REBUILD_SIG), settleSrc = await src(SETTLE_SIG);
   assert(/ob1:pass-settled-is-the-pass-to-reopen/.test(rebuildSrc) && /ob1:rebuild-acts-on-a-held-frontier/.test(rebuildSrc) && /ob1:settle-records-the-texts-it-judged/.test(settleSrc),
     "the reopen and the settle carry their sentinels; 063's frontier sentinel stands");
@@ -22434,6 +22438,100 @@ console.log("\n[133] Migration 148: a re-tag that came out the same settles the 
       && JSON.stringify(await q(`SELECT artifact_id, recipe, input_fingerprints, stale_since, produced_at FROM derivations ORDER BY artifact_id, artifact_kind`)) === derivBefore
       && (await one<{ n: number }>(`SELECT count(*)::int AS n FROM thought_audit`)).n === eventsBefore,
     "148 applied again is a no-op: one update_thought, no row, lineage row or event moved");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM derivations WHERE artifact_kind = 'metadata'`);
+}
+
+console.log("\n[134] Migration 149: rebuild_derived hands a stale tags row to the re-tag pool — the metadata arm marks the row and, with ob1_config.retag_key recorded, requeues the thought under it (enqueued, the key in pools), a live claim revoked as every arm's is; with none recorded, marked alone, unqueued; 067's function otherwise verbatim; 067 re-applied marks alone again and the shipped file restores the requeue; a re-apply a no-op (SMD-2298)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  // The new file first: an older section's re-apply may have left an earlier body (the SMD-3778 rule).
+  const file = await reapply("149");
+  await db.exec(`DELETE FROM thoughts`);
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'retag_key'`);
+  const SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)";
+  const body = async () => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).s);
+  const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
+  assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived") === file && /ob1:tags-requeued-under-retag-key/.test(await body())
+      && /ob1:rebuild-acts-on-a-held-frontier/.test(await body()) && /149 \(SMD-2298\)/.test(comment) && /SMD-2298/.test(comment),
+    `149's one rebuild_derived: the tags' sentinel beside 063's, its comment naming 149 (SMD-2298) (${lastDefinerOf("rebuild_derived")})`);
+
+  // Nothing else moves: 149's function is 067's, less the retag key's read and the tags' arm.
+  const fn = (f: string) => { const x = readFileSync(join(MIGRATIONS, files.find((y) => y.startsWith(f))!), "utf8"); const i = x.indexOf("CREATE OR REPLACE FUNCTION rebuild_derived("); return x.slice(i, x.indexOf("\n$$;\n", i)); };
+  const as067 = fn("149")
+    .replace("  v_cfg_retag    text;               -- 149: db/retag.ts's recorded key, the tags' pool; NULL where unset\n", "")
+    .replace("  SELECT NULLIF(value, '') INTO v_cfg_retag FROM ob1_config WHERE key = 'retag_key';\n", "")
+    .replace(/      WHEN 'metadata' THEN\n        -- ob1:tags-requeued-under-retag-key[\s\S]*?        END IF;\n      ELSE\n/,
+      "      WHEN 'metadata' THEN\n        -- No pool re-tags a thought: marked for the operator, nothing more.\n        UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;\n        v_marked   := v_marked + 1;\n        v_unqueued := v_unqueued + 1;\n      ELSE\n");
+  assert(as067 === fn("067"), `149's rebuild_derived is 067's verbatim but for the retag key's read and the tags' arm (${as067.length} vs ${fn("067").length} chars)`);
+
+  // Behaviour. A thought tagged under the extractor's recipe (148 records its tags row), its text moved raw.
+  const R = JSON.stringify({ metadata: { deterministic: false, model: "m1", prompt_version: 1, prompt_hash: "h1", temperature: 0 } });
+  const tagged = async (text: string) => {
+    const id = (await one<{ r: { id: string } }>(`SELECT upsert_thought($1, '{"metadata":{"type":"note","topics":["alpha"]}}'::jsonb) AS r`, [text])).r.id;
+    await db.query(`SELECT update_thought($1::uuid, p_metadata_patch => '{"type":"note","topics":["alpha"]}'::jsonb, p_lineage => $2::jsonb)`, [id, R]);
+    return id;
+  };
+  const move = (id: string, text: string) => db.query(`UPDATE thoughts SET content = $2, content_fingerprint = content_fingerprint_of($2) WHERE id = $1::uuid`, [id, text]);
+  type Rb = { ok: boolean; marked: number; unqueued: number; enqueued: number; pools: string[] };
+  const rebuild = async (id: string) => (await one<{ r: Rb }>(`SELECT rebuild_derived($1::uuid, 'test: moved') AS r`, [id])).r;
+  const KEY = "retag:m1@p1";
+  const claim = async (id: string) => await one<{ status: string; worker_id: string | null }>(`SELECT status, worker_id FROM thought_work_claims WHERE work_type = $1 AND thought_id = $2::uuid`, [KEY, id]);
+  const marked = async (id: string) => (await one<{ m: boolean }>(`SELECT stale_since IS NOT NULL AS m FROM derivations WHERE artifact_kind = 'metadata' AND artifact_id = $1::uuid`, [id]))?.m;
+
+  // No key recorded: marked alone, unqueued, nothing pooled.
+  const t1 = await tagged("[134] the first note, before its move");
+  await move(t1, "[134] the first note, after its move");
+  const r1 = await rebuild(t1);
+  assert(r1.ok && r1.marked === 1 && r1.unqueued === 1 && r1.enqueued === 0 && (await marked(t1)) === true && (await claim(t1)) === undefined,
+    `with no retag key recorded, a stale tags row is marked alone and counted unqueued, nothing pooled (${JSON.stringify(r1)})`);
+
+  // A key recorded: marked, and the thought requeued under it, the key in pools.
+  await db.query(`INSERT INTO ob1_config (key, value) VALUES ('retag_key', $1)`, [KEY]);
+  const t2 = await tagged("[134] the second note, before its move");
+  await move(t2, "[134] the second note, after its move");
+  const r2 = await rebuild(t2);
+  const c2 = await claim(t2);
+  assert(r2.ok && r2.marked === 1 && r2.unqueued === 0 && r2.enqueued === 1 && r2.pools.includes(KEY) && (await marked(t2)) === true && c2?.status === "pending",
+    `with ${KEY} recorded, the stale tags row is marked and the thought requeued under the key, which pools names (${JSON.stringify(r2)}; ${JSON.stringify(c2)})`);
+
+  // A live claim on it is revoked, as every arm's requeue does: pending again, no holder.
+  await db.query(`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'retag-test-1', claimed_at = now(), ttl_expires_at = now() + interval '15 minutes', attempt_count = 1 WHERE work_type = $1 AND thought_id = $2::uuid`, [KEY, t2]);
+  await move(t2, "[134] the second note, moved again");
+  await rebuild(t2);
+  const c2b = await claim(t2);
+  assert(c2b?.status === "pending" && c2b.worker_id === null, `…a live claim on it is revoked, pending again with no holder (${JSON.stringify(c2b)})`);
+
+  // An empty key is unset, as the extraction key's is.
+  await db.query(`UPDATE ob1_config SET value = '' WHERE key = 'retag_key'`);
+  const t4 = await tagged("[134] the fourth note, before its move");
+  await move(t4, "[134] the fourth note, after its move");
+  const r4 = await rebuild(t4);
+  await db.query(`UPDATE ob1_config SET value = $1 WHERE key = 'retag_key'`, [KEY]);
+  assert(r4.unqueued === 1 && r4.enqueued === 0 && (await claim(t4)) === undefined, `…an empty retag key is unset: marked alone (${JSON.stringify(r4)})`);
+
+  // 067 re-applied puts the old arm back (marked alone, the key recorded or not); the shipped file restores the requeue.
+  const t3 = await tagged("[134] the third note, before its move");
+  await move(t3, "[134] the third note, after its move");
+  await reapply("067");
+  const r3old = await rebuild(t3);
+  const body067 = await body();
+  await restoreShipped("rebuild_derived");
+  await move(t3, "[134] the third note, moved again");
+  const r3 = await rebuild(t3);
+  assert(r3old.unqueued === 1 && r3old.enqueued === 0 && !/ob1:tags-requeued-under-retag-key/.test(body067) && r3.enqueued === 1 && (await claim(t3))?.status === "pending" && lastDefinerOf("rebuild_derived") === file,
+    `067 re-applied: the tags row marked alone though the key is recorded (${JSON.stringify(r3old)}); the shipped file restored, requeued again (${JSON.stringify(r3)})`);
+
+  // A re-apply is a no-op: one form, no claim and no lineage row moved.
+  const claimsBefore = JSON.stringify(await q(`SELECT thought_id, work_type, status FROM thought_work_claims ORDER BY thought_id, work_type`));
+  const derivBefore = JSON.stringify(await q(`SELECT artifact_id, artifact_kind, stale_since FROM derivations ORDER BY artifact_id, artifact_kind`));
+  await reapply("149");
+  assert((await functionsNamed("rebuild_derived")) === 1 && JSON.stringify(await q(`SELECT thought_id, work_type, status FROM thought_work_claims ORDER BY thought_id, work_type`)) === claimsBefore
+      && JSON.stringify(await q(`SELECT artifact_id, artifact_kind, stale_since FROM derivations ORDER BY artifact_id, artifact_kind`)) === derivBefore,
+    "149 applied again is a no-op: one rebuild_derived, no claim or lineage row moved");
+  await db.exec(`DELETE FROM thought_work_claims WHERE work_type = '${KEY}'`);
+  await db.exec(`DELETE FROM ob1_config WHERE key = 'retag_key'`);
   await db.exec(`DELETE FROM thoughts`);
   await db.exec(`DELETE FROM derivations WHERE artifact_kind = 'metadata'`);
 }

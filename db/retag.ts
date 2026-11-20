@@ -105,14 +105,16 @@
  * answers. --status and --dry-run record nothing and register no agent.
  *
  * ── The pool, and what is not here ──────────────────────────────────────────
- * Nothing feeds the pool between runs yet: each run pools the backlog itself
- * — the thoughts not in the pool are added (enqueue_thoughts, which skips a
+ * rebuild_derived feeds the pool between runs: a tags row it finds stale is
+ * requeued under the key this worker recorded (migration 149, SMD-2298 PR 2).
+ * Each run pools the rest of the backlog itself, what no rebuild marked (a
+ * thought tagged before 061, a capture that fell back, a text moved raw with
+ * no rebuild) — the thoughts not in the pool are added (enqueue_thoughts, which skips a
  * pooled one), and a thought re-tagged before and back in the backlog since
  * is put back (requeue_thought_work's reset, on a row still `succeeded` when it is
  * locked: review pass 1); a failed one waits for --retry-failed,
  * and a claimed one is its holder's. Not here (SMD-2298's later PRs):
- * rebuild_derived's metadata arm requeuing a marked row under the recorded
- * key (PR 2), preflight's retag rows (PR 3), the --switch for a prompt
+ * preflight's retag rows (PR 3), the --switch for a prompt
  * version (PR 3), and a sleep pass and --follow on the shared follower
  * (PR 4). recipes/thought-enrichment's enrich-thoughts.mjs, which wrote its
  * own tag set through the SQL shim, is retired for this (decided 2026-11-15:
@@ -469,7 +471,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
   if (stoppedEarly()) return 130;
-  // The pool, every run, until rebuild_derived feeds it (SMD-2298 PR 2): the backlog not pooled, and a re-tagged one due again.
+  // The pool, every run, beside rebuild_derived's requeue (149): the backlog not pooled, and a re-tagged one due again.
   const [{ added }] = (await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(${backlogIds()})) AS added`) as { added: number }[];
   // requeue_thought_work's reset, guarded: the UPDATE checks `succeeded` again on the row it locks (READ COMMITTED's
   // recheck), so a thought another run requeued and claimed since this statement began keeps its lease (review pass 1:

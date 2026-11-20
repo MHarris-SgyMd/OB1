@@ -46,10 +46,11 @@
  *
  * ── What it does not do ─────────────────────────────────────────────────────
  * It calls no model. The pools it fills are drained by the workers that own
- * the recipes — db/reembed.ts, db/extract-entities.ts, db/consolidate.ts —
- * and the end of a run names each pool that gained rows with the command that
- * drains it. The tags have no pool: a stale tags row is marked and reported,
- * and waits for a re-capture or an edit with the extractor's recipe.
+ * the recipes — db/reembed.ts, db/extract-entities.ts, db/consolidate.ts,
+ * db/retag.ts — and the end of a run names each pool that gained rows with
+ * the command that drains it. A stale tags row is requeued under the re-tag
+ * key db/retag.ts recorded (migration 149, SMD-2298); before its first run
+ * there is none, and the row is marked and reported alone.
  *
  * ── Exit codes ──────────────────────────────────────────────────────────────
  * 0 the call ran (or --status printed); 1 the function answered a refusal as a
@@ -123,6 +124,7 @@ export function drainer(pool: string, subjectPool: string | null = null): string
   }
   if (pool.startsWith("extract:")) return "bun db/extract-entities.ts --url <url>";
   if (pool.startsWith("consolidate:")) return "bun db/consolidate.ts --url <url>";
+  if (pool.startsWith("retag:")) return "bun db/retag.ts --url <url>";
   return "(no worker in this tree drains this key)";
 }
 
@@ -133,7 +135,7 @@ function printReport(r: Report, out: Writer["out"]): void {
   out(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns${r.force ? "; or, under --force, a vector at the configured model whose text did not move, its record renewed" : ""})`);
   out(`  enqueued:    ${r.enqueued} (thought, pool) claim(s) for the workers`);
   out(`  deleted:     ${r.deleted} (lineage rows whose artifact is gone${r.input_gone ? "; the windows, the graph and the snapshot rows the input keyed" : ""})`);
-  out(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (067) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not` : ""}`);
+  out(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags before db/retag.ts has recorded its key, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (067) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not` : ""}`);
   out(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a person's decision on a proposal stands)`);
   out(`  current:     ${r.current} (nothing moved)${r.legacy ? `; ${r.legacy} legacy row(s) read current by construction — --force re-runs them` : ""}`);
   if (r.input_gone) out(`  cascade:     ${r.cascading.proposals} proposal(s) and ${r.cascading.lineage_rows} lineage row(s) go with the row delete (029's and 061's triggers)`);

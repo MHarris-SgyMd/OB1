@@ -2970,9 +2970,10 @@ else {
   // 067's settle function stands and warns naming 067 — 063's own lesson
   // about 061 over 063, applied to the file after it.
   const pre067 = await run(SQL_ENV);
-  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql\./.test(fix(pre067.out, "lineage")),
-         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
+  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql, then db\/migrations\/149_rebuild_requeues_tags\.sql — 149 last defines rebuild_derived/.test(fix(pre067.out, "lineage")),
+         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 then 149 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
+  // 149 after it: it last defines rebuild_derived, on 067's body (SMD-2298).
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") || f.startsWith("149_") });
   // 029 re-applied by hand over 110 (SMD-2313, SMD-3248, SMD-3249) — this
   // ladder's own state since the queue section re-applied 029 alone: 029's
   // two-argument listing stands BESIDE 110's seven-argument one, and a call
