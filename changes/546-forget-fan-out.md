@@ -1,0 +1,32 @@
+# 546. Forget fan-out — the session hook copies a forget to the other brains, and a forget takes every thought its name is (SMD-1723)
+
+**What changed.** The write fan-out (SMD-3314) copies `forget_thought` (session hook 1.9.0); SMD-1723's earlier record, migrations 139 and 144, is the forget itself.
+- **The copy:** a forget through the connector's brain is repeated on each brain with a write key, by the id the first brain answered and `confirm` the same. It always detaches citations there (the maintainer's choice: a copy copies the text), and is retried by the thought's own `client_key`, which the reply names, where a brain knows it by that alone.
+- **The queue:** a forget drops that brain's queued and given-up copies of the thought (pending/ and dead/), by its id or its key, an earlier forget kept. A copy marked `sending` (in flight, or left so by a killed drain) or `sent` (a send that may have reached the brain: a timeout, a 5xx, a fault) is kept, since it may land late: sent again, the forget behind it removes it.
+- **The answers:** a copy forgotten there already is done; one the brain no longer knows is skipped, said so. A brain whose server has no `forget_thought` holds the copy until it is upgraded, for up to a week, and `--check` warns rather than fails; a forget given up says its text stays there. The log names what the receiving brain's forget left to review. A copy whose reply names a thought not forgotten is kept and sent again.
+- **The server:** a forget takes every thought its name is there: the id, standing or deleted; the thought keeping it as its `client_key`; each deleted one whose tombstone kept it. The others are listed (`alsoForgotten`, MCP's values `alsoForgottenIds`) and the thought's own key named (`clientKey`). A thought refused, or a fault, beside one forgotten is named in `notForgotten` (its id and code, a fault's `FAILED` with its SQLSTATE in REST and the text), the others staying forgotten; a `CITED` before the first stops the rest. Before the first, a refusal that leaves a text outranks `FORGOTTEN`, so the call sent again after a partial forget answers what still holds the text.
+
+**Limits.**
+- Not dropped: a capture whose own hook run queues it after the forget's (the two runs are asynchronous); a brain with no write key at the forget's run; the first brain's own queue. A forget the hook never queued (its config unreadable) is not copied again: the first brain refuses it `FORGOTTEN`.
+- `--check` cannot tell a v2.1.0 server, which has `forget_thought` but takes one thought a name resolves to, from a current one: hence the upgrade order.
+
+**Held.**
+- **The hook's suite [12]:** the echo and forced detach; a deleted copy reached by its key; queued and given-up copies dropped, an edit among them, while an earlier forget and another thought's copy are kept; a retry by the thought's own key; a repeat and a brain's own forget done; a partial forget kept; a capture whose answer was lost, and one a killed drain left in flight, kept past the forget; a refused connection and an answered refusal not marked sent; the receiving brain's review lists and the week's give-up logged; a refused forget not copied; an old brain held then drained; `--check`; the matcher.
+- **test-update-delete [12]:** a forget by a deleted key; every thought a name is; a standing id beside a keyed thought; the reply's key.
+- **test-server [23c]:** the reply's ids and twins, its hints, `notForgotten` through a fake store (a replay and a thrown `57P01`), the call sent again after a partial forget, a refusal before the first thought forgotten named, the `CITED` stop, and one forgotten already never named.
+- The hook's eight mutants and test-update-delete's three, then pass 2's eight, each killed; pass 6's 79 over the whole diff, the real survivors now held.
+
+**Review passes.**
+
+| Pass | Finding | Caught | Fix |
+|---|---|---|---|
+| 1 | A queued capture of a forgotten thought still landed; a cited copy given up; a two-way fan-out missed the other brain; one name took one thought of several | cold read | f2d8e014 |
+| 2 | A later thought's refusal or fault lost (now `notForgotten`, the copy kept); a standing keyed thought left beside the id | cold read | 5083eabd |
+| 2 | The queue drop untested beyond one capture: four mutants passed | mutant | 5083eabd |
+| 3 | A fault's code was its SQLSTATE, which the reply's values drop (now `FAILED`); the upgrade order unsaid | cold read | b9b6fb5f |
+| 4 | A partial forget sent again answered `FORGOTTEN`, its first thought forgotten already, while a later one held its text: the hook logged the copy done | run-it | b2e07dc9 |
+| 5 | A refusal before the first thought forgotten was dropped when a later one was (unreachable since 144); the `CITED` stop untested; a v2.1.0 first brain unsaid | run-it, mutant | 55adb0d7 |
+| 6 | Four mechanisms no test held, by a mutation pass over the whole diff (a copy's `confirm`, a deleted thought's key named, nothing left named not forgotten); stale one-thought sentences and log lines | mutant, walkthrough | 7adc2a74 |
+| 7 | A capture whose answer was lost, dropped by the forget, committed after it, its text kept for good; a forget given up after a week said nothing; the receiving brain's review lists lost; the old-server line never ran against a real server | run-it | 7194288d |
+| 8 | Pass 7's claim by rename: a stale drain put a copy back after the forget that followed it, the thought restored 20/20; a killed drain's claim invisible to every session event. Replaced by `sending`/`sent` in the copy's own file, written whole | run-it | f338c6dd |
+| 9 | A drop that read a copy before its mark removed it, losing its `sent` (14 in 3,000 natural runs); a capture's `STORE_UNAVAILABLE` unmarked | run-it | 9e1f36a8 |

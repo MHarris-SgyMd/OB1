@@ -4815,7 +4815,7 @@ else {
       // Gone stale: its restart is the compose service, then the checkout's.
       await beat("heartbeat:sleep", v({ every_s: 60, slept: { from: await at(900), to: await at(700) } }), 600);
       const sleepOut = await run(LOG_ON);
-      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last period ended 12 min ago, after 3 min; when it runs, a live write pauses its passes; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_MAX_WAIT, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
+      assert(/!\s+sleep\s+stale \(last stamped 10 min ago, every 60 s\); its last period ended 12 min ago, after 3 min; when it runs, a live write pauses its passes; a search does not$/.test(row(sleepOut.out, "sleep")) && /→ sleep has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_REEMBED_SHARE, OB1_SLEEP_MAX_WAIT, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there\); from a checkout, cd db && bun sleep\.ts --url \$DATABASE_URL --follow, with each as its flag\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:sleep'\.$/.test(fix(sleepOut.out, "sleep")),
         `a stale heartbeat:sleep names the sleep service's restart (${row(sleepOut.out, "sleep")} | ${fix(sleepOut.out, "sleep")})`);
       // Working, with a pass waiting at its start for the provider (SMD-2752):
       // the row says so, not that its passes run, and warns with the provider.
@@ -4848,8 +4848,56 @@ else {
       const reembedWaitFix = fix((await run(LOG_ON)).out, "sleep");
       assert(/Re-embed waiting for the provider mid-pass: the provider stopped answering — check it, and the embedding provider row here \(--deep calls it\)/.test(reembedWaitFix) && !/--deep probes chat/.test(reembedWaitFix),
         `re-embed's wait names the embedding provider's row (${reembedWaitFix})`);
-      assert(/re-embed is set down for the period at the scheduler's next poll, extraction going on, and the next period with work tries it again\.$/.test(reembedWaitFix) && !/goes on by itself|back in the pool meanwhile/.test(reembedWaitFix),
+      assert(/re-embed is set down for the period at the scheduler's next poll, extraction going on, and the next period with work tries it again\.$/.test(reembedWaitFix) && !/goes on by itself|back in the pool meanwhile|left waiting/.test(reembedWaitFix),
         `…and says the scheduler sets re-embed down, not that the pass goes on by itself (review pass 1: ${reembedWaitFix})`);
+      // Left waiting on an outage that made a thought a suspect (SMD-4254, review pass 1): the row carries the wait's
+      // start and the period's isolation before it against the bound and the cap, and the fix says re-embed is left
+      // waiting and when it is set down — not that the next poll sets it down. In seconds and the time left (review
+      // pass 2: ago() read 90 s as "2 min", 210 s as "4 min"), the log line that names a crashing thought once the
+      // period has isolated before, and the back-off the set-down begins.
+      const LEFT_FIX = /Re-embed waiting for the provider mid-pass: the provider stopped answering — check it, and the embedding provider row here \(--deep calls it\); re-embed is left waiting: an outage made the thought in hand a suspect — a thought's embedding may have crashed the provider — so the scheduler waits it out and, once it answers, retries the suspects one at a time; it sets re-embed down for the period, extraction going on, in (\d+) s and a poll at most — (\d+) s from this wait's start \((\d+) s ago\), or (\d+) s of isolation this period, its waits and the retries between them \((\d+) s before this wait\) — and then backs off (\d+) s, a period that meets such an outage meanwhile setting it down at once, its suspects moved behind the pool(.*)\.$/;
+      const HINT = `; a thought that crashes the provider at each retry is named in the scheduler's log: the same thought id "goes back to the pool unrecorded" at each outage`;
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed"], reembedWait: { since: await at(40), earlierS: 30, boundS: 120, periodS: 240, backoffS: 240 }, slept: { from: await at(130), to: null } }), 10);
+      const leftOut = await run(LOG_ON);
+      const leftFix = fix(leftOut.out, "sleep");
+      const [, leftIn, leftBound, began, leftCap, leftEarlier, leftNext, leftTail] = LEFT_FIX.exec(leftFix) ?? [];
+      assert(/working, re-embed waiting for the provider mid-pass/.test(row(leftOut.out, "sleep"))
+          && leftBound === "120" && leftCap === "240" && leftEarlier === "30" && leftNext === "240" && leftTail === HINT
+          && Number(began) >= 38 && Number(began) <= 45 && Number(leftIn) === 120 - Number(began) && !/at the scheduler's next poll| min\b/.test(leftFix),
+        `re-embed left waiting on an outage that made a thought a suspect: the fix says it waits, the time left by the bound, its bound, its cap and the period's isolation before it, the back-off, and the log line naming a crashing thought — not the next poll's set-down (began ${began} s ago, ${leftIn} s left: ${leftFix})`);
+      // The cap the nearer: 210 s isolated before a wait 25 s old leaves about 5 s, said so, not "4 min" (review pass 2).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed"], reembedWait: { since: await at(25), earlierS: 210, boundS: 120, periodS: 240, backoffS: 240 }, slept: { from: await at(130), to: null } }), 10);
+      const nearFix = fix((await run(LOG_ON)).out, "sleep");
+      const [, nearIn, , nearBegan, , nearEarlier] = LEFT_FIX.exec(nearFix) ?? [];
+      assert(nearEarlier === "210" && Number(nearBegan) >= 23 && Number(nearBegan) <= 30 && Number(nearIn) === Math.max(0, 240 - 210 - Number(nearBegan)) && !/ min\b/.test(nearFix),
+        `the cap the nearer limit: the time left is the cap's, in seconds (began ${nearBegan} s ago, ${nearIn} s left: ${nearFix})`);
+      // The first wait of the period: no hint yet; a try after a back-off ran out says so, and the back-off its limit
+      // begins, the row's (review pass 3: by time).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed"], reembedWait: { since: await at(20), earlierS: 0, boundS: 120, periodS: 240, backoffS: 480 }, reembedBackoff: { until: await at(30), nextS: 480, skipped: false }, slept: { from: await at(130), to: null } }), 10);
+      const tryFix = fix((await run(LOG_ON)).out, "sleep");
+      const [, , , , , tryEarlier, tryNext, tryTail] = LEFT_FIX.exec(tryFix) ?? [];
+      assert(tryEarlier === "0" && tryNext === "480" && tryTail === " (a try: an earlier back-off has run out)",
+        `a try after backing off: the back-off its limit begins and that it is a try, no log hint before the period has isolated (${tryFix})`);
+      // A suspect of this isolation recorded failed alone: its limit begins no back-off, and the fix says so (review pass 3);
+      // the crashing thought found, the log hint that names one is left off, the period's earlier isolation whatever
+      // (review pass 4).
+      await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed"], reembedWait: { since: await at(20), earlierS: 40, boundS: 120, periodS: 240, backoffS: 0 }, slept: { from: await at(130), to: null } }), 10);
+      const blamedFix = fix((await run(LOG_ON)).out, "sleep");
+      assert(/\(40 s before this wait\) — and does not back off: a suspect was recorded failed alone in this isolation\.$/.test(blamedFix) && !/and then backs off|goes back to the pool unrecorded/.test(blamedFix),
+        `left waiting after a suspect was recorded failed alone: no back-off said, and no log hint (${blamedFix})`);
+      // The mark read only beside re-embed waiting mid-pass, and only of its shape: else the next poll's words, as before.
+      for (const [label, extra] of [
+        ["beside a wait at re-embed's start", { waiting: ["reembed"], reembedWait: { since: await at(40), earlierS: 0, boundS: 120, periodS: 240, backoffS: 240 } }],
+        ["a bound of 0", { waitingMidPass: ["reembed"], reembedWait: { since: await at(40), earlierS: 0, boundS: 0, periodS: 240, backoffS: 240 } }],
+        ["a cap of 0", { waitingMidPass: ["reembed"], reembedWait: { since: await at(40), earlierS: 0, boundS: 120, periodS: 0, backoffS: 240 } }],
+        ["earlier waits not a count", { waitingMidPass: ["reembed"], reembedWait: { since: await at(40), earlierS: -1, boundS: 120, periodS: 240, backoffS: 240 } }],
+        ["a since not an instant", { waitingMidPass: ["reembed"], reembedWait: { since: "yesterday", earlierS: 0, boundS: 120, periodS: 240, backoffS: 240 } }],
+        ["a back-off not a count", { waitingMidPass: ["reembed"], reembedWait: { since: await at(40), earlierS: 0, boundS: 120, periodS: 240, backoffS: -1 } }],
+      ] as const) {
+        await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", ...extra, slept: { from: await at(130), to: null } }), 10);
+        const offFix = fix((await run(LOG_ON)).out, "sleep");
+        assert(!/left waiting/.test(offFix) && /re-embed is set down for the period at the scheduler's next poll/.test(offFix), `a reembedWait ${label} is left off, the fix as before (${offFix})`);
+      }
       await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", waitingMidPass: ["reembed", "extract"], slept: { from: await at(130), to: null } }), 10);
       const bothWaitFix = fix((await run(LOG_ON)).out, "sleep");
       assert(/check it, and the model provider rows here \(--deep probes chat\) and the embedding provider row here \(--deep calls it\)/.test(bothWaitFix),
@@ -5095,8 +5143,38 @@ else {
       await beat("heartbeat:sleep", v({ every_s: 60, running: false, outcome: "ok", aside: { reembed: { kind: "outage" } }, slept: { from: await at(300), to: await at(130) } }), 10);
       const lastDown = await run(LOG_ON);
       assert(/; re-embed set down for its last period \(outage\)$/.test(row(lastDown.out, "sleep"))
-          && /Re-embed was set down for its last period — its provider did not answer: check it, and the embedding provider row here \(--deep calls it\)/.test(fix(lastDown.out, "sleep")),
-        `idle, a set-down speaks of the last period, an outage naming the embedding provider (${row(lastDown.out, "sleep")} | ${fix(lastDown.out, "sleep")})`);
+          && /Re-embed was set down for its last period — its provider did not answer: check it, and the embedding provider row here \(--deep calls it\)/.test(fix(lastDown.out, "sleep"))
+          // …and, coming back every period, a thought that crashes the provider, as its log names it (SMD-4254).
+          && /if it comes back every period, a thought whose embedding crashes the provider for longer than the scheduler waits on such outages \(2 min a wait, 4 min of isolation a period, the retries between the waits counted; a crashing thought takes four waits, so one whose crash lasts about 80 s or more is never failed, and the scheduler then sets re-embed down at once at such an outage for 4 min, then 8, 16, … up to an hour between tries, its suspects moved behind the pool so the backlog is re-embedded meanwhile\), which its log names at each period's start: the same thought id "goes back to the pool unrecorded"; the other passes run on, and the next period with work tries it again\.$/.test(fix(lastDown.out, "sleep")),
+        `idle, a set-down speaks of the last period, an outage naming the embedding provider, and a thought crashing it as the cause of one that comes back every period (${row(lastDown.out, "sleep")} | ${fix(lastDown.out, "sleep")})`);
+      // Backing off (SMD-4254 review pass 2, the maintainer's decision): the row's back-off said with the set-down, by
+      // state (review pass 3, run-it: "this period waits once more" on an idle row, and on a period set down at its
+      // start) — "this period" only of a live row the back-off set down at once, else the next period that meets one;
+      // the time left; past its end, a try due; and the back-off the next try's limit begins.
+      const AFTER = "its suspects moved behind the pool; the first one met after that is waited out once more, and if that wait ends at a limit too re-embed backs off 480 s.";
+      for (const [label, running, backoff, words] of [
+        ["live, this period set down at once in the window", true, { until: await at(-100), nextS: 480, skipped: true }, new RegExp(`the next period with work runs it again — backing off: a try's wait on an outage that made a thought a suspect ended at a limit, so this period met such an outage and set re-embed down at once, as a period that meets one in the next (\\d+) s will, ${rx(AFTER)}$`)],
+        ["live, set down at its start in the window", true, { until: await at(-100), nextS: 480, skipped: false }, new RegExp(`the next period with work runs it again — backing off: a try's wait on an outage that made a thought a suspect ended at a limit, so a period that meets such an outage in the next (\\d+) s sets re-embed down at once, ${rx(AFTER)}$`)],
+        ["idle in the window, its last period set down at once", false, { until: await at(-100), nextS: 480, skipped: true }, new RegExp(`the next period with work runs it again — backing off: a try's wait on an outage that made a thought a suspect ended at a limit, so a period that meets such an outage in the next (\\d+) s sets re-embed down at once, ${rx(AFTER)}$`)],
+        ["the window run out, a try due", true, { until: await at(5), nextS: 480, skipped: false }, /the next period with work runs it again — backing off has run out: the next period that meets an outage that made a thought a suspect waits it out once more, and if that wait ends at a limit too re-embed backs off 480 s\.$()/],
+      ] as const) {
+        await beat("heartbeat:sleep", v({ every_s: 60, running, outcome: "ok", aside: { reembed: { kind: "outage" } }, reembedBackoff: backoff, slept: { from: await at(130), to: running ? null : await at(60) } }), 10);
+        const backoffFix = fix((await run(LOG_ON)).out, "sleep");
+        const m = words.exec(backoffFix);
+        const leftS = Number(m?.[1]);
+        assert(backoffFix.includes(`Re-embed was set down for ${running ? "this" : "its last"} period — its provider did not answer`) && m !== null && (m[1] === "" || (leftS >= 95 && leftS <= 100)) && (running && backoff.skipped || !/this period/.test(backoffFix.slice(backoffFix.indexOf("backing off")))),
+          `re-embed's back-off said with an outage's set-down: ${label} (${backoffFix})`);
+      }
+      // A back-off not of the shape is left off: the words as before.
+      for (const [label, backoff] of [
+        ["a nextS of 0", { until: await at(-100), nextS: 0, skipped: false }],
+        ["skipped not a boolean", { until: await at(-100), nextS: 480, skipped: "yes" }],
+        ["until not an instant", { until: "soon", nextS: 480, skipped: false }],
+      ] as const) {
+        await beat("heartbeat:sleep", v({ every_s: 60, running: true, outcome: "ok", aside: { reembed: { kind: "outage" } }, reembedBackoff: backoff, slept: { from: await at(130), to: null } }), 10);
+        const offFix = fix((await run(LOG_ON)).out, "sleep");
+        assert(!/backing off/.test(offFix) && /; the other passes run on, and the next period with work tries it again\./.test(offFix), `a reembedBackoff ${label} is left off, the words as before (${offFix})`);
+      }
       await beat("heartbeat:sleep", v({ every_s: 60, outcome: "stopped", ended: true, aside: { reembed: { kind: "provider" } }, slept: { from: await at(900), to: await at(700) } }), 30);
       const endedDown = await run(LOG_ON);
       assert(/at its last word, re-embed set down for its last period \(provider\)$/.test(row(endedDown.out, "sleep")) && !/Re-embed was set down/.test(fix(endedDown.out, "sleep"))

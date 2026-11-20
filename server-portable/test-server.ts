@@ -2648,6 +2648,252 @@ console.log("\n[13d] SIGTERM stops the server once what is in flight has ended, 
   assert(c === 0 && lateClose >= 30 && lateClose <= 70,
     `a drain that ends late gives the close what is left of the bound, not its full second (${lateClose} ms of a 200 ms bound ended at about 170)`);
 
+  // Streams a server holds open on purpose (the MCP server's listen streams, SMD-4347): not waited on, and closed by
+  // the stop itself: after the flush where the drain finished, at the bound where it was cut. The stand-in's count holds each stream, as Bun's does, and neither of its stops ever
+  // resolves (below): a stop that waited on the server's own end would not end.
+  const { HELD_CLOSE_MS, HELD_POLL_MS, HELD_ENDED_POLL_MS } = await import("./shutdown.ts");
+  assert(HELD_CLOSE_MS === 100 && HELD_POLL_MS === 20 && HELD_ENDED_POLL_MS === 2, `the stop's bounds for held streams: 100 ms to close them and 100 ms for their answers to end, looked for every 2 ms; the requests looked for every 20 ms (${HELD_CLOSE_MS}, ${HELD_POLL_MS}, ${HELD_ENDED_POLL_MS})`);
+  const holding = (others: number, streams = 1) => {
+    const calls: string[] = [];
+    const at: Record<string, number> = {};
+    const state = { others, streams, stuck: 0, watched: false };
+    const said = (name: string) => { calls.push(name); at[name] ??= performance.now(); };
+    let seenEmpty = false;
+    const server = {
+      get pendingRequests() {
+        // Watched: the first look that finds nothing in flight is the one that ends the drain, and a turn of the event loop after it is when a request could next arrive.
+        if (state.watched && state.others === 0 && !seenEmpty) {
+          seenEmpty = true;
+          setTimeout(() => said("a turn later"), 0);
+        }
+        return state.others + state.streams + state.stuck;
+      },
+      // Neither resolves here: with a connection open and unused, Bun's does not, and the stop must not wait on it.
+      stop: (force?: boolean) => { said(force ? "stop(true)" : "stop()"); return new Promise<void>(() => {}); },
+    };
+    /** What the app's close does: every stream ended. */
+    const closeHeld = async () => {
+      said("closeHeld");
+      state.streams = 0;
+    };
+    const opts = { server: () => server, heldCount: () => state.streams, closeHeld, onCut: () => said("onCut"), onDrainEnd: () => said("onDrainEnd"), flush: async () => { said("flush"); return "sent" as const; }, close: async () => { said("close"); return false; } };
+    return { calls, at, state, opts, said, end: () => { state.others = 0; } };
+  };
+
+  let kept = holding(0);
+  let bh = performance.now();
+  h = harness(kept.opts);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && performance.now() - bh < 150 && kept.calls.join() === "stop(),onDrainEnd,flush,close,closeHeld,stop(true)"
+    && /^SIGTERM: no longer accepting; 0 requests in flight, waited on for up to 0\.2 s \(SMD-2250\); 1 stream held open, not waited on \(SMD-4347\)$/.test(h.lines[0]) && /; telemetry sent; 1 held stream closed; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a stop with only a held stream: not waited on, nor on the server's own end; the drain's end told, the stream closed after the flush and the pool, every connection after it, exit 0 at once (${Math.round(performance.now() - bh)} ms; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+
+  kept = holding(1, 2);
+  bh = performance.now();
+  h = harness({ ...kept.opts, drainBoundMs: 2_000 });
+  h.handlers.get("SIGTERM")!();
+  setTimeout(kept.end, 120);
+  c = await settled(h.stopped);
+  const waited = performance.now() - bh;
+  assert(c === 0 && waited >= 110 && waited < 600 && kept.calls.join() === "stop(),onDrainEnd,flush,close,closeHeld,stop(true)" && kept.at.onDrainEnd - bh >= 110 && h.lines[0].includes("1 request in flight") && h.lines[0].includes("2 streams held open, not waited on") && /2 held streams closed; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a stop with held streams and a request running: the request is waited on and counted alone, the drain's end told only then, the streams closed after it, exit 0 (${Math.round(waited)} ms; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+
+  // The drain's end is told in the turn that decides it: no request can arrive between the look that found nothing in flight and the app being told.
+  kept = holding(1);
+  kept.state.watched = true;
+  h = harness({ ...kept.opts, drainBoundMs: 2_000 });
+  h.handlers.get("SIGTERM")!();
+  setTimeout(kept.end, 50);
+  c = await settled(h.stopped);
+  // The whole of this stop ends in the turn that ended its drain; the marker's turn comes after it.
+  await Bun.sleep(20);
+  assert(c === 0 && kept.calls.includes("a turn later") && kept.calls.indexOf("onDrainEnd") < kept.calls.indexOf("a turn later"), `the drain's end is told before the event loop turns again after the look that decided it (${kept.calls.join()})`);
+
+  // A tool call still running with no request left (its client gone): waited on too, looked at with the requests, so the drain ends in one turn with nothing in flight.
+  kept = holding(0);
+  let stillCalling = 1;
+  bh = performance.now();
+  h = harness({ ...kept.opts, drainBoundMs: 2_000, calls: { get running() { return stillCalling; }, idle: () => new Promise<void>(() => {}) } });
+  h.handlers.get("SIGTERM")!();
+  setTimeout(() => { stillCalling = 0; }, 100);
+  c = await settled(h.stopped);
+  assert(c === 0 && kept.at.onDrainEnd - bh >= 90 && performance.now() - bh < 600 && kept.calls.join() === "stop(),onDrainEnd,flush,close,closeHeld,stop(true)",
+    `a stop with a held stream and a tool call running: the call is waited on by its count, and the drain's end told after it (${Math.round(kept.at.onDrainEnd - bh)} ms; ${kept.calls.join()})`);
+
+  // Cut at the bound: the streams are closed there, before the flush, and the connections only once their answers
+  // have left (the runtime's count fallen by as many), not before, where it would drop each stream with no last word.
+  kept = holding(1);
+  h = harness({ ...kept.opts, closeHeld: async () => { const { state } = kept; kept.said("closeHeld"); setTimeout(() => { state.streams = 0; }, 40); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const leftFor = kept.at["stop(true)"] - kept.at.closeHeld;
+  assert(c === 1 && kept.calls.join() === "stop(),onDrainEnd,onCut,closeHeld,stop(true),flush,close" && leftFor >= 30 && leftFor < 90 && h.lines.some((l) => /^SIGTERM: 1 request still in flight after 0\.\d s, closed unfinished$/.test(l)) && /1 held stream closed; exit 1$/.test(h.lines.at(-1) ?? ""),
+    `a stop with a held stream and a request that never ends: the drain's end and the cut told at the bound, the stream closed there, the connections cut once its answer has left, 40 ms on, and not at the wait's bound, and the flush after them; exit 1 (${kept.calls.join()}; stop(true) ${Math.round(leftFor)} ms after the close; ${h.lines.join(" | ")})`);
+
+  // The runtime's count is of every request, so the cut request's own end in that wait lowers it by as many as the
+  // one stream closed: not read as the stream's answer while the app still counts the stream, whose end comes 40 ms on.
+  kept = holding(1);
+  h = harness({ ...kept.opts, closeHeld: async () => { const { state } = kept; kept.said("closeHeld"); setTimeout(kept.end, 5); setTimeout(() => { state.streams = 0; }, 40); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const stoodIn = kept.at["stop(true)"] - kept.at.closeHeld;
+  assert(c === 1 && stoodIn >= 30 && stoodIn < 90 && /1 held stream closed; exit 1$/.test(h.lines.at(-1) ?? ""),
+    `another request's end in the wait for the streams' answers does not stand in for a stream's: the connections are closed once the app's count of streams is at zero too, 40 ms on and not 5, and the stream is said closed, not dropped (stop(true) ${Math.round(stoodIn)} ms after the close; ${h.lines.at(-1)})`);
+
+  // A stream opened during the drain by a server that held none at its signal: the drain is the one that looks all the
+  // same (the server's own end would now wait on that stream, to the bound), and the stream is closed after it.
+  kept = holding(1, 0);
+  bh = performance.now();
+  h = harness({ ...kept.opts, drainBoundMs: 2_000 });
+  h.handlers.get("SIGTERM")!();
+  setTimeout(() => { kept.state.streams = 1; }, 30);
+  setTimeout(kept.end, 80);
+  c = await settled(h.stopped);
+  const openedIn = performance.now() - bh;
+  assert(c === 0 && openedIn >= 70 && openedIn < 600 && kept.calls.join() === "stop(),onDrainEnd,flush,close,closeHeld,stop(true)" && !/held open/.test(h.lines[0]) && /1 held stream closed; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a stream opened during the drain, none held at the signal: the drain ends with the request, not at the bound of 2 s, and the stream is closed after the flush, exit 0 (${Math.round(openedIn)} ms; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+
+  // A second signal: the drain is cut short as ever, and the streams are still closed before the connections are.
+  kept = holding(1);
+  bh = performance.now();
+  h = harness({ ...kept.opts, drainBoundMs: 5_000 });
+  h.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && performance.now() - bh < 1_000 && kept.calls.join() === "stop(),onDrainEnd,onCut,closeHeld,stop(true),flush,close" && h.lines.some((l) => /SIGTERM again/.test(l)),
+    `a second signal with a held stream: the wait cut short, the stream closed all the same and the connections after it, exit 1 (${Math.round(performance.now() - bh)} ms; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+
+  // A second signal as the last request ends, with a stream still held: the cut finds nothing left but the stream, and that is a drain.
+  kept = holding(1);
+  h = harness({ ...kept.opts, drainBoundMs: 5_000 });
+  h.handlers.get("SIGTERM")!();
+  await Bun.sleep(30);
+  kept.end();
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && !kept.calls.includes("onCut") && !h.lines.some((l) => /unfinished/.test(l)) && /1 held stream closed; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a wait cut short with nothing left but a held stream is a drain, the stream not counted a request: exit 0 (${kept.calls.join()}; ${h.lines.join(" | ")})`);
+
+  // A close that never returns, its streams never ended: each of its two waits bounded, the connections cut, and the last line says what was not closed.
+  kept = holding(0, 3);
+  h = harness({ ...kept.opts, closeHeld: () => { kept.said("closeHeld"); return new Promise<void>(() => {}); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const hungFor = kept.at["stop(true)"] - kept.at.closeHeld;
+  assert(c === 0 && kept.calls.at(-1) === "stop(true)" && hungFor >= 2 * HELD_CLOSE_MS - 20 && hungFor < 2 * HELD_CLOSE_MS + 90 && /; 3 held streams not closed in time, dropped; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a close of the held streams that never returns, and answers that never end: bounded twice over, the connections cut, and the stop says they were not closed (${kept.calls.join()}; ${Math.round(hungFor)} ms; ${h.lines.at(-1)})`);
+  // …and one that closed some: the count of those left.
+  kept = holding(0, 3);
+  h = harness({ ...kept.opts, closeHeld: async () => { kept.said("closeHeld"); kept.state.streams = 1; } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && /; 1 of 3 held streams not closed in time, dropped; exit 0$/.test(h.lines.at(-1) ?? ""), `…and a close that leaves one of three open says so (${h.lines.at(-1)})`);
+  // A second signal while the streams are being closed ends both of its waits: 20 ms in, where either alone would run to 100.
+  kept = holding(0);
+  h = harness({ ...kept.opts, closeHeld: () => { kept.said("closeHeld"); setTimeout(() => h.handlers.get("SIGTERM")!(), 20); return new Promise<void>(() => {}); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const hurriedFor = kept.at["stop(true)"] - kept.at.closeHeld;
+  assert(kept.calls.at(-1) === "stop(true)" && hurriedFor < 80 && h.lines.some((l) => /SIGTERM again: not waiting for the rest/.test(l)) && /1 held stream not closed: a second signal, dropped; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a second signal while the streams are being closed: said, and not waited out (${Math.round(hurriedFor)} ms of ${2 * HELD_CLOSE_MS}; ${h.lines.join(" | ")})`);
+  // The app's count at zero and the runtime's not fallen: the streams' answers were not seen to end, and the last line does not say plain "closed".
+  kept = holding(0, 2);
+  h = harness({ ...kept.opts, closeHeld: async () => { kept.said("closeHeld"); kept.state.streams = 0; kept.state.stuck = 2; } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const unseenFor = kept.at["stop(true)"] - kept.at.closeHeld;
+  assert(c === 0 && unseenFor >= HELD_CLOSE_MS - 20 && /; 2 held streams closed, not seen to leave in time; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `streams the app closed whose answers the runtime still counts when the wait runs out: the connections are closed, and the stop says the frames were not seen to leave (${Math.round(unseenFor)} ms; ${h.lines.at(-1)})`);
+  // A second signal during the flush of a drain that finished: the flush is cut short as ever, and the streams are closed after it all the same.
+  kept = holding(0);
+  h = harness({ ...kept.opts, flush: () => { kept.said("flush"); setTimeout(() => h.handlers.get("SIGTERM")!(), 30); return stall(); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && kept.calls.join() === "stop(),onDrainEnd,flush,close,closeHeld,stop(true)" && /telemetry not all sent: a second signal; 1 held stream closed; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a second signal during a finished drain's flush, with a stream held: the flush cut short, the stream closed after it, exit 0 (${kept.calls.join()}; ${h.lines.join(" | ")})`);
+  // An app's word at the drain's end that throws takes nothing with it, as none of the stop's callbacks does.
+  kept = holding(0);
+  h = harness({ ...kept.opts, onDrainEnd: () => { kept.said("onDrainEnd"); throw new Error("told, and threw"); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && kept.calls.join() === "stop(),onDrainEnd,flush,close,closeHeld,stop(true)" && /1 held stream closed; exit 0$/.test(h.lines.at(-1) ?? ""), `a word at the drain's end that throws: the stop goes on as it would have (exit ${c}; ${kept.calls.join()})`);
+  // With no server the drain ends in the signal's own turn, and is told in it: nothing sent to a listener still open is served in between.
+  kept = holding(0, 0);
+  h = harness({ ...kept.opts, server: () => undefined });
+  setTimeout(() => kept.said("a turn later"), 0);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  await Bun.sleep(20);
+  assert(c === 0 && kept.calls.indexOf("onDrainEnd") === 0 && kept.calls.includes("a turn later") && kept.calls.indexOf("onDrainEnd") < kept.calls.indexOf("a turn later"), `a stop with no server tells its drain's end before the event loop turns (${kept.calls.join()})`);
+  // A stop with no server to stop accepting (an entry that has served no request yet, whose listener stays open): it tells the drain's end all the same, so what arrives is not served, and it has no connections to close.
+  kept = holding(0, 0);
+  h = harness({ ...kept.opts, server: () => undefined });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && kept.calls.join() === "onDrainEnd,flush,close", `a stop that had no server at its signal tells its app the drain has ended, and stops nothing (exit ${c}; ${kept.calls.join()})`);
+  // A server that could hold streams and holds none as its drain ends stops as one that could not: nothing to close, the connections cut at the bound in its own turn.
+  kept = holding(0, 0);
+  h = harness(kept.opts);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const noneFinished = kept.calls.join();
+  kept = holding(1, 0);
+  h = harness(kept.opts);
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(noneFinished === "stop(),onDrainEnd,flush,close" && c === 1 && kept.calls.join() === "stop(),onDrainEnd,onCut,stop(true),flush,close" && !h.lines.some((l) => /held/.test(l)),
+    `a stop with no stream held as its drain ends closes none: where it finished nothing more is done, and where it cut the connections are closed at the bound, with no word of streams (${noneFinished}; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+  // A second signal while the streams are being closed at the cut is one for the flush that follows: it is not waited out.
+  // The flush's own bound here is 2 s, and the close's after a cut 50 ms: the stop ends by the second, where the words alone are the same by either.
+  kept = holding(1);
+  h = harness({ ...kept.opts, graceMs: 60_000, flushBudgetMs: 2_000, closeAfterCutMs: 50, closeHeld: () => { kept.said("closeHeld"); setTimeout(() => h.handlers.get("SIGTERM")!(), 20); return new Promise<void>(() => {}); }, flush: () => { kept.said("flush"); return stall(); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  const afterSecond = performance.now() - kept.at.closeHeld;
+  assert(c === 1 && afterSecond < 500 && h.lines.some((l) => /SIGTERM again: not waiting for the rest/.test(l)) && /telemetry not all sent: a second signal; 1 held stream not closed: a second signal, dropped; exit 1$/.test(h.lines.at(-1) ?? ""),
+    `a second signal while a cut's streams are being closed: said, the close not waited out, and the flush after it given the close's 50 ms, not its own 2 s (${Math.round(afterSecond)} ms from the close to the exit; ${kept.calls.join()}; ${h.lines.join(" | ")})`);
+  // A close that throws at once, not as a rejection, and a count that throws: guarded as the stop's other callbacks are.
+  kept = holding(0);
+  h = harness({ ...kept.opts, closeHeld: () => { kept.said("closeHeld"); throw new Error("close failed at once"); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && kept.calls.at(-1) === "stop(true)" && /1 held stream not closed in time, dropped; exit 0$/.test(h.lines.at(-1) ?? ""), `a close that throws at once: the stop still ends, the connections closed, and says the stream was not closed (exit ${c}; ${kept.calls.join()}; ${h.lines.at(-1)})`);
+  kept = holding(0);
+  h = harness({ ...kept.opts, heldCount: () => { throw new Error("no count"); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 1 && h.exits.join() === "1" && h.lines.some((l) => /^SIGTERM: 1 request still in flight after 0\.\d s, closed unfinished$/.test(l)) && !h.lines.some((l) => /held open/.test(l)),
+    `a count that throws reads as no stream held: the stream is waited on as a request to the bound, and the stop ends, exit 1 (exit ${c}; ${h.lines.join(" | ")})`);
+
+  // A close that throws takes nothing with it: what it closed before it threw is closed, and the stop ends as it would have.
+  kept = holding(0);
+  h = harness({ ...kept.opts, closeHeld: async () => { await kept.opts.closeHeld(); throw new Error("close failed"); } });
+  h.handlers.get("SIGTERM")!();
+  c = await settled(h.stopped);
+  assert(c === 0 && h.exits.join() === "0" && kept.calls.at(-1) === "stop(true)" && /1 held stream closed; exit 0$/.test(h.lines.at(-1) ?? ""),
+    `a close that throws takes nothing with it: the stop ends, exit 0, and says what was closed (exit ${c}; ${kept.calls.join()}; ${h.lines.at(-1)})`);
+
+  // After a drain that finished, the two bounds of the streams' close come out of the flush's: at this grace of 1.3 s, 200 ms of its 300.
+  const flushBound = async (extra: Partial<Parameters<typeof drainOnSignal>[0]>) =>
+    (await bounded({ server: () => ({ pendingRequests: 0, stop: async () => {} }), graceMs: 1_300, drainBoundMs: 100, closeBoundMs: 50, flushBudgetMs: 5_000, flush: stall, ...extra })).within;
+  const flushPlain = await flushBound({});
+  const flushHeld = await flushBound({ heldCount: () => 1, closeHeld: async () => {} });
+  // …and nothing is kept back by a server that could hold streams and holds none as its drain ends.
+  const flushNone = await flushBound({ heldCount: () => 0, closeHeld: async () => {} });
+  assert(flushPlain > 200 && flushPlain <= 300 && flushPlain - flushHeld >= 2 * HELD_CLOSE_MS - 40 && flushPlain - flushHeld <= 2 * HELD_CLOSE_MS + 40 && Math.abs(flushPlain - flushNone) <= 40,
+    `a stop that closes streams after its flush gives the flush that much less of the grace period, and one with none to close gives it all: ${flushPlain} ms for a server that cannot hold any, ${flushHeld} ms with a stream held, ${flushNone} ms with none held, of a grace of 1.3 s`);
+  // After a cut the streams are closed before the flush, whose bound is then what the grace period has left, with nothing more taken from it.
+  const flushAfterCut = async (extra: Partial<Parameters<typeof drainOnSignal>[0]>) =>
+    (await bounded({ server: () => ({ pendingRequests: 1, stop: () => new Promise<void>(() => {}) }), graceMs: 1_300, drainBoundMs: 100, closeBoundMs: 50, closeAfterCutMs: 30, flushBudgetMs: 5_000, flush: stall, ...extra })).within;
+  const cutPlain = await flushAfterCut({});
+  // One request that never ends and one stream, which the close ends at once.
+  const cutAndStream = { pendingRequests: 2, stop: () => new Promise<void>(() => {}) };
+  const cutHeld = await flushAfterCut({ server: () => cutAndStream, heldCount: () => (cutAndStream.pendingRequests === 2 ? 1 : 0), closeHeld: async () => { cutAndStream.pendingRequests = 1; } });
+  assert(cutPlain > 100 && cutPlain <= 200 && Math.abs(cutPlain - cutHeld) <= 40,
+    `after a cut a stop that closes streams gives its flush what one that holds none gives it: ${cutPlain} ms and ${cutHeld} ms, of a grace of 1.3 s cut at 0.1`);
+
   const aborter = new AbortController();
   embedDelayMs = 700;
   const gone = fetch(BASE, { method: "POST", headers: AUTH, signal: aborter.signal, body: JSON.stringify({ jsonrpc: "2.0", id: 60, method: "tools/call", params: { name: "search_thoughts", arguments: { query: "a call whose client leaves" } } }) }).then(async (r) => { await r.text(); return "read"; }, () => "left");
@@ -3605,7 +3851,7 @@ console.log("\n[16m] The stated-status label in words and fields: every moved ti
 console.log("\n[17] A tool call outlives the runtime's idle timeout, and a client that leaves is logged (SMD-1864)");
 {
   const { withSseKeepalive, requestLabel, abandonedRequestLine, stalledRequestLine, SSE_KEEPALIVE_MS } = await import("./sse.ts") as {
-    withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: () => void; onStall?: () => void; label?: string }) => Response;
+    withSseKeepalive: (r: Response, opts?: { intervalMs?: number; maxMs?: number; startedAt?: number; signal?: AbortSignal; onEnd?: (bytes?: number) => void; onStall?: () => void; onCancel?: () => void; label?: string; held?: boolean; isCut?: () => boolean }) => Response;
     requestLabel: (body: string | null) => string;
     abandonedRequestLine: (label: string, elapsedMs: number) => string;
     stalledRequestLine: (label: string, elapsedMs: number) => string;
@@ -3775,6 +4021,70 @@ console.log("\n[17] A tool call outlives the runtime's idle timeout, and a clien
   let ended = false;
   const plain = new Response("{}", { headers: { "content-type": "application/json" } });
   assert(withSseKeepalive(plain, { onEnd: () => { ended = true; } }) === plain && ended, "a response that is not an event stream passes through untouched, complete at once");
+
+  // A stream meant to stay open (`held`, the MCP server's listen streams, SMD-4347): no frame of the wrapper's and
+  // no bound, its end and its reader's leaving still told. And an end its caller holds: the answer stays open.
+  {
+    const sse = { headers: { "content-type": "text/event-stream" } };
+    const bytesOf = (text: string) => new TextEncoder().encode(text);
+    const textOf = (read: { value?: Uint8Array }) => new TextDecoder().decode(read.value);
+    const fed = () => {
+      let feed!: ReadableStreamDefaultController<Uint8Array>;
+      const source = new ReadableStream<Uint8Array>({ start: (controller) => { feed = controller; } });
+      return { source, feed };
+    };
+    const warned: string[] = [];
+    const warnBefore = console.warn;
+    console.warn = (...a: unknown[]) => void warned.push(a.join(" "));
+    try {
+      const open = fed();
+      let stalls = 0;
+      let cancels = 0;
+      let endedWith: number | undefined;
+      const reader = withSseKeepalive(new Response(open.source, sse), { held: true, intervalMs: 20, maxMs: 100, label: "subscriptions/listen", onStall: () => { stalls++; }, onEnd: (b) => { endedWith = b; }, onCancel: () => { cancels++; } }).body!.getReader();
+      open.feed.enqueue(bytesOf("data: 1\n\n"));
+      const one = textOf(await reader.read());
+      const next = reader.read();
+      const meanwhile = await Promise.race([next.then(() => "a frame"), Bun.sleep(250).then(() => "nothing")]);
+      open.feed.enqueue(bytesOf("data: 2\n\n"));
+      const two = textOf(await next);
+      open.feed.close();
+      const done = (await reader.read()).done;
+      assert(one === "data: 1\n\n" && meanwhile === "nothing" && two === "data: 2\n\n" && done === true && stalls === 0 && warned.length === 0 && endedWith === 18 && cancels === 0,
+        `a held stream: past the stall bound nothing of the wrapper's is written and nothing said, its writer's frames pass, and its end is told with its bytes (${JSON.stringify([one, meanwhile, two])}; done ${done}; ${stalls} stall(s), ${warned.length} warning(s), ${endedWith} bytes, ${cancels} cancel(s))`);
+
+      const left = fed();
+      let leftCancels = 0;
+      const leaving = withSseKeepalive(new Response(left.source, sse), { held: true, onCancel: () => { leftCancels++; } }).body!.getReader();
+      left.feed.enqueue(bytesOf("data: 1\n\n"));
+      await leaving.read();
+      await leaving.cancel();
+      assert(leftCancels === 1, `…and its reader's leaving is told (${leftCancels})`);
+
+      // Cut by the stop: from then nothing more is passed on, the wrapper's own frame neither, and the end is not
+      // passed on: the answer stays open, as much of it as had left, and the end is told as a reader's leaving is.
+      const cutFeed = fed();
+      let isCut = false;
+      let cutEnds = 0;
+      let cutCancels = 0;
+      const cutting = withSseKeepalive(new Response(cutFeed.source, sse), { intervalMs: 20, maxMs: 5_000, isCut: () => isCut, onEnd: () => { cutEnds++; }, onCancel: () => { cutCancels++; } }).body!.getReader();
+      cutFeed.feed.enqueue(bytesOf("data: 1\n\n"));
+      const beforeCut = textOf(await cutting.read());
+      isCut = true;
+      cutFeed.feed.enqueue(bytesOf("data: 2\n\n"));
+      let afterCut = "";
+      const rest = (async () => { for (;;) { const r = await cutting.read(); if (r.done) return "ended"; afterCut += textOf(r); } })();
+      // Its writer still at work, six of the wrapper's intervals: no frame of the wrapper's own in them.
+      const whileWritten = await Promise.race([rest, Bun.sleep(120).then(() => "open")]);
+      const quiet = afterCut === "";
+      cutFeed.feed.close();
+      const stillOpen = await Promise.race([rest, Bun.sleep(150).then(() => "open")]);
+      assert(beforeCut === "data: 1\n\n" && whileWritten === "open" && quiet && stillOpen === "open" && afterCut === "" && cutEnds === 0 && cutCancels === 1,
+        `an answer the stop has cut: nothing more of it is passed on, no keepalive frame either, and it does not end; its end is told once, as its reader's leaving is (${JSON.stringify(beforeCut)}, then ${JSON.stringify(afterCut)}, ${stillOpen}; ${cutEnds} end(s), ${cutCancels} cancel(s))`);
+    } finally {
+      console.warn = warnBefore;
+    }
+  }
 }
 
 console.log("\n[18] Async job routes: keyed GETs, no key shown nothing, an id required (SMD-2273)");
@@ -5312,6 +5622,68 @@ console.log("\n[23c] forget_thought's reply and fault: the item and proposal ids
   const fnHint = forgetHint("permission denied for function forget_thought");
   assert(/apply migration 144/.test(tableHint) && /--url <the owner's connection string> --grant <role> --groups server/.test(fnHint) && forgetHint("connection refused") === "",
     `a forget refused a store's privilege names 144; one refused the function names the owner's grant; another fault no hint (${tableHint.slice(0, 60)} | ${fnHint.slice(0, 60)})`);
+  // A forget whose name is three thoughts: the first forgotten, the second refused REPLAYING, the third a fault — each
+  // its own transaction, so the first stays forgotten and the other two are named, not lost (review pass 2).
+  const { createCore } = await import("./core/index.ts");
+  const N = "00000000-0000-4000-8000-0000000017d1", D2 = "00000000-0000-4000-8000-0000000017d2", D3 = "00000000-0000-4000-8000-0000000017d3";
+  const tried: string[] = [];
+  const store = {
+    thoughtsNamed: async () => new Map([[N, N]]),
+    thoughtsKeyed: async () => [D2, D3],
+    clientKeyOf: async () => null,
+    forgetThought: async ({ id }: { id: string }) => {
+      tried.push(id);
+      if (id === N) return { ok: true, ...evidence, id: N, itemIds: [], proposalIds: [] };
+      if (id === D2) return { ok: false, error: "REPLAYING" };
+      throw Object.assign(new Error("the store went away"), { errno: "57P01" });
+    },
+  };
+  const core = createCore({ env: () => ({}) as never, store: async () => store as never, door: "test" });
+  const partial = await core.forgetThought({ name: "op", scope: "write", keyHash: "h" } as never, { id: N, confirm: N } as never);
+  const partialReply = renderForget(partial as never);
+  const scMissed = (partialReply.structuredContent as { notForgotten?: { id: string; code: string }[] }).notForgotten;
+  assert(partial.ok && JSON.stringify(partial.value.notForgotten) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "FAILED", errno: "57P01" }]) && tried.join() === [N, D2, D3].join()
+      && /Not forgotten — the same thought under that name, still holding its text here: .*REPLAYING.*\(FAILED 57P01\)/.test(partialReply.content[0].text)
+      && JSON.stringify(scMissed) === JSON.stringify([{ id: D2, code: "REPLAYING" }, { id: D3, code: "FAILED" }]),
+    `a refusal or a fault after the first thought is named, not lost, the first staying forgotten (${JSON.stringify(partial.ok ? partial.value.notForgotten : partial)})`);
+  // The same call sent again: its first thought forgotten already, a later one still refused. The answer is the
+  // refusal that leaves the text, not FORGOTTEN's "nothing is left" (review pass 4), whichever order they come in.
+  const who = (id?: string) => (id === N ? "N" : id === D2 ? "D2" : "?");
+  const resendTried: string[] = [];
+  const resend = async (answers: Record<string, string>) => {
+    const again = {
+      ...store,
+      thoughtsKeyed: async () => Object.keys(answers).filter((id) => id !== N),
+      forgetThought: async ({ id }: { id: string }) => {
+        resendTried.push(who(id));
+        return answers[id] === "ok" ? { ok: true, ...evidence, id, itemIds: [], proposalIds: [] } : { ok: false, error: answers[id] };
+      },
+    };
+    const c = createCore({ env: () => ({}) as never, store: async () => again as never, door: "test" });
+    const r = await c.forgetThought({ name: "op", scope: "write", keyHash: "h" } as never, { id: N, confirm: N } as never);
+    return r.ok ? `ok:${who(r.value.id)}[${(r.value.notForgotten ?? []).map((m) => `${who(m.id)} ${m.code}`).join()}]` : `${r.refusal.code}:${who((r.refusal as { id?: string }).id)}`;
+  };
+  const resent = [
+    await resend({ [N]: "FORGOTTEN", [D2]: "REPLAYING" }),
+    await resend({ [N]: "FORGOTTEN", [D2]: "CITED" }),
+    await resend({ [N]: "FORGOTTEN", [D2]: "NOT_FOUND" }),
+    await resend({ [N]: "NOT_FOUND", [D2]: "FORGOTTEN" }),
+  ];
+  // A refusal before the first thought forgotten is named when a later one is; a CITED stops the rest (review pass 5).
+  resendTried.length = 0;
+  const heldFirst = await resend({ [N]: "REPLAYING", [D2]: "ok" });
+  const citedStops = await resend({ [N]: "CITED", [D2]: "ok" });
+  assert(heldFirst === "ok:D2[N REPLAYING]" && citedStops === "REFUSED_CITED:N" && resendTried.join() === "N,D2,N",
+    `a refusal before the first thought forgotten is named, not dropped; a CITED stops the rest, the later thought not tried (${heldFirst} | ${citedStops} | ${resendTried.join()})`);
+  // One forgotten already, before or after the first forgotten now, holds no text: never named not forgotten (pass 6).
+  const forgottenBefore = await resend({ [N]: "FORGOTTEN", [D2]: "ok" });
+  const forgottenAfter = await resend({ [N]: "ok", [D2]: "FORGOTTEN" });
+  assert(forgottenBefore === "ok:D2[]" && forgottenAfter === "ok:N[]",
+    `a thought forgotten already, before or after the first forgotten now, is not named not forgotten (${forgottenBefore} | ${forgottenAfter})`);
+  const citedReply = renderForget({ ok: true, value: { ...(partial.ok ? partial.value : {}), notForgotten: [{ id: D2, code: "CITED" }] } } as never).content[0].text;
+  assert(resent.join() === "REPLAYING:D2,REFUSED_CITED:D2,FORGOTTEN:N,FORGOTTEN:D2"
+      && /again, with detach_citations true for one CITED \(another thought cites it\)/.test(citedReply) && /again once the replay is done:/.test(partialReply.content[0].text) && !/detach_citations/.test(partialReply.content[0].text),
+    `a partial forget sent again answers what still holds the text, not "forgotten already"; a cited one left is told to detach, a replaying one to wait (${resent.join()})`);
   const thrown = (r: unknown) => { try { normaliseForget(r); return "answered"; } catch (e) { return (e as Error).message.slice(0, 40); } };
   const noWord = thrown({ ok: false });
   const noTime = thrown({ ok: true, id: T, removed: {} });
@@ -7364,7 +7736,7 @@ console.log("\n[35] Priority assertions in the tools' words (SMD-3664): a statem
     let asked: Record<string, unknown> | null = null;
     const logged: unknown[][] = [];
     const ctx = {
-      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked = o; return { items: [{ kind: "ticket", key: "SMD-1", effective: 4 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0, now: "2027-01-01T00:00:00.000Z" }; } }),
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked = o; return { items: [{ kind: "ticket", key: "SMD-1", effective: 4 }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0, now: "2027-01-01T00:00:00.000Z" }; }, staleUnreviewedOn: async () => [] }),
       logAgenda: async (...a: unknown[]) => { logged.push(a); },
     };
     await agendaRead(ctx as never, { name: "k", scope: "read", agentId: "a1" } as never,
@@ -7675,7 +8047,7 @@ console.log("\n[36c] A read's own priority weights in the core and the words (SM
     const value = { items: [{ rank: 1, kind: "ticket", key: "SMD-7", source: "linear", title: "T", project: "P", status: "Todo", statusType: "unstarted", effective: 5, level: 2, inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 3, overdue: true, unblocks: 0, terms: [{ term: "level", value: 2, detail: {} }, { term: "overdue", value: 3, detail: {} }], winner: null, passedOver: [], claimed: [], lapsedClaim: [], blockers: [] }],
                     total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 1, now: "2027-01-01T00:00:00.000Z", order: "priority" };
     const ctx = (fail?: Error) => ({
-      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked.push(o); if (fail) throw fail; return value; } }),
+      store: async () => ({ agenda: async (o: Record<string, unknown>) => { asked.push(o); if (fail) throw fail; return value; }, staleUnreviewedOn: async () => [] }),
       logAgenda: async (...a: unknown[]) => { logged.push(a); },
     });
     const P = { name: "k", scope: "read", agentId: "a1" } as never;
@@ -7710,7 +8082,7 @@ console.log("\n[36c] A read's own priority weights in the core and the words (SM
         && /^Refused: weights reweigh priority_weight's and min_priority's read, and this search asked for neither/.test(saidUnranked),
       `weights with neither priority_weight above 0 nor min_priority are refused, before the store is touched, said in words (${saidUnranked})`);
     const calls: { items: number; opts: unknown }[] = [];
-    const store = { effectivePriority: async (items: unknown[], opts?: unknown) => { calls.push({ items: items.length, opts: opts ?? null }); return []; } };
+    const store = { effectivePriority: async (items: unknown[], opts?: unknown) => { calls.push({ items: items.length, opts: opts ?? null }); return []; }, staleUnreviewedOn: async () => [] };
     await readPriorities(store as never, [{ id: "t1", content: "x" }], { tickets: false, weights: { overdue: 3 } });
     await readPriorities(store as never, [{ id: "t2", content: "x" }], { tickets: false });
     await priorityOf(store as never, [{ id: "t3", content: "on SMD-5" }], new Map(), { soon: 2 });
@@ -7747,7 +8119,9 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
   };
   for (let i = 0; i < 12; i++) answers[`ticket:SMD-${600 + i}`] = ans("ticket", `SMD-${600 + i}`, { effective: 1 + (i % 3), level: 1 + (i % 3), terms: [lvl(1 + (i % 3))] });
   const calls: { kind: string; key: string }[][] = [];
-  const store = (fail?: Error) => ({ effectivePriority: async (items: { kind: string; key: string }[]) => { calls.push(items); if (fail) throw fail; return items.map((i) => answers[`${i.kind}:${i.key}`]).filter(Boolean); } }) as never;
+  // No pending stale finding on any item (SMD-3671 PR 3's unreviewed read; [36i] holds it).
+  const store = (fail?: Error) => ({ effectivePriority: async (items: { kind: string; key: string }[]) => { calls.push(items); if (fail) throw fail; return items.map((i) => answers[`${i.kind}:${i.key}`]).filter(Boolean); },
+    staleUnreviewedOn: async () => [] }) as never;
   const sixty = Array.from({ length: 60 }, (_, i) => `SMD-${7000 + i}`).join(", ");
   const rows = [
     { id: "a", content: "A note on SMD-2 and SMD-3, filed under SMD-1", metadata: { ticket: "SMD-1" } },
@@ -7868,7 +8242,7 @@ console.log("\n[36b] The priority label in the core and the words (SMD-3668 PR 2
   const noteVal = (noteHit.structuredContent.hits as Record<string, unknown>[])[0].priority as Record<string, unknown>[];
   const noneFromItem = say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...base, ...noteGot!.n3 }], facts, window: null, priority: null } } as never, false).content[0].text;
   const noteTitle = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", ...priorityResult(noteGot, "n1") }, { id: "z", title: "t", url: "u", trust: "agent", ...priorityResult(noteGot, "n3") }] } } as never).content[0].text).results as { title: string }[];
-  assert(n1?.self && n1.level === null && JSON.stringify(n1.fromItem) === JSON.stringify({ key: ITEM, level: 4 }) && noteGot!.n2.priority.length === 0 && noteGot!.n3.priority[0]?.fromItem?.level === 0
+  assert(n1?.self && n1.level === null && JSON.stringify(n1.fromItem) === JSON.stringify({ key: ITEM, level: 4, unreviewed: false }) && noteGot!.n2.priority.length === 0 && noteGot!.n3.priority[0]?.fromItem?.level === 0
       && noteHit.content[0].text.includes(`\nPriority: this thought at 6 (urgent (4) from open item ${ITEM}; +2 due by the end of 2026-11-01 (UTC) (open item ${ITEM})).\n`)
       && JSON.stringify(noteVal[0]) === JSON.stringify({ kind: "thought", self: true, effective: 6, fromItem: { key: ITEM, level: 4 }, dueAt: "2026-11-02T00:00:00.000Z", urgency: 2 })
       && noneFromItem.includes(`\nPriority: this thought at 0 (stated none (0) from open item ${ITEM}).\n`)
@@ -8438,6 +8812,432 @@ console.log("\n[36h] The dashboard's build stage copies every module the dashboa
     `every module the dashboard reaches through the server's and the REST client's files is copied into the dashboard-build stage (${reached.size} reached; missing: ${missing.join(", ") || "none"})`);
 }
 
+console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pending stale finding's statements read leniently, its age, level and maker from the newest; the first read beside the priorities, a second only for what 122 named that it did not ask, a level's source among them; a failed read every mark null and the priorities as read; past the reach counted apart; the agenda's items and plan_context's board marked under the deadline, the knowledge's marks reused, their order unchanged; the words, the source's mark, one day and today; the compact value and the notes once");
+{
+  const { normaliseStaleUnreviewed } = await import("./store.ts");
+  const { priorityOf, priorityRead, readPriorities, unreviewedOf, markOf, UNREVIEWED_READ } = await import("./core/reads.ts");
+  const { agenda: agendaRead } = await import("./core/agenda.ts");
+  const { boardOf } = await import("./core/plan.ts");
+  const say = await import("./render.ts");
+  const text = (r: { content: { text: string }[] }) => r.content[0].text;
+  const FID = "55555555-5555-4555-8555-555555555555";
+  const ITEM = "66666666-6666-4666-8666-666666666666";
+  const NOW = "2027-03-01T12:00:00.000Z";
+  const daysBefore = (n: number, h = 0) => new Date(Date.parse(NOW) - n * 86_400_000 - h * 3_600_000).toISOString();
+  const st = (at: unknown, id = "a1", level: unknown = 2, maker: unknown = "bot") => ({ id, level, maker, asserted_at: at });
+  const days = (u: unknown) => (u === false ? "none" : u === null ? "unread" : u === undefined ? "absent" : (u as { days: number | null }).days);
+
+  // The store's reader: the newest statement's time, level and maker, the days on the database's clock, rounded down; leniently.
+  const two = normaliseStaleUnreviewed({ id: FID, item_kind: "ticket", item_key: "SMD-5", evidence: { statements: [st(daysBefore(90), "a1", 3, "old-bot"), st(daysBefore(75, 3), "a2", 1, "codex")], window_days: 60, last_activity: null }, window_days: 60, now: new Date(NOW) });
+  const oneDay = normaliseStaleUnreviewed({ id: FID, item_kind: "thought", item_key: "t", evidence: { statements: [st(daysBefore(1, 1), "a1", "high", 7)] }, window_days: 1, now: NOW });
+  const ahead = normaliseStaleUnreviewed({ id: FID, item_kind: "thought", item_key: "t", evidence: { statements: [st("2027-03-02T00:00:00Z")] }, window_days: 60, now: NOW });
+  const badTime = normaliseStaleUnreviewed({ id: FID, item_kind: "thought", item_key: "t", evidence: { statements: [st(daysBefore(90), "a1"), st("not a time", "a2")] }, window_days: 60, now: NOW });
+  const badEntry = normaliseStaleUnreviewed({ id: FID, item_kind: "thought", item_key: "t", evidence: { statements: [st(daysBefore(90), "a1"), "x"] }, window_days: 60, now: NOW });
+  const noList = normaliseStaleUnreviewed({ id: FID, item_kind: "thought", item_key: "t", evidence: { statements: "?" }, window_days: 60, now: NOW });
+  const noEvidence = normaliseStaleUnreviewed({ id: FID, item_kind: "thought", item_key: "t", evidence: [1, 2], window_days: 60, now: NOW });
+  const noId = normaliseStaleUnreviewed({ item_kind: "thought", item_key: "t", evidence: {}, window_days: 60, now: NOW });
+  assert(JSON.stringify(two) === JSON.stringify({ item: { kind: "ticket", key: "SMD-5" }, unreviewed: { findingId: FID, statedAt: daysBefore(75, 3), days: 75, level: 1, maker: "codex", windowDays: 60 } })
+      && oneDay?.unreviewed.days === 1 && oneDay.unreviewed.level === null && oneDay.unreviewed.maker === null && ahead?.unreviewed.days === 0
+      && [badTime, badEntry, noList, noEvidence].every((r) => r?.unreviewed.findingId === FID && r.unreviewed.statedAt === null && r.unreviewed.days === null && r.unreviewed.level === null && r.unreviewed.maker === null) && noId === null,
+    `a finding's age, level and maker from its newest statement (75 days, codex's low, not the 90-day high); a level or maker not read null; a time ahead 0; statements or a time not read: marked without an age or a statement, never one from the rest; a row with no id skipped (${JSON.stringify(two?.unreviewed)} ${oneDay?.unreviewed.days} ${badTime?.unreviewed.days})`);
+
+  // The core: the first read beside the priorities, over the keys the priority read asks; a second only for what 122 named that it did not ask.
+  const term = (t: string, value: number, detail: Record<string, unknown> = {}) => ({ term: t, value, detail });
+  const ans = (kind: string, key: string, level: number, over: Record<string, unknown> = {}) => ({ item: { kind, key }, effective: level, level, inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0,
+    settled: false, notBefore: null, waiting: false, terms: [term("level", level, { level, tier: 3, maker: "bot" })], winner: null, passedOver: [], ...over });
+  const answers: Record<string, ReturnType<typeof ans>> = {
+    "thought:p1": ans("thought", "p1", 2), "ticket:SMD-5": ans("ticket", "SMD-5", 4), "ticket:SMD-6": ans("ticket", "SMD-6", 3),
+    // A note reading its level from an open item, and one inheriting from a ticket no row names.
+    "thought:f1": ans("thought", "f1", 4, { level: null, terms: [term("from_items", 4, { level: 4, tier: 1, maker: "op", item: ITEM })] }),
+    "thought:h1": ans("thought", "h1", 3, { level: null, inheritedFrom: { kind: "ticket", key: "SMD-50", level: 4, hops: 1 }, terms: [term("inherited", 3, { from: { kind: "ticket", key: "SMD-50", level: 4, hops: 1 } })] }),
+  };
+  const mark = (n: number, level: number | null = 2, maker: string | null = "bot") => ({ findingId: FID, statedAt: daysBefore(n), days: n, level, maker, windowDays: 60 });
+  const asked: { kind: string; key: string }[][] = [];
+  const askedOpts: unknown[] = [];
+  const events: string[] = [];
+  const store = (findings: Record<string, ReturnType<typeof mark>>, fail?: Error) => {
+    let sawFindings: () => void = () => {};
+    const seen = new Promise<void>((r) => { sawFindings = r; });
+    return {
+      // The priority read waits (a little) for the findings read to have started: beside it, it has; after it, it cannot.
+      effectivePriority: async (items: { kind: string; key: string }[]) => {
+        events.push("priorities asked");
+        await Promise.race([seen, Bun.sleep(150)]);
+        events.push("priorities answered");
+        return items.map((i) => answers[`${i.kind}:${i.key}`]).filter(Boolean);
+      },
+      staleUnreviewedOn: async (items: { kind: string; key: string }[], opts?: unknown) => {
+        events.push("findings asked");
+        sawFindings();
+        asked.push(items);
+        askedOpts.push(opts ?? null);
+        if (fail) throw fail;
+        return items.filter((i) => findings[`${i.kind}:${i.key}`]).map((i) => ({ item: i, unreviewed: findings[`${i.kind}:${i.key}`] }));
+      },
+    } as never;
+  };
+  const rows = [{ id: "p1", content: "names SMD-5 and SMD-6", metadata: {} }, { id: "p2", content: "SMD-5 again", metadata: {} }, { id: "p3", content: "nothing", metadata: {} }];
+  events.length = 0;
+  const marked = await priorityOf(store({ "ticket:SMD-5": mark(75), "thought:p1": mark(1) }), rows);
+  const askedOnce = asked.splice(0), order = events.splice(0);
+  const flat = (h: typeof marked) => JSON.stringify(Object.fromEntries(Object.entries(h ?? {}).map(([id, x]) => [id, x.priority.map((p) => [p.kind, p.key, p.effective, days(p.unreviewed)])])));
+  assert(flat(marked) === JSON.stringify({ p1: [["thought", "p1", 2, 1], ["ticket", "SMD-5", 4, 75], ["ticket", "SMD-6", 3, "none"]], p2: [["ticket", "SMD-5", 4, 75]], p3: [] })
+      && askedOnce.length === 1 && JSON.stringify(askedOnce[0]) === JSON.stringify([{ kind: "thought", key: "p1" }, { kind: "thought", key: "p2" }, { kind: "thought", key: "p3" }, { kind: "ticket", key: "SMD-5" }, { kind: "ticket", key: "SMD-6" }])
+      && order.indexOf("findings asked") < order.indexOf("priorities answered"),
+    `one read, started beside the priorities' (asked before they answered), over every row's own thought and the tickets the priority read asks; each item its finding's mark, none false, the order and effective priority as read (${flat(marked)} ${order.join(" > ")})`);
+  // A level's source: asked in a second read, as only 122's answer names it; marked on the source, the item itself not.
+  const sourced = await priorityOf(store({ [`item:${ITEM}`]: mark(90, 4, "op"), "ticket:SMD-50": mark(70, 4, "lin") }), [{ id: "f1", content: "the bill" }, { id: "h1", content: "a note" }]);
+  const sourceAsks = asked.splice(0);
+  const f1 = sourced?.f1.priority[0], h1 = sourced?.h1.priority[0];
+  assert(sourceAsks.length === 2 && JSON.stringify(sourceAsks[1]) === JSON.stringify([{ kind: "item", key: ITEM }, { kind: "ticket", key: "SMD-50" }])
+      && days(f1?.fromItem?.unreviewed) === 90 && days(f1?.unreviewed) === "none" && days(h1?.inheritedFrom?.unreviewed) === 70 && days(h1?.unreviewed) === "none",
+    `a level read from an open item, or inherited, carries its source's mark, asked in a second read; the item itself is not marked for it (${JSON.stringify(sourceAsks[1])} ${days(f1?.fromItem?.unreviewed)} ${days(h1?.inheritedFrom?.unreviewed)})`);
+  // A ranked page's label reuses the window's answers (`have`): still marked; nothing labelled, nothing past the first read.
+  const window = await readPriorities(store({}), rows, { tickets: false });
+  asked.splice(0);
+  const ranked = await priorityOf(store({ "ticket:SMD-5": mark(75) }), [rows[1]], window.by);
+  const rankedAsks = asked.splice(0);
+  assert(days(ranked?.p2.priority[0].unreviewed) === 75 && rankedAsks.length === 1 && rankedAsks[0].some((i) => i.kind === "thought" && i.key === "p2"),
+    `a ranked page's label, reusing the window's answers, is marked too, its own thought asked though 122 is not (${JSON.stringify(rankedAsks)})`);
+  // A failed read: every mark null, the sources' too, the priorities exactly as read, one log line.
+  const logged: string[] = [], realError = console.error;
+  console.error = (...x: unknown[]) => { logged.push(x.join(" ")); };
+  let failed, failedSourced;
+  try {
+    failed = await priorityOf(store({}, Object.assign(new Error('relation "priority_findings" does not exist'), { errno: "42P01" })), rows);
+    failedSourced = await priorityOf(store({}, Object.assign(new Error("permission denied"), { errno: "42501" })), [{ id: "f1", content: "the bill" }]);
+  } finally { console.error = realError; }
+  const unmarked = await priorityOf(store({}), rows);
+  const strip = (h: typeof marked) => JSON.stringify(Object.values(h ?? {}).map((x) => x.priority.map(({ unreviewed: _u, ...p }) => p)));
+  assert(failed != null && strip(failed) === strip(unmarked) && strip(failed) === strip(marked) && Object.values(failed ?? {}).every((x) => x.priority.every((p) => p.unreviewed === null) && !x.unreviewedUnchecked)
+      && Object.values(unmarked ?? {}).every((x) => x.priority.every((p) => p.unreviewed === false))
+      && failedSourced?.f1.priority[0].fromItem?.unreviewed === null && failedSourced.f1.priority[0].level === null && failedSourced.f1.priority[0].effective === 4
+      && logged.filter((l) => l.startsWith("unreviewed: the priority findings read failed (42P01): relation \"priority_findings\" does not exist")).length === 1,
+    `a findings read that fails leaves the priorities exactly as read, every mark null and the sources' too, none counted past the reach, and logs why (${logged[0]?.slice(0, 90)})`);
+  // Review pass 2: a first read that failed asks no second (the sources' marks not read either), and logs once; under a
+  // failed priority read the first read's failure goes unsaid.
+  asked.splice(0);
+  const quiet: string[] = [];
+  console.error = (...x: unknown[]) => { quiet.push(x.join(" ")); };
+  let noSecond, bothFail;
+  try {
+    noSecond = await priorityOf(store({}, Object.assign(new Error("permission denied for table priority_findings"), { errno: "42501" })), [{ id: "f1", content: "the bill" }, { id: "h1", content: "a note" }]);
+    const failingAll = { ...(store({}, Object.assign(new Error("permission denied for table priority_findings"), { errno: "42501" })) as unknown as Record<string, unknown>),
+      effectivePriority: async () => { throw Object.assign(new Error("function effective_priority(jsonb) does not exist"), { errno: "42883" }); } };
+    bothFail = await priorityOf(failingAll as never, [{ id: "f1", content: "the bill" }]);
+    await Bun.sleep(5);
+  } finally { console.error = realError; }
+  const noSecondAsks = asked.splice(0);
+  assert(noSecondAsks.length === 2 && noSecond?.f1.priority[0].fromItem?.unreviewed === null && noSecond.h1.priority[0].inheritedFrom?.unreviewed === null && noSecond.f1.priority[0].effective === 4
+      && bothFail === null && quiet.filter((l) => l.startsWith("unreviewed:")).length === 1 && quiet.filter((l) => l.startsWith("priority: the effective priority read failed (42883)")).length === 1,
+    `a first findings read that fails asks no second — one store call, the sources' marks not read — and logs once; when the priority read fails too, only its line is logged (two pages, ${noSecondAsks.length} calls; ${quiet.map((l) => l.slice(0, 40)).join(" | ")})`);
+  // Review pass 2: a reply's deadline (plan_context's knowledge) bounds both reads; out of it, the second is not asked and the reply is told why.
+  asked.splice(0); askedOpts.splice(0);
+  const lefts = [5000, 0];
+  const boundedRead = await priorityRead(store({ [`item:${ITEM}`]: mark(90) }), [{ id: "f1", content: "the bill" }], undefined, undefined, { leftMs: () => lefts.shift() ?? 0 });
+  const bounded = boundedRead.labels, told = [boundedRead.unread];
+  const boundedAsks = asked.splice(0), boundedOpts = askedOpts.splice(0);
+  assert(boundedAsks.length === 1 && JSON.stringify(boundedOpts) === '[{"timeoutMs":5000}]' && bounded?.f1.priority[0].fromItem?.unreviewed === null && JSON.stringify(told) === '["deadline"]',
+    `a reply's deadline bounds each findings read: the first under what was left (5000 ms), the second, nothing left, not asked, its source not read, and the reply told the deadline (${JSON.stringify(boundedOpts)} ${JSON.stringify(told)})`);
+  // The read's reach: past it, a mark is not checked (cut), counted on its result apart from a failure.
+  const wide = Array.from({ length: UNREVIEWED_READ + 5 }, (_, i) => ({ kind: "ticket", key: `SMD-${i + 1}` }));
+  asked.splice(0);
+  const reach = await unreviewedOf(store({ "ticket:SMD-1": mark(70) }), wide);
+  const reachAsked = asked.splice(0);
+  const deep = Array.from({ length: UNREVIEWED_READ + 1 }, (_, i) => ({ id: `r${i}`, content: "x" }));
+  for (const r of deep) answers[`thought:${r.id}`] = ans("thought", r.id, 3, { level: null, inheritedFrom: { kind: "ticket", key: `INH-${r.id}`, level: 4, hops: 1 }, terms: [term("inherited", 3, { from: { kind: "ticket", key: `INH-${r.id}`, level: 4, hops: 1 } })] });
+  const deepRead = await priorityOf(store({}), deep);
+  const deepAsks = asked.splice(0);
+  const cutRows = Object.entries(deepRead ?? {}).filter(([, h]) => h.unreviewedUnchecked?.length);
+  assert(reachAsked.length === 1 && reachAsked[0].length === UNREVIEWED_READ && markOf([reach], wide[0]).mark !== false && markOf([reach], wide[1]).mark === false
+      && JSON.stringify(markOf([reach], wide[UNREVIEWED_READ])) === '{"mark":null,"cut":true}' && reach.failed === null
+      && deepAsks.length === 2 && deepAsks.every((a) => a.length <= UNREVIEWED_READ) && JSON.stringify(cutRows.map(([id, h]) => [id, h.unreviewedUnchecked])) === '[["r1000",[{"kind":"thought","key":"r1000"},{"kind":"ticket","key":"INH-r1000"}]]]',
+    `one read asks at most ${UNREVIEWED_READ} items; past it a mark is not checked (cut), named on its result; 1001 rows inheriting from 1001 tickets: two reads, two items named past the reach (${reachAsked[0]?.length} ${deepAsks.map((a) => a.length).join("+")} ${cutRows.map(([id, h]) => `${id}:${h.unreviewedUnchecked?.length}`).join(" ")})`);
+
+  // Review pass 2: a source three priorities share, past the reach, is one item not checked, not three.
+  answers["thought:z"] = ans("thought", "z", 3, { level: null, inheritedFrom: { kind: "ticket", key: "PAR-1", level: 4, hops: 1 }, terms: [term("inherited", 3, { from: { kind: "ticket", key: "PAR-1", level: 4, hops: 1 } })] });
+  for (const k of ["SMD-801", "SMD-802", "SMD-803"]) answers[`ticket:${k}`] = ans("ticket", k, 3, { level: null, inheritedFrom: { kind: "ticket", key: "PAR-1", level: 4, hops: 1 }, terms: [term("inherited", 3, { from: { kind: "ticket", key: "PAR-1", level: 4, hops: 1 } })] });
+  // 996 notes, each reading its level from an open item of its own and inheriting from a ticket of its own, fill the
+  // second read past its reach before the parent z and its three tickets share is asked.
+  const many = Array.from({ length: UNREVIEWED_READ - 4 }, (_, i) => ({ id: `s${i}`, content: "x" }));
+  for (const r of many) answers[`thought:${r.id}`] = ans("thought", r.id, 3, { level: null, inheritedFrom: { kind: "ticket", key: `INH-${r.id}`, level: 4, hops: 1 },
+    terms: [term("from_items", 3, { level: 3, item: `item-${r.id}` }), term("inherited", 3, { from: { kind: "ticket", key: `INH-${r.id}`, level: 4, hops: 1 } })] });
+  asked.splice(0);
+  const shared = await priorityOf(store({}), [...many, { id: "z", content: "SMD-801 SMD-802 SMD-803" }]);
+  const sharedAsks = asked.splice(0);
+  assert(shared?.z.priority.length === 4 && sharedAsks.length === 2 && sharedAsks[1].length === UNREVIEWED_READ && JSON.stringify(shared.z.unreviewedUnchecked) === '[{"kind":"ticket","key":"PAR-1"}]',
+    `past the reach, a result counts distinct items not checked: the parent its own thought and three tickets share, one item, not four marks (${JSON.stringify(shared?.z.unreviewedUnchecked)}; ${sharedAsks.map((a) => a.length).join("+")})`);
+
+  // Review pass 4: a first read that failed and left items past its reach: no second read ran, so those are the
+  // failure's, not unchecked, and the failure is said.
+  asked.splice(0);
+  const deepFail: string[] = [];
+  console.error = (...x: unknown[]) => { deepFail.push(x.join(" ")); };
+  let failedDeep;
+  try { failedDeep = await priorityOf(store({}, Object.assign(new Error("permission denied for table priority_findings"), { errno: "42501" })), deep); } finally { console.error = realError; }
+  const failedDeepAsks = asked.splice(0);
+  const failedDeepReply = failedDeep ? text(say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ id: "33333333-3333-4333-8333-333333333333", content: "x", metadata: {}, created_at: "2026-11-01T00:00:00.000Z", similarity: 0.9, matchedNeedles: [], score: 1, fused: false, demoted: [], supersededBy: null, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, ...failedDeep.r1000 }], facts: { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false }, window: null, priority: null } } as never, false)) : "";
+  assert(failedDeepAsks.length === 1 && failedDeepAsks[0].length === UNREVIEWED_READ && Object.values(failedDeep ?? {}).every((h) => !h.unreviewedUnchecked)
+      && failedDeep?.r1000.priority[0].unreviewed === null && failedDeepReply.split("Whether these priorities are unreviewed could not be read").length === 2 && !failedDeepReply.includes("past the read's reach"),
+    `a failed first read with items past its reach: one read, no second, every null the failure's — none named unchecked — and the failure said (${failedDeepAsks.length} reads, ${JSON.stringify(failedDeep?.r1000.unreviewedUnchecked)})`);
+  // Review passes 4 and 5: a failed priority read under a deadline (plan_context's, its findings read bounded) settles
+  // the findings read it started before it answers; with none (every other read) it answers at once, never waiting on
+  // an unbounded read, which finishes on its own. Unlogged either way.
+  let findingsSettled = false;
+  const slowFindings = { effectivePriority: async () => { throw Object.assign(new Error("function effective_priority(jsonb) does not exist"), { errno: "42883" }); },
+    staleUnreviewedOn: async () => { await Bun.sleep(40); findingsSettled = true; return []; } };
+  const settleLog: string[] = [];
+  console.error = (...x: unknown[]) => { settleLog.push(x.join(" ")); };
+  let abandoned, unbounded, unboundedSettled = true;
+  try {
+    abandoned = await priorityRead(slowFindings as never, [{ id: "f1", content: "the bill" }], undefined, undefined, { leftMs: () => 5000 });
+    const boundedSettled = findingsSettled;
+    findingsSettled = false;
+    unbounded = await priorityRead(slowFindings as never, [{ id: "f1", content: "the bill" }]);
+    unboundedSettled = findingsSettled;
+    await Bun.sleep(80);
+    findingsSettled = boundedSettled;
+  } finally { console.error = realError; }
+  assert(abandoned.labels === null && findingsSettled && unbounded.labels === null && !unboundedSettled && settleLog.every((l) => l.startsWith("priority:")),
+    `a failed priority read under a deadline waits for the findings read it started; with none it answers at once, the findings read finishing on its own; neither logs it (${findingsSettled} ${unboundedSettled})`);
+
+  // The agenda: each listed item marked after the agenda decided its list, the list and its order the store's.
+  const item = (key: string, rank: number, effective: number) => ({ rank, kind: "ticket", key, source: "linear", title: key, project: null, status: "Todo", statusType: "unstarted", owner: null, effective, level: Math.floor(effective),
+    inheritedFrom: null, dueAt: null, dueFrom: null, urgency: 0, overdue: false, unblocks: 0, terms: [term("level", Math.floor(effective), { level: Math.floor(effective) })], winner: null, claimed: [], lapsedClaim: [], blockers: [], unreviewed: null });
+  const agendaAnswer = { items: [item("SMD-5", 1, 4), item("SMD-6", 2, 3), item("SMD-7", 3, 2)], total: 3, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0, keyed: null, order: "priority", now: NOW };
+  const agendaCtx = (findings: Record<string, ReturnType<typeof mark>>, fail?: Error) => {
+    const s = store(findings, fail) as unknown as Record<string, unknown>;
+    return { store: async () => ({ ...s, agenda: async () => structuredClone(agendaAnswer) }), logAgenda: async () => {} };
+  };
+  const I = { limit: 20, include_blocked: false, include_claimed: false, include_proposed: false, include_started: false } as never;
+  const P = { name: "k", scope: "read", agentId: undefined } as never;
+  const ag = await agendaRead(agendaCtx({ "ticket:SMD-6": mark(1, null, null) }) as never, P, I);
+  console.error = (...x: unknown[]) => { logged.push(x.join(" ")); };
+  let agFailed;
+  try { agFailed = await agendaRead(agendaCtx({}, new Error("permission denied for table priority_findings")) as never, P, I); } finally { console.error = realError; }
+  const agItems = (o: typeof ag) => (o.ok ? o.value.items : []);
+  const order3 = (o: typeof ag) => agItems(o).map((i) => `${i.rank}:${i.key}:${i.effective}`).join(" ");
+  const agText = ag.ok ? text(say.renderAgenda(ag)) : "";
+  const agFailedText = agFailed?.ok ? text(say.renderAgenda(agFailed)) : "";
+  assert(ag.ok && order3(ag) === "1:SMD-5:4 2:SMD-6:3 3:SMD-7:2" && agFailed?.ok && order3(agFailed) === order3(ag)
+      && JSON.stringify(agItems(ag).map((i) => days(i.unreviewed))) === '["none",1,"none"]' && agItems(agFailed).every((i) => i.unreviewed === null)
+      && agText.includes(`2. ticket SMD-6 ("Todo") "SMD-6" — 3: high (3) [stated 1 day ago, unreviewed]`) && agText.includes("\nUnreviewed: sleep's priority review found that statement stale")
+      && !agText.includes("could not be read (for instance, a brain before migration 142") && agFailedText.split("Whether these priorities are unreviewed could not be read").length === 2 && !agFailedText.includes("unreviewed]"),
+    `the agenda's items marked, one a day ago said in the singular; the order, ranks and effective priorities the agenda's, with the marks or without; a failed read every mark null, said once (${order3(ag)} | ${agText.match(/2\. .*/)?.[0]})`);
+
+  // Review pass 2: an agenda item's level's source — inherited, or read from an open item — carries its own mark, read
+  // with the items in the agenda's one read, said on the term that names it.
+  const srcItems = [
+    { ...item("SMD-8", 1, 3), level: null, inheritedFrom: { kind: "ticket", key: "SMD-50", level: 4, hops: 1, unreviewed: null }, fromItem: null,
+      terms: [term("inherited", 3, { from: { kind: "ticket", key: "SMD-50", level: 4, hops: 1 } })] },
+    { ...item("SMD-9", 2, 3), level: null, inheritedFrom: null, fromItem: { key: ITEM, level: 3, unreviewed: null }, terms: [term("from_items", 3, { level: 3, item: ITEM })] },
+  ];
+  asked.splice(0);
+  const srcCtx = { store: async () => ({ ...(store({ "ticket:SMD-50": mark(70, 4, "lin"), [`item:${ITEM}`]: mark(90, 3, "op") }) as unknown as Record<string, unknown>), agenda: async () => ({ ...structuredClone(agendaAnswer), items: structuredClone(srcItems), total: 2 }) }), logAgenda: async () => {} };
+  const srcAg = await agendaRead(srcCtx as never, P, I);
+  const srcAsks = asked.splice(0);
+  const srcText = srcAg.ok ? text(say.renderAgenda(srcAg)) : "";
+  const srcVals = srcAg.ok ? srcAg.value.items : [];
+  assert(srcAsks.length === 1 && JSON.stringify(srcAsks[0].map((i) => `${i.kind}:${i.key}`)) === JSON.stringify(["ticket:SMD-8", "ticket:SMD-50", "ticket:SMD-9", `item:${ITEM}`])
+      && days(srcVals[0]?.inheritedFrom?.unreviewed) === 70 && days(srcVals[0]?.unreviewed) === "none" && days(srcVals[1]?.fromItem?.unreviewed) === 90 && days(srcVals[1]?.unreviewed) === "none"
+      && srcText.includes(`1. ticket SMD-8 ("Todo") "SMD-8" — 3: inherited 3 from ticket SMD-50 (urgent (4), 1 hop) (urgent (4) by "lin", stated 70 days ago, unreviewed)`)
+      && srcText.includes(`2. ticket SMD-9 ("Todo") "SMD-9" — 3: high (3) from open item ${ITEM} (high (3) by "op", stated 90 days ago, unreviewed)`)
+      && srcText.split("Unreviewed: sleep's priority review").length === 2,
+    `an agenda item's inherited source and open-item source carry their own marks, asked in the agenda's one read beside the items, said on the term that names them, the item itself unmarked (${JSON.stringify(srcAsks[0]?.map((i) => i.key))} | ${srcText.match(/1\. .*/)?.[0]})`);
+
+  // Review pass 3: the compact board value carries a ticket's source's mark, present alone; the board reads marks for
+  // the first BOARD_SHOWN tickets only, the ones the reply shows.
+  {
+    const { BOARD_SHOWN } = await import("./core/plan.ts");
+    const srcBoardValue = (say.renderPlanContext({ ok: true, value: { request: "r", knowledge: { preferCurrent: true, hits: [] }, board: { available: true, tickets: srcVals, others: [], waiting: [], claimsRead: true, claimsLive: 0, boardSync: null },
+      specs: { available: false, reason: "r", waitsOn: [] }, procedures: { available: false, reason: "r", waitsOn: [] }, tools: { scope: "read", core: [], plugins: [], elsewhere: "unknown" }, gaps: [], notes: [], deadlineMs: 10000 } } as never)
+      .structuredContent as { board: { tickets: Record<string, Record<string, unknown> | undefined>[] } }).board.tickets;
+    assert((srcBoardValue[0].inheritedFrom?.unreviewed as { days?: number } | undefined)?.days === 70 && srcBoardValue[0].inheritedFrom?.key === "SMD-50" && !("fromItem" in srcBoardValue[0])
+        && (srcBoardValue[1].fromItem?.unreviewed as { days?: number } | undefined)?.days === 90 && !("inheritedFrom" in srcBoardValue[1]) && !JSON.stringify(srcBoardValue).includes("null"),
+      `the compact board value carries a ticket's inherited and open-item source's mark, present alone, no null (${JSON.stringify(srcBoardValue)})`);
+    const twenty = Array.from({ length: 20 }, (_, n) => item(`SMD-${100 + n}`, n + 1, 3));
+    const wideAsks: { kind: string; key: string }[][] = [];
+    const wideCtx = { store: async () => ({
+      agenda: async () => ({ ...structuredClone(agendaAnswer), items: structuredClone(twenty), total: 20, keyed: { others: [], waiting: [], missing: [] } }),
+      staleUnreviewedOn: async (items: { kind: string; key: string }[]) => { wideAsks.push(items); return []; },
+    }) };
+    const wide = await boardOf(wideCtx as never, { keys: twenty.map((x) => x.key), notRead: 0 }, 5000, new Map(), () => 0);
+    const wideTickets = wide.board.available ? wide.board.tickets : [];
+    assert(BOARD_SHOWN === 15 && wideAsks.length === 1 && JSON.stringify(wideAsks[0].map((x) => x.key)) === JSON.stringify(twenty.slice(0, BOARD_SHOWN).map((x) => x.key))
+        && wideTickets.length === 20 && wideTickets.slice(0, BOARD_SHOWN).every((x) => x.unreviewed === false) && wideTickets.slice(BOARD_SHOWN).every((x) => x.unreviewed === null),
+      `the board reads marks for the ${BOARD_SHOWN} tickets the reply shows, in its order, and none for those past them, listed by key (${wideAsks[0]?.length} asked of ${twenty.length})`);
+  }
+  // Review pass 3: past the reach on the agenda is said as not checked, as search's is, never the grant's hint.
+  {
+    const many = Array.from({ length: UNREVIEWED_READ + 1 }, (_, n) => item(`SMD-${2000 + n}`, n + 1, 3));
+    const manyCtx = { store: async () => ({ ...(store({}) as unknown as Record<string, unknown>), agenda: async () => ({ ...structuredClone(agendaAnswer), items: structuredClone(many), total: many.length }) }), logAgenda: async () => {} };
+    const manyAg = await agendaRead(manyCtx as never, P, I);
+    const manyText = manyAg.ok ? text(say.renderAgenda(manyAg)) : "";
+    const last = manyAg.ok ? manyAg.value.items[UNREVIEWED_READ] : undefined;
+    assert(last?.unreviewed === null && JSON.stringify(last.unreviewedUnchecked) === `[{"kind":"ticket","key":"SMD-${2000 + UNREVIEWED_READ}"}]`
+        && manyText.includes(`ticket SMD-${2000 + UNREVIEWED_READ} ("Todo") "SMD-${2000 + UNREVIEWED_READ}" — 3: high (3) [unreviewed not checked on 1 item: past the read's reach]`)
+        && !manyText.includes("Whether these priorities are unreviewed could not be read"),
+      `an agenda item past the read's reach: not checked, said in the words search uses, never the grant's hint (${JSON.stringify(last?.unreviewedUnchecked)})`);
+  }
+
+  // plan_context's board: the listed tickets marked as the agenda's, under what is left of the deadline; those the
+  // knowledge's marks hold not asked again; out of time, or past the statement timeout, not read and a gap says so.
+  const boardAsks: { items: { kind: string; key: string }[]; opts: unknown }[] = [];
+  const boardCtx = (findings: Record<string, ReturnType<typeof mark>>, fail?: Error) => ({ store: async () => ({
+    agenda: async () => ({ ...structuredClone(agendaAnswer), keyed: { others: [], waiting: [], missing: [] } }),
+    staleUnreviewedOn: async (items: { kind: string; key: string }[], opts?: unknown) => {
+      boardAsks.push({ items, opts: opts ?? null });
+      if (fail) throw fail;
+      return items.filter((i) => findings[`${i.kind}:${i.key}`]).map((i) => ({ item: i, unreviewed: findings[`${i.kind}:${i.key}`] }));
+    },
+  }) });
+  let t = 0;
+  const clock = () => t;
+  const keys = { keys: ["SMD-5", "SMD-6", "SMD-7"], notRead: 0 };
+  const board = await boardOf(boardCtx({ "ticket:SMD-5": mark(75, 1, "codex") }) as never, keys, 5000, new Map([["ticket:SMD-6", false as const]]), () => (t += 1000));
+  const tickets = board.board.available ? board.board.tickets : [];
+  const firstAsk = boardAsks.splice(0);
+  t = 0;
+  const late = await boardOf(boardCtx({ "ticket:SMD-5": mark(75) }) as never, keys, 1000, new Map(), () => (t += 1000));
+  const lateAsks = boardAsks.splice(0);
+  const cancelled = await boardOf(boardCtx({}, Object.assign(new Error("canceling statement due to statement timeout"), { errno: "57014" })) as never, keys, 5000, new Map(), clock);
+  const gapOf = (b: typeof board) => JSON.stringify(b.notes);
+  const lateTickets = late.board.available ? late.board.tickets : [];
+  const planValue = (b: typeof board) => ({ request: "r", knowledge: { preferCurrent: true, hits: [] }, board: b.board, specs: { available: false, reason: "r", waitsOn: [] }, procedures: { available: false, reason: "r", waitsOn: [] },
+    tools: { scope: "read", core: [], plugins: [], elsewhere: "unknown" }, gaps: b.gaps, notes: b.notes, deadlineMs: 10000 });
+  const planReply = say.renderPlanContext({ ok: true, value: planValue(board) } as never);
+  const lateReply = say.renderPlanContext({ ok: true, value: planValue(late) } as never);
+  const planTickets = (planReply.structuredContent as { board: { tickets: Record<string, unknown>[] } }).board.tickets;
+  assert(tickets.map((x) => x.key).join(" ") === "SMD-5 SMD-6 SMD-7" && days(tickets[0]?.unreviewed) === 75 && tickets[1]?.unreviewed === false && tickets[2]?.unreviewed === false
+      && firstAsk.length === 1 && JSON.stringify(firstAsk[0].items.map((i) => i.key)) === '["SMD-5","SMD-7"]' && (firstAsk[0].opts as { timeoutMs?: number } | null)?.timeoutMs === 4000 && gapOf(board) === "[]"
+      && text(planReply).includes(`1. ticket SMD-5 ("Todo") "SMD-5" — 4: urgent (4) [low (1) by "codex", stated 75 days ago, unreviewed]`) && text(planReply).split("Unreviewed: sleep's priority review").length === 2
+      && JSON.stringify(planTickets[0].unreviewed) === JSON.stringify({ findingId: FID, statedAt: daysBefore(75), days: 75, level: 1, windowDays: 60 }) && !("unreviewed" in planTickets[1]),
+    `plan_context's board marks its tickets in the agenda's order, a ticket the knowledge's marks hold not asked again, the read's statement timeout what is left of the deadline; the line names the statement, the value the finding and only a mark present (${firstAsk[0]?.items.map((i) => i.key)} ${JSON.stringify(firstAsk[0]?.opts)} ${text(planReply).match(/1\. ticket SMD-5.*/)?.[0]})`);
+  assert(lateAsks.length === 0 && lateTickets.every((x) => x.unreviewed === null) && gapOf(late) === '[{"note":"unreviewed_not_read","section":"board","reason":"deadline"}]' && gapOf(cancelled) === '[{"note":"unreviewed_not_read","section":"board","reason":"deadline"}]' && late.gaps.length === 0
+      && text(lateReply).includes("\nWhether the board's priorities are unreviewed was not read (out of the read's time), so a ticket not marked unreviewed may still be.\n") && !text(lateReply).includes("could not be read (for instance")
+      && text(lateReply).includes("\n## Gaps\n- None found.") && JSON.stringify((lateReply.structuredContent as { notes?: unknown }).notes) === gapOf(late),
+    `the deadline spent on the agenda: the board's marks not read, none asked, a note (in notes, not the gaps) saying so in the board's section and the value, never the grant's hint; a statement cut at the deadline alike (${gapOf(late)} ${gapOf(cancelled)} ${lateAsks.length})`);
+
+  // Review pass 2: plan_context's knowledge reads its marks in its own share of the deadline; out of it, a note among the
+  // gaps, and the knowledge's notes never the grant's hint for it.
+  {
+    const { planContext, budgetPlan, HIT_LABELS } = await import("./core/plan.ts");
+    let pt = 1000, gotLeft = -1;
+    const hitRow = { id: "11111111-1111-4111-8111-111111111111", content: "about nothing", metadata: { trust: "agent" }, created_at: "2027-01-01T00:00:00.000Z", similarity: 0.5, matchedNeedles: [], score: 0.9, fused: 0.9, demoted: [], supersededBy: null };
+    const outHit = { ...hitRow, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0,
+      priority: [{ ...marked!.p1.priority[0], unreviewed: null }], priorityMore: 0, priorityNotRead: 0 };
+    const search = async (_c: unknown, _p: unknown, q: { marks?: { leftMs?: () => number } }) => {
+      pt += 2000;
+      gotLeft = q.marks?.leftMs?.() ?? -1;
+      return { rows: [hitRow], hits: [outHit], marksUnread: "deadline" as const };
+    };
+    const ctx = { env: () => ({}), store: async () => ({ agenda: async () => ({ ...structuredClone(agendaAnswer), keyed: { others: [], waiting: [], missing: [] } }), staleUnreviewedOn: async () => [] }), logPlanContext: async () => {} };
+    const pc = await planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, now: () => pt, search: search as never });
+    const pcv = pc.ok ? pc.value : null;
+    const pcText = pc.ok ? text(say.renderPlanContext(pc)) : "";
+    // The knowledge read's labels pass the marks' answer on (review pass 3): out of time, labelHitsRead says so.
+    const { labelHitsRead } = await import("./core/reads.ts");
+    answers[`thought:${hitRow.id}`] = ans("thought", hitRow.id, 2);
+    const anyStore = new Proxy(store({}) as unknown as Record<string, unknown>, { get: (t, k) => (k in t || k === "then" ? t[k as string] : async () => (k === "supersededAmong" ? {} : [])) });
+    const labelled = await labelHitsRead({ store: async () => anyStore } as never, { name: "k", scope: "read" } as never, [hitRow] as never, undefined, { leftMs: () => 0 });
+    assert(labelled.unread === "deadline" && labelled.hits[0]?.priority?.[0]?.unreviewed === null && labelled.hits[0].priority[0].effective === 2,
+      `labelHitsRead hands plan_context the marks' answer: out of the knowledge's time, "deadline", the hit's priority kept and its mark null (${labelled.unread})`);
+    assert(gotLeft === 8000 - 2000 && JSON.stringify(pcv?.notes) === '[{"note":"unreviewed_not_read","section":"knowledge","reason":"deadline"}]'
+        && pcText.includes("\nWhether the hits' priorities are unreviewed was not all read (out of the knowledge's time)") && !pcText.includes("Whether these priorities are unreviewed could not be read"),
+      `plan_context's knowledge reads its marks under its share of the deadline (what is left of the 8000 ms before the board's reserve); out of it, the read's answer a note in notes, said in the knowledge's section, never the grant's hint (${gotLeft} ${JSON.stringify(pcv?.notes)})`);
+    // Review pass 5: the knowledge's note only where its failure left a mark a kept hit shows null: hits with no
+    // priority carry none, in the value or the text, whether the read failed or ran out of time.
+    for (const reason of ["failed", "deadline"] as const) {
+      const bare = { ...outHit, priority: [] };
+      const quietSearch = async () => ({ rows: [hitRow], hits: [bare], marksUnread: reason });
+      const quiet = await planContext(ctx as never, { name: "k", scope: "read" } as never, { request: "r", limit: 3 } as never, { deadlineMs: 10_000, now: () => pt, search: quietSearch as never });
+      const quietText = quiet.ok ? text(say.renderPlanContext(quiet)) : "";
+      assert(quiet.ok && quiet.value.notes.length === 0 && !quietText.includes("unreviewed") && !(quiet.ok && JSON.stringify(say.renderPlanContext(quiet).structuredContent).includes("unreviewed_not_read")),
+        `a knowledge read that ${reason === "failed" ? "failed" : "ran out of time"} on hits with no priority leaves no note: none in the value, none in the text (${JSON.stringify(quiet.ok ? quiet.value.notes : null)})`);
+    }
+    // The budget: a hit's priorities cut to HIT_LABELS.priority keep a count of those not checked they still show.
+    const cutAll = sourced!.f1.priority[0];
+    const longHit = { ...outHit, priority: [{ ...cutAll, unreviewed: false }, { ...cutAll, key: "SMD-A", kind: "ticket", self: false, unreviewed: false }, { ...cutAll, key: "SMD-B", kind: "ticket", self: false, unreviewed: null, fromItem: null },
+      { ...cutAll, key: "SMD-C", kind: "ticket", self: false, unreviewed: null, fromItem: null }, { ...cutAll, key: "SMD-D", kind: "ticket", self: false, unreviewed: null, fromItem: null }],
+      unreviewedUnchecked: [{ kind: "ticket", key: "SMD-B" }, { kind: "ticket", key: "SMD-C" }, { kind: "ticket", key: "SMD-D" }] };
+    const budget = (h: object) => budgetPlan({ ...(pcv as object), knowledge: { preferCurrent: true, hits: [h] } } as never).knowledge.hits[0] as { priority: unknown[] | null; unreviewedUnchecked?: { kind: string; key: string }[] };
+    const kept = budget(longHit), keptNone = budget({ ...longHit, priority: [longHit.priority[0], longHit.priority[1], longHit.priority[1], ...longHit.priority.slice(2)] });
+    const keptReply = say.renderPlanContext({ ok: true, value: { ...(pcv as object), gaps: [], knowledge: { preferCurrent: true, hits: [{ ...budget(longHit), contentChars: 13 }] } } } as never);
+    // Review pass 3: a source a failed second read left null, kept, beside a past-reach mark the cut took away: none past
+    // the reach, and the failure said.
+    const failedSrc = { ...outHit, priority: [{ ...cutAll, unreviewed: false, fromItem: { ...cutAll.fromItem!, unreviewed: null } }, { ...cutAll, key: "SMD-A", kind: "ticket", self: false, unreviewed: false, fromItem: null },
+      { ...cutAll, key: "SMD-E", kind: "ticket", self: false, unreviewed: false, fromItem: null }, { ...cutAll, key: "SMD-D", kind: "ticket", self: false, unreviewed: null, fromItem: null }],
+      unreviewedUnchecked: [{ kind: "ticket", key: "SMD-D" }] };
+    const keptFailed = budget(failedSrc);
+    const failedReply = say.renderPlanContext({ ok: true, value: { ...(pcv as object), gaps: [], notes: [], knowledge: { preferCurrent: true, hits: [{ ...keptFailed, contentChars: 13 }] } } } as never);
+    assert(keptFailed.priority?.length === 3 && keptFailed.unreviewedUnchecked === undefined && text(failedReply).split("Whether these priorities are unreviewed could not be read").length === 2 && !text(failedReply).includes("past the read's reach"),
+      `a kept source a failed read left null, beside a past-reach mark the budget cut away: none counted past the reach, the failure said once (${JSON.stringify(keptFailed.unreviewedUnchecked)})`);
+    assert(HIT_LABELS.priority === 3 && kept.priority?.length === 3 && JSON.stringify(kept.unreviewedUnchecked) === '[{"kind":"ticket","key":"SMD-B"}]' && keptNone.unreviewedUnchecked === undefined
+        && /\(unreviewed not checked on 1 item: past the read's reach\)\./.test(text(keptReply)) && !text(keptReply).includes("Whether these priorities are unreviewed could not be read"),
+      `a hit cut to its first ${HIT_LABELS.priority} priorities counts only the items not checked among them (1 of 3), none when it shows none, so its text neither overstates nor reads a failure (${JSON.stringify(kept.unreviewedUnchecked)} ${JSON.stringify(keptNone.unreviewedUnchecked)})`);
+  }
+
+  // The words: the statement named, a source's mark on its term, the key once, the value compact; the notes, once.
+  const base = { id: "33333333-3333-4333-8333-333333333333", content: "x", metadata: {}, created_at: "2026-11-01T00:00:00.000Z", similarity: 0.9, matchedNeedles: [], score: 1, fused: false, demoted: [], supersededBy: null, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0 };
+  const facts = { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false };
+  const p1 = marked!.p1, p2 = marked!.p2;
+  const st2 = (hits: object[]) => say.renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits, facts, window: null, priority: null } } as never, false);
+  const reply = st2([{ ...base, ...p1 }, { ...base, id: "44444444-4444-4444-8444-444444444444", ...p2 }]);
+  const line = "Priority: this thought at 2 (medium (2)), medium (2) by \"bot\", stated 1 day ago, unreviewed; ticket SMD-5 at 4 (urgent (4)), medium (2) by \"bot\", stated 75 days ago, unreviewed; ticket SMD-6 at 3 (high (3)).";
+  const val = (reply.structuredContent.hits as { priority: Record<string, unknown>[] }[])[0].priority;
+  const srcReply = st2([{ ...base, ...sourced!.f1 }, { ...base, id: "44444444-4444-4444-8444-444444444444", ...sourced!.h1 }]);
+  const srcVal = (srcReply.structuredContent.hits as { priority: Record<string, unknown>[] }[]).map((h) => h.priority[0]);
+  const srcTitle = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: sourced!.f1.priority }, { id: "z", title: "t", url: "u", trust: "agent", priority: sourced!.h1.priority }] } } as never).content[0].text).results as { title: string }[];
+  const titled = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: p1.priority }] } } as never).content[0].text);
+  const fetched = JSON.parse(say.renderFetch({ ok: true, value: { id: base.id, title: "t", text: "x", url: "u", metadata: {}, priority: p2.priority } } as never).content[0].text);
+  const ageless = { ...p1.priority[1], unreviewed: { ...mark(0), statedAt: null, days: null, level: null, maker: null } };
+  const today = { ...p1.priority[1], unreviewed: mark(0, null, null) };
+  const odd = text(st2([{ ...base, priority: [ageless, today], priorityMore: 0, priorityNotRead: 0 }]));
+  assert(text(reply).includes(`\n${line}\n`) && text(reply).split("Unreviewed: sleep's priority review found that statement stale").length === 2 && !text(reply).includes("Whether these priorities")
+      && JSON.stringify(val[1]) === JSON.stringify({ kind: "ticket", key: "SMD-5", effective: 4, level: 4, unreviewed: { findingId: FID, statedAt: daysBefore(75), days: 75, level: 2, windowDays: 60 } })
+      && !("unreviewed" in val[2]) && !("unreviewedRead" in reply.structuredContent)
+      && titled.results[0].title === "[priority: this thought medium (2), medium (2) by \"bot\", stated 1 day ago, unreviewed; ticket SMD-5 urgent (4), medium (2) by \"bot\", stated 75 days ago, unreviewed; and 1 more] t"
+      && fetched.title === "[priority: ticket SMD-5 urgent (4), medium (2) by \"bot\", stated 75 days ago, unreviewed] t" && fetched.priority[0].unreviewed.days === 75
+      && odd.includes("Priority: ticket SMD-5 at 4 (urgent (4)), unreviewed; ticket SMD-5 at 4 (urgent (4)), stated today, unreviewed."),
+    `a marked item names the statement under review and its age after its priority — 1 day, 75 days, today, or no age when not read — in the line and the title; the key once; the value the finding, no maker, none no field (${text(reply).match(/Priority: .*/)?.[0]} | ${odd.match(/Priority: .*/)?.[0]})`);
+  assert(text(srcReply).includes(`Priority: this thought at 4 (urgent (4) from open item ${ITEM} (urgent (4) by "op", stated 90 days ago, unreviewed)).`)
+      && text(srcReply).includes("Priority: this thought at 3 (inherited 3 from ticket SMD-50 (urgent (4), 1 hop) (urgent (4) by \"lin\", stated 70 days ago, unreviewed)).")
+      && srcTitle[0].title === `[priority: this thought urgent (4) from open item ${ITEM} (urgent (4) by "op", stated 90 days ago, unreviewed)] t`
+      && srcTitle[1].title === "[priority: this thought high (3), inherited from urgent (4) ticket SMD-50 (urgent (4) by \"lin\", stated 70 days ago, unreviewed)] t"
+      && (srcVal[0].fromItem as { unreviewed?: { days: number } }).unreviewed?.days === 90 && (srcVal[1].inheritedFrom as { unreviewed?: { days: number } }).unreviewed?.days === 70 && !("unreviewed" in srcVal[0]),
+    `a source's mark is said on the term and in the title that name the source, and carried on fromItem and inheritedFrom; the item itself unmarked (${text(srcReply).match(/Priority: .*/)?.[0]} | ${srcTitle[1].title})`);
+  // Not read, and past the reach: each said once, apart.
+  const UNREAD = "Whether these priorities are unreviewed could not be read";
+  const unreadLabel = failed?.p1 ?? { priority: [], priorityMore: 0, priorityNotRead: 0 };
+  const unreadHit = { ...base, ...unreadLabel };
+  const unreadReply = st2([unreadHit, unreadHit]);
+  const unreadList = text(say.renderListThoughts({ ok: true, value: { thoughts: [{ id: base.id, content: "x", metadata: {}, created_at: base.created_at, supersededBy: null, claimed: [], claimedMore: 0, claimedNotRead: 0, ...p1 }, { id: base.id, content: "x", metadata: {}, created_at: base.created_at, supersededBy: null, claimed: [], claimedMore: 0, claimedNotRead: 0, ...unreadLabel }], sort: "newest", cursor: null } } as never));
+  const cutHit = { ...base, ...(cutRows[0]?.[1] ?? { priority: [], priorityMore: 0, priorityNotRead: 0 }) };
+  const cutReply = st2([cutHit]);
+  const unreadVal = unreadReply.structuredContent as { unreviewedRead?: boolean; hits: { priority: Record<string, unknown>[] }[] };
+  assert(text(unreadReply).split(UNREAD).length === 2 && unreadVal.unreviewedRead === false && unreadVal.hits[0].priority.every((p) => !("unreviewed" in p))
+      && !text(unreadReply).includes(", unreviewed") && unreadList.split(UNREAD).length === 2 && unreadList.includes("stated 75 days ago, unreviewed"),
+    `marks a read failed to give: said once in the text, the value's unreviewedRead false once, no null on an item (${JSON.stringify(unreadVal.hits[0]?.priority[0])})`);
+  assert(cutRows.length > 0 && !text(cutReply).includes(UNREAD) && /\(unreviewed not checked on 2 items: past the read's reach\)\.\n/.test(text(cutReply))
+      && (cutReply.structuredContent as { hits: { unreviewedUnchecked?: unknown[] }[] }).hits[0].unreviewedUnchecked?.length === 2 && !("unreviewedRead" in cutReply.structuredContent),
+    `a mark past the read's reach: named on its result and said as not checked, never the grant's hint (${text(cutReply).match(/Priority: .*/)?.[0]})`);
+  // Review pass 4: a mark's maker is another key's words, quoted and cut, so it cannot forge a note in the agenda's brackets.
+  const forger = mark(80, 3, "bot]; claimed by op");
+  const forgedAgenda = text(say.renderAgenda({ ok: true, value: { ...agendaAnswer, weights: null, items: [{ ...item("SMD-1", 1, 3), unreviewed: forger }] } } as never));
+  const forgedLine = text(st2([{ ...base, priority: [{ ...p1.priority[1], unreviewed: forger }], priorityMore: 0, priorityNotRead: 0 }]));
+  assert(forgedAgenda.includes(`1. ticket SMD-1 ("Todo") "SMD-1" — 3: high (3) [high (3) by "bot]; claimed by op", stated 80 days ago, unreviewed]`)
+      && !forgedAgenda.includes("by bot]; claimed by op") && forgedLine.includes(`high (3) by "bot]; claimed by op", stated 80 days ago, unreviewed`),
+    `a maker's name is quoted on the agenda's and search's lines, so "bot]; claimed by op" reads as a name, not a note (${forgedAgenda.match(/1\. .*/)?.[0]})`);
+  // The compat pair: the key and the unread note once a reply, beside priorityNote's place.
+  const compatOk = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: p1.priority }, { id: "x", title: "t", url: "u", trust: "agent", priority: p2.priority }] } } as never).content[0].text);
+  const compatBad = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: unreadHit.priority }] } } as never).content[0].text);
+  const fetchBad = JSON.parse(say.renderFetch({ ok: true, value: { id: base.id, title: "t", text: "x", url: "u", metadata: {}, priority: unreadHit.priority } } as never).content[0].text);
+  const compatNone = JSON.parse(say.renderSearch({ ok: true, value: { results: [{ id: base.id, title: "t", url: "u", trust: "agent", priority: unmarked!.p1.priority }] } } as never).content[0].text);
+  assert(/^Unreviewed: sleep's priority review found that statement stale/.test(compatOk.unreviewedNote) && !compatOk.unreviewedNote.includes(UNREAD) && fetched.unreviewedNote === compatOk.unreviewedNote
+      && compatBad.unreviewedNote?.startsWith(UNREAD) && fetchBad.unreviewedNote?.startsWith(UNREAD) && !("unreviewedNote" in compatNone),
+    `search's and fetch's replies carry the key where an item is marked and the unread note where a read failed, once, as priorityNote; none where nothing is said (${String(compatBad.unreviewedNote).slice(0, 60)})`);
+}
+
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
   const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT, LITTLE_BAR, LITTLE_MEASURED_ON } = await import("./core/plan.ts");
@@ -8475,7 +9275,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   const answer = { items: [{ kind: "ticket", key: "SMD-11", effective: 3, title: "T", blockers: [], claimed: [], lapsedClaim: [] }], total: 1, unknown: 0, leftOut: { blocked: 0, claimed: 0, started: 0, waiting: 0 }, boardSync: null, claimsRead: true, claimsLive: 0,
                    keyed: { others: [{ key: "SMD-12", title: "T", status: "Done", statusType: "completed", settled: true }], waiting: [], missing: ["OPS-3"] }, now: "2027-01-01T00:00:00.000Z" };
   let asked: Record<string, unknown> | null = null, calls = 0;
-  const store = (f: (o: Record<string, unknown>) => unknown) => ({ store: async () => ({ agenda: async (o: Record<string, unknown>) => { calls++; asked = o; return f(o); } }) }) as never;
+  const store = (f: (o: Record<string, unknown>) => unknown) => ({ store: async () => ({ agenda: async (o: Record<string, unknown>) => { calls++; asked = o; return f(o); }, staleUnreviewedOn: async () => [] }) }) as never;
   const raise = (errno: string, message: string) => store(() => { throw Object.assign(new Error(message), { errno }); });
   const named = { keys: ["SMD-11", "SMD-12", "OPS-3"], notRead: 2 };
   const read = await boardOf(store(() => answer), named, 4321);
@@ -8567,7 +9367,7 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
       logged.length = 0;
       const ctx = {
         env: () => ({}),
-        store: async () => ({ agenda: async (o: Record<string, unknown>) => { askedTimeout = Number(o.timeoutMs); return agenda(); } }),
+        store: async () => ({ agenda: async (o: Record<string, unknown>) => { askedTimeout = Number(o.timeoutMs); return agenda(); }, staleUnreviewedOn: async () => [] }),
         logPlanContext: async (_p: unknown, row: Record<string, unknown>) => { logged.push(row); },
       };
       const search = async (_c: unknown, _p: unknown, q: { limit: number }) => { askedLimit = q.limit; t += 2500; return { rows: found, hits: found.map((r) => ({ ...r, moved: [], movedNotRead: 0, claimed: [], claimedMore: 0, claimedNotRead: 0, relations: [], relationsMore: 0, priority: [], priorityMore: 0, priorityNotRead: 0 })) }; };

@@ -28,7 +28,7 @@ import type { FindingKind, FindingStatus } from "./priority-kinds.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, normaliseStaleUnreviewed, type Unreviewed, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -1023,6 +1023,37 @@ export class SqlStore implements ThoughtStore {
     }
   }
 
+  async thoughtsKeyed(key: string): Promise<string[]> {
+    if (!UUID_RE.test(key)) return [];
+    const k = key.toLowerCase();
+    // The standing thought keeping the key (112's unique index), then every thought a delete event's previous metadata
+    // kept it for, not standing again, newest first — never the thought whose id it is. The deleted arm scans the
+    // delete events (no index on the path): only a forget asks, and only by a name (review pass 1 measured 0.5 s at a
+    // million deletes).
+    const rows = await this.sql`
+      SELECT id FROM (
+        SELECT t.id::text AS id, 0 AS arm, now() AS at FROM thoughts t
+         WHERE t.metadata->>'client_key' = ${k}::text AND t.id::text <> ${k}::text
+        UNION ALL
+        SELECT a.thought_id::text, 1, max(a.created_at) FROM thought_audit a
+         WHERE a.action = 'delete' AND a.diff->'previous_metadata'->>'client_key' = ${k}::text AND a.thought_id::text <> ${k}::text
+           AND NOT EXISTS (SELECT 1 FROM thoughts t WHERE t.id = a.thought_id)
+         GROUP BY a.thought_id) x
+      ORDER BY arm, at DESC`;
+    return (rows as { id: string }[]).map((r) => String(r.id).toLowerCase());
+  }
+
+  async clientKeyOf(id: string): Promise<string | null> {
+    if (!UUID_RE.test(id)) return null;
+    const rows = await this.sql`
+      SELECT COALESCE(
+        (SELECT t.metadata->>'client_key' FROM thoughts t WHERE t.id = ${id}::uuid),
+        (SELECT a.diff->'previous_metadata'->>'client_key' FROM thought_audit a
+          WHERE a.thought_id = ${id}::uuid AND a.action = 'delete' ORDER BY a.created_at DESC LIMIT 1)) AS k`;
+    const k = (rows[0] as { k: string | null } | undefined)?.k;
+    return typeof k === "string" && UUID_RE.test(k) ? k.toLowerCase() : null;
+  }
+
   async resetCaptureStamp(opts: { id: string; actor?: Actor }): Promise<ResetStampResult> {
     // 086: one statement, as the note and the restamp are made; the function
     // decides who may, and names the actor in the event it appends.
@@ -1309,6 +1340,34 @@ export class SqlStore implements ThoughtStore {
     };
   }
 
+  // SMD-3671 PR 3: the unreviewed mark's read, one statement for a page. Both literals are in its text, so a cached
+  // generic plan can still use 142's partial index of the pending (kind, item_kind, item_key), as the pending listing's
+  // does; the items are two parallel arrays, unnested in step. The database's now rides each row, so the days count on
+  // the clock that stamped the statements. Under plan_context's deadline, the agenda's ceiling (review pass 1).
+  async staleUnreviewedOn(items: readonly { kind: string; key: string }[], opts: { timeoutMs?: number } = {}): Promise<{ item: { kind: string; key: string }; unreviewed: Unreviewed }[]> {
+    if (items.length === 0) return [];
+    const read = (q: typeof this.sql) => q`
+      SELECT f.id::text AS id, f.item_kind, f.item_key, f.evidence, f.window_days, now() AS now
+        FROM unnest(${q.array(items.map((i) => i.kind), "TEXT")}::text[], ${q.array(items.map((i) => i.key), "TEXT")}::text[]) AS i(kind, key)
+        JOIN priority_findings f ON f.kind = 'stale' AND f.status = 'pending' AND f.item_kind = i.kind AND f.item_key = i.key` as Promise<Record<string, unknown>[]>;
+    const rows = opts.timeoutMs === undefined ? await read(this.sql) : await this.underCeiling(opts.timeoutMs, read);
+    return rows.map(normaliseStaleUnreviewed).filter((r) => r !== null);
+  }
+
+  /**
+   * A read under a deadline (plan_context, SMD-2684): a statement-timeout ceiling, as readDatabaseFacts sets one — 0
+   * (none) or a looser setting is lowered to it, a stricter one kept — local to the read's own transaction. The agenda's
+   * and the unreviewed read's (SMD-3671 PR 3 review pass 1).
+   */
+  private async underCeiling<T>(timeoutMs: number, run: (q: typeof this.sql) => Promise<T>): Promise<T> {
+    const ms = Math.max(1, Math.floor(timeoutMs));
+    return await this.sql.begin(async (tx) => {
+      await tx`SELECT set_config('statement_timeout', (CASE WHEN s.st = 0 OR s.st > ${ms}::int THEN ${ms}::int ELSE s.st END)::text, true)
+                 FROM (SELECT setting::int AS st FROM pg_settings WHERE name = 'statement_timeout') s`;
+      return run(tx as unknown as typeof this.sql);
+    }) as T;
+  }
+
   // SMD-3671 PR 2: 142's operator decision, one statement. The envelope states the key's scope (116's rule, which 142
   // reads: write scope alone decides), every value a bind parameter.
   async reviewPriorityFinding(opts: { id: string; decision: "accept" | "reject"; level?: number; dueAt?: string; clear?: boolean; note?: string; actor?: Actor; scope: "write" | "capture" | undefined }): Promise<ReviewFindingResult> {
@@ -1348,14 +1407,8 @@ export class SqlStore implements ThoughtStore {
       return r;
     };
     if (opts.timeoutMs === undefined) return checked(normaliseAgenda((await call(this.sql))[0]?.a, "agenda"));
-    // A deadline (plan_context, SMD-2684): a ceiling, as readDatabaseFacts sets one — 0 (none) or a looser setting is
-    // lowered to it, a stricter one kept — local to the call's own transaction.
-    const ms = Math.max(1, Math.floor(opts.timeoutMs));
-    const rows = await this.sql.begin(async (tx) => {
-      await tx`SELECT set_config('statement_timeout', (CASE WHEN s.st = 0 OR s.st > ${ms}::int THEN ${ms}::int ELSE s.st END)::text, true)
-                 FROM (SELECT setting::int AS st FROM pg_settings WHERE name = 'statement_timeout') s`;
-      return call(tx as unknown as typeof this.sql);
-    });
+    // A deadline (plan_context, SMD-2684): underCeiling's statement timeout, local to the call's own transaction.
+    const rows = await this.underCeiling(opts.timeoutMs, call);
     return checked(normaliseAgenda(rows[0]?.a, "agenda"));
   }
 

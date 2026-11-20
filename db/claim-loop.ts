@@ -92,9 +92,7 @@ export type ClaimWorkerOptions<Row extends { id: string }> = {
   finallyFirst?: (workerId: string) => void;
   /** In the finally, before the worker's leases are returned. */
   beforeReturn?: (workerId: string) => Promise<void>;
-  /** After a wait at the admit gate, an engine's own reason to end this worker beside the loop's (re-embed: the record's model moved). */
-  afterGate?: () => boolean;
-  /** Before each claim, inside the claim's own error handling: true ends this worker with nothing claimed (re-embed's follower reads the record's model). */
+  /** Before each claim, with a gate or with none, inside the claim's own error handling: true ends this worker with nothing claimed (re-embed's follower reads the record's model, and ends once any worker has read it moved). */
   beforeClaim?: () => Promise<boolean>;
   /** Where an engine's return of its leases differs from the claim passes' (re-embed's). */
   leaseReturn?: {
@@ -137,7 +135,7 @@ export async function claimWorker<Row extends { id: string }>(o: ClaimWorkerOpti
       // here holding no claim, and a stop while it waits ends it.
       if (o.admit) {
         if (!(await admitted(o.admit, o.gate()))) return;
-        if (o.stopping() || outage.reason !== null || limitReached() || o.afterGate?.()) return;
+        if (o.stopping() || outage.reason !== null || limitReached()) return;
       }
       let batch: Claimed[];
       let byId: Map<string, Row>;
@@ -371,8 +369,8 @@ export async function thoughtFault(o: FaultHost, t: FaultThought, e: unknown): P
       return { then: "failed", error: `provider error again with this thought alone in flight, and a one-token call right after answered, so this thought's: ${msg} (--retry-failed revisits it)`, stopAfter: false };
     }
     // Its own, and the provider not answering all the same: the outage begins, no suspect made, and
-    // this worker stops after recording it.
-    outage.begin(msg);
+    // this worker stops after recording it. A thought's doing all the same (ProviderOutage's byThought, SMD-4254).
+    outage.begin(msg, undefined, true);
     o.count.providerStop();
     o.halt().abort();
     return { then: "failed", error: `provider error again with this thought alone in flight at ${ALONE_OUTAGES} outages, the one-token call after each unanswered, so this thought's: ${msg} (--retry-failed revisits it)`, stopAfter: true };

@@ -578,6 +578,60 @@ whenever stated (None's 0 too), every other field only where it says something
 (no null, false, or zero urgency or unblocks), and no `key` on a result's own
 thought, which is its id. Over REST every field is there, with the terms.
 
+**Unreviewed, a mark on a priority (SMD-3671 PR 3).** Each item a priority
+label names carries `unreviewed`: sleep's pending stale finding on it (migration
+142's `priority_findings`), a statement by the brain's own keys older than the
+review's window, with nothing done on the item since, that no operator has
+decided. It is `{findingId, statedAt, days, level, maker, windowDays}`: the
+newest of the finding's statements — its `asserted_at`, so `days`, whole days
+from it to the database's now, never overstates how long a statement has stood,
+and its level and maker, as that statement need not be the one setting the
+level shown (a source's counted High beside an agent's stale Low). Each is null
+when the finding's statements, or any one's time, could not be read (the item is
+still marked). `false` is none; `null` is not checked. A level read from an open
+item or inherited carries its source's mark on `fromItem.unreviewed` and
+`inheritedFrom.unreviewed`: the statement under review is the source's, and the
+item itself is not said stale for it. The agenda's items and `plan_context`'s
+board tickets carry it too, on their level's sources as well (`inheritedFrom`, a
+parent ticket's, and `fromItem`).
+
+Not checked is one of two things, kept apart: a read that failed (a brain before
+142, a role without SELECT on the table, one log line naming why), said once a
+reply; or a mark past the read's reach of 1000 items, named on its result in
+`unreviewedUnchecked` (each `{kind, key}`, distinct items, and after
+`plan_context`'s budget cuts a hit's list, those it still shows) and said as not
+checked — on an agenda item or a board ticket too, in the same words.
+`plan_context` reads its knowledge hits' marks in the knowledge's share of the
+deadline and the board's, for the first 15 tickets it shows alone, in what is
+left of it; out of time or failed, a note in the reply's `notes`
+(`{note: "unreviewed_not_read", section, reason}`) says so, in that section's
+words. The compact board value carries a ticket's sources' marks as it does the
+ticket's.
+
+Over MCP a marked item reads `…, medium (2) by "codex", stated 75 days ago,
+unreviewed` (the maker's name quoted and cut, as a holder's is; `1 day`, `today`,
+or no statement and no age when not read) in the
+`Priority` line, the title and the agenda's and board's lines, a source's in
+brackets after the source; the reply says once what it means. The compact value
+carries `unreviewed` (no maker: a key's name rides the text) only where a mark is
+present, never a null; a failed read is the value's top-level
+`unreviewedRead: false`. `search` and `fetch` carry the meaning, or the failed
+read, once in `unreviewedNote`, as `priorityNote`.
+
+The reads a reply makes: `search`, `fetch` and the lists at most two — the first
+of the keys the priority read asks, beside it, and a second only for what its
+answer names that the first did not ask (a level's source, a ticket a row reads
+as), none after a first that failed; the agenda one, its items and their sources
+together; `plan_context` at most three — the knowledge's two, then the board's,
+for the tickets and sources the knowledge's marks did not cover. By 142's
+partial index of the pending, and never failing or nulling the priority.
+It is a mark, never a weight: no order, rank or filter reads it, so a ranked
+search, the agenda and the board order alike with it or without. It lags the
+review, whose scan writes and moots findings at most every six hours, and with
+sleep off nothing is marked. An operator's accept or reject
+(`review_priority_finding`), or the scan mooting the finding, takes the mark
+away.
+
 ### Tickets that moved since a hit was written (migration 095)
 
 Both searches label, and never rank lower, a hit naming a ticket whose status
@@ -1088,9 +1142,19 @@ again, exactly as sent (an id or a `client_key`), or the call is refused
 it. The answer is the evidence: what each store gave up (`removed`), the thoughts
 derived from it and the pages for a person to review (prose that absorbed the text
 can't be removed mechanically), the twins that keep the same text, the hashed
-record it was ingested as, and the copies outside the brain. Forgotten already,
-it is `FORGOTTEN`; an id the log never held, `NOT_FOUND`. It writes no action-log
-row: the query log is one of the stores it clears.
+record it was ingested as, and the copies outside the brain. A name takes every
+thought here it is: the thought with that id, standing or deleted; the one keeping
+it as its `client_key`; and each deleted one whose tombstone kept that key, since
+the session hook's copy of a forget names a copy by its key, which a copied delete
+may have removed first. The others are listed as `alsoForgotten` (MCP's values:
+`alsoForgottenIds`). Any it could not forget beside one it did (refused, or a
+fault) is listed as `notForgotten` (MCP's values give each id and code; REST and
+the text a fault's SQLSTATE too), and the same call sweeps it when sent again,
+with `detach_citations` for one left `CITED`. The reply names the thought's own
+`client_key` too, so a copy of the call can reach it on a brain that knows it by
+that key alone. Forgotten already, it is `FORGOTTEN`; an id the log never held,
+nor a key a thought here keeps, `NOT_FOUND`. It writes no action-log row: the query log is one of the stores it
+clears.
 
 A capture or an edit of a forgotten text is refused `FORGOTTEN` before the
 embedding call (144's `ob1_text_forgotten_at`), so the model provider never sees
@@ -1213,9 +1277,10 @@ first written. The copy keeps it as `metadata.client_key`, one thought per key
 with that id, else the one keeping it as its key**: `update_thought`'s,
 `delete_thought`'s and `forget_thought`'s `id` (and the REST paths
 `PATCH`/`DELETE /v1/thoughts/{id}` and `POST /v1/thoughts/{id}/forget`), and
-the `supersedes` and `derived_from` of a capture or an edit. So the client sends the
-second brain the same ids it sent the first. A thought a refresh copied has the same id
-on both brains, and a key equal to it names that thought.
+the `supersedes` and `derived_from` of a capture or an edit; a forget takes every
+thought its name is, not one (SMD-1723 PR 3). So the client sends the second brain
+the same ids it sent the first. A thought a refresh copied has the same id on both
+brains, and a key equal to it names that thought.
 
 - **A key that names a thought already** (as its id or its key) returns that thought
   and writes nothing, with no model call: `Already captured — id …`, `keyed:
@@ -1508,7 +1573,7 @@ it, each over REST and MCP alike:
 | `item_history` | `GET /v1/items/{id}` | read | `{item, events, proposals}` |
 | `list_items` | `GET /v1/items` | read | `{items, truncated}`, each item with `overdue` and `pendingProposals` |
 | `agenda` | `GET /v1/agenda` | read | `{items, total, unknown, leftOut, boardSync, claimsRead, claimsLive, keyed, order, weights, now}`: open tickets and open items ranked by effective priority (migrations 123 and 124), a tie by the sooner due time, then the more open items it unblocks (migration 137, SMD-4264), then kind and key, each with its terms, claims and blockers, a ticket with its `status` and `statusType`; a started ticket no live claim covers is left out unless `include_started` and counted in `leftOut.started` (a claimed one is `include_claimed`'s, or holder `mine`'s); `claimsLive` is how many live claims this brain records (0: no claim could leave anything out); `unknown` counts the items in `total` with no priority; holder `mine` on a database role without the claims group is refused 503 `CLAIMS_UNREADABLE`; `order=due` (migration 129, SMD-4192) lists the items with a due time first, soonest first, then the undated by priority (a stated None counts as undated), the answer's `order` saying which was applied; on a brain before 129 it is refused 503 `ORDER_UNAVAILABLE`; `weights[name]=value` (SMD-4193) overrides the default weights by name for this call, echoed as `weights` (null without), a bad one refused 400, naming it (`REFUSED_INPUT` for a name or a range, `REFUSED_WEIGHTS` for cap below `unblocks_many_at`) |
-| `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, deadlineMs}` (SMD-2684): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values, little on this among them (SMD-4212: the best similarity of the first 8 hits under 0.74, the bar measured on qwen3-embedding:4b@1024; on another embedding a `little_not_measured` note says so, a note and not a coverage gap). One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. The reply is held to a budget (SMD-4191), about 15,500 to 17,200 characters at the default 8 hits and about 55,500 for the largest shape tested: each hit's text cut to its share of 1,200 characters, never through a character (`contentChars` the whole); a hit's labels to 2 claims, 2 relations and 3 priorities, and its topics, people and action items to 3, 3 and 2 of at most 60 characters; the board to 15 open tickets with 72-character titles, 3 blockers and one holder of each kind kept whole (each line saying how many more), and the rest by key, settled ones past five by key and past 40 counted, 10 not yet startable, 20 missing keys; each cut counted in a `trimmed` entry among the gaps, which is a cut and not a coverage gap. A query_log row of its own kind (126), saying why a board was not read |
+| `plan_context` | `POST /v1/plan-context` | read | `{request, knowledge, board, specs, procedures, tools, gaps, notes, deadlineMs}` (SMD-2684; `notes` SMD-3671): what the brain holds for a request in one read. `knowledge` is search_thoughts' hybrid arm with `prefer_current`, each hit labelled as there; `board` the tickets those hits name in one agenda call (migration 126's `keys` scope: blocked, claimed and started ones listed and said, the settled and unknown-type ones under `others`, those not yet startable under `waiting`); `specs` and `procedures` not available, naming the tickets they wait on; `tools` those this key's scope may call; `gaps` what it could not find, as values, little on this among them (SMD-4212: the best similarity of the first 8 hits under 0.74, the bar measured on qwen3-embedding:4b@1024; on another embedding a `little_not_measured` note says so, a note and not a coverage gap). One deadline bounds the query's embedding (stopped 2 s before it, leaving the board a reserve; then exact matches alone) and the board (past it, or failing, a gap). The board reads up to 500 named tickets, lists 100, and counts the rest. The reply is held to a budget (SMD-4191), about 15,500 to 17,200 characters at the default 8 hits and about 55,500 for the largest shape tested: each hit's text cut to its share of 1,200 characters, never through a character (`contentChars` the whole); a hit's labels to 2 claims, 2 relations and 3 priorities, and its topics, people and action items to 3, 3 and 2 of at most 60 characters; the board to 15 open tickets with 72-character titles, 3 blockers and one holder of each kind kept whole (each line saying how many more), and the rest by key, settled ones past five by key and past 40 counted, 10 not yet startable, 20 missing keys; each cut counted in a `trimmed` entry among the gaps, which is a cut and not a coverage gap. A query_log row of its own kind (126), saying why a board was not read |
 
 - **Capture proposes items** (SMD-3665 PR 3a). A capture that writes a thought opens a
   `proposed` item for each distinct non-blank action item the extractor reads from it, at

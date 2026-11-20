@@ -78,7 +78,8 @@
  *      `.env.`) but an .example, .sample or .template; and deploy/canary.sh and deploy/tier.sh
  *      read the stack's project through a stub carrying compose.yaml's own
  *      `name:` on one code line that reads an env file, and name it nowhere
- *      else in code but a short list (SMD-2873).
+ *      else in code but a short list (SMD-2873), canary.sh's env-file
+ *      program, deploy/canary-env.py, naming it nowhere at all (SMD-4332).
  *      The files are parsed with Bun.YAML (SMD-1844); no other exceptions
  *  14. every knob the server reads reaches the container: each `OB1_*` /
  *      `OPEN_BRAIN_*` name server-portable/root.ts declares in its `type Env`
@@ -2780,6 +2781,16 @@ function checkPublishedPorts() {
         if (stubs.length !== 1 || !/--env-file/.test(stubs[0][1])) fail(`deploy/${script}`, `reads the stack's project through compose with a stub carrying compose.yaml's \`name: ${name}\` (${stub}) on exactly one code line, which reads an env file (--env-file), so its fallback is the project compose.yaml names (found on ${stubs.length}) (SMD-2873)`);
         // Each allowed text, and the stub, is taken out of the code; the name must then be gone.
         for (const [n, l] of lines) if (ok.reduce((s, r) => s.replace(r, ""), l.split(stub).join("")).includes(name)) fail(`deploy/${script}:${n}`, `names ${name} outside the project read (${JSON.stringify(l.trim().slice(0, 80))}): the project follows the env file, and compose.yaml's name is the read's fallback alone (SMD-2873)`);
+      }
+      // canary.sh's env-file program, a file of its own since SMD-4332. Its lines were canary.sh's code lines, read above
+      // until the move, and are read here: it makes no project read of its own, so it has no stub and no allowed text.
+      const program = join(ROOT, "deploy", "canary-env.py");
+      if (!existsSync(program)) fail("deploy/canary.sh", "runs deploy/canary-env.py for env_file(), and the file is not there (SMD-4332)");
+      else {
+        for (const [i, raw] of readFileSync(program, "utf8").split("\n").entries()) {
+          const l = raw.replace(/\s#.*$/, "");
+          if (!/^\s*(#|$)/.test(l) && l.includes(composeName)) fail(`deploy/canary-env.py:${i + 1}`, `names ${composeName} (${JSON.stringify(l.trim().slice(0, 80))}): canary.sh's env-file program makes no project read, and the project follows the env file (SMD-2873, SMD-4332)`);
+        }
       }
     }
   }
@@ -9963,6 +9974,7 @@ const SUITE_WORKFLOW = ".github/workflows/brain-checks.yml";
 const SUITES_NOT_RUN: Record<string, string> = {
   "db/test-support.ts": "the db/ suites' shared helpers, imported by them; it runs nothing itself",
   "server-portable/test-support.ts": "the server suites' shared helpers, imported by them; it runs nothing itself",
+  "mcp-server/test-listen-on.ts": "a preload: test-mcp.ts starts its spawned entry with it, to hold listen streams (SMD-4347); it runs nothing itself, and its name keeps it out of the image",
   "db/test-bench-reuse.ts": "nine bench runs at 150,000 rows, about three minutes; run by hand with with-postgres.sh (db/README.md, db/ci-parity.sh)",
   "recipes/atomizer/test-atomize.mjs": "calls a live model provider with the operator's key; a reachability check, not a suite",
   "recipes/authorship-edges/test-attribution.mjs": "an upstream recipe's own self-test, run by hand as its README says (the maintainer's call, SMD-2895)",

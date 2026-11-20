@@ -21,6 +21,7 @@ import type { Config, Fetch } from "./facts.ts";
 import type { Gql } from "../../db/linear-api.ts";
 import type { Outcome } from "./record.ts";
 import type { RunInput, RunResult } from "./run.ts";
+import { maskTokens } from "./text.ts";
 
 /** What the live run takes from its environment, so the self-check can stand in for all of it. */
 export type LiveDeps = {
@@ -94,7 +95,7 @@ export function handbackComment(result: RunResult): string {
         ? "An environment step did not answer before the work started; the label is kept so a later run can take it."
         : "The work could not be completed; the ticket is labelled for a person.",
   );
-  return lines.join("\n").replace(/wc_[0-9a-f]{6,}/gi, "wc_…");
+  return maskTokens(lines.join("\n"));
 }
 
 /** Settle the release: a released claim's token is deleted; anything else keeps the token and is recorded owed for step 0. */
@@ -153,7 +154,7 @@ export async function liveRun(input: LiveInput): Promise<LiveResult> {
   try {
     result = await d.run({ ...input.runInput, claimId });
   } catch (e) {
-    const why = String((e as Error)?.message ?? e).replace(/wc_[0-9a-f]{6,}/gi, "wc_…").slice(0, 200);
+    const why = maskTokens(String((e as Error)?.message ?? e)).slice(0, 200);
     const rel = await releaseClaim(d.fetch, ready.base, d.brainKey, { id: claimId, token, reason: `agent-runner errored before finishing: ${why}` });
     const released = settleRelease(rel, d.runnerDir, claimId, owed);
     const back = await handBack(d.gql, input.cfg, { identifier: ident, kind: "work", readyLabelId: d.readyLabelId, handedBackLabelId: d.handedBackLabelId });
