@@ -12531,7 +12531,7 @@ const DASHBOARD_FILE = "deploy/observability/dashboard.json";
 /** The alert rules' file (SMD-3050, check 38's), as the generator names it. */
 const ALERT_FILE = INLINE_FILES.find((f) => f.config === "grafana-alert-rules")!.path;
 const DASHBOARD_UNITS: Record<string, string> = { s: "_seconds", ms: "_milliseconds", By: "_bytes" };
-/** The instruments server-portable/'s code records, by the name a histogram is made or a span's metric is given under (`histogram("x.duration", SPEC` or `name: "x.duration", spec: SPEC`), each named in Prometheus with its spec's unit (`unit: "s"` → `_seconds`) and labelled as DASHBOARD_INSTRUMENT_LABELS holds, and each observable gauge by its name and the unit in its own options (`createObservableGauge("process.uptime", { unit: "s"` → `process_uptime_seconds`, SMD-3050); a name whose spec it cannot find, or whose unit it does not know, is named with no unit, which no query here reads. */
+/** The instruments server-portable/'s code records, by the name a histogram is made or a span's metric is given under (`histogram("x.duration", SPEC` or `name: "x.duration", spec: SPEC`), each named in Prometheus with its spec's unit (`unit: "s"` → `_seconds`) and labelled as DASHBOARD_INSTRUMENT_LABELS holds, and each observable gauge and observable up-down counter by its name and the unit in its own options (`createObservableGauge("process.uptime", { unit: "s"` → `process_uptime_seconds`, SMD-3050; `createObservableUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}"` → `ob1_mcp_listen_streams`, SMD-4458: a braced annotation names no unit, and a sum that may fall takes no `_total`, both measured on the pinned image); a name whose spec it cannot find, or whose unit it does not know, is named with no unit, which no query here reads. */
 function instrumentNamesIn(texts: string[]): Map<string, string[]> {
   const all = texts.join("\n");
   const names = new Map<string, string[]>();
@@ -12543,8 +12543,10 @@ function instrumentNamesIn(texts: string[]): Map<string, string[]> {
     names.set(`${base}_bucket`, [...labels, "le"]);
     for (const suffix of ["_count", "_sum"]) names.set(base + suffix, labels);
   }
-  for (const m of all.matchAll(/createObservableGauge\("([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)",\s*\{([^}]{0,300})\}/g)) {
-    const unit = /\bunit:\s*"([^"]+)"/.exec(m[2])?.[1];
+  // The options are read to their own closing brace: a string in them may hold one (`unit: "{stream}"`), which ended the block there
+  // and left the unit unread (SMD-4458: that name came out right all the same, a braced unit having no suffix, which is no reading).
+  for (const m of all.matchAll(/createObservable(?:Gauge|UpDownCounter)\("([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)",\s*\{((?:[^{}"]|"(?:[^"\\]|\\.)*"){0,300})\}/g)) {
+    const unit = /\bunit:\s*"((?:[^"\\]|\\.)+)"/.exec(m[2])?.[1];
     const base = `${m[1].replace(/\./g, "_")}${(unit && DASHBOARD_UNITS[unit]) ?? ""}`;
     names.set(base, DASHBOARD_INSTRUMENT_LABELS[base] ?? []);
   }
@@ -12652,7 +12654,7 @@ function promqlProblems(where: string, given: string, written: Map<string, strin
   const text = withoutComments(given);
   const reads = promqlReads(text);
   const unknown = [...new Set(reads.names)].filter((n) => !written.has(n));
-  if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so it reads nothing for ever (a panel's "No data", a rule that never fires) — the names there are: the servers' instruments in server-portable/*.ts (instrumentNamesIn reads their \`*.duration\` histograms and their observable gauges alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 37's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
+  if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so it reads nothing for ever (a panel's "No data", a rule that never fires) — the names there are: the servers' instruments in server-portable/*.ts (instrumentNamesIn reads their \`*.duration\` histograms and their observable gauges and up-down counters alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 37's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
   const carried = new Set([...DASHBOARD_RESOURCE_LABELS, ...reads.made, ...reads.names.flatMap((n) => written.get(n) ?? [])]);
   const stray = [...new Set(reads.labels)].filter((l) => !carried.has(l));
   for (const [name, read] of reads.selectors) {
@@ -12806,6 +12808,11 @@ const INSTRUMENT_PROBES: [string, string, string][] = [
   ["a span's metric by its spec", 'const JOB_DURATION: HistogramSpec = {\n  unit: "s",\n};\nmetric: { name: "ob1.job.duration", spec: JOB_DURATION, labels }', "ob1_job_duration_seconds_bucket"],
   ["an observable gauge in seconds (SMD-3050)", 'provider.getMeter("ob1").createObservableGauge("process.uptime", { unit: "s", description: "x" })', "process_uptime_seconds"],
   ["an observable gauge whose unit became milliseconds is not the seconds name", 'provider.getMeter("ob1").createObservableGauge("process.uptime", { unit: "ms", description: "x" })', "!process_uptime_seconds"],
+  ["an observable up-down counter whose unit is a braced annotation, named with no unit (SMD-4458)", 'provider.getMeter("ob1").createObservableUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}", description: "x" })', "ob1_mcp_listen_streams"],
+  ["…and with no `_total`, the name of a sum that only rises", 'provider.getMeter("ob1").createObservableUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}", description: "x" })', "!ob1_mcp_listen_streams_total"],
+  ["an observable up-down counter in seconds takes its unit, read past a brace in its description", 'provider.getMeter("ob1").createObservableUpDownCounter("ob1.mcp.listen_wait", { description: "a } in words", unit: "s" })', "ob1_mcp_listen_wait_seconds"],
+  ["…and is not the name with no unit", 'provider.getMeter("ob1").createObservableUpDownCounter("ob1.mcp.listen_wait", { description: "a } in words", unit: "s" })', "!ob1_mcp_listen_wait"],
+  ["a counter that is not observed is not read: this reads the two observable kinds alone", 'provider.getMeter("ob1").createUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}" })', "!ob1_mcp_listen_streams"],
 ];
 function checkDashboard() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {

@@ -1876,7 +1876,9 @@ runs out; a kill) leaves the count before it as its series' last. Prometheus
 goes on reading that for its lookback, five minutes unless set otherwise, and a
 sum over servers is too high for as long (measured on the image: three streams
 open at a kill were still counted beside the next server's one 286 s on, and no
-longer at 302 s).
+longer at 302 s). The observability profile's dashboard shows that sum, as
+**Listen streams open** in its Requests row (below), and its description says
+the same of itself.
 
 On its keyed `/health`, as `listen`, read as the route answers: `open`, the two
 bounds (`max` for the server and `perCaller` for one caller) and `callers`, one
@@ -2082,7 +2084,10 @@ What it holds, from the servers (the workers send nothing, SMD-2910):
   a classic histogram (`_bucket`, `_count`, `_sum`), each label the attribute
   underscored (`ob1_tool`, `gen_ai_request_model`, `error_type`); `job` is the
   service's name, `instance` its `service.instance.id`, new at each start, and
-  a pipeline tier's `deployment_environment_name` its tier.
+  a pipeline tier's `deployment_environment_name` its tier. Two more are single
+  series with no label of their own: `process_uptime_seconds`, which every
+  server sends from its start, and `ob1_mcp_listen_streams`, which a server
+  sends only where it holds listen streams (none does yet; SMD-4458).
 - **Log records** in Loki: each request's, its body the line's fields, under
   `service_name`.
 - **The database's own numbers** in Prometheus under `job` `postgres`, from
@@ -2156,8 +2161,13 @@ panel saying what it counts:
 - **Requests**, every server: per second by door and the tool each ran (an
   MCP tool call's, a REST route's operation, a mirror's; a keyed `/health` is
   `brain_info`'s), latency p50 and p99 by tool, by outcome, the share the
-  server failed (`error`, `stalled`, `cut`; a refusal is the caller's), and
-  those failures by fault code or outcome.
+  server failed (`error`, `stalled`, `cut`; a refusal is the caller's),
+  those failures by fault code or outcome, and the listen streams the MCP
+  server holds open (`ob1_mcp_listen_streams`, summed over the servers picked;
+  SMD-4458). That last panel reads 0 where no server picked sends the count
+  (none does until SMD-4347's last PR, and the REST core never will) and no
+  data where none sends metrics at all. What the count is, and when a sum of
+  it is too high or too low, is under "Traces, metrics and log records" above.
 - **Model provider**: calls per second by model, latency p50 and p99 by
   operation, and failures by status or kind.
 - **Store**: operations per second and p99 by the store's method, and its

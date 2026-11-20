@@ -5137,11 +5137,15 @@ jobs:
       # every query is run where Grafana would run it, its variables at All
       # and its rate window 5 m. Each Prometheus query must return a series
       # with a number above 0 in it within three minutes (the exporter is
-      # scraped every 10 s here, 30 s as shipped) — or 0 itself for the ten
-      # that answer 0 where their family has series and their filter matches
-      # nothing (`or 0 * …`:
-      # the failure share, the store's three, the collector's three and its
-      # three totals), empty where it has none — but the NO_TRAFFIC panel,
+      # scraped every 10 s here, 30 s as shipped) — or 0 itself for the eleven
+      # that may answer 0: ten where their family has series and their filter
+      # matches nothing (`or 0 * …`: the failure share, the store's three, the
+      # collector's three and its three totals), empty where it has none; and
+      # the listen streams' count (SMD-4458), whose series no server sends
+      # until one holds streams (SMD-4347), so its 0 is its own
+      # `or vector(0)`, witnessed by the servers' process_uptime_seconds. That
+      # 0 holds nothing of the series' name, which check 37 alone holds until
+      # a listen is opened here — but the NO_TRAFFIC panel,
       # whose events this traffic does not make; each Loki query must return
       # a record (one that parsed and has an outcome); each Tempo query must
       # find a trace (the stub's 404 ends a provider span in error). So this
