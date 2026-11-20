@@ -803,20 +803,20 @@ export function ticketsIn(text, teams) {
  * The tickets an ask names, read with its secrets blanked (SMD-4292): a ticket-shaped value a secret holds
  * (`password=ABC-1234`) is no ticket. Read off the raw ask, it headed the summary while the ask that held it was
  * blanked, the brain keyed it as a subject, it began an episode ("begun with ABC-1234") and it decided where the
- * session split. Every reader of an ask's tickets — `named`, the segmenter's boundaries — goes through here.
- * In every mode, `refuse` too: there an episode holding a secret is refused whatever the secret's shape, as one holding
- * `password=hunter2` always was. Read raw, a ticket-shaped secret split off an episode of its own, and the clean
- * episode before it, which `refuse` sends, said "ended when ABC-1234 was taken up" (review pass 1: limiting this to
- * `redact` kept that clean episode sendable, and sent the value with it). A scanner match on a real ticket
- * (`Password: SMD-12 (reset flow)`) drops it as well: that ask is blanked in the text too.
- * The ask is blanked as the summary blanks it, on one line (`redactEpisode` blanks each prompt flattened): blanked as
- * written, a quoted secret whose closing quote is on the next line (`password = "hunter22⏎QQZ-9876"`) was cut at its
- * first space, so its ticket-shaped part headed the summary while the prompt showed it blanked (review pass 1, secrets
- * adversary). Only tickets the raw ask names, as the same teams read it, are kept: blanking can join a word to a marker
- * into a ticket shape (`XY-12` before a Slack webhook's URL), which it must not add (review pass 1, cold read), and a
- * lower-case mention of that key before any team is known is no ticket (review pass 3, mutant).
- * The scan runs once per ask (cached per event: the segmenter and the episode both read it), and only for an ask whose
- * raw text names a ticket. It grows with the bytes of such asks, about 20 ms per MB; an ask naming none costs nothing.
+ * session split. Both readers of an ask's tickets, `named` and the segmenter's boundaries, go through here.
+ * In both modes: under `refuse`, read raw, the secret split off an episode of its own, and the clean episode before it
+ * was sent saying "ended when ABC-1234 was taken up" (review pass 1: limiting this rule to `redact` kept sending that
+ * line). Read blanked, it splits nothing, and its episode is refused whole, as one holding `password=hunter2` always
+ * was. A real ticket the scan takes for a secret (`Password: SMD-12 (reset flow)`) is dropped too: its ask is blanked
+ * in the text as well.
+ * The ask is blanked on one line, as `redactEpisode` blanks each prompt: blanked as written, a quoted secret whose
+ * closing quote is on the next line (`password = "hunter22⏎QQZ-9876"`) was cut at its first space, and its
+ * ticket-shaped part headed the summary while the prompt showed it blanked (review pass 1, secrets adversary).
+ * Only tickets the raw ask names, read with the same teams, are kept: blanking can join a word to its marker into a
+ * ticket shape (`XY-12` before a Slack webhook's URL; review pass 1, cold read), and a lower-case mention of that key
+ * before any team is known is no ticket (review pass 3, mutant).
+ * The cost: the scan runs once per ask, cached per event (the segmenter and the episode both read it), and only for an
+ * ask whose raw text names a ticket: about 20 ms per MB of such asks, nothing for an ask naming none.
  */
 const blankedAsks = new WeakMap();
 const askTickets = (ev, teams) => {

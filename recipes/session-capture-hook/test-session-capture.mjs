@@ -450,6 +450,11 @@ let episodesLines;
   const teamKey = blanked(CWD("/wt/ob1"), BR("me/smd-610-x"), P("set password=smd-4321 and go"));
   const noSplit = blanked(CWD("/wt/ob1"), BR("main"), P("tidy the readme"), P("set password=ABC-1234 and go"));
   const alsoNamed = blanked(CWD("/wt/ob1"), BR("main"), P("for ABC-1234, set password=ABC-1234 and go"));
+  assert(noTeam.named === "" && noTeam.head.from === null && !/ABC-1234/i.test(noTeam.text)
+      && teamKey.named === "" && teamKey.head.from === "place" && teamKey.head.tickets.join() === "SMD-610" && !/4321/.test(teamKey.text)
+      && noSplit.episodes === 1 && !/ABC-1234/i.test(noSplit.text)
+      && alsoNamed.named === "ABC-1234" && alsoNamed.head.from === "asks" && /^Session summary — ABC-1234 — /.test(alsoNamed.text),
+    `a ticket-shaped value inside a secret is no ticket: it heads no summary, begins no episode and is in no text, with no team known or as the team's key; one an ask also names outside the secret stays (${JSON.stringify([noTeam, teamKey, noSplit, alsoNamed].map((x) => ({ episodes: x.episodes, named: x.named, head: x.head })))})`);
   // Review pass 1 (cold read): blanking can join a word to its marker into a ticket shape, here XY-12 before a Slack
   // webhook's URL, which the scan blanks from its first letter; only tickets the raw ask names are kept.
   const joined = blanked(CWD("/wt/ob1"), BR("main"), P("XY-12https://hooks.slack.com/services/T0ABC/B0DEF/abcdefghijklmnop1234 and SMD-12"));
@@ -476,11 +481,6 @@ let episodesLines;
   const longTitle = titledLong.text.split("\n").find((l) => l.startsWith("Title:")) ?? "";
   assert(/\[redacted:/.test(longTitle) && !/sk-ant|Ab1Ab1/.test(longTitle) && titledLong.redactions.some((r) => r.in === "the title"),
     `a key the title's clip would cut is blanked whole in the title, before the clip (${longTitle.slice(-40)})`);
-  assert(noTeam.named === "" && noTeam.head.from === null && !/ABC-1234/i.test(noTeam.text)
-      && teamKey.named === "" && teamKey.head.from === "place" && teamKey.head.tickets.join() === "SMD-610" && !/4321/.test(teamKey.text)
-      && noSplit.episodes === 1 && !/ABC-1234/i.test(noSplit.text)
-      && alsoNamed.named === "ABC-1234" && alsoNamed.head.from === "asks" && /^Session summary — ABC-1234 — /.test(alsoNamed.text),
-    `a ticket-shaped value inside a secret is no ticket: it heads no summary, begins no episode and is in no text, with no team known or as the team's key; one an ask also names outside the secret stays (${JSON.stringify([noTeam, teamKey, noSplit, alsoNamed].map((x) => ({ episodes: x.episodes, named: x.named, head: x.head })))})`);
   // Review pass 2 (cold read, mutants): the move to a branch by its own ticket; the gate judged where the session moved to;
   // a cd within any of the episode's roots.
   assert(asks(CWD("/wt/ob1"), BR("main"), P("do SMD-700"), BR("me/node-22-smd-700-x"), P("go")) === "do SMD-700|go",
@@ -1234,7 +1234,7 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const pwPrep = prepare({ ...base, session_id: "s-ticket-password", transcript_path: pwT });
   assert(pwPrep.code === 0 && pwPrep.payload && !/ABC-1234/i.test(JSON.stringify(pwPrep.payload)) && pwPrep.payload.tickets_from === undefined
       && /\[redacted:password assignment\]/.test(pwPrep.payload.text) && pwPrep.payload.redactions?.length === 1,
-    `a ticket-shaped password is blanked and heads no summary: the payload carries it nowhere, and no tickets_from (${pwPrep.payload?.text?.split("\n")[0]}; ${pwPrep.payload?.tickets_from}; in the payload: ${Object.entries(pwPrep.payload ?? {}).filter(([, v]) => /ABC-1234/i.test(JSON.stringify(v))).map(([k, v]) => `${k}=${JSON.stringify(v).slice(Math.max(0, JSON.stringify(v).search(/ABC-1234/i) - 80), JSON.stringify(v).search(/ABC-1234/i) + 20)}`).join(" | ") || "nowhere"}; redactions: ${JSON.stringify(pwPrep.payload?.redactions)}; marker: ${/\[redacted:password assignment\]/.test(pwPrep.payload?.text ?? "")})`);
+    `a ticket-shaped password is blanked, one redaction counted, and heads no summary: the payload carries it nowhere, and no tickets_from (${pwPrep.payload?.text?.split("\n")[0]}; ${pwPrep.payload?.tickets_from}; redactions: ${JSON.stringify(pwPrep.payload?.redactions)})`);
   if (pwPrep.payloadPath) unlinkSync(pwPrep.payloadPath);
   // Review pass 1: under refuse too. Read raw, the secret's ask split off an episode of its own, which was refused, and
   // the clean episode before it was sent saying "ended when ABC-1234 was taken up". Read blanked, it splits nothing,
