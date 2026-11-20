@@ -45,12 +45,11 @@ export function histogram(name: string, spec: HistogramSpec): otel.Histogram {
  * server keeps: the total alone, with no label of its own, since a label for each caller's name would have no bound.
  * An up-down counter, read when asked: the conventions' instrument for a count of open things that is summed over
  * servers, as `http.server.active_requests` is (review pass 1: it was a gauge, their instrument for what is not
- * summed). Prometheus shows either as a gauge.
+ * summed). The profile's Prometheus has it as `ob1_mcp_listen_streams`, with no suffix (measured on its image).
  * Made on the meter provider the API has now, so it is called once the SDK is set up (startTelemetry's answer); before
  * that, or where no metrics go anywhere, the API's provider is its no-op and this does nothing. It is here, not in
  * mcp-server/, because this is the module that holds the OpenTelemetry API, which mcp-server/ has no dependency of
- * its own on; and check 37 reads the instruments a dashboard may name from this directory's code alone (no up-down
- * counter yet: the change that adds the panel teaches it). Answers false where making it threw, and true otherwise,
+ * its own on. Answers false where making it threw, and true otherwise,
  * the no-op provider's nothing included: a meter that throws loses the count and nothing else, as a failed start of
  * the SDK loses its signals and not the server (review pass 1: asked for in a start's continuation, a throw here
  * ended the process).
