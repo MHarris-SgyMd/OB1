@@ -186,8 +186,8 @@ Each runner session, the worker's and the review's, runs inside the five layers 
   * Outside the stamp: **`text.ts`** has the one-line cut and `maskTokens`, the one mask for a claim token (`wc_…` and the markdown-escaped `wc\_…`); **`facts.ts`** has `jsonOf` and `NOT_JSON`; **`fixture-git.ts`** has the git the self-checks build fixtures with.
 
 ```bash
-shasum -a 256 ~/.local/share/claude/versions/2.1.319                                  # the version to pin's checksum (cut 2b runs a copy in the install)
-bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.319
+shasum -a 256 ~/.local/share/claude/versions/2.1.329                                  # the version to pin's checksum (cut 2b runs a copy in the install)
+bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.329
 bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts … --state <dir> --only init,keychain --main-checkout ~/Projects/OB1
 bun scripts/agent-runner/probes.ts --self-check                                       # offline, no Claude Code; CI runs it
 ```
@@ -219,6 +219,11 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 * **The login keychain is out of reach.** A sandboxed `security find-generic-password` finds nothing (exit 44) where the same search outside finds the item (exit 0). The sessions stay in the maintainer's account.
 * **Grep and Glob don't follow a link out of the clone.**
 * **Claude Code sets two credentials for a command itself.** One is the token of its messaging socket, which the sandbox blocks. The other is its sandbox proxy's login, and the proxy refuses every host. Neither is the runner's.
+
+**What they found on 2.1.329** (2026-11-20, SMD-4489). The pin moved here: Claude Code's updater had pruned 2.1.319 from `~/.local/share/claude/versions`, which is why the runner is to hold a copy of its own. All 35 pass, after one change:
+
+* **Claude Code refuses to start on a profile that fails validation.** Given `sandbox.enabled: "yes"`, 2.1.319 started and the init check ended the session. 2.1.329 emits no init event, only one error result (`error_during_execution`, `startup_failure_reason: sandbox_required_unavailable`), and exits. `session.ts` took that for a session that ended with its result. A result before any init now ends the session as `init`, with the result's subtype, its startup failure reason and its first error as the reason, and its text is not taken as a report.
+* The other 34 probes passed unchanged, and their notes read as on 2.1.319: a call asking for `dangerouslyDisableSandbox` still runs sandboxed, the same four variables are Claude Code's own, and an Edit of `CLAUDE.md` goes through with the guard off.
 
 One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
 
