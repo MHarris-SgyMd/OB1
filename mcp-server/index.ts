@@ -18,6 +18,7 @@ import { loadPlugins, type LoadedPlugin } from "../server-portable/core/plugins.
 import { listenHostFrom, routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
 import { cutOpenRequests, cutTelemetry, flushTelemetry, knowTools, markTelemetry, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
+import { observeListenStreams } from "../server-portable/tracing.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
 import { createListenStreams } from "./listen-streams.ts";
 import { createExchanger, exchangeSettings } from "./exchange.ts";
@@ -97,7 +98,16 @@ const app = createMcpApp({ rest, plugins: () => plugins, toolCalls, stop, restUr
 let bunServer: Stoppable | undefined;
 if (import.meta.main) {
   // Spans to a collector, where one is named (OTEL_EXPORTER_OTLP_ENDPOINT), as server-portable's index.ts's were (PR 4c).
-  void startTelemetry(SERVICE_NAME);
+  // …and, on a server that holds listen streams, a count of how many are open (SMD-4458), asked for once the SDK is
+  // set up: before that the API's meter provider is its no-op, and a count made on it is never sent. A server that
+  // holds none sends no such series.
+  // Once the stop's drain has ended it reads 0. The stop is then about to close every stream, after its flush where
+  // the drain finished, and the flush reads the count a last time: left at the streams still open, that would be the
+  // last point of a series that never reports again, and a panel that sums the servers would count those streams
+  // beside the next server's until the old series went stale (review pass 1).
+  void startTelemetry(SERVICE_NAME).then((set) => {
+    if (set && listenStreams.hold && !observeListenStreams(() => (stop.drainEnded ? 0 : listenStreams.count))) console.warn("telemetry: the count of open listen streams (ob1.mcp.listen_streams) could not be made, and is not sent (SMD-4458)");
+  });
   const grace = drainBoundFrom(env.OB1_STOP_GRACE);
   if (grace.problem) console.warn(grace.problem);
   // As server-portable's index.ts stopped, and the REST core stops (SMD-2250): the server's own requests in flight, and the tool calls a request no longer counts
