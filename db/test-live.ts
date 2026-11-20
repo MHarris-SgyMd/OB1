@@ -6507,20 +6507,25 @@ if (want("10")) {
       }
 
       // A stop ends a probe in flight: after a timeout of 4 s the probe has the
-      // call's whole timeout, and a first stop 1 s into it returns at once,
-      // where the probe would have run 3 s more (review pass 1; 8 s and 2 s into
-      // it before SMD-3196). Timed from the probe's arrival, not the claim: a
+      // call's whole timeout, and a first stop 200 ms into it returns at once,
+      // where the probe would have run some 3.5 s more (review pass 1; 8 s and
+      // 2 s into it before SMD-3196; 1 s into it, under a 2 s bound, before
+      // SMD-4399). The return is 4 to 25 ms, alone or under load, so the bound
+      // is the runner's room, not the path's: a CI runner once took 2,054 ms.
+      // Stopping sooner leaves more of the probe's 4 s for the bound to sit
+      // under, 3 s of it. Timed from the probe's arrival, not the claim: a
       // stop during the hung call takes another path, the call left to time out,
       // no probe after it and the thought recorded failed. The hang begins once
       // the start's probe has answered, so the start never meets it.
       {
         const stopProbe = new AbortController();
-        const probeLines: string[] = [];
+        // Each line with when it came: a return past the bound says what the follower said after the stop, and when (SMD-4399).
+        const probeLines: { at: number; line: string }[] = [];
         let returnedAt = 0;
         // Deleted when the case ends: left pending, it would be the one-shot run's first claim below.
         let slow = "";
         const startProbes = probes;
-        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push(l), err: (l) => probeLines.push(l) } }).then((c) => { returnedAt = Date.now(); return c; });
+        const probing = runExtract({ url: URL_!, env, workers: 1, follow: 1, timeout: 4, signal: stopProbe.signal, writer: { out: (l) => probeLines.push({ at: Date.now(), line: l }), err: (l) => probeLines.push({ at: Date.now(), line: l }) } }).then((c) => { returnedAt = Date.now(); return c; });
         try {
           // Its start's probe answered, then the settle the cases above give it (SMD-3196: a 1 s sleep stood in for both).
           await pollUntil(async () => probes > startProbes, 10_000);
@@ -6531,12 +6536,14 @@ if (want("10")) {
           const claimed = await pollUntil(async () => (await claimRow(slow))?.status === "claimed", 5000);
           const askedBefore = probesAsked;
           const probed = await pollUntil(async () => probesAsked > askedBefore, 15_000);
-          await Bun.sleep(1000);
+          await Bun.sleep(200);
           const stoppedAt = Date.now();
           stopProbe.abort();
           const code = await probing;
-          assert(claimed && probed && code === 0 && returnedAt - stoppedAt < 2000 && (await claimRow(slow))?.status === "pending",
-                 `a first stop during a probe after a timeout ends it: the follower returns within 2 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"})`);
+          const inTime = returnedAt - stoppedAt < 3000;
+          const afterStop = probeLines.filter((l) => l.at >= stoppedAt).map((l) => `+${l.at - stoppedAt} ms ${l.line.trim().slice(0, 110)}`).join(" | ");
+          assert(claimed && probed && code === 0 && inTime && (await claimRow(slow))?.status === "pending",
+                 `a first stop during a probe after a timeout ends it: the follower returns within 3 s, the thought back in the pool (exit ${code} after ${returnedAt - stoppedAt} ms, claim ${(await claimRow(slow))?.status}${claimed ? "" : "; the thought was not claimed within 5 s"}${probed ? "" : "; no probe came within 15 s of the claim"}${inTime ? "" : `; after the stop: ${afterStop || "the follower said nothing"}`})`);
         } finally {
           downUntil = 0;
           stopProbe.abort();
@@ -29204,9 +29211,9 @@ if (want("38r")) {
 // and 3); each wait is probed on a fixed interval, nothing carried between them. Its body a function's, as [26]'s: the
 // module body is at TS2563's limit for control-flow analysis.
 if (want("38p")) await (async () => {
-  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated");
+  console.log("\n[38p] db/sleep.ts: a thought whose embedding crashes the provider (SMD-4254) — re-embed waits out an outage that made the thought in hand a suspect and retries its suspects one at a time, so the thought is recorded failed at its third outage alone and the backlog behind it is re-embedded in the same period, re-embed never set down; each wait probed on a fixed interval from its own start, nothing carried, so a crash that broke the bound under the carried schedule fits it; one that keeps the provider down sets re-embed down once the wait passes its bound, and an isolation that passes the period's cap — its waits and the retries between them, a provider that hangs too — sets it down at the cap, extraction running on, neither counting a live write's pause; a set-down at a limit backs off by time, 4 min then 8, 16, … at full scale, setting re-embed down at once at such an outage met meanwhile, its suspects moved behind the pool so the backlog is re-embedded, until a thought is recorded failed alone or re-embed drains — the outage a thought failed alone leaves beginning none; and the isolation's count ends at its first drain not isolated; under a steady inflow of thoughts with no vector, re-embed and the claim passes take turns in the one period, each handing over sooner once caught up, a re-embed set down for an outage tried again at a turn's end, and re-embed's turns re-embed every thought (SMD-4384)");
   const sql = new SQL({ url: URL_, max: 4 });
-  const { EX, EMBED_JOB, sw, env, capture, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
+  const { EX, EMBED_JOB, modelCalls, sw, env, capture, beat, lines, sleepRun, bounded, nextPeriod, done } = await sleepScaffold(sql);
   // Every wait probes once a second (the scheduler's fixed probe, reembedThoughtProbeMs, at 1 s, and OUTAGE_MS for the
   // rest): with embedCrashProbes 2 the provider is back at a wait's second or third probe, 2-3 s on, which the
   // scheduler's 250 ms poll sees many times over — a set-down at the first sight would leave the thought pending and
@@ -29245,7 +29252,7 @@ if (want("38p")) await (async () => {
     /** Such an outage met while the back-off runs: set down at once, and the seconds left of it. */
     const BACKED_OFF = /re-embed's provider stopped answering after an outage that made the thought in hand a suspect, while re-embed backs off from a try's wait on such an outage that ended at a limit — set down at once, backing off: (\d+) s more, then the first such outage is waited out once more/;
     /** The outage's suspects moved behind the pool at a limit's set-down or a backed-off one (review pass 3). */
-    const MOVED = /^ {2}(\d+) suspect\(s\) of the outage moved behind re-embed's pool — the next period re-embeds the backlog before claiming them again$/;
+    const MOVED = /^ {2}(\d+) suspect\(s\) of the outage moved behind re-embed's pool — its next turn re-embeds the backlog before claiming them again$/;
 
     // The provider back in seconds: the thought failed at its third outage alone, its fourth crash, the backlog behind
     // it re-embedded, all in the one period — re-embed drained, never set down.
@@ -29683,7 +29690,10 @@ if (want("38p")) await (async () => {
         manLimit = await pollUntil(async () => lines.some((l) => PAST_BOUND.test(l)), 30_000);
         manLine = lines.find((l) => PAST_BOUND.test(l)) ?? "";
         manPaused = lines.some((l) => /^ {2}resumed: no live write/.test(l));
-        const b = ((await beat()) as { reembedBackoff?: { until: string } } | null)?.reembedBackoff;
+        // The row's mark, once stamped: the limit's line is said before re-embed's end and the set-down that stamp it, so
+        // a read at once could beat the stamp (SMD-4384 review pass 2: once in eight runs, the mark read missing).
+        let b: { until: string } | undefined;
+        await pollUntil(async () => (b = ((await beat()) as { reembedBackoff?: { until: string } } | null)?.reembedBackoff) !== undefined, 5000);
         const [{ now }] = (await sql`SELECT now() AS now`) as { now: Date }[];
         manAhead = b ? (Date.parse(b.until) - new Date(now).getTime()) / 1000 : -1;
         if (manLimit) {
@@ -29705,6 +29715,330 @@ if (want("38p")) await (async () => {
         `a pause before a try's limit: the back-off runs its whole window from the limit on the scheduler's clock, not on re-embed's, which the pause held back (left ${manLeft}; paused ${manPaused}; limit ${manLimit}: ${manLine.trim().slice(0, 160)}; the row's until ${manAhead.toFixed(1)} s ahead; the left wait's start ${manWaitAge.toFixed(1)} s old at the resume; exit ${manCode})`);
       assert(manTry && manTryLines.some((l) => LEFT.test(l)) && manTryLines.some((l) => BACKS_OFF.exec(l)?.[1] === "60" && PAST_BOUND.test(l)) && !manTryLines.some((l) => BACKED_OFF.test(l)),
         `a period begun just past the back-off's end, after a pause: a try, left waiting, its limit backing off 60 s — the back-off read on the scheduler's clock, not on re-embed's, which the pause holds behind (${told(manTryLines) || "nothing said"}${manTry ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+    }
+
+    // A steady inflow of thoughts with no vector (SMD-4384): one every 300 ms, each embedding 400 ms and each extraction
+    // 400 ms, so neither re-embed's pool nor extraction's ever drains. Before the share, re-embed ran alone the whole
+    // period, extraction never starting (0 of 64 in 240 s at the shipped settings); with a one-way share (review pass 1's
+    // run) the claim passes then ran until the inflow stopped, a vector 131-202 s late. A 3 s share, the turns
+    // alternating (the maintainer's choice): re-embed gives way, extraction takes a note, the claim passes' turn ends and
+    // they wait at their turn gate while re-embed, in the same period, re-embeds a thought captured after the first
+    // give-way — all while the inflow goes on; once it ends, every thought gets its vector, never set down, in the one
+    // period (review pass 2: the first cut of the turns ended the period at each).
+    {
+      const SHARE = /^ {2}re-embed has had its share — ([\d.]+) s alone(?:, besides \d+ s isolating outages)? — (\d+) thought\(s\) left for its next turn, once the claim passes have had theirs or drained — extracting$/;
+      const TURN = /^ {2}the claim passes have had their turn — ([\d.]+) s — with (\d+) thought\(s\) waiting for re-embed: they wait between thoughts while re-embed runs alone again$/;
+      const RETRIED = /^ {2}re-embed, set down earlier in this period \([a-z-]+\), is tried again at the claim passes' turn's end$/;
+      sw.embedSlowMs = 400;
+      sw.slowExtract = 400;
+      const inflow: string[] = [];
+      let flowing = true;
+      const flow = (async () => {
+        for (let i = 0; flowing; i++) {
+          inflow.push(await vectorless(`An inflow note with no vector, number ${i}.`));
+          await Bun.sleep(300);
+        }
+      })();
+      const shareMeanwhile = await capture("A note extraction takes while vectorless thoughts keep arriving.", "sync-sleep", 0, 33);
+      let gave = false, extractedInFlow = false, turned = false, laterVectored = false, resumed = false, flowed = 0, vectored = 0, shareCode = -9, downSaid = false, endedInFlow = true;
+      /** The inflow's notes extraction has taken. */
+      const extractedCount = async () => (await Promise.all(inflow.map(exSucceeded))).filter(Boolean).length;
+      const shareStop = follow({ reembedShareMs: 3000 });
+      // Each line with when it came, read every 25 ms: re-embed's mid-period turn runs from the claim passes' turn line
+      // to its share line after it (review pass 2).
+      const stampedLines: { line: string; at: number }[] = [];
+      let stamping = true;
+      const stampLines = (async () => {
+        for (let k = 0; stamping; await Bun.sleep(25)) while (k < lines.length) stampedLines.push({ line: lines[k++], at: Date.now() });
+      })();
+      try {
+        try {
+          gave = await pollUntil(async () => lines.some((l) => SHARE.test(l)), 30_000);
+          // The thoughts captured from the first give-way on: one re-embedded while the inflow goes on is a turn back.
+          const after = inflow.length;
+          extractedInFlow = gave && await pollUntil(() => exSucceeded(shareMeanwhile), 20_000);
+          turned = extractedInFlow && await pollUntil(async () => lines.some((l) => TURN.test(l)), 30_000);
+          laterVectored = turned && await pollUntil(async () => (await allAtEmbed(inflow.slice(after))) > 0, 30_000);
+          // Re-embed's second turn over, the claim passes go on from their gate: extraction takes another note.
+          if (laterVectored && await pollUntil(async () => lines.filter((l) => SHARE.test(l)).length >= 2, 30_000)) {
+            const before = await extractedCount();
+            resumed = await pollUntil(async () => (await extractedCount()) > before, 30_000);
+          }
+          // The turns are the period's own: none ended it (review pass 2).
+          endedInFlow = lines.some((l) => /— the period ends$/.test(l));
+        } finally {
+          stamping = false;
+          await stampLines;
+          flowing = false;
+          await flow;
+        }
+        flowed = inflow.length;
+        await pollUntil(async () => (vectored = await allAtEmbed(inflow)) === inflow.length, 120_000);
+      } finally {
+        sw.embedSlowMs = 0;
+        sw.slowExtract = 0;
+        downSaid = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+        shareCode = await shareStop();
+      }
+      const shareLine = lines.find((l) => SHARE.test(l)) ?? "";
+      const turnLine = lines.find((l) => TURN.test(l)) ?? "";
+      // Re-embed alone in its mid-period turn: no extraction call begun from a second after the claim passes' turn
+      // ended — the call in hand then, 400 ms, runs out — until re-embed's share line after it (review pass 2).
+      const turnAt = stampedLines.find((x) => TURN.test(x.line))?.at ?? 0;
+      const backAt = stampedLines.find((x) => x.at > turnAt && SHARE.test(x.line))?.at ?? 0;
+      const extractsInTurn = turnAt && backAt ? modelCalls.filter((c) => c.kind === "extract" && c.at > turnAt + 1000 && c.at < backAt - 100).length : -1;
+      assert(gave && SHARE.exec(shareLine)?.[1] === "3" && Number(SHARE.exec(shareLine)?.[2]) > 0 && extractedInFlow && turned && TURN.exec(turnLine)?.[1] === "3" && laterVectored && resumed && !endedInFlow && extractsInTurn === 0 && backAt - turnAt > 2000 && vectored === flowed && !downSaid && shareCode === 0,
+        `a steady inflow of thoughts with no vector, neither re-embed's pool nor extraction's ever drained: the turns alternate — re-embed gives way at its 3 s share, extraction takes a note, the claim passes' 3 s turn holds them at their gate and re-embed, in the same period, re-embeds a thought captured after the give-way, alone, extraction waiting at its gate, then gives way again and extraction goes on, all while the inflow goes on, no period ended — and once it ends every thought gets its vector, never set down (gave way ${gave}: ${shareLine.trim().slice(0, 140)}; extracted during the inflow ${extractedInFlow}; turn ${turned}: ${turnLine.trim().slice(0, 140)}; a later thought re-embedded during the inflow ${laterVectored}; extraction going on after re-embed's second turn ${resumed}; ${extractsInTurn} extraction call(s) begun in re-embed's ${((backAt - turnAt) / 1000).toFixed(1)} s turn; a period ended during it ${endedInFlow}; ${vectored} of ${flowed} re-embedded; set down ${downSaid}; exit ${shareCode}${gave && turned && laterVectored && vectored === flowed ? "" : `; its last lines: ${lines.slice(-16).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+
+      // Review pass 1 (cold read): a share spent with no claim pass's work waiting gives way to nothing — re-embed runs on
+      // until its pool drains. Ten thoughts with no vector at 300 ms each, about 3 s, past a 1 s share, every other
+      // pass's pending claim taken as done — theirs and what the rows above left (thought_work_claims is no audited
+      // table, so nothing pauses): one period, drained, no share.
+      sw.embedSlowMs = 300;
+      const alone: string[] = [];
+      for (let i = 0; i < 10; i++) alone.push(await vectorless(`A note with no vector and nothing else to do, number ${i}.`));
+      await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+      const othersLeft = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type <> ${EMBED_JOB} AND status IN ('pending', 'claimed')`)[0].c);
+      let aloneDone = false, aloneCode = -9;
+      const aloneStop = follow({ reembedShareMs: 1000 });
+      try {
+        aloneDone = await pollUntil(async () => (await allAtEmbed(alone)) === alone.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 30_000);
+      } finally {
+        sw.embedSlowMs = 0;
+        aloneCode = await aloneStop();
+      }
+      const aloneShared = lines.some((l) => SHARE.test(l));
+      assert(othersLeft === 0 && aloneDone && !aloneShared && aloneCode === 0,
+        `a share spent with no claim pass's work waiting: re-embed runs on until its pool drains, never giving way to nothing (${othersLeft} other claim(s) left; drained ${aloneDone}; gave way ${aloneShared}; exit ${aloneCode}${aloneDone && !aloneShared ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+
+      // Review pass 1 (cold read): the share does not count re-embed's isolation of an outage. A thought crashing the
+      // provider 4 s a crash, three pooled behind it, scaled as the oleander row, four waits of about 4 s, a note
+      // waiting for extraction; once the thought is recorded failed, eight more with no vector at 300 ms each, so
+      // re-embed has work past the isolation's end. Past an 8 s share by its waits alone (about 18 s), not by the rest
+      // (about 4 s): re-embed fails the thought, re-embeds the eleven and drains, the share never spent. Counted, the
+      // share was spent at the first poll after the isolation, the eight left.
+      {
+        const restoreShared = shortenOutage(500, 30_000);
+        sw.embedCrashOn = "hellebore";
+        sw.embedCrashMs = 4000;
+        sw.embedCrashes = 0;
+        const crasher = await vectorless("A hellebore note whose embedding keeps the provider down 4 s a crash.");
+        const crasherBehind: string[] = [];
+        // None of the three names the crashing word: an embedding of any would crash the provider too.
+        for (let i = 1; i <= 3; i++) crasherBehind.push(await vectorless(`A note pooled behind the one whose share test crashes, number ${i}.`));
+        await poolFirst(crasher, crasherBehind);
+        await capture("A note extraction waits for while re-embed isolates the crashing one.", "sync-sleep", 0, 35);
+        let isoDone = false, isoClaim: Awaited<ReturnType<typeof reClaim>>, isoCode = -9;
+        const isoAfter: string[] = [];
+        // Slow from the start, so the three behind still hold re-embed when the eight come.
+        sw.embedSlowMs = 300;
+        const isoStop = follow({ reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 12_000, reembedThoughtPeriodMs: 24_000, reembedShareMs: 8000 });
+        try {
+          if (await pollUntil(async () => (await reClaim(crasher))?.status === "failed", 60_000)) {
+            for (let i = 1; i <= 8; i++) isoAfter.push(await vectorless(`A note with no vector come after the isolation, number ${i}.`));
+            isoDone = await pollUntil(async () => (await allAtEmbed([...crasherBehind, ...isoAfter])) === crasherBehind.length + isoAfter.length && lines.some((l) => /re-embed drained — extracting/.test(l)), 60_000);
+          }
+          isoClaim = await reClaim(crasher);
+        } finally {
+          sw.embedCrashOn = null;
+          sw.embedCrashMs = 0;
+          sw.embedCrashUntil = 0;
+          sw.embedSlowMs = 0;
+          isoCode = await isoStop();
+          restoreShared();
+        }
+        const isoShared = lines.some((l) => SHARE.test(l));
+        const isoDown = lines.some((l) => DOWN.test(l) || PAST_BOUND.test(l) || PAST_CAP.test(l));
+        assert(isoDone && isoClaim?.status === "failed" && !isoShared && !isoDown && isoCode === 0,
+          `an isolation longer than the share: its waits and retries not counted, re-embed fails the crashing thought, re-embeds the three behind it and the eight come after the isolation and drains, the share never spent, never set down (done ${isoDone}; ${JSON.stringify(isoClaim)}; gave way ${isoShared}; set down ${isoDown}; ${sw.embedCrashes} crash(es); exit ${isoCode}${isoDone && !isoShared ? "" : `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 2 (the maintainer's choice): a side caught up hands over at its next pooling, not after the share. A
+      // thought with no vector every 500 ms, embeddings and extractions at once, a 20 s share: each side keeps up, so
+      // each is caught up within a pooling (1 s here), and a vector waits a few seconds, not the share's 20.
+      {
+        const CAUGHT = /^ {2}re-embed has caught up — \d+ s alone — \d+ thought\(s\) not yet in its pool left for its next turn, once the claim passes have had theirs or drained — extracting$/;
+        const CLAIMS_CAUGHT = /^ {2}the claim passes have caught up — \d+ s — with \d+ thought\(s\) waiting for re-embed: they wait between thoughts while re-embed runs alone again$/;
+        const seen = new Map<string, { at: number; vectorAt?: number }>();
+        let flowingC = true;
+        const flowC = (async () => {
+          for (let i = 0; flowingC; i++) {
+            const at = Date.now();
+            seen.set(await vectorless(`A note with no vector both sides keep up with, number ${i}.`), { at });
+            await Bun.sleep(500);
+          }
+        })();
+        const watchC = (async () => {
+          while (flowingC) {
+            for (const [id, v] of seen) if (v.vectorAt === undefined && (await atEmbed(id))) v.vectorAt = Date.now();
+            await Bun.sleep(200);
+          }
+        })();
+        let bothCaught = false, caughtCode = -9, endAt = 0;
+        const caughtStop = follow({ reembedShareMs: 20_000 });
+        try {
+          bothCaught = await pollUntil(async () => lines.some((l) => CAUGHT.test(l)) && lines.some((l) => CLAIMS_CAUGHT.test(l)), 30_000);
+          // A stretch of the inflow under the turns, longer than a share would hold a side.
+          if (bothCaught) await Bun.sleep(12_000);
+        } finally {
+          flowingC = false;
+          endAt = Date.now();
+          await flowC;
+          await watchC;
+          caughtCode = await caughtStop();
+        }
+        const waited = [...seen.values()].filter((v) => v.vectorAt !== undefined).map((v) => v.vectorAt! - v.at);
+        const longest = Math.max(0, ...waited);
+        // Captured 6 s or more before the inflow ended, and no vector by then: under the share's whole turns a vector
+        // waits up to 20 s, and with the claim passes caught up only by an empty pool, which 016's trigger never leaves
+        // under an inflow, 9.5-11.4 s; caught up by a claim's age, 2.1-2.2 s at most in four runs.
+        const stale = [...seen.values()].filter((v) => v.vectorAt === undefined && endAt - v.at >= 6000).length;
+        assert(bothCaught && longest < 6000 && stale === 0 && caughtCode === 0,
+          `both sides keeping up with an inflow, a 20 s share: each hands over caught up at its next pooling — re-embed's and the claim passes' lines said — and no vector waits the share (both said ${bothCaught}; ${waited.length} of ${seen.size} vectored, the longest wait ${(longest / 1000).toFixed(1)} s; ${stale} captured 6 s or more before the end with none; exit ${caughtCode}${bothCaught && stale === 0 ? "" : `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 2's run: a re-embed set down at a turn's start — its endpoint not answering — is tried again at the
+      // claim passes' whole turn's end, as a period's start would; before, it stayed down while the inflow went on, the
+      // period never ending, and no vector came until the inflow stopped. A thought with no vector every 300 ms,
+      // embeddings and extractions 400 ms (neither side keeps up), a 3 s share; the endpoint down from the first
+      // give-way until re-embed is set down, then back.
+      {
+        sw.embedSlowMs = 400;
+        sw.slowExtract = 400;
+        const flowedB: string[] = [];
+        let flowingB = true;
+        const flowB = (async () => {
+          for (let i = 0; flowingB; i++) {
+            flowedB.push(await vectorless(`A note with no vector while re-embed's endpoint goes down, number ${i}.`));
+            await Bun.sleep(300);
+          }
+        })();
+        let downB = false, retried = false, laterB = false, codeB = -9;
+        const stopB = follow({ reembedShareMs: 3000 });
+        try {
+          try {
+            if (await pollUntil(async () => lines.some((l) => SHARE.test(l)), 30_000)) {
+              sw.embedDown = true;
+              downB = await pollUntil(async () => lines.some((l) => DOWN.test(l)), 30_000);
+            }
+          } finally {
+            sw.embedDown = false;
+          }
+          const after = flowedB.length;
+          retried = downB && await pollUntil(async () => lines.some((l) => RETRIED.test(l)), 30_000);
+          laterB = retried && await pollUntil(async () => (await allAtEmbed(flowedB.slice(after))) > 0, 30_000);
+        } finally {
+          flowingB = false;
+          await flowB;
+          sw.embedSlowMs = 0;
+          sw.slowExtract = 0;
+          codeB = await stopB();
+        }
+        assert(downB && retried && laterB && codeB === 0,
+          `re-embed set down at a turn's start, its endpoint not answering, under an inflow: tried again at the claim passes' whole turn's end, and a thought captured once the endpoint is back gets its vector while the inflow goes on (set down ${downB}; tried again ${retried}; a later thought re-embedded ${laterB}; exit ${codeB}${downB && retried && laterB ? "" : `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 2's run: on a fresh brain no extraction key is recorded until extraction's first pass, so no trigger
+      // pools a capture and no claim row shows extraction's work; re-embed gives way to it all the same, extraction's
+      // pool read whole. Ten thoughts with no vector at 300 ms each past a 1 s share, the key removed, every other
+      // pass's pending claim taken as done: re-embed gives way, and extraction records the key and takes them.
+      {
+        sw.embedSlowMs = 300;
+        await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+        await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+        const fresh: string[] = [];
+        for (let i = 0; i < 10; i++) fresh.push(await vectorless(`A note with no vector on a brain with no extraction key, number ${i}.`));
+        const freshRows = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ANY(${sql.array(fresh, "TEXT")}::uuid[])`)[0].c);
+        let freshGave = false, freshExtracted = false, freshCode = -9;
+        const freshStop = follow({ reembedShareMs: 1000 });
+        try {
+          freshGave = await pollUntil(async () => lines.some((l) => SHARE.test(l)), 20_000);
+          freshExtracted = freshGave && await pollUntil(async () => (await Promise.all(fresh.map(exSucceeded))).some(Boolean), 30_000);
+        } finally {
+          sw.embedSlowMs = 0;
+          freshCode = await freshStop();
+        }
+        assert(freshRows === 0 && freshGave && freshExtracted && freshCode === 0,
+          `a brain with no extraction key recorded, its captures in no claim row: re-embed gives way at its share all the same, extraction's pool read whole, and extraction takes them (${freshRows} claim row(s) before; gave way ${freshGave}; extracted ${freshExtracted}; exit ${freshCode}${freshGave && freshExtracted ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 1, held since review pass 2: a period that ends — its claim passes drained before a turn floor — with
+      // re-embed's share having left work begins the next at the next idle poll, by a whole read of its own: no poll
+      // between reads re-embed's claims, so the rest waited for a vector's whole read (a minute) or the rescan. Twelve
+      // thoughts with no vector at 100 ms each — beside what the rows above left unvectored, dozens — past a 1 s share,
+      // the followers' poll and the turn floor at 5 s, the claim passes' work each thought's extraction, at once:
+      // re-embed gives way, they drain, the period ends, and the next re-embeds the rest, all within 45 s — under the
+      // minute a vector's whole read waits.
+      {
+        sw.embedSlowMs = 100;
+        await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+        const leftOver: string[] = [];
+        for (let i = 0; i < 12; i++) leftOver.push(await vectorless(`A note with no vector a period leaves to the next, number ${i}.`));
+        let leftGave = false, leftEnded = false, leftDone = false, leftCode = -9;
+        const leftStop = follow({ reembedShareMs: 1000, passFollowS: 5 });
+        try {
+          leftGave = await pollUntil(async () => lines.some((l) => SHARE.test(l)), 20_000);
+          leftEnded = leftGave && await pollUntil(async () => lines.some((l) => /^ {2}the pools drained — the period ends$/.test(l)), 20_000);
+          leftDone = leftEnded && await pollUntil(async () => (await allAtEmbed(leftOver)) === leftOver.length, 45_000);
+        } finally {
+          sw.embedSlowMs = 0;
+          leftCode = await leftStop();
+        }
+        const leftPeriods = lines.filter((l) => /^ {2}working:/.test(l)).length;
+        assert(leftGave && leftEnded && leftDone && leftPeriods >= 2 && leftCode === 0,
+          `a period ending with re-embed's share having left work: the next begins at once by a whole read of its own and re-embeds the rest (gave way ${leftGave}; the period ended ${leftEnded}; all ${leftOver.length} re-embedded within 45 s ${leftDone}; ${leftPeriods} period(s); exit ${leftCode}${leftGave && leftEnded && leftDone ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
+
+      // Review pass 3 (cold read, run-it): a re-embed set down is tried again at a whole turn's end for an outage alone,
+      // and not while SMD-4254's back-off sets such an outage down at once — a crashing thought claimed again at each
+      // turn crashed the provider every two minutes — nor for a refusal, which the next period or the rescan tries.
+      {
+        /** Fifteen notes for extraction at 500 ms each, about 7.5 s of the claim passes' work, past several 2 s turns. */
+        const extractWork = async (word: string) => {
+          sw.slowExtract = 500;
+          await sql`UPDATE thought_work_claims SET status = 'succeeded' WHERE work_type <> ${EMBED_JOB} AND status = 'pending'`;
+          for (let i = 0; i < 15; i++) await capture(`A note extraction takes while re-embed is ${word}, number ${i}.`, "sync-sleep", 0, 36);
+        };
+        // The back-off: a thought that brings the provider down for good, a 3 s bound, a 30 s back-off. Set down at the
+        // bound, backing off; the claim passes' 2 s turns run out several times inside the window, and none tries it.
+        sw.embedCrashOn = "baneberry";
+        sw.embedCrashProbes = Infinity;
+        sw.embedCrashes = 0;
+        await poolFirst(await vectorless("A baneberry note whose embedding brings the provider down for good."), []);
+        await extractWork("backing off");
+        let boLimit = false, boTried = true, boCode = -9;
+        const boStop = follow({ reembedShareMs: 2000, reembedThoughtProbeMs: 500, reembedThoughtWaitMs: 3000, reembedThoughtBackoffMs: 30_000 });
+        try {
+          boLimit = await pollUntil(async () => lines.some((l) => PAST_BOUND.test(l)), 30_000);
+          if (boLimit) await Bun.sleep(8000);
+          boTried = lines.some((l) => RETRIED.test(l));
+        } finally {
+          sw.embedCrashOn = null;
+          sw.embedCrashLeft = null;
+          sw.slowExtract = 0;
+          boCode = await boStop();
+        }
+        assert(boLimit && !boTried && boCode === 0,
+          `a re-embed set down at its bound, backing off: no claim passes' turn's end tries it again inside the back-off's window, where each would claim the crashing thought again (the limit ${boLimit}; tried again ${boTried}; exit ${boCode}${boLimit && !boTried ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+        // A refusal: the embedding key refused at re-embed's start sets it down (provider); the claim passes' 2 s turns
+        // run out several times, and none tries it — the next period or the rescan does.
+        await vectorless("A note with no vector while the embedding key is refused.");
+        await extractWork("refused");
+        sw.embedKeyRefused = true;
+        let keyLimit = false, keyTried = true, keyCode = -9;
+        const keyStop = follow({ reembedShareMs: 2000 });
+        try {
+          keyLimit = await pollUntil(async () => lines.some((l) => /re-embed set down for this period — the embedding provider refused it/.test(l)), 20_000);
+          if (keyLimit) await Bun.sleep(8000);
+          keyTried = lines.some((l) => RETRIED.test(l));
+        } finally {
+          sw.embedKeyRefused = false;
+          sw.slowExtract = 0;
+          keyCode = await keyStop();
+        }
+        assert(keyLimit && !keyTried && keyCode === 0,
+          `a re-embed set down for a refusal — its key — is not tried again at the claim passes' turns' ends, only by the next period or the rescan (set down ${keyLimit}; tried again ${keyTried}; exit ${keyCode}${keyLimit && !keyTried ? "" : `; its last lines: ${lines.slice(-12).map((l) => l.trim().slice(0, 160)).join(" | ")}`})`);
+      }
     }
   } finally {
     sw.embedCrashOn = null;
