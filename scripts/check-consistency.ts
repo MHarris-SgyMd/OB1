@@ -11983,7 +11983,7 @@ function readsProblems(text: string, gated: readonly string[], selfCheckJob: str
     const cell = axes.map((a) => "${{ matrix." + a + " }}").join("-");
     const wantList = `${READS_LIST} ${key}${cell ? ` ${cell}` : ""}`;
     const lists = steps.flatMap((s, i) => (readsRuns(runOf(s), "list") ? [i] : []));
-    if (lists.length !== 1) { problems.push(`job ${key} has ${lists.length} steps that run ${READS_SCRIPT} list, not one — its last \`run\` step is \`${wantList}\` (check 55, SMD-2435)`); continue; }
+    if (lists.length !== 1) { problems.push(`job ${key} has ${lists.length} steps that run ${READS_SCRIPT} list, not one — its last step but its upload is \`${wantList}\` (check 55, SMD-2435)`); continue; }
     const list = steps[lists[0]];
     if (runOf(list) !== wantList) problems.push(`job ${key}'s list step runs \`${runOf(list)}\`, not \`${wantList}\` — the list is named for the job${cell ? " and its cell, so one cell's does not overwrite another's" : ", so no other job's overwrites it"} (check 55, SMD-2435)`);
     if (String(list.if ?? "").trim() !== READS_LIST_IF) problems.push(`job ${key}'s list step runs if: ${JSON.stringify(list.if ?? null)}, not ${READS_LIST_IF} — after a failed step too, its header saying how the job stood, and not where no marker was made, a failed checkout, with no script to run (check 55, SMD-2435)`);

@@ -1,9 +1,9 @@
 #!/bin/bash
 # What a job read (SMD-2435 PR 3b-1). `reads.sh mark` straight after a job's
-# checkout, `reads.sh list JOB [CELL]` as its last step, which writes the
-# tracked files the job opened and the tracked folders it listed between the
-# two to $RUNNER_TEMP/reads/JOB[.CELL].txt and says how many;
-# `reads.sh --self-check` runs its cases.
+# checkout, `reads.sh list JOB [CELL]` as its last step but the list's
+# upload, which writes the tracked files the job opened and the tracked
+# folders it listed between the two to $RUNNER_TEMP/reads/JOB[.CELL].txt and
+# says how many; `reads.sh --self-check` runs its cases.
 #
 # A runner's checkout is on a filesystem mounted relatime (the probe, OB1 PR
 # 835): a file's first read after it is written moves its access time, and a
@@ -90,7 +90,7 @@ gone_now() {
 # character in JOB or CELL that is not a letter, a digit, -, _ or . is
 # written _, so a matrix value cannot leave the file's name or its header.
 list() {
-  local job=${1:-} cell=${2:-} dir out sight=ok files=0 dirs=0 odd=0 gone=0 p tmp own=''
+  local job=${1:-} cell=${2:-} dir out sight=ok files=0 dirs=0 odd=0 gone=0 p tmp own='' more=''
   if [ -z "$job" ]; then echo "usage: reads.sh list JOB [CELL]" >&2; return 2; fi
   job=${job//[^A-Za-z0-9_.-]/_} cell=${cell//[^A-Za-z0-9_.-]/_}
   dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/reads
@@ -144,7 +144,6 @@ list() {
     blind) echo "::warning title=reads.sh::this filesystem recorded no access time for a file just read, so $job${cell:+ ($cell)}'s list is empty" ;;
     unmarked) echo "::warning title=reads.sh::no marker was made after the checkout, so $job${cell:+ ($cell)}'s list is empty" ;;
   esac
-  local more=''
   if [ "$gone" -gt 0 ]; then more=", $gone gone by the end"; fi
   if [ "$odd" -gt 0 ]; then more="$more, $odd path(s) with a tab or a newline left out"; fi
   echo "reads.sh: $job${cell:+ ($cell)} opened $files of $(git -C "$top" ls-files | wc -l | tr -d ' ') tracked files and listed $dirs folders (sight $sight$more), digest $(sed 1d "$out" | git hash-object --stdin | cut -c1-12)"
@@ -175,19 +174,21 @@ self_check() {
   if ! (cd "$dir" && g init -q repo && cd repo && mkdir -p read left walked deep/er gone tool && echo a > read/a.txt && echo b > left/b.txt && echo c > walked/c.txt \
       && echo d > deep/er/d.txt && echo e > top.txt && echo o > "$(printf 'odd\tname.txt')" && echo x > ./-dash.txt && echo r > gone/r.txt && cp "$SELF" tool/reads.sh \
       && g add -A && g commit -qm base && cd .. && g clone -q repo work) > /dev/null 2>&1; then
-    echo "reads.sh: could not make the scratch repository" >&2; rm -rf "$dir"; return 1
+    echo "reads.sh: could not make the scratch repository" >&2; return 1
   fi
   # The cases run in work, a clone: its files are written by a checkout and
   # not yet read, as a job's are. In repo, where `git add` read each to hash
   # it, relatime would leave a later read's access time where that left it.
   # They run work's own copy of this file, tool/reads.sh, as a job runs its checkout's.
+  # fresh: work as a new clone, no file of it read yet, tool/reads.sh included.
+  fresh() { rm -rf "$dir/work" && (cd "$dir" && g clone -q repo work) > /dev/null 2>&1; }
   out="$dir/reads/job.cell.txt"
   # With no marker: an empty list that says so, and exit 0.
   (cd "$dir/work" && RUNNER_TEMP="$dir" bash tool/reads.sh list job cell) > /dev/null 2>&1 || { echo "reads.sh: list with no marker did not exit 0" >&2; fails=$((fails + 1)); }
   grep -q '^# reads v1 job=job cell=cell commit=[0-9a-f]\{40\} status=- sight=unmarked files=0 dirs=0 gone=0 odd=0$' "$out" 2> /dev/null || { echo "reads.sh: with no marker the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
-  # In a fresh clone again, since that list read tool/reads.sh. Marked, then: files read (one named as an option
+  # In a fresh clone, since that list read tool/reads.sh. Marked, then: files read (one named as an option
   # would be, one with a tab in its name), a folder listed, a file deleted unread and one read then deleted.
-  rm -rf "$dir/work" && (cd "$dir" && g clone -q repo work) > /dev/null 2>&1
+  fresh
   (cd "$dir/work" && bash tool/reads.sh mark > /dev/null && cat read/a.txt top.txt deep/er/d.txt ./-dash.txt gone/r.txt "$(printf 'odd\tname.txt')" > /dev/null && ls walked > /dev/null \
     && rm left/b.txt gone/r.txt && JOB_STATUS=success RUNNER_TEMP="$dir" bash tool/reads.sh list job cell > "$dir/said" 2>&1) || { echo "reads.sh: mark, reads and list did not all exit 0" >&2; fails=$((fails + 1)); }
   if grep -q 'sight=blind' "$out" 2> /dev/null; then
@@ -216,21 +217,21 @@ self_check() {
   fi
   # The sight test, where access times are recorded: with its file gone after the marker, so no read of it can
   # show, the list is blind, empty and says so, whatever the job read.
-  rm -rf "$dir/work" && (cd "$dir" && g clone -q repo work) > /dev/null 2>&1
+  fresh
   (cd "$dir/work" && bash tool/reads.sh mark > /dev/null && cat top.txt > /dev/null && rm -f .git/ob1-reads/sight \
     && RUNNER_TEMP="$dir" bash tool/reads.sh list job unseen > "$dir/said" 2>&1) || { echo "reads.sh: a list with no sight file did not exit 0" >&2; fails=$((fails + 1)); }
   grep -q '^# reads v1 job=job cell=unseen commit=[0-9a-f]\{40\} status=- sight=blind files=0 dirs=0 gone=0 odd=0$' "$dir/reads/job.unseen.txt" 2> /dev/null \
     || { echo "reads.sh: with no sight file the header is '$(head -1 "$dir/reads/job.unseen.txt" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
   grep -q '^::warning title=reads.sh::this filesystem recorded no access time' "$dir/said" || { echo "reads.sh: a list with no sight file gave no warning" >&2; fails=$((fails + 1)); }
   # …and so is a sight file written after the marker, which a read would then show whether or not reads do.
-  rm -rf "$dir/work" && (cd "$dir" && g clone -q repo work) > /dev/null 2>&1
+  fresh
   (cd "$dir/work" && bash tool/reads.sh mark > /dev/null && sleep 1.1 && echo late > .git/ob1-reads/sight \
     && RUNNER_TEMP="$dir" bash tool/reads.sh list job late > /dev/null 2>&1) || { echo "reads.sh: a list with a late sight file did not exit 0" >&2; fails=$((fails + 1)); }
   grep -q '^# reads v1 job=job cell=late .* sight=blind files=0 ' "$dir/reads/job.late.txt" 2> /dev/null \
     || { echo "reads.sh: with a sight file written after the marker the header is '$(head -1 "$dir/reads/job.late.txt" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
   # A copy reads its source, unless the filesystem makes it as a clone (btrfs, xfs), which reads no byte and moves
   # no time: a job's copies would be in no list. A runner's ext4 clones nothing; where one does, that is the news.
-  rm -rf "$dir/work" && (cd "$dir" && g clone -q repo work) > /dev/null 2>&1
+  fresh
   (cd "$dir/work" && bash tool/reads.sh mark > /dev/null && cp top.txt "$dir/copied" && RUNNER_TEMP="$dir" bash tool/reads.sh list job copy > /dev/null 2>&1) \
     || { echo "reads.sh: mark, a copy and list did not all exit 0" >&2; fails=$((fails + 1)); }
   if grep -q 'sight=ok' "$dir/reads/job.copy.txt" 2> /dev/null && ! grep -qxF -- "$(printf 'f\ttop.txt')" "$dir/reads/job.copy.txt"; then
@@ -252,7 +253,6 @@ self_check() {
       echo "reads.sh: under an exported GIT_DIR the cases wrote to the repository it names: $(g -C "$dir/outer" log --format=%s | tr '\n' ' ')" >&2; fails=$((fails + 1))
     fi
   fi
-  rm -rf "$dir"
   if [ "$fails" -gt 0 ]; then echo "reads.sh: $fails case(s) wrong" >&2; return 1; fi
   echo "reads.sh: every case holds"
 }

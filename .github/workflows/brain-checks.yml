@@ -994,7 +994,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list db-schema
@@ -1128,7 +1128,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list replay-gate
@@ -1303,7 +1303,7 @@ jobs:
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list db-live ${{ matrix.shard }}
@@ -1831,7 +1831,7 @@ jobs:
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list data-layer
@@ -1967,7 +1967,7 @@ jobs:
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list preflight-rest
@@ -3313,7 +3313,7 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list deploy-stack
@@ -4189,7 +4189,7 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list deploy-stack-brains
@@ -5021,7 +5021,7 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml down -v
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list deploy-stack-auth
@@ -5408,7 +5408,7 @@ jobs:
         working-directory: deploy
         run: docker compose -f compose.yaml --profile observability down -v
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list deploy-stack-observability
@@ -5500,7 +5500,7 @@ jobs:
         working-directory: evals
         run: bun eval-auth.ts --down better-auth
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list auth-poc
@@ -5642,7 +5642,7 @@ jobs:
             docker rm -f "$c" > /dev/null 2>&1 || true
           done
 
-      # portable-server's last step has why (SMD-2435).
+      # portable-server's "The job's reads" has why (SMD-2435).
       - name: The job's reads
         if: ${{ !cancelled() && steps.reads-mark.outcome == 'success' }}
         run: bash .github/ci/reads.sh list compat-shim
