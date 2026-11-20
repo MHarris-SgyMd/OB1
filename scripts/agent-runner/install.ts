@@ -8,17 +8,18 @@
  *   - makeInstall makes <state>/install, a clone of the runner's bare repository at one commit of main, or moves it to
  *     a newer commit, and names each probed file the move changed;
  *   - stampReport says, before a run is tried, whether the stamp's binary and install are still there and still as
- *     probed, and names what isn't.
+ *     probed, and whether the host is, and names what isn't. It is not every check a run makes: the flags a run is
+ *     given and the stamp's own list of probes are stampProblem's alone (probes.ts).
  *
  * Nothing here is hashed into the probe stamp (profile.ts's PROFILE_FILES), and nothing hashed imports it.
  */
 
-import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { GitRun } from "./gate.ts";
 import { isObject, shownText } from "./guard.ts";
 import { PROFILE_FILES, sha256Hex } from "./profile.ts";
-import { STAMP_FILE, type Host } from "./probes.ts";
+import { STAMP_FILE, developerGit, hostStamp, type Host } from "./probes.ts";
 
 /** Where the runner keeps its copies of Claude Code, under its state directory: one file per version. */
 export const CLAUDE_DIR = "claude";
@@ -104,10 +105,16 @@ export function makeInstall(git: GitRun, state: string, source: string, commit: 
     const cloned = git(["clone", "--quiet", "--no-hardlinks", "--no-checkout", source, path]);
     if (cloned.code !== 0) return fail(`cloning ${source} to ${path} failed`, cloned.stderr);
   }
+  // A clone just made and not put at its commit is removed: left there, it has HEAD and no files, which the next try
+  // would read as a checkout with changes of its own and refuse for good. One that was there before stays as it was.
+  const undo = (r: InstallResult): InstallResult => {
+    if (from === null) rmSync(path, { recursive: true, force: true });
+    return r;
+  };
   const out = git(["-C", path, "checkout", "--quiet", "--detach", commit]);
-  if (out.code !== 0) return fail(`${path} couldn't be put at ${commit}`, out.stderr);
+  if (out.code !== 0) return undo(fail(`${path} couldn't be put at ${commit} (is it a commit of main?)`, out.stderr));
   const now = git(["-C", path, "rev-parse", "HEAD"]);
-  if (now.code !== 0 || now.stdout.trim() !== commit) return fail(`${path} is not at ${commit} after the checkout`, now.stderr);
+  if (now.code !== 0 || now.stdout.trim() !== commit) return undo(fail(`${path} is not at ${commit} after the checkout`, now.stderr));
   let changed: string[] = [];
   if (from !== null && from !== commit) {
     const diff = git(["-C", path, "diff", "--name-only", from, commit, "--", ...PROFILE_FILES]);
@@ -118,6 +125,17 @@ export function makeInstall(git: GitRun, state: string, source: string, commit: 
 }
 
 export type StampLine = { ok: boolean; text: string };
+
+/** The host as it is now, for stampReport, or null where there is no developer git to read (off macOS, where no stamp is made). */
+export async function hostNow(): Promise<Host | null> {
+  let git: string | null = null;
+  try {
+    git = developerGit();
+  } catch {
+    // no xcode-select
+  }
+  return git === null ? null : hostStamp(process.execPath, git);
+}
 
 const fileSha = (path: string): string | null => {
   try {

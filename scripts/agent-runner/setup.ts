@@ -41,9 +41,9 @@ import { join } from "node:path";
 import { KEY_FILES, KEY_SHAPES, parseConfig, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import type { GitRun } from "./gate.ts";
-import { CLAUDE_DIR, INSTALL_DIR, claudeVersion, copyClaude, makeInstall, stampReport } from "./install.ts";
-import { BARE_REPO, STATE_DIR, ensureBareRepo, gitRunner, installDir } from "./live-run.ts";
-import { STAMP_FILE, developerGit, hostStamp, type Host } from "./probes.ts";
+import { CLAUDE_DIR, INSTALL_DIR, claudeVersion, copyClaude, hostNow, makeInstall, stampReport } from "./install.ts";
+import { STATE_DIR, ensureBareRepo, gitRunner, installDir } from "./live-run.ts";
+import { STAMP_FILE, type Host } from "./probes.ts";
 import { PROFILE_FILES, sha256Hex } from "./profile.ts";
 
 /** This repo, as the config's `repo` defaults to it: the upstream the bot forks and must not be able to push to. */
@@ -159,15 +159,33 @@ export function checkGithub(bot: string): { ok: boolean; lines: string[] } {
   return { ok, lines };
 }
 
-/** The host as it is now, for the stamp's report, or null where there is no developer git to read (off macOS). */
-async function hostNow(): Promise<Host | null> {
-  let git: string | null = null;
+/**
+ * `setup.ts checkout`: reads the runner's config for the main checkout, brings the runner's bare repository to its
+ * origin/main (the one source the install clones), and makes or moves the install: to `commit`, or to that main.
+ * Every path is the caller's, so the self-check runs it whole on a temp directory.
+ */
+export function checkout(io: { runnerDir: string; state: string; home: string; git: GitRun; commit: string | null }): { ok: boolean; lines: string[] } {
+  const no = (why: string): { ok: boolean; lines: string[] } => ({ ok: false, lines: [`✗ ${why}`] });
+  const configPath = join(io.runnerDir, "config.json");
+  let text: string | null;
   try {
-    git = developerGit();
-  } catch {
-    // no xcode-select: not macOS, where no stamp is made
+    text = readOwnedFile(configPath, false);
+  } catch (e) {
+    return no((e as Error).message);
   }
-  return git === null ? null : hostStamp(process.execPath, git);
+  if (text === null) return no(`no config at ${configPath}`);
+  const cfg = parseConfig(text, io.home);
+  if ("error" in cfg) return no(`${configPath}: ${cfg.error}`);
+  const bareRepo = join(io.state, "repo.git");
+  const bare = ensureBareRepo(io.git, bareRepo, cfg.mainCheckout);
+  if (!bare.ok) return no(bare.problem);
+  const made = makeInstall(io.git, io.state, bareRepo, io.commit ?? bare.base);
+  if (!made.ok) return no(made.problem);
+  const lines = [`✓ ${made.path} is at ${made.commit}${made.from === null ? " (made)" : made.from === made.commit ? " (as it was)" : ` (moved from ${made.from})`}`];
+  if (made.from === null) lines.push("  Run the probes from it before a run: no stamp names it yet.");
+  else if (made.changed.length) lines.push(`  The move changed ${made.changed.length} probed file(s): ${made.changed.join(", ")}. Run the probes again from it.`);
+  else if (made.from !== made.commit) lines.push("  The move changed no probed file: a stamp made from it still holds.");
+  return { ok: true, lines };
 }
 
 /** Offline self-check: the shape gate, the 0600 write, the no-symlink write, the owner-only read, and the directory check — on a temp directory, no clipboard, no network. */
@@ -335,6 +353,33 @@ export function selfCheck(): number {
       ok(!refusedDir.ok && refusedDir.problem.includes("not a checkout"), "a directory there that is no checkout is refused");
       const short = makeInstall(git, join(root, "state-short"), src, c1.slice(0, 12));
       ok(!short.ok && short.problem.includes("full commit id") && !existsSync(join(root, "state-short")), "a commit id that isn't whole is refused before anything is made");
+      // A first make whose commit the source doesn't have: the clone it made is removed, so the next try is a first make again.
+      const unknown = makeInstall(git, join(root, "state-unknown"), src, "f".repeat(40));
+      ok(!unknown.ok && unknown.problem.includes("couldn't be put at") && !existsSync(join(root, "state-unknown", INSTALL_DIR)), "a commit the source doesn't have is refused, and the clone just made is removed");
+      const retry = makeInstall(git, join(root, "state-unknown"), src, c1);
+      ok(retry.ok && retry.from === null, "so the next try makes it, where a clone left behind would be refused for its changes");
+      const kept = makeInstall(git, state, src, "f".repeat(40));
+      ok(!kept.ok && existsSync(join(path, "notes.txt")), "a checkout that was there before a failed move stays as it was");
+
+      // The command whole (SMD-4491 review pass 1): the config's main checkout, the bare repository brought to its origin/main, the install made and moved.
+      // The fixture as a main checkout: its own main behind its origin/main, which then moves on, as a maintainer's does.
+      git(["-C", src, "checkout", "--quiet", "--detach"]);
+      git(["-C", src, "branch", "--quiet", "-f", "main", c1]);
+      git(["-C", src, "update-ref", "refs/remotes/origin/main", c2]);
+      const runnerDir = join(root, "runner-config");
+      mkdirSync(runnerDir, { mode: 0o700 });
+      writeFileSync(join(runnerDir, "config.json"), JSON.stringify({ initiative: "I", maintainerLinearId: "00000000-0000-4000-8000-000000000000", mainCheckout: src }), { mode: 0o600 });
+      const cmdState = join(root, "state-command");
+      const io = { runnerDir, state: cmdState, home: root, git };
+      const first = checkout({ ...io, commit: null });
+      ok(first.ok && first.lines[0].includes(`${join(cmdState, INSTALL_DIR)} is at ${c2} (made)`) && first.lines[1].includes("no stamp names it yet") && existsSync(join(cmdState, "repo.git", "HEAD")), "`checkout` with no commit makes the bare repository and the install at the main checkout's origin/main");
+      git(["-C", src, "update-ref", "refs/remotes/origin/main", c3]);
+      const second = checkout({ ...io, commit: null });
+      ok(second.ok && second.lines[0].includes(`(moved from ${c2})`) && second.lines[1].includes(PROFILE_FILES[0]) && second.lines[1].includes("Run the probes again"), "run again after main moved, it moves the install and names the probed file to sweep for");
+      const back = checkout({ ...io, commit: c1 });
+      ok(back.ok && back.lines[0].includes(`is at ${c1}`), "`--commit` puts it at that commit of main");
+      const noConfig = checkout({ ...io, runnerDir: join(root, "no-runner-dir"), commit: null });
+      ok(!noConfig.ok && noConfig.lines[0].startsWith("✗"), "with no config it says so and makes nothing");
     });
 
     section("what the probe stamp says of its binary and its install (SMD-4491)", () => {
@@ -472,27 +517,9 @@ if (import.meta.main) {
   if (cmd === "checkout") {
     const at = rest.indexOf("--commit");
     if (rest.length !== (at >= 0 ? 2 : 0) || (at >= 0 && at !== 0)) fail("usage: checkout [--commit <full commit id>]");
-    try {
-      const configPath = join(RUNNER_DIR, "config.json");
-      const text = readOwnedFile(configPath, false);
-      if (text === null) throw new Error(`no config at ${configPath}`);
-      const cfg = parseConfig(text, homedir());
-      if ("error" in cfg) throw new Error(`${configPath}: ${cfg.error}`);
-      const git = gitRunner(homedir());
-      // The runner's bare repository, brought to the main checkout's origin/main: the one source the install clones.
-      const bare = ensureBareRepo(git, BARE_REPO, cfg.mainCheckout);
-      if (!bare.ok) throw new Error(bare.problem);
-      const made = makeInstall(git, STATE_DIR, BARE_REPO, at >= 0 ? (rest[1] as string) : bare.base);
-      if (!made.ok) throw new Error(made.problem);
-      console.log(`✓ ${made.path} is at ${made.commit}${made.from === null ? " (made)" : made.from === made.commit ? " (as it was)" : ` (moved from ${made.from})`}`);
-      if (made.from === null) console.log("  Run the probes from it before a run: no stamp names it yet.");
-      else if (made.changed.length) console.log(`  The move changed ${made.changed.length} probed file(s): ${made.changed.join(", ")}. Run the probes again from it.`);
-      else if (made.from !== made.commit) console.log("  The move changed no probed file: a stamp made from it still holds.");
-      process.exit(0);
-    } catch (e) {
-      console.error(`✗ ${(e as Error).message}`);
-      process.exit(1);
-    }
+    const done = checkout({ runnerDir: RUNNER_DIR, state: STATE_DIR, home: homedir(), git: gitRunner(homedir()), commit: at >= 0 ? (rest[1] as string) : null });
+    for (const line of done.lines) (done.ok ? console.log : console.error)(line);
+    process.exit(done.ok ? 0 : 1);
   }
 
   if (cmd === "check-github") {

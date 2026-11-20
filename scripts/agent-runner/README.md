@@ -189,7 +189,7 @@ Each runner session, the worker's and the review's, runs inside the five layers 
 bun scripts/agent-runner/setup.ts claude ~/.local/share/claude/versions/2.1.329       # the runner's own copy; prints --claude --sha256 --version
 bun scripts/agent-runner/setup.ts checkout                                            # the runner's own checkout, at the main checkout's origin/main
 cd ~/.local/share/open-brain/agent-runner/install                                     # the probes and a run start from the install
-bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.329
+bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.329 --main-checkout ~/Projects/OB1
 bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts … --state <dir> --only init,keychain --main-checkout ~/Projects/OB1
 bun scripts/agent-runner/probes.ts --self-check                                       # offline, no Claude Code; CI runs it
 ```
@@ -234,6 +234,8 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 * **`setup.ts claude <path>`** copies that binary to `~/.local/share/open-brain/agent-runner/claude/<version>` (0500, in a 0700 directory), asking the binary its own version. It prints the three flags the probes and a run take. The same bytes again are left alone; other bytes under a version already there are refused, since a stamp may name the copy.
 * **`setup.ts checkout [--commit <sha>]`** makes `~/.local/share/open-brain/agent-runner/install`: a clone of the runner's bare repository on a detached HEAD, at the main checkout's `origin/main` unless a commit is given. No task works in it. Run again, it moves the install to the newer commit and names each probed file the move changed: any named means the probe sweep runs again from the install; none means the stamp still holds. A checkout with changes of its own is refused.
 * **`setup.ts verify`** and **`live-run.ts --plan`** say what the stamp makes of both, before a run is tried: a binary gone or changed, an install gone, each probed file that differs, a run started from another checkout, a new Bun, git or macOS build.
+
+**From the install, give the sweep `--main-checkout`.** It defaults to the checkout the probes run from, which was the maintainer's own tree while they ran from a worktree of it. From the install that default is the install, and the probe that a session can't read the maintainer's checkout would test the wrong directory.
 
 Until the install is made and probed, the stamp names the checkout the last sweep ran from, and a run starts from there.
 
