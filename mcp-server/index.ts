@@ -19,6 +19,7 @@ import { listenHostFrom, routable } from "../server-portable/auth.ts";
 import { createCallCount, drainBoundFrom, drainOnSignal, isStoppable, type Stoppable } from "../server-portable/shutdown.ts";
 import { cutOpenRequests, cutTelemetry, flushTelemetry, knowTools, markTelemetry, outgoingTraceparent, startTelemetry } from "../server-portable/telemetry.ts";
 import { createMcpApp, edgeFrom, REST_TIMEOUT_MS } from "./app.ts";
+import { createListenStreams } from "./listen-streams.ts";
 import { createExchanger, exchangeSettings } from "./exchange.ts";
 import { originProblem } from "../server-portable/oauth-edge.ts";
 
@@ -72,8 +73,12 @@ const plugins = enabledPlugins();
 knowTools(plugins.flatMap((p) => p.operations.map((op) => op.tool)));
 /** The tool calls running, counted for the stop (SMD-2250), as server-portable's index.ts counted its own: a call whose client left still runs to its end. */
 const toolCalls = createCallCount();
-/** The stop's word: set when it cuts what is still in flight, so a request it ends then is `cut`, not `abandoned`. */
-const stop = { cut: false };
+/**
+ * The stop's word. `cut`: set when it cuts what is still in flight, so a request it ends then is `cut`, not
+ * `abandoned`. `drainEnded`: set when its drain has ended, by a stop that closes listen streams itself (SMD-4347):
+ * the app then serves nothing that arrives.
+ */
+const stop = { cut: false, drainEnded: false };
 const edge = edgeFrom({ COMPOSE_PROFILES: env.COMPOSE_PROFILES, OB1_PUBLIC_ORIGIN: env.OB1_PUBLIC_ORIGIN });
 // The token exchange (SMD-2286): on a configured stack with the `mcp` client's secret; without the secret a token is
 // no caller (refused as before), said once at the start rather than on every OAuth client's request.
@@ -85,7 +90,9 @@ if (import.meta.main && !edge.origin && env.OB1_AUTH_SECRET_MCP?.trim()) {
   console.warn(`OB1_AUTH_SECRET_MCP is set, but no OAuth token is traded: ${edge.configured ? originProblem(env.OB1_PUBLIC_ORIGIN) : "COMPOSE_PROFILES does not name auth"} (set COMPOSE_PROFILES and OB1_PUBLIC_ORIGIN as the REST core has them).`);
 }
 const exchanger = exchange ? createExchanger(exchange) : null;
-const app = createMcpApp({ rest, plugins: () => plugins, toolCalls, stop, restUrl: baseUrl.replace(/\/\/[^/@]*@/, "//…@"), edge: () => edge, exchanger: () => exchanger });
+/** The listen streams this server holds open, where it holds any (listen-streams.ts, SMD-4347): the app counts them, and the stop closes them. */
+const listenStreams = createListenStreams();
+const app = createMcpApp({ rest, plugins: () => plugins, toolCalls, stop, restUrl: baseUrl.replace(/\/\/[^/@]*@/, "//…@"), edge: () => edge, exchanger: () => exchanger, listen: listenStreams });
 
 let bunServer: Stoppable | undefined;
 if (import.meta.main) {
@@ -101,6 +108,9 @@ if (import.meta.main) {
     server: () => bunServer,
     calls: toolCalls,
     close: async () => false,
+    // The listen streams are not waited on: the stop closes them itself, each with its closing frame, after the
+    // flush, or at its cut. Given only where the server holds any, so a server that holds none stops as it always has.
+    ...(listenStreams.hold ? { heldCount: () => listenStreams.count, closeHeld: () => listenStreams.close(), onDrainEnd: () => { stop.drainEnded = true; } } : {}),
     // The telemetry still batched goes under a bound of its own, said on its own; cut short, what each signal still
     // held is said by count (as the REST core's, SMD-2902).
     mark: markTelemetry,
