@@ -22759,6 +22759,7 @@ console.log("\n[135] Migration 150: rebuild_derived hands a stale tags row to th
   const as067 = fn("150")
     .replace("  v_cfg_retag    text;               -- 150: db/retag.ts's recorded key, the tags' pool; NULL where unset\n", "")
     .replace("  SELECT NULLIF(value, '') INTO v_cfg_retag FROM ob1_config WHERE key = 'retag_key';\n", "")
+    .replace("        -- were before 150. Before 067 the row fell to the kept arm below, unmarked", "        -- are. Before this file the row fell to the kept arm below, unmarked")
     .replace(/      WHEN 'metadata' THEN\n        -- ob1:tags-requeued-under-retag-key[\s\S]*?        END IF;\n      ELSE\n/,
       "      WHEN 'metadata' THEN\n        -- No pool re-tags a thought: marked for the operator, nothing more.\n        UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;\n        v_marked   := v_marked + 1;\n        v_unqueued := v_unqueued + 1;\n      ELSE\n");
   assert(as067 === fn("067"), `150's rebuild_derived is 067's verbatim but for the retag key's read and the tags' arm (${as067.length} vs ${fn("067").length} chars)`);

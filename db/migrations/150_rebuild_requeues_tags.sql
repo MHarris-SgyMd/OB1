@@ -31,8 +31,12 @@
 --   * Preflight's retag rows and the prompt version's --switch (SMD-2298
 --     PR 3); a sleep pass (PR 4).
 --   * A requeue revokes a live lease on the thought, as every arm's does:
---     the holder's write meets STALE_READ (the text moved under it) and its
---     release returns false.
+--     db/retag.ts's write in flight meets STALE_READ (the text moved under
+--     it), and the worker, finding the claim pending again, re-tags the
+--     thought from its new text in the same run (review pass 1).
+--   * thought_validity (149, SMD-3887) still answers no_pool for a stale
+--     tags row; with a retag key recorded the row has a pool now (named on
+--     SMD-3887, review pass 1).
 --
 -- SAFETY
 --   One function redefined under its own signature; its comment. MINOR:
@@ -56,6 +60,7 @@
 DO $qc$
 BEGIN
   IF to_regprocedure('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)') IS NULL
+     OR to_regprocedure('settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NULL
      OR to_regprocedure('requeue_thought_work(text, uuid)') IS NULL
      OR NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('derivations') AND attname = 'stale_since' AND NOT attisdropped) THEN
     RAISE EXCEPTION USING
@@ -452,7 +457,7 @@ BEGIN
         -- 064's generated page section (SMD-1812): no pool regenerates it —
         -- its generator calls write_page_section, whose lineage upsert
         -- clears the mark — so it is marked for the operator, as the tags
-        -- are. Before this file the row fell to the kept arm below, unmarked
+        -- were before 150. Before 067 the row fell to the kept arm below, unmarked
         -- and uncounted as waiting (067's post-merge review pass, run-it).
         UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
         v_marked   := v_marked + 1;

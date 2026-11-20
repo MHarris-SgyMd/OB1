@@ -23750,9 +23750,18 @@ if (want("29")) {
     const SPECIAL = new Map<string, number | "prose" | "slow" | "partial">();
     let raced = false;
     let raceId = "";
+    /** A thought whose text a session moves and rebuilds while its call is out (SMD-2298 PR 2, review pass 1). */
+    let rebuiltId = "";
+    let rebuiltDone = false;
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
       const body = await req.text();
       bodies.push(body);
+      if (!rebuiltDone && rebuiltId && body.includes("[29] rebuilt")) {
+        rebuiltDone = true;
+        const edited = "[29] rebuilt, its text moved while the call was out";
+        await sql`UPDATE thoughts SET content = ${edited}, content_fingerprint = content_fingerprint_of(${edited}) WHERE id = ${rebuiltId}::uuid`;
+        await sql`SELECT rebuild_derived(${rebuiltId}::uuid, 'live: rebuilt while its call was out')`;
+      }
       if (!raced && raceId && body.includes("[29] race")) {
         raced = true;
         const edited = `[29] race, edited meanwhile ${raceId.slice(0, 8)}`;
@@ -24028,6 +24037,19 @@ if (want("29")) {
       const jClaims = (await claims()).filter((c) => order2.includes(c.id));
       assert(proseBetween.code === 1 && !/in a row/.test(proseBetween.err) && jClaims.length === 5 && jClaims.every((c) => c.status === "failed"),
         `a 400, then an answer in prose, three times: the prose was an answer, so no three in a row; the run goes on, every one failed as its own, exit 1 (${proseBetween.code}: ${jClaims.map((c) => c.status).join(",")})`);
+
+      // SMD-2298 PR 2 review pass 1: a session moves a thought's text and rebuilds it while the worker's call is out —
+      // 150 requeues it, revoking the worker's lease. The worker's write meets STALE_READ, it finds the claim pending
+      // (a rebuild's requeue, not another run's lease), and re-tags it from the new text in the same run, under --limit 1.
+      const RB = await tagged("[29] rebuilt, the text the tags were made from");
+      await move(RB, "[29] rebuilt, moved before the run");
+      rebuiltId = RB;
+      const rbFrom = bodies.length;
+      const rbRun = await retag({ limit: 1, pausesMs: [10] });
+      const rbRow = await tagsRow(RB);
+      assert(rebuiltDone && settled(rbRow) && bodies.slice(rbFrom).filter((b) => b.includes("[29] rebuilt")).length === 2
+          && (await claims()).find((c) => c.id === RB)?.status === "succeeded" && /1 changed while re-tagged/.test(rbRun.out) && !/no longer this worker's/.test(rbRun.out + rbRun.err),
+        `a text moved and rebuilt while the call is out: requeued by 150, the worker re-tags it from the new text in the same run, counted changed, not lost (${line(rbRun.out, "re-tagged (")})`);
 
       // A 401 is the request's: the run stops, exit 2, nothing marked failed, the thought pending for the next run.
       const P401 = await plant("[29] P401 tagged, the key refused", { topics: ["t"], type: "idea" });

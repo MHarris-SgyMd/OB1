@@ -596,8 +596,13 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
            SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL, finished_at = NULL, enqueued_at = now(), worker_id = NULL
          WHERE work_type = ${JOB} AND thought_id = ${row.id}::uuid AND status = 'claimed' AND worker_id = ${workerId}
         RETURNING 1`) as unknown[];
-      // No row: the lease lapsed and another run holds the thought now; it re-tags it (review pass 3).
-      return requeued.length > 0 ? { outcome: "changed" } : { outcome: "lostClaim" };
+      if (requeued.length > 0) return { outcome: "changed" };
+      // No row: pending with no holder is a rebuild's requeue (migration 150 revokes the lease when the text moves), the
+      // same as this worker's own; claimed by another worker is a lease that lapsed and was taken since, which that
+      // run re-tags (review pass 3; SMD-2298 PR 2 review pass 1: the rebuild's case read as a lapse, and under --limit
+      // the thought went unre-tagged).
+      const [now] = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${JOB} AND thought_id = ${row.id}::uuid`) as { status: string }[];
+      return now?.status === "pending" ? { outcome: "changed" } : { outcome: "lostClaim" };
     }
     return { outcome: "failed", error: `update_thought: ${r.r.error}` };
   }

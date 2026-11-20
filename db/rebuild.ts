@@ -19,7 +19,8 @@
  * the one re-derivation the database owns), enqueued (handed to the workers'
  * pools under their CURRENT keys, the reason marked on each lineage row),
  * deleted (a row whose artifact is gone; under --gone the windows, the graph
- * and the snapshot rows too), marked with no pool (the tags), kept (a
+ * and the snapshot rows too), marked with no pool (the tags before
+ * db/retag.ts has recorded its key, migration 150), kept (a
  * structured pass, a decided proposal), current (nothing moved), and the
  * derived_from children it cannot reproduce. The reason defaults to the flag
  * that asked ('operator: edit', 'operator: force', 'operator: forget'); say

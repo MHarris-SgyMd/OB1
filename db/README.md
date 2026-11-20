@@ -938,7 +938,7 @@ as a person's decision, which would leave a pair the pass once found clear
 unproposable when its texts later conflict, and over a fifth status); a
 person's rejected or accepted row is kept, as before; and 064's `section`
 kind — a generated page section, which 063's body sent to the kept arm — is
-marked with no pool, as the tags are (its generator's next
+marked with no pool, as the tags were before 150 (its generator's next
 `write_page_section` clears the mark). `consolidate.ts` does
 the rest (its section below): every run re-pools each stale row's newer
 thought under its own key, judges a stale pair the top-k left out when it
