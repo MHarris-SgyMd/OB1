@@ -23,6 +23,7 @@ import { prepareClone } from "./clone.ts";
 import { gate, type Commitlint, type GitRun, type ScanSecrets } from "./gate.ts";
 import { branchFor, bundleFile, clonePath, diffFile, reviewCheckout, runDir, runId, startRecord, updateRecord, writeNoFollow, type GateSummary, type Outcome, type RunRecord, type Step } from "./record.ts";
 import type { SessionOutcome } from "./session.ts";
+import { oneLine } from "./text.ts";
 
 /** One session run, as the orchestrator asks for it. The caller turns this into a SessionSpec and calls session.ts's `runSession`; the self-check stubs it. */
 export type SessionRequest = {
@@ -128,10 +129,7 @@ export function resumeDecision(findings: string[], firstRunCostUsd: number | nul
 const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
 
 /** A clean one-line fragment of git's or an error's output, for a note. */
-const trunc = (s: string, n = 200): string => {
-  const t = (s ?? "").replace(/\s+/g, " ").trim();
-  return t.length > n ? `${t.slice(0, n - 1)}…` : t;
-};
+const trunc = (s: string, n = 200): string => oneLine(s ?? "", n);
 
 /** Delete the clone and the review checkout (docs step 10); the bundle, the diff, the transcripts, the logs and the record stay. */
 function cleanup(dir: string): void {
