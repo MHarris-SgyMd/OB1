@@ -1571,6 +1571,25 @@ else {
   assert(reRecorded.action === "added" && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
          "…and following the remedy — the facet closed, the subject recorded again — the check is ok again");
   await ctx.unsafe(`SELECT delete_thought('${subA}'::uuid)`);
+  // 148's kind (SMD-4446): a settled part's lineage row is no stale row for the coverage to count. Its status is its
+  // mark, as a proposal's is, and a decided part keeps the fingerprints it was judged at for good. The older thought
+  // is the first input of the part's row: its text moved raw, the count grows by its own rows and not by the part's.
+  // The two thoughts are removed after, so the counts below are as they were.
+  const staleIn = (out: string) => Number(/(\d+) stale \(the input's text moved since/.exec(out)?.[1] ?? NaN);
+  const partO = ((await ctx.unsafe(`SELECT upsert_thought('preflight-148 older: the plan is to ship by Friday', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const partN = ((await ctx.unsafe(`SELECT upsert_thought('preflight-148 newer: it shipped on Thursday', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const part148 = (await ctx.unsafe(`SELECT record_settled_part('${partO}'::uuid, '${partN}'::uuid, 'older', 'ship by Friday', 'shipped on Thursday', 'implements', 'the later note reports it done', 'consolidate:t@p4',
+      (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partO}'::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partN}'::uuid), '{"deterministic": false}'::jsonb) AS r`))[0].r as { action: string; id: string };
+  await ctx.unsafe(`SELECT review_settled_part('${part148.id}'::uuid, 'accept', 'right')`);
+  const staleBefore148 = staleIn((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out);
+  await ctx.unsafe(`UPDATE thoughts SET content = 'preflight-148 older: the plan was to ship by Friday', content_fingerprint = content_fingerprint_of('preflight-148 older: the plan was to ship by Friday') WHERE id = '${partO}'::uuid`);
+  const rows148 = (await ctx.unsafe(`SELECT count(*) FILTER (WHERE artifact_kind = 'part')::int AS parts, count(*) FILTER (WHERE artifact_kind NOT IN ('part', 'proposal', 'relation', 'subject'))::int AS own
+                                       FROM derivations WHERE input_ids[1] = '${partO}'::uuid`))[0] as { parts: number; own: number };
+  const staleAfter148 = staleIn((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out);
+  assert(part148.action === "recorded" && rows148.parts === 1 && staleAfter148 - staleBefore148 === rows148.own,
+         `a settled part's lineage row is not counted stale when its thought's text moves: the coverage's count grows by the thought's own rows alone (${staleBefore148} before, ${staleAfter148} after; ${rows148.own} of its own, ${rows148.parts} part's)`);
+  await ctx.unsafe(`SELECT delete_thought('${partN}'::uuid)`);
+  await ctx.unsafe(`SELECT delete_thought('${partO}'::uuid)`);
   // 120's edge (SMD-3306): a work thread's standing edge without its lineage
   // row is refused the same way, counted apart from a judged relation, and the
   // remedy is the thread's own: close the edge and re-link its key, which

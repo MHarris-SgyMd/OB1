@@ -426,7 +426,7 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       const [c] = (await sql`
         WITH al AS (SELECT id, artifact_kind, artifact_id, produced_by, input_ids, input_fingerprints, recipe, stale_since FROM derivations ORDER BY id LIMIT ${LINEAGE_WINDOW}),
              st AS (SELECT d.id FROM al d JOIN thoughts t ON t.id = d.input_ids[1]
-                     WHERE d.artifact_kind <> 'proposal' AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))),
+                     WHERE d.artifact_kind NOT IN ('proposal', 'part') AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))),
              orph AS (SELECT d.id FROM al d WHERE ${orphaned(sql)})
         SELECT (SELECT count(*)::int FROM al) AS rows,
                (SELECT jsonb_object_agg(k, n) FROM (SELECT artifact_kind AS k, count(*)::int AS n FROM al GROUP BY 1) s) AS by_kind,

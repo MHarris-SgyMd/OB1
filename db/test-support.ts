@@ -584,9 +584,11 @@ const FUNCTIONS = [
   "ob1_text_forgotten_at(text)",
   "ob1_forget_leftovers()",
   "ob1_forget_thought_body(uuid, jsonb, boolean)",
-  // 148 (SMD-4446): settled parts — the pass's write, the reviewer's decision and the lineage row's drop.
+  // 148 (SMD-4446): settled parts — the pass's write, the reviewer's decision, the guard on a part's judgement and
+  // the lineage row's drop.
   "record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)",
-  "review_settled_part(uuid, text, text, jsonb, boolean)",
+  "review_settled_part(uuid, text, text, jsonb, boolean, timestamptz)",
+  "ob1_keep_part_judgement()",
   "ob1_drop_part_derivation()",
 ];
 

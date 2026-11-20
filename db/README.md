@@ -4963,21 +4963,44 @@ proposals are the ticket's later cuts.
   statement, the quote from each, the word and its group (`no_longer_holds`
   or `done_or_settled`), the reason, the fingerprint of each text as judged,
   the judge's key, a status and who decided it. A pair may hold several
-  parts, and one statement of one thought once.
+  parts, and one statement of one thought once. The statement is read as a
+  thought's text is (`content_fingerprint_of`: case and runs of white space
+  folded), so the same words in other capitals are the same part.
 - **`record_settled_part`** is the pass's write. It refuses a part of the
-  wrong shape, returns NULL for a statement that already stands on the pair,
-  and replaces a stale row in place. It does not check that the words are in
-  the texts: that check is the pass's (SMD-4442).
+  wrong shape, without echoing an argument, and answers
+  `{ok, action, id, status}`: `recorded`, or `stands` with the id and status
+  of the row that already holds the statement. A stale row is replaced in
+  place. It does not check that the words are in the texts: that check is
+  the pass's (SMD-4442).
 - **`review_settled_part`** is the reviewer's decision: accept or reject.
   An accept is refused when either text has moved since it was judged, unless
   forced. A decision that repeats the row's status is refused, and a reviewer
-  may reverse one. An accepted part writes no thought: no `supersedes`
-  pointer is set and nothing is demoted.
+  may reverse one: the row keeps the last decision alone. A caller that
+  passes `p_if_unchanged_since`, the later of the row's `judged_at` and
+  `reviewed_at` as it read them, is refused `STALE_READ` when the row was
+  judged again or decided since. It runs under READ COMMITTED alone. An
+  accepted part writes no thought: no `supersedes` pointer is set and
+  nothing is demoted.
+- **A part keeps its judgement.** No UPDATE moves its pair, its holder or
+  its statement, and its quotes, word, reason, fingerprints and judge change
+  only when a stale part is judged again (`settled_parts_keep_judgement`).
 - **A moved text** sets a pending part stale and queues its newer thought
-  again, through `rebuild_derived`, as it does a proposal. A person's
-  decision stands.
+  again, through `rebuild_derived`, as it does a proposal. A decided part
+  stands. The walk (`derivation_descendants`) orders a part beside the
+  proposal, ahead of the kinds its order does not name, which share what
+  its cap of 2,000 rows leaves.
 - **A deleted or forgotten thought** takes its parts, and their lineage rows,
-  with it.
+  with it. The planner keeps no statistics on a part's words
+  (`SET STATISTICS 0`), so `ANALYZE` copies none into `pg_statistic`.
+- **Unlike a proposal,** a part has no confidence and no similarity (the
+  index for its review queue is by the time judged), and nothing settles
+  one the pass no longer names yet.
+- **Grants.** `rebuild_derived` reads the table once a thought's walk holds
+  a part's lineage row, so a role that runs it (`db/rebuild.ts`, the sleep
+  scheduler's sweep) needs `SELECT` on `settled_parts`. The worker and
+  server groups hold it, and 148 gives it to every role that decides or
+  records proposals. A role outside those is refused there
+  (`permission denied for table settled_parts`).
 
 Needs 016, 029, 061, 063, 067, 111 and 114; a re-apply is a no-op.
 test-schema [133], test-upgrade [20ck].

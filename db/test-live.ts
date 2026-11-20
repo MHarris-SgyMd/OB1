@@ -24247,7 +24247,7 @@ if (want("31")) {
     const po = await cap148("148 live: the plan is to ship the importer by Friday", 4);
     const pn = await cap148("148 live: the importer shipped on Thursday", 5);
     const partOf = async (statement: string, shown: string) =>
-      String((await sql`SELECT record_settled_part(${po.id}::uuid, ${pn.id}::uuid, 'older', ${statement}, ${shown}, 'implements', 'the later note reports it done', ${JUDGE}::text, ${po.fingerprint}, ${pn.fingerprint}, '{"deterministic": false}'::jsonb) AS id`)[0].id);
+      String(((await sql`SELECT record_settled_part(${po.id}::uuid, ${pn.id}::uuid, 'older', ${statement}, ${shown}, 'implements', 'the later note reports it done', ${JUDGE}::text, ${po.fingerprint}, ${pn.fingerprint}, '{"deterministic": false}'::jsonb) AS r`)[0].r as { action: string; id: string }).id);
     const partStatus = async (id: string) => String((await sql`SELECT status FROM settled_parts WHERE id = ${id}::uuid`)[0]?.status);
     const pendingPart = await partOf("ship the importer by Friday", "the importer shipped on Thursday");
     const acceptedPart = await partOf("the plan is to ship", "shipped on Thursday");
@@ -24260,6 +24260,17 @@ if (want("31")) {
     const leavingPart = await rebuildTs("--input", pn.id, "--gone", "--dry-run");
     assert(leavingPart.code === 0 && /cascade:\s+0 proposal\(s\), 2 settled part\(s\) and/.test(leavingPart.out) && (await partStatus(acceptedPart)) === "accepted",
       `a leaving thought's two parts are counted for the cascade, the dry run keeping them (exit ${leavingPart.code}: ${leavingPart.out.split("\n").find((l) => /cascade:/.test(l))?.trim()})`);
+    // The census (--status) counts a lineage row whose first input's text moved. A part's status is its mark, as a
+    // proposal's is, and a decided part keeps the fingerprints it was judged at: its row is no stale row to count. The
+    // older thought is the first input of both parts' rows, so its text moving adds its own rows to the count and neither part's.
+    const staleCount = async () => Number(/stale:\s+(\d+) row\(s\)/.exec((await rebuildTs("--status")).out)?.[1] ?? NaN);
+    const staleBefore = await staleCount();
+    await sql`UPDATE thoughts SET content = '148 live: the plan was to ship the importer by Friday', content_fingerprint = content_fingerprint_of('148 live: the plan was to ship the importer by Friday') WHERE id = ${po.id}::uuid`;
+    const own = (await sql`SELECT count(*) FILTER (WHERE artifact_kind = 'part')::int AS parts, count(*) FILTER (WHERE artifact_kind NOT IN ('part', 'proposal'))::int AS others
+                             FROM derivations WHERE input_ids[1] = ${po.id}::uuid`)[0] as { parts: number; others: number };
+    const staleAfter = await staleCount();
+    assert(own.parts === 2 && own.others >= 1 && staleAfter - staleBefore === own.others,
+      `the census counts the moved thought's own lineage rows stale and neither of its two parts' (${staleBefore} before, ${staleAfter} after; ${own.others} of its own, ${own.parts} parts')`);
   }
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM derivations`;

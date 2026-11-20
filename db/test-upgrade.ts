@@ -7171,7 +7171,7 @@ console.log("\n[20cj] Migration 145: onto a populated brain at the file before i
 
   await sql.close();
 }
-console.log("\n[20ck] Migration 148: onto a populated brain at the file before it — refused by name without 114's ob1_stamp_proposal_reviewer, the table not made and the lineage kinds as they were; then applied: the pending proposal and its lineage row as they were; a part recorded beside it on the same pair and accepted, no pointer written; the roles that decide and record proposals hold the same on parts, a reader of the queue nothing; a moved text stales a pending part and the proposal, the accepted part standing; a re-apply with parts standing a no-op (SMD-4446)");
+console.log("\n[20ck] Migration 148: onto a populated brain at the file before it — refused by name without 114's ob1_stamp_proposal_reviewer, the table not made and the lineage kinds as they were; then applied: the pending proposal and its lineage row as they were; a part recorded beside it on the same pair and accepted, no pointer written; the roles that decide and record proposals hold the same on parts, a reader of the queue nothing; a moved text stales a pending part and the proposal, the accepted part standing; ANALYZE keeps no statistics on a part's words; a re-apply with parts standing a no-op; a transaction that began before a row's last change and writes after it still moves the row's stamp forward (SMD-4446)");
 {
   const the148 = MIGRATIONS.find((f) => /^\d{3}_settled_parts\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   const NUM = the148.slice(0, 3);
@@ -7207,15 +7207,20 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   // A part beside the proposal on the same pair, accepted: no pointer written, the proposal still pending.
   const RECIPE = `{"deterministic": false, "model": "stub"}`;
   const record = async (statement: string, shown: string, word: string) =>
-    String((await sql`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', ${statement}, ${shown}, ${word}, 'the later note reports it done', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb) AS id`)[0].id);
+    String(((await sql`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', ${statement}, ${shown}, ${word}, 'the later note reports it done', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb) AS r`)[0].r as { action: string; id: string }).id);
   const part = await record("ship the importer by Friday", "the importer shipped on Thursday", "implements");
-  const accepted = (await sql`SELECT review_settled_part(${part}::uuid, 'accept', 'right', '{"name": "upgrade-148-op"}'::jsonb) AS r`)[0].r as { ok: boolean; status: string };
+  // The reviewer says when it read the row, as a JavaScript Date carries the time: to the millisecond, where the row's
+  // own has microseconds (PGlite's clock has none, so this is the row that holds the comparison to the millisecond).
+  // A read from before the row was judged is refused; the row's own stamp, passed back, is not.
+  const readAt = (await sql`SELECT judged_at AS at, judged_at::text AS micros FROM settled_parts WHERE id = ${part}::uuid`)[0] as { at: Date; micros: string };
+  const tooEarly = (await sql`SELECT review_settled_part(${part}::uuid, 'accept', 'right', '{"name": "upgrade-148-op"}'::jsonb, false, ${new Date(readAt.at.getTime() - 1000)}::timestamptz) AS r`)[0].r as { ok: boolean; error?: string };
+  const accepted = (await sql`SELECT review_settled_part(${part}::uuid, 'accept', 'right', '{"name": "upgrade-148-op"}'::jsonb, false, ${readAt.at}::timestamptz) AS r`)[0].r as { ok: boolean; status: string; error?: string };
   const shape = async () => (await sql`SELECT (SELECT count(*)::int FROM thoughts WHERE supersedes IS NOT NULL) AS pointers, (SELECT status FROM supersession_proposals WHERE id = ${pid}::uuid) AS proposal,
       (SELECT status FROM settled_parts WHERE id = ${part}::uuid) AS part, (SELECT reviewed_by FROM settled_parts WHERE id = ${part}::uuid) AS by,
       (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'part' AND artifact_id = ${part}::uuid) AS lineage`)[0] as { pointers: number; proposal: string; part: string; by: string | null; lineage: number };
   const after = await shape();
-  assert(accepted.ok === true && after.pointers === 0 && after.proposal === "pending" && after.part === "accepted" && after.by === "upgrade-148-op" && after.lineage === 1,
-    `a part recorded beside the proposal on the same pair and accepted: no pointer written, the proposal still pending, the reviewer and the lineage row recorded (${JSON.stringify(after)})`);
+  assert(tooEarly.ok === false && tooEarly.error === "STALE_READ" && accepted.ok === true && after.pointers === 0 && after.proposal === "pending" && after.part === "accepted" && after.by === "upgrade-148-op" && after.lineage === 1,
+    `a part recorded beside the proposal on the same pair and accepted by a reviewer passing back the time it read, a Date's milliseconds of ${readAt.micros}, a read from a second earlier refused: no pointer written, the proposal still pending, the reviewer and the lineage row recorded (${tooEarly.error}, ${accepted.error ?? "accepted"}; ${JSON.stringify(after)})`);
 
   // The grants carried from the proposals' table.
   const may = async (role: string) => ((await sql`SELECT p, has_table_privilege(${role}, 'settled_parts', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE']) AS p`) as unknown as { p: string; y: boolean }[]).filter((r) => r.y).map((r) => r.p).join();
@@ -7232,13 +7237,57 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   assert(rb.ok === true && rb.stale_parts === 1 && rb.stale_proposals === 1 && moved.pending === "stale" && moved.accepted === "accepted" && moved.proposal === "stale" && moved.queued === 1,
     `a moved text sets the pending part stale beside the pending proposal, queues the newer thought once under their key, and leaves the accepted part (${JSON.stringify(rb)}; ${JSON.stringify(moved)})`);
 
+  // ANALYZE on a real Postgres: the planner's statistics hold nothing of a part's words, where they do hold the
+  // columns that are no thought's (the control: ANALYZE ran and sampled the table). A forgotten thought's quote would
+  // otherwise stand in pg_statistic until the next ANALYZE.
+  await sql`ANALYZE settled_parts`;
+  const stats = (await sql`SELECT
+      (SELECT count(*)::int FROM pg_stats WHERE tablename = 'settled_parts' AND attname IN ('statement', 'shown_by', 'reason', 'review_note')) AS words,
+      (SELECT count(*)::int FROM pg_stats WHERE tablename = 'settled_parts_one_statement') AS identity,
+      (SELECT count(*)::int FROM pg_stats WHERE tablename = 'settled_parts' AND attname IN ('word', 'status', 'holder')) AS others,
+      (SELECT count(*)::int FROM pg_stats WHERE tablename IN ('settled_parts', 'settled_parts_one_statement')
+          AND (COALESCE(most_common_vals::text, '') || COALESCE(histogram_bounds::text, '')) ~* 'importer|shipped|the plan is') AS quoting`)[0] as { words: number; identity: number; others: number; quoting: number };
+  assert(stats.words === 0 && stats.identity === 0 && stats.others === 3 && stats.quoting === 0,
+    `after ANALYZE the planner's statistics hold no value of a part's statement, showing words, reason or note, nor of the identity index's fingerprint, and do hold the word, the status and the holder (${JSON.stringify(stats)})`);
+
   // A re-apply with parts standing is a no-op: the rows, the triggers, the validated CHECK and the grants as they were.
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the148 });
   const again = (await sql`SELECT (SELECT string_agg(status, ',' ORDER BY status) FROM settled_parts) AS parts,
       (SELECT count(*)::int FROM pg_trigger WHERE tgrelid = 'settled_parts'::regclass AND NOT tgisinternal) AS triggers,
       (SELECT convalidated FROM pg_constraint WHERE conname = 'derivations_artifact_kind_check') AS valid`)[0] as { parts: string; triggers: number; valid: boolean };
-  assert(again.parts === "accepted,stale" && again.triggers === 2 && again.valid === true && (await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE | ",
-    `a re-apply with parts standing is a no-op: the rows, two triggers, the kind's CHECK validated over their lineage rows, the grants (${JSON.stringify(again)})`);
+  assert(again.parts === "accepted,stale" && again.triggers === 3 && again.valid === true && (await grants()) === "SELECT,UPDATE | SELECT,INSERT,UPDATE | ",
+    `a re-apply with parts standing is a no-op: the rows, three triggers, the kind's CHECK validated over their lineage rows, the grants (${JSON.stringify(again)})`);
+
+  // The stamp a decision is read against is the clock's time as the row was written under its lock, not the writer's
+  // transaction's start. `held` begins its transaction first and writes last, three times: it replaces a stale part,
+  // it rejects a part and it accepts one, each recorded by the other session after `held` began. A reviewer holding
+  // the stamp read before `held`'s write is then refused; from now() the stamp would have gone back past it.
+  const other = new SQL({ url: URL_, max: 1 });
+  const stampOf = async (id: string) => (await sql`SELECT GREATEST(judged_at, reviewed_at) AS at FROM settled_parts WHERE id = ${id}::uuid`)[0].at as Date;
+  const decide = async (id: string, decision: string, since: Date) =>
+    (await sql`SELECT review_settled_part(${id}::uuid, ${decision}, 'decided on what was read', '{"name": "upgrade-148-op"}'::jsonb, true, ${since}::timestamptz) AS r`)[0].r as { ok: boolean; error?: string; status?: string };
+  const behind: string[] = [];
+  for (const write of ["replace", "reject", "accept"] as const) {
+    let id = "", read = new Date(0);
+    await other.begin(async (held) => {
+      await held`SELECT 1`;
+      await Bun.sleep(5);
+      id = await record(`a statement for the ${write}`, "words that show it", "updates");
+      read = await stampOf(id);
+      if (write === "replace") {
+        await sql`UPDATE settled_parts SET status = 'stale' WHERE id = ${id}::uuid`;
+        await held`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', ${`a statement for the ${write}`}, 'other words', 'resolves', 'judged again', ${KEY}, ${await fp(O)}, ${await fp(N)}, (${RECIPE}::text)::jsonb)`;
+      } else {
+        await held`SELECT review_settled_part(${id}::uuid, ${write}, 'the first decision', '{"name": "upgrade-148-op"}'::jsonb, true)`;
+      }
+    });
+    const late = await decide(id, write === "accept" ? "reject" : "accept", read);
+    const now = (await sql`SELECT status, word FROM settled_parts WHERE id = ${id}::uuid`)[0] as { status: string; word: string };
+    behind.push(`${write}: ${late.ok ? "DECIDED" : late.error} on ${now.status}/${now.word}`);
+  }
+  await other.close();
+  assert(behind.join("; ") === "replace: STALE_READ on pending/resolves; reject: STALE_READ on rejected/updates; accept: STALE_READ on accepted/updates",
+    `a write by a transaction that began before the row was recorded still moves the row's stamp forward: a reviewer holding the stamp read before it is refused, after a replacement, a reject and an accept (${behind.join("; ")})`);
 
   await sql.unsafe(`DROP OWNED BY ${REVIEWER}; DROP ROLE ${REVIEWER}; DROP OWNED BY ${PASS}; DROP ROLE ${PASS}; DROP OWNED BY ${READER}; DROP ROLE ${READER}`);
   await sql.close();
