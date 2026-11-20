@@ -191,7 +191,12 @@ export function checkout(io: { runnerDir: string; state: string; home: string; g
   return { ok: true, lines };
 }
 
-/** Offline self-check: the shape gate, the 0600 write, the no-symlink write, the owner-only read, and the directory check — on a temp directory, no clipboard, no network. */
+/**
+ * Offline self-check, on a temp directory, with no clipboard and no network. The identities: the shape gate, the 0600
+ * write, the no-symlink write, the owner-only read and the directory check. The install (SMD-4491): the copy of a
+ * Claude Code binary, the checkout made and moved on git fixtures and the `checkout` command whole, and the probe
+ * stamp's report.
+ */
 export function selfCheck(): number {
   let passed = 0;
   let failed = 0;
