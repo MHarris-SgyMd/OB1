@@ -794,12 +794,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // by name without 046 or 115 ([20cj]); 146 and 147 upsert ob1_config.schema_version
   // for the 2.1.0 and 2.2.0 cuts, needing only 006's table; 148 redefines 099's
   // update_thought on its own body, refusing by name without 073 or 063's
-  // derivations.stale_since ([20ck]) — all recorded by the
+  // derivations.stale_since ([20ck]); 149 adds thought_validity, a read of a
+  // thought's state on three axes, refusing by name without 016, 029, 042,
+  // 046, 050, 061, 063, 068, 114, 134 or 139 ([20cl]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 119, `030 is among the last one hundred and nineteen migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 120, `030 is among the last one hundred and twenty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7170,7 +7172,6 @@ console.log("\n[20cj] Migration 145: onto a populated brain at the file before i
 
   await sql.close();
 }
-
 console.log("\n[20ck] Migration 148: onto a populated brain at the file before it — a re-tag that came out the same records nothing there; refused by name without 063's derivations.stale_since, update_thought left as it was; then applied: the same re-tag records the tags' row, and settles it once marked stale, with no event; a re-apply a no-op (SMD-2298)");
 {
   const the148 = MIGRATIONS.find((f) => /^\d{3}_update_thought_settles_tags\.sql$/.test(f))!;  // by name: renumbered when main takes its number
@@ -7211,6 +7212,41 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   await retag();
   const forms = Number((await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'update_thought'`)[0].n);
   assert(forms === 1 && (await tagsRow())?.marked === false && (await events()) === ev0, `a re-apply is a no-op: one update_thought (${forms}), a marked row still settled, no event`);
+
+  await sql.close();
+}
+
+console.log("\n[20cl] Migration 149: onto a populated brain at the file before it — refused by name without 068's ob1_superseded_by, thought_validity not made; then applied: the brain's own thoughts read, a superseded one superseded, a contested one contested, an untouched one unchallenged; a re-apply a no-op (SMD-3887)");
+{
+  const the149 = MIGRATIONS.find((f) => /^\d{3}_thought_validity\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the149 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const ins = async (content: string) => String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, '{}'::jsonb) RETURNING id`)[0].id);
+  const older = await ins("up-149 older"), newer = await ins("up-149 newer"), plain = await ins("up-149 plain");
+  const doubted = await ins("up-149 doubted"), doubter = await ins("up-149 doubter");
+  await sql`UPDATE thoughts SET supersedes = ${older}::uuid WHERE id = ${newer}::uuid`;
+  await sql`SELECT record_supersession_proposal(${doubted}::uuid, ${doubter}::uuid, 'newer_supersedes_older', 0.7, 'up', 0.9, 'consolidate:up@p1', NULL, NULL, NULL, NULL)`;
+
+  // Without 068's projection (the read's superseded): refused by name, the function not made.
+  await sql`ALTER TABLE ob1_superseded_by RENAME TO ob1_superseded_by_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the149 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER TABLE ob1_superseded_by_away RENAME TO ob1_superseded_by`;
+  const made = async () => (await sql`SELECT to_regprocedure('thought_validity(uuid[])') IS NOT NULL AS m`)[0].m as boolean;
+  assert(/^migration 149 needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134 and 139; this schema lacks ob1_superseded_by/.test(without) && !(await made()),
+    `without 068's ob1_superseded_by the file is refused by name; thought_validity not made (${without.slice(0, 100)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the149 });
+  type V = { ok: boolean; thoughts: { id: string; validity: { state: string } }[] };
+  const states = async () => ((await sql`SELECT thought_validity(${`{${older},${doubted},${plain}}`}::uuid[]) AS r`)[0].r as V).thoughts.map((t) => t.validity.state).join();
+  const first = await states();
+  assert(first === "superseded,contested,unchallenged",
+    `the brain's own thoughts read: superseded, contested, unchallenged (${first})`);
+
+  // A re-apply is a no-op: the same answers.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the149 });
+  const again = await states();
+  assert(again === first, `a re-apply is a no-op: the same answers (${again})`);
 
   await sql.close();
 }
