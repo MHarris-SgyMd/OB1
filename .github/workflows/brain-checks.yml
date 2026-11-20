@@ -89,9 +89,9 @@ jobs:
   # that commit to this checkout. The classifier fetches those lists itself,
   # the reads-<job> artifacts of that run, with this job's token, which reads
   # and writes nothing more than the workflow's contents: read allows (enough
-  # for a public repository's artifacts: the probe, OB1 PR 846). No lists, a
-  # list a failed or blind job wrote, or any doubt about what differs, and
-  # every job runs as before.
+  # for a public repository's artifacts: the probe, OB1 PR 846). A job whose
+  # list is missing, cut short, or a failed or blind job's runs; with no
+  # lists, or any doubt about what differs, every job runs as before.
   # Each gated job runs on any other answer. It fails open: a failed or
   # cancelled run of this job runs them all, and the aggregate lets them skip
   # only when this job succeeded and said code=false or named them. Any other

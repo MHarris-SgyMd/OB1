@@ -654,7 +654,8 @@
  *      a matrix job by every one of its cells and no other; every gated job
  *      is in it or in MAP_ALWAYS_RUN with why its list cannot be trusted; and
  *      no job in it runs a compose stack, builds an image or mounts a path
- *      into a container, whose reads no list sees (SMD-2435 PR 3b-2). Its
+ *      into a container, whose reads no list sees, or has a step that reads
+ *      the event, since the lists are a push run's (SMD-2435 PR 3b-2). Its
  *      probe pins what it refuses and passes
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
@@ -12099,8 +12100,11 @@ checkReadsRecorded();
 // would be skipped by the others' reads. A job that runs a compose stack,
 // builds an image or mounts a path into a container reads through the
 // container, where no access time moves on the checkout, so its list says
-// less than it read: such a job stays out. And a gated job in neither list
-// was never decided: MAP_ALWAYS_RUN gives each job left out its reason.
+// less than it read: such a job stays out. So does one with a step that
+// runs, or reads otherwise, on a pull request: the lists are recorded on a
+// push to main, and hold nothing a pull request's run alone reads. And a
+// gated job in neither list was never decided: MAP_ALWAYS_RUN gives each job
+// left out its reason.
 const MAP_ALWAYS_RUN: Record<string, string> = {
   "deploy-stack": "runs the compose stack, whose containers read through mounts and build contexts (PR 3c)",
   "deploy-stack-brains": "runs the compose stack twice over, and canary.sh has git read the tree back",
@@ -12109,12 +12113,33 @@ const MAP_ALWAYS_RUN: Record<string, string> = {
   "auth-poc": "runs a compose stack of its own through evals/eval-auth.ts",
   "compat-shim": "greps the whole tree and has git read it back, so its list is nearly every file",
 };
+/** The words docker and podman take first; one that makes a container or an image is among them, and a global flag's value is none of them. */
+const MAP_SUBCOMMANDS = new Set(["run", "create", "build", "buildx", "compose", "container", "image", "exec", "logs", "rm", "rmi", "pull", "push", "ps", "inspect", "cp", "stop", "start", "restart", "kill", "wait", "port", "network", "volume", "login", "logout", "tag", "save", "load", "info", "version", "stats", "top", "events", "system"]);
 /**
- * A command whose reads of the checkout no list holds: compose, an image build, a container made with a path
- * (`-v` alone or among short flags, `--volume`, `--mount`, `--volumes-from`). Matched against a command with its
- * continuation lines joined. Lexical: a container a script the step runs makes is not seen.
+ * Whether a command line (its continuation lines joined) holds a command whose reads of the checkout no list
+ * holds: compose, an image build, or a container made with a path (`-v` alone, among short flags or with its
+ * value against it, `--volume`, `--mount`, `--volumes-from`), whatever global flags docker or podman is given
+ * first. Read word by word, so no pattern backtracks. Lexical: a container a script the step runs makes is
+ * not seen, and a `-v` meant for the command inside a container counts as one for it.
  */
-const MAP_HIDES_READS = /\b(?:docker|podman)\s+(?:image\s+)?(?:compose|build|buildx)\b|\bdocker-compose\b|\b(?:docker|podman)\s+(?:container\s+)?(?:run|create)\b[^\n]*\s(?:-[a-zA-Z]*v[a-zA-Z]*|--volume|--mount|--volumes-from)[\s=]/;
+function hidesReads(line: string): boolean {
+  return line.split(/&&|\|\||[;|]/).some((command) => {
+    const words = command.trim().split(/\s+/).map((w) => w.replace(/^["']|["']$/g, ""));
+    const at = words.findIndex((w) => /^(?:.*\/)?(?:docker|podman)(?:-compose)?$/.test(w));
+    if (at === -1) return false;
+    if (/-compose$/.test(words[at])) return true;
+    let i = words.findIndex((w, k) => k > at && MAP_SUBCOMMANDS.has(w));
+    if (i === -1) return false;
+    if (words[i] === "container" || words[i] === "image") i += 1;
+    if (["build", "buildx", "compose"].includes(words[i])) return true;
+    if (!["run", "create"].includes(words[i])) return false;
+    return words.slice(i + 1).some((w) => /^-[a-zA-Z]*v/.test(w) || /^--(?:volume|mount|volumes-from)(?:=|$)/.test(w));
+  });
+}
+/** What in a step differs by the event that started the run: a list is recorded on a push, so a step that runs or reads otherwise on a pull request reads what no list holds. */
+const MAP_BY_EVENT = /github\.event\.pull_request\b|github\.(?:base_ref|head_ref)\b|\bGITHUB_(?:EVENT_NAME|EVENT_PATH|BASE_REF|HEAD_REF)\b/;
+/** A step's condition that runs it on a push alone, where it can only add to what a list holds. */
+const MAP_PUSH_ALONE = /github\.event_name\s*==\s*'push'/;
 /** MAP_LISTS as CHANGES_SCRIPT prints it, or why it could not be read. */
 function mapLists(): string[] | string {
   const r = Bun.spawnSync(["bash", join(ROOT, CHANGES_SCRIPT), "--map-lists"]);
@@ -12151,7 +12176,13 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
     if (missing.length || extra.length) problems.push(`MAP_LISTS names ${mine.join(", ")} for job ${key}, whose lists are ${want.join(", ")} — ${missing.length ? `without ${missing.join(", ")} the job would skip by its other cells' reads` : `${extra.join(", ")} is no list of its`} (check 56, SMD-2435)`);
     (Array.isArray(job.steps) ? job.steps : []).forEach((st, i) => {
       const run = mapping(st)?.run;
-      const hit = typeof run === "string" ? run.replace(/\s*\\\n\s*/g, " ").split("\n").find((l) => !/^\s*#/.test(l) && MAP_HIDES_READS.test(l)) : undefined;
+      const step = mapping(st) ?? {};
+      const uses = typeof step.uses === "string" ? step.uses : "";
+      if (/^docker\//.test(uses)) problems.push(`job ${key}, which MAP_LISTS names, uses ${uses.split("@")[0]} in step ${i + 1} — an image built or a container run by an action reads the checkout where no access time moves; take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
+      const whole = JSON.stringify(step);
+      const byEvent = MAP_BY_EVENT.test(whole) || (/github\.event_name\b/.test(whole) && !(typeof step.if === "string" && MAP_PUSH_ALONE.test(step.if) && !/github\.event_name\b/.test(JSON.stringify({ ...step, if: undefined }))));
+      if (byEvent) problems.push(`job ${key}, which MAP_LISTS names, has step ${i + 1}${typeof step.name === "string" ? ` (${JSON.stringify(step.name)})` : ""} read the event that started the run — the lists are a push run's, so what the step does on a pull request alone is in none; only a step run on a push alone may name the event (check 56, SMD-2435)`);
+      const hit = typeof run === "string" ? run.replace(/\s*\\\n\s*/g, " ").split("\n").find((l) => !/^\s*#/.test(l) && hidesReads(l)) : undefined;
       if (hit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${hit.trim().slice(0, 80)}\` in step ${i + 1} — a container reads the checkout where no access time moves, so the job's list would say less than it read; take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
     });
   }
@@ -12186,6 +12217,17 @@ function checkMapLists() {
     ["a mount among short flags, by docker container run", ["a", "m.x", "m.y"], wf(job("a", step("docker container run -dv /w:/w image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker container run -dv"]],
     ["a container made with another's volumes", ["a", "m.x", "m.y"], wf(job("a", step("docker create --volumes-from data image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker create --volumes-from"]],
     ["an image built by docker image build", ["a", "m.x", "m.y"], wf(job("a", step("docker image build -t x .")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker image build"]],
+    ["a mount with its value against the flag", ["a", "m.x", "m.y"], wf(job("a", step("docker run --rm -v$PWD/db:/db:ro image psql")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker run --rm -v$PWD/db:/db:ro"]],
+    ["a mount after a global flag and its value", ["a", "m.x", "m.y"], wf(job("a", step("docker --log-level error run -v /w:/w image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker --log-level error run"]],
+    ["podman-compose", ["a", "m.x", "m.y"], wf(job("a", step("podman-compose up -d")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `podman-compose up -d`"]],
+    ["a container made after another command on the line", ["a", "m.x", "m.y"], wf(job("a", step("docker pull image && docker run -v /w:/w image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `docker pull image && docker run"]],
+    ["a -v for psql inside a container that is there already", ["a", "m.x", "m.y"], wf(job("a", step("docker exec postgres psql -v ON_ERROR_STOP=1 -c 'create extension vector'")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["an image built by an action", ["a", "m.x", "m.y"], wf(job("a", "      - uses: docker/build-push-action@v6\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, uses docker/build-push-action"]],
+    ["a step run on pull requests alone", ["a", "m.x", "m.y"], wf(job("a", "      - name: only on a pull request\n        if: github.event_name == 'pull_request'\n        run: bun check-x.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 (\"only on a pull request\") read the event"]],
+    ["a step that reads the pull request's base", ["a", "m.x", "m.y"], wf(job("a", "      - run: bun lint.ts\n        env:\n          FROM: ${{ github.event.pull_request.base.sha }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event"]],
+    ["a step whose command asks which event it is", ["a", "m.x", "m.y"], wf(job("a", step("if [ \"$GITHUB_EVENT_NAME\" = pull_request ]; then bun x.ts; fi")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event"]],
+    ["a step run on a push alone", ["a", "m.x", "m.y"], wf(job("a", "      - if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n        run: bun keep.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["a matrix of one value, named whole, as its list step names its list with no cell", ["a", "m"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x]\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a matrix with a cell added by include", ["a", "m.x", "m.y"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x, y]\n        include:\n          - shard: z\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["it sets include, which add and take cells no axis lists"]],
     ["a matrix with a cell taken by exclude", ["a", "m.x", "m.y"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x, y]\n        exclude:\n          - shard: y\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["it sets exclude, which add and take cells no axis lists"]],
     ["a compose line in a comment", ["a", "m.x", "m.y"], wf(job("a", "      - run: |\n          # docker compose up is the stack jobs'\n          bun test.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],

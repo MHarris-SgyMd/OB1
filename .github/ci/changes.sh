@@ -90,8 +90,13 @@ MAP_LISTS="portable-server db-schema replay-gate data-layer preflight-rest db-li
 # The names a runtime or git looks for in each folder above a file it loads,
 # without opening what is not there: one added above a file a job read counts
 # against the job, though no list could hold it. Beside them by_map counts
-# .env and every .env.<name>, which Bun loads from the folder it is run in.
-MAP_LOOKED_FOR="package.json tsconfig.json jsconfig.json bunfig.toml bun.lock bun.lockb .npmrc .gitattributes .gitignore"
+# .env and every .env.<name>, which Bun loads from the folder it is run in;
+# a file whose name, less its extensions, is a folder the job read through,
+# which an import of that folder would now find first; and .gitattributes,
+# whatever becomes of it, an edit too: the checkout applies it before any
+# marker is made, so no list holds it, and it sets the bytes of every file
+# under it.
+MAP_LOOKED_FOR="package.json tsconfig.json jsconfig.json bunfig.toml bun.lock bun.lockb .npmrc .gitignore"
 
 # Not code: a path no gated job reads, builds or runs. An allowlist, so a new
 # kind of file runs every job until it is shown here not to matter: Markdown
@@ -314,8 +319,10 @@ fetch_lists() {
 #   listed or opened a file in (or, the folder itself new or gone, the nearest
 #   one above that is not): what a job asks after without opening leaves no
 #   access time, and a job at work in a folder is taken to ask after its files;
-# - a MAP_LOOKED_FOR name is added or deleted in any folder above a file it
-#   opened;
+# - a MAP_LOOKED_FOR name or an .env is added or deleted in any folder above a
+#   file it opened, or a .gitattributes there differs at all;
+# - a file is added or deleted whose name, less its extensions, is a folder
+#   above a file it opened;
 # - CHARGES names a path that differs, and the job;
 # - its block of the workflow differs, or it holds no gate on skip.
 # Every job runs (skip empty) with no lists to read, lists of more than one
@@ -337,10 +344,10 @@ by_map() {
     case "$name" in *.*) cell=${name#*.} ;; esac
     f="$d/lists/$name.txt" head=''
     if [ -f "$f" ]; then IFS= read -r head < "$f" || true; fi
-    # A list is whole when its rows are as many of each kind as its header counted: one cut short in its
-    # download would pass for a job that read less.
+    # A list is whole when its rows are as many of each kind as its header counted and its last line is
+    # ended: one cut short in its download, a row or part of one, would pass for a job that read less.
     re="^# reads v1 job=$job cell=$cell commit=([0-9a-f]{40}) status=success sight=ok files=([0-9]+) dirs=([0-9]+) gone=([0-9]+) "
-    if [[ "$head" =~ $re ]] && [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]}" = "$(awk -F '\t' 'NR > 1 { n[$1]++ } END { print n["f"] + 0, n["d"] + 0, n["g"] + 0 }' "$f")" ]; then
+    if [[ "$head" =~ $re ]] && [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]}" = "$(awk -F '\t' 'NR > 1 { n[$1]++ } END { print n["f"] + 0, n["d"] + 0, n["g"] + 0 }' "$f")" ] && [ -z "$(tail -c 1 "$f")" ]; then
       if [ -n "$x" ] && [ "$x" != "${BASH_REMATCH[1]}" ]; then no_map "main's lists of what its jobs read are of more than one commit"; return; fi
       x=${BASH_REMATCH[1]}
       sed 1d "$f" >> "$d/rows.$job"
@@ -432,10 +439,13 @@ by_map() {
         {
           s = $1; p = substr($0, 3)
           if (s != "A" && (p in opened)) { print "it read " p ", which differs"; done = 1; exit }
-          if (s == "M") next
           q = dirname(p)
           b = basename(p)
+          if (b == ".gitattributes" && (q in above)) { print p " sets how the files it read are checked out, and differs"; done = 1; exit }
+          if (s == "M") next
           if (((b in lookedfor) || b ~ /^\.env(\..*)?$/) && (q in above)) { print p " is looked for above files it read"; done = 1; exit }
+          stem = b; sub(/\..*$/, "", stem)
+          if (stem != "" && (((q == "" ? "" : q "/") stem) in above)) { print p " came or went beside " shown((q == "" ? "" : q "/") stem) ", a folder it read through"; done = 1; exit }
           for (;;) {
             if (q in listed) { print "it listed " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
             if (q in worked) { print "it read files in " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
@@ -716,6 +726,8 @@ EOF
     BASE_OPS=$mb LISTS="$std; AS=data-layer list db-schema" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     # …nor does one cut short: a header that counts two files over one row.
     BASE_OPS=$mb LISTS="$std; FILES=2 list db-schema 'f db/migrations/1.sql'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    # shellcheck disable=SC2016 # as above
+    BASE_OPS=$mb LISTS="$std"'; printf %s "$(cat "$dir/map/data-layer.txt")" > "$dir/map/cut" && mv "$dir/map/cut" "$dir/map/data-layer.txt"' SKIP='db-schema db-live' run true pull_request main 'echo x >> db/tool.sh'
     # Lists of two commits, or of one that is not here, skip nothing at all.
     BASE_OPS=$mb LISTS="$std; AT=HEAD^1~1 list db-schema" run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS="COMMIT=0123456789012345678901234567890123456789; $std" run true pull_request main 'echo x >> db/tool.sh'
@@ -738,6 +750,12 @@ EOF
     BASE_OPS=$mb LISTS=$std run true pull_request main 'echo "{}" > tsconfig.json'
     BASE_OPS=$mb LISTS=$std SKIP='data-layer' run true pull_request main 'echo A=1 > db/.env.test'
     BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer' run true pull_request main 'echo A=1 > db/env.txt'
+    # A .gitattributes above a file read, edited: it sets that file's bytes, and no list could hold it.
+    BASE_OPS="$mb && echo '*.md text' > db/.gitattributes" LISTS=$std SKIP='data-layer' run true pull_request main 'echo "*.sql text eol=crlf" >> db/.gitattributes'
+    BASE_OPS="$mb && echo '*.md text' > docs/.gitattributes" LISTS=$std SKIP='db-schema data-layer db-live' run true pull_request main 'echo "*.txt text" >> docs/.gitattributes'
+    # A file named for a folder a job read through: an import of the folder would find the file first.
+    BASE_OPS="$mb && mkdir -p lib/core && echo c > lib/core/index.ts" LISTS="$std; list db-schema 'f db/migrations/1.sql' 'd db/migrations/' 'f lib/core/index.ts'" SKIP='data-layer db-live' run true pull_request main 'echo c > lib/core.ts'
+    BASE_OPS="$mb && mkdir -p lib/core && echo c > lib/core/index.ts" LISTS="$std; list db-schema 'f db/migrations/1.sql' 'd db/migrations/' 'f lib/core/index.ts'" SKIP='db-schema data-layer db-live' run true pull_request main 'echo c > lib/other.ts'
     # The workflow since then: a job's own block, a path CHARGES gives a job, and what stops every skip.
     BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; sub "echo db-schema" "echo db-schema2"'
     BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; mkdir -p changes && echo x > changes/smd-1.md'
