@@ -441,6 +441,20 @@ let episodesLines;
   const es = segment([CWD("/wt/ob1"), BR("me/es-2015-target-smd-610"), P("smd-610 now")]).episodes[0];
   assert(headerTickets(es).tickets.join() === "SMD-610" && ticketsIn("ES-2015 and CC-12 and FY-2026").length === 0,
     `a prefix the brain denies is no place's ticket nor any ask's: es-2015-target-smd-610 is SMD-610's (${JSON.stringify(headerTickets(es))})`);
+  // SMD-4292: an ask's tickets were read off the raw ask, so a ticket-shaped value a secret held (`password=ABC-1234`)
+  // headed the summary under redact, the brain keyed it as a subject, and it began an episode ("begun with ABC-1234").
+  // The asks' tickets are read with the secrets blanked: none where no team is known, a team's key the same, no episode
+  // split by it; and one an ask also names outside the secret stays.
+  const blanked = (...ev) => { const eps = segment(ev).episodes, ep = eps[0], r = redactEpisode(ep); return { episodes: eps.length, named: [...ep.named].join(), head: headerTickets(r.ep), text: eps.map((e) => redactEpisode(e).text).join("\n") }; };
+  const noTeam = blanked(CWD("/wt/ob1"), BR("main"), P("set password=ABC-1234 and go"));
+  const teamKey = blanked(CWD("/wt/ob1"), BR("me/smd-610-x"), P("set password=smd-4321 and go"));
+  const noSplit = blanked(CWD("/wt/ob1"), BR("main"), P("tidy the readme"), P("set password=ABC-1234 and go"));
+  const alsoNamed = blanked(CWD("/wt/ob1"), BR("main"), P("for ABC-1234, set password=ABC-1234 and go"));
+  assert(noTeam.named === "" && noTeam.head.from === null && !/ABC-1234/i.test(noTeam.text)
+      && teamKey.named === "" && teamKey.head.from === "place" && teamKey.head.tickets.join() === "SMD-610" && !/4321/.test(teamKey.text)
+      && noSplit.episodes === 1 && !/ABC-1234/i.test(noSplit.text)
+      && alsoNamed.named === "ABC-1234" && alsoNamed.head.from === "asks" && /^Session summary — ABC-1234 — /.test(alsoNamed.text),
+    `a ticket-shaped value inside a secret is no ticket: it heads no summary, begins no episode and is in no text, with no team known or as the team's key; one an ask also names outside the secret stays (${JSON.stringify([noTeam, teamKey, noSplit, alsoNamed].map((x) => ({ episodes: x.episodes, named: x.named, head: x.head })))})`);
   // Review pass 2 (cold read, mutants): the move to a branch by its own ticket; the gate judged where the session moved to;
   // a cd within any of the episode's roots.
   assert(asks(CWD("/wt/ob1"), BR("main"), P("do SMD-700"), BR("me/node-22-smd-700-x"), P("go")) === "do SMD-700|go",
@@ -1187,6 +1201,15 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(askedPrep.code === 0 && /^Session summary — SMD-2013 — /.test(askedPrep.payload?.text ?? "") && askedPrep.payload.tickets_from === "asks",
     `…an ask naming its ticket: the header lists it, and the payload says the asks named it (${askedPrep.payload?.tickets_from}; ${askedPrep.payload?.text?.split("\n")[0]})`);
   if (askedPrep.payloadPath) unlinkSync(askedPrep.payloadPath);
+  // SMD-4292, through the hook's own prepare: a ticket-shaped password is blanked in the ask and heads no summary, so
+  // the payload sends it nowhere and says no asks named a ticket.
+  const pwT = join(TMP, "ticket-password.jsonl");
+  writeFileSync(pwT, claudeTranscript().replaceAll("now push and open the PR", "now push and open the PR, and set password=ABC-1234 and go"));
+  const pwPrep = prepare({ ...base, session_id: "s-ticket-password", transcript_path: pwT });
+  assert(pwPrep.code === 0 && pwPrep.payload && !/ABC-1234/i.test(JSON.stringify(pwPrep.payload)) && pwPrep.payload.tickets_from === undefined
+      && /\[redacted:password assignment\]/.test(pwPrep.payload.text) && pwPrep.payload.redactions?.length === 1,
+    `a ticket-shaped password is blanked and heads no summary: the payload carries it nowhere, and no tickets_from (${pwPrep.payload?.text?.split("\n")[0]}; ${pwPrep.payload?.tickets_from}; in the payload: ${Object.entries(pwPrep.payload ?? {}).filter(([, v]) => /ABC-1234/i.test(JSON.stringify(v))).map(([k, v]) => `${k}=${JSON.stringify(v).slice(Math.max(0, JSON.stringify(v).search(/ABC-1234/i) - 80), JSON.stringify(v).search(/ABC-1234/i) + 20)}`).join(" | ") || "nowhere"}; redactions: ${JSON.stringify(pwPrep.payload?.redactions)}; marker: ${/\[redacted:password assignment\]/.test(pwPrep.payload?.text ?? "")})`);
+  if (pwPrep.payloadPath) unlinkSync(pwPrep.payloadPath);
   // Review pass 4 (mutants): the place's tickets three at most; a payload prepared on a branch naming a ticket says
   // `place`.
   const placedFour = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "smd-11-smd-12-smd-13-smd-14" });
@@ -2620,6 +2643,14 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   // Review pass 6 (mutant: a null word named lived): a summary whose header lists no ticket names no word.
   assert(/^--- would send: source=claude-code, derived_from=3 id\(s\)(?: \[[^\]]*\])?$/m.test(dry.out), `…a header listing no ticket names no metadata.tickets_from (${dry.out.split("\n").find((l) => l.startsWith("--- would send"))})`);
   assert(!/Checkpoint:/.test(dry.out), "…with no checkpoint line: a dry run has no event");
+  // SMD-4292: the dry run's line per episode lists the tickets as the text would send them, so a ticket-shaped password
+  // a blanked ask held is printed nowhere, the segmentation's lines included.
+  const pwDryT = join(TMP, "ticket-password-dry.jsonl");
+  writeFileSync(pwDryT, [user("set password=ABC-1234 and go", { origin: { kind: "human" } }), assistant([{ type: "text", text: "set" }]),
+    user("This session is being continued from a previous conversation that ran out of context.", { isCompactSummary: true }), user("carry on", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
+  const pwDry = await run(["--dry-run", pwDryT]);
+  assert(pwDry.code === 0 && /--- 2 episodes — one thought each/.test(pwDry.out) && /^ {4}1\. no ticket — /m.test(pwDry.out) && !/ABC-1234/i.test(pwDry.out + pwDry.err),
+    `--dry-run's episode lines and texts carry no ticket-shaped password (${pwDry.out.split("\n").filter((l) => /^ {4}\d\. /.test(l)).join(" | ")})`);
   const dryCp = await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger", "auto"]);
   assert(dryCp.code === 0 && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(dryCp.out) && /\n\nCheckpoint: turn ended at /.test((await run(["--dry-run", CLAUDE_T, "--event", "Stop"])).out),
     "--dry-run --event previews the checkpoint line the hook would write for that event (first review pass)");
