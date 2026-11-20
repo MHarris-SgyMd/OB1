@@ -79,7 +79,8 @@ export function ensureBareRepo(git: GitRun, bareRepo: string, mainCheckout: stri
   }
   // Fetch the checkout's main into the bare repo's own main, so the base is the maintainer's current origin/main.
   const fetched = git(["-C", bareRepo, "fetch", "--quiet", "--no-tags", mainCheckout, "refs/remotes/origin/main:refs/heads/main"]);
-  if (fetched.code !== 0) return { ok: false, problem: `fetch main into the bare repo failed: ${fetched.stderr.trim()}` };
+  // --quiet leaves a refused update without a word: the usual one is a main here that the checkout's origin/main is not ahead of.
+  if (fetched.code !== 0) return { ok: false, problem: `fetch main into the bare repo failed: ${fetched.stderr.trim() || `git said nothing (exit ${fetched.code}); ${bareRepo}'s main may not be an ancestor of ${mainCheckout}'s origin/main`}` };
   const rev = git(["-C", bareRepo, "rev-parse", "main"]);
   if (rev.code !== 0 || !/^[0-9a-f]{40}$/.test(rev.stdout.trim())) return { ok: false, problem: `the bare repo has no main to build on: ${rev.stderr.trim()}` };
   return { ok: true, base: rev.stdout.trim() };

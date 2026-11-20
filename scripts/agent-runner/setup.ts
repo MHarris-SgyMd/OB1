@@ -162,6 +162,7 @@ export function checkGithub(bot: string): { ok: boolean; lines: string[] } {
 /**
  * `setup.ts checkout`: reads the runner's config for the main checkout, brings the runner's bare repository to its
  * origin/main (the one source the install clones), and makes or moves the install: to `commit`, or to that main.
+ * It then says what the probe stamp makes of the install as it now is.
  * Every path is the caller's, so the self-check runs it whole on a temp directory.
  */
 export function checkout(io: { runnerDir: string; state: string; home: string; git: GitRun; commit: string | null }): { ok: boolean; lines: string[] } {
@@ -182,9 +183,11 @@ export function checkout(io: { runnerDir: string; state: string; home: string; g
   const made = makeInstall(io.git, io.state, bareRepo, io.commit ?? bare.base);
   if (!made.ok) return no(made.problem);
   const lines = [`✓ ${made.path} is at ${made.commit}${made.from === null ? " (made)" : made.from === made.commit ? " (as it was)" : ` (moved from ${made.from})`}`];
-  if (made.from === null) lines.push("  Run the probes from it before a run: no stamp names it yet.");
-  else if (made.changed.length) lines.push(`  The move changed ${made.changed.length} probed file(s): ${made.changed.join(", ")}. Run the probes again from it.`);
-  else if (made.from !== made.commit) lines.push("  The move changed no probed file: a stamp made from it still holds.");
+  if (made.changed.length) lines.push(`  The move changed ${made.changed.length} probed file(s): ${made.changed.join(", ")}.`);
+  // Whether the stamp still covers it is read from the files, not from this one move: an earlier move may have gone unswept.
+  const report = stampReport(io.state, made.path, null);
+  for (const l of report.lines) lines.push(`  ${l.ok ? "✓" : "✗"} stamp: ${l.text}`);
+  if (!report.ok) lines.push(`  Run the probes from ${made.path} before a run.`);
   return { ok: true, lines };
 }
 
@@ -333,6 +336,12 @@ export function selfCheck(): number {
       writeFileSync(join(src, PROFILE_FILES[0]), "// a probed file, changed\n");
       git(["-C", src, "commit", "--quiet", "-am", "three"]);
       const c3 = git(["-C", src, "rev-parse", "HEAD"]).stdout.trim();
+      writeFileSync(join(src, "notes.txt"), "four\n");
+      git(["-C", src, "commit", "--quiet", "-am", "four"]);
+      const c4 = git(["-C", src, "rev-parse", "HEAD"]).stdout.trim();
+      // A commit the source holds on a branch that is not main, as the bare repository holds a session's.
+      const side = git(["-C", src, "commit-tree", `${c1}^{tree}`, "-p", c1, "-m", "a session's commit"]).stdout.trim();
+      git(["-C", src, "update-ref", "refs/heads/agent/side", side]);
       const state = join(root, "state-install");
       const made = makeInstall(git, state, src, c1);
       const path = join(state, INSTALL_DIR);
@@ -355,11 +364,11 @@ export function selfCheck(): number {
       ok(!short.ok && short.problem.includes("full commit id") && !existsSync(join(root, "state-short")), "a commit id that isn't whole is refused before anything is made");
       // A first make whose commit the source doesn't have: the clone it made is removed, so the next try is a first make again.
       const unknown = makeInstall(git, join(root, "state-unknown"), src, "f".repeat(40));
-      ok(!unknown.ok && unknown.problem.includes("couldn't be put at") && !existsSync(join(root, "state-unknown", INSTALL_DIR)), "a commit the source doesn't have is refused, and the clone just made is removed");
+      ok(!unknown.ok && unknown.problem.includes("not a commit of main") && !existsSync(join(root, "state-unknown", INSTALL_DIR)), "a commit the source doesn't have is refused, and the clone just made is removed");
+      const offMain = makeInstall(git, join(root, "state-unknown"), src, side);
+      ok(/^[0-9a-f]{40}$/.test(side) && !offMain.ok && offMain.problem.includes("not a commit of main") && !existsSync(join(root, "state-unknown", INSTALL_DIR)), "a commit the source holds on another branch, as a session's is, is refused: the install is put only at a commit of main");
       const retry = makeInstall(git, join(root, "state-unknown"), src, c1);
       ok(retry.ok && retry.from === null, "so the next try makes it, where a clone left behind would be refused for its changes");
-      const kept = makeInstall(git, state, src, "f".repeat(40));
-      ok(!kept.ok && existsSync(join(path, "notes.txt")), "a checkout that was there before a failed move stays as it was");
 
       // The command whole (SMD-4491 review pass 1): the config's main checkout, the bare repository brought to its origin/main, the install made and moved.
       // The fixture as a main checkout: its own main behind its origin/main, which then moves on, as a maintainer's does.
@@ -372,12 +381,27 @@ export function selfCheck(): number {
       const cmdState = join(root, "state-command");
       const io = { runnerDir, state: cmdState, home: root, git };
       const first = checkout({ ...io, commit: null });
-      ok(first.ok && first.lines[0].includes(`${join(cmdState, INSTALL_DIR)} is at ${c2} (made)`) && first.lines[1].includes("no stamp names it yet") && existsSync(join(cmdState, "repo.git", "HEAD")), "`checkout` with no commit makes the bare repository and the install at the main checkout's origin/main");
+      const said = (r: { lines: string[] }): string => r.lines.join(" | ");
+      ok(first.ok && first.lines[0].includes(`${join(cmdState, INSTALL_DIR)} is at ${c2} (made)`) && said(first).includes("no probe stamp") && said(first).includes("Run the probes from") && existsSync(join(cmdState, "repo.git", "HEAD")), "`checkout` with no commit makes the bare repository and the install at the main checkout's origin/main, and says no stamp names it");
+      // A stamp for the install as it is at c2, as a sweep from it would leave.
+      const cmdInstall = join(cmdState, INSTALL_DIR);
+      const cmdBin = join(root, "command-bin");
+      writeFileSync(cmdBin, "a binary\n", { mode: 0o755 });
+      const cmdClaude = copyClaude(cmdState, cmdBin, "2.1.329");
+      writeFileSync(join(cmdState, STAMP_FILE), JSON.stringify({ at: "t", claude: { path: cmdClaude.path, sha256: cmdClaude.sha256, version: cmdClaude.version }, host: {}, install: cmdInstall, profile: Object.fromEntries(PROFILE_FILES.map((f) => [f, sha256Hex(readFileSync(join(cmdInstall, f)))])), probes: [] }));
+      const still = checkout({ ...io, commit: null });
+      ok(still.ok && still.lines[0].includes("(as it was)") && said(still).includes("probed files as probed") && !said(still).includes("Run the probes"), "under a stamp made from it, it says the install is as probed");
       git(["-C", src, "update-ref", "refs/remotes/origin/main", c3]);
       const second = checkout({ ...io, commit: null });
-      ok(second.ok && second.lines[0].includes(`(moved from ${c2})`) && second.lines[1].includes(PROFILE_FILES[0]) && second.lines[1].includes("Run the probes again"), "run again after main moved, it moves the install and names the probed file to sweep for");
+      ok(second.ok && second.lines[0].includes(`(moved from ${c2})`) && second.lines[1].includes("The move changed 1 probed file(s)") && second.lines[1].includes(PROFILE_FILES[0]) && said(second).includes("1 of the install's probed files differ") && said(second).includes("Run the probes from"), "run again after main moved, it moves the install, names the probed file the move changed, and says the stamp no longer covers it");
+      // The next move changes no probed file, and the sweep was never run: the stamp is still stale, and it says so from the files.
+      git(["-C", src, "update-ref", "refs/remotes/origin/main", c4]);
+      const third = checkout({ ...io, commit: null });
+      ok(third.ok && third.lines[0].includes(`(moved from ${c3})`) && !said(third).includes("The move changed") && said(third).includes("1 of the install's probed files differ") && said(third).includes("Run the probes from"), "a later move that changes no probed file still says the stamp is stale: it reads the files, not the one move");
       const back = checkout({ ...io, commit: c1 });
-      ok(back.ok && back.lines[0].includes(`is at ${c1}`), "`--commit` puts it at that commit of main");
+      ok(back.ok && back.lines[0].includes(`is at ${c1}`) && said(back).includes("probed files as probed"), "`--commit` puts it at that commit of main, here one the stamp's files match again");
+      const kept = makeInstall(git, cmdState, join(cmdState, "repo.git"), side);
+      ok(!kept.ok && kept.problem.includes("not a commit of main") && git(["-C", cmdInstall, "rev-parse", "HEAD"]).stdout.trim() === c1 && existsSync(join(cmdInstall, "notes.txt")), "a refused move leaves a checkout that was there, clean, as it was");
       const noConfig = checkout({ ...io, runnerDir: join(root, "no-runner-dir"), commit: null });
       ok(!noConfig.ok && noConfig.lines[0].startsWith("✗"), "with no config it says so and makes nothing");
     });

@@ -82,7 +82,8 @@ export type InstallResult =
 /**
  * Makes the runner's checkout, `<state>/install`, at `commit`, or moves the one there to it. It is a clone of the
  * runner's bare repository (`source`), which objects are copied into, on a detached HEAD: no branch to drift, and
- * nothing shared with a worktree a task works in. A checkout with changes of its own is refused, not overwritten.
+ * nothing shared with a worktree a task works in. `commit` must be a commit of the source's main. A checkout with
+ * changes of its own is refused, not overwritten.
  * `changed` names each probed file that differs between the commit it was on and the one it is on now: any there
  * means the probe sweep must run again from it. `from` is null for a checkout just made.
  */
@@ -111,8 +112,12 @@ export function makeInstall(git: GitRun, state: string, source: string, commit: 
     if (from === null) rmSync(path, { recursive: true, force: true });
     return r;
   };
+  // Only a commit of main: the bare repository also holds the branches agent sessions wrote, and the clone copies
+  // them. The install is the code that holds a session, so it is never put at one of those.
+  const onMain = git(["-C", path, "merge-base", "--is-ancestor", commit, "refs/remotes/origin/main"]);
+  if (onMain.code !== 0) return undo({ ok: false, problem: `${commit} is not a commit of main in ${source}: the install is put only at one` });
   const out = git(["-C", path, "checkout", "--quiet", "--detach", commit]);
-  if (out.code !== 0) return undo(fail(`${path} couldn't be put at ${commit} (is it a commit of main?)`, out.stderr));
+  if (out.code !== 0) return undo(fail(`${path} couldn't be put at ${commit}`, out.stderr));
   const now = git(["-C", path, "rev-parse", "HEAD"]);
   if (now.code !== 0 || now.stdout.trim() !== commit) return undo(fail(`${path} is not at ${commit} after the checkout`, now.stderr));
   let changed: string[] = [];
