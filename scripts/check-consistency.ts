@@ -12531,7 +12531,7 @@ const DASHBOARD_FILE = "deploy/observability/dashboard.json";
 /** The alert rules' file (SMD-3050, check 38's), as the generator names it. */
 const ALERT_FILE = INLINE_FILES.find((f) => f.config === "grafana-alert-rules")!.path;
 const DASHBOARD_UNITS: Record<string, string> = { s: "_seconds", ms: "_milliseconds", By: "_bytes" };
-/** The instruments server-portable/'s code records, by the name a histogram is made or a span's metric is given under (`histogram("x.duration", SPEC` or `name: "x.duration", spec: SPEC`), each named in Prometheus with its spec's unit (`unit: "s"` → `_seconds`) and labelled as DASHBOARD_INSTRUMENT_LABELS holds, and each observable gauge and observable up-down counter by its name and the unit in its own options (`createObservableGauge("process.uptime", { unit: "s"` → `process_uptime_seconds`, SMD-3050; `createObservableUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}"` → `ob1_mcp_listen_streams`, SMD-4458: a sum that may fall takes no `_total`, measured on the pinned image); a name whose spec it cannot find, or whose unit it does not know, is named with no unit. That is right for a unit that is a braced annotation alone, which Prometheus drops (`{stream}`, measured on the pinned image, and the one such name a query here reads), and wrong for any other unit this does not know. A spec's braces and an instrument's options are read to their first `}`, so one inside a string ends them there and a unit written after it goes unread. */
+/** The instruments server-portable/'s code records, by the name a histogram is made or a span's metric is given under (`histogram("x.duration", SPEC` or `name: "x.duration", spec: SPEC`), each named in Prometheus with its spec's unit (`unit: "s"` → `_seconds`) and labelled as DASHBOARD_INSTRUMENT_LABELS holds, and each observable gauge and observable up-down counter by its name and the unit in its own options (`createObservableGauge("process.uptime", { unit: "s"` → `process_uptime_seconds`, SMD-3050; `createObservableUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}"` → `ob1_mcp_listen_streams`, SMD-4458: a sum that may fall takes no `_total`, measured on the pinned image); a name whose spec it cannot find, or whose unit it does not know, is named with no unit. That is right for a unit that is a braced annotation alone, which Prometheus drops (`{stream}`, measured on the pinned image, and the one such name a query here reads), and may be wrong for another unit this does not know. A spec's braces and an instrument's options are read to their first `}`, within 600 and 300 characters, so one inside a string ends them there and a unit written after it goes unread. */
 function instrumentNamesIn(texts: string[]): Map<string, string[]> {
   const all = texts.join("\n");
   const names = new Map<string, string[]>();
@@ -12543,7 +12543,7 @@ function instrumentNamesIn(texts: string[]): Map<string, string[]> {
     names.set(`${base}_bucket`, [...labels, "le"]);
     for (const suffix of ["_count", "_sum"]) names.set(base + suffix, labels);
   }
-  // The two observable kinds, by one pattern (SMD-4458). `unit: "{stream}"` ends the options at its own brace, so that unit is not read:
+  // Two of the three observable kinds, gauges and up-down counters, by one pattern (SMD-4458). `unit: "{stream}"` ends the options at its own brace, so that unit is not read:
   // no unit is what a braced annotation names, so the name is right, and a pattern that reads strings was tried and taken back (review
   // pass 1: it left ten ordinary shapes of options unread that this one reads, and read five this one does not).
   for (const m of all.matchAll(/createObservable(?:Gauge|UpDownCounter)\("([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)",\s*\{([^}]{0,300})\}/g)) {
@@ -12655,7 +12655,7 @@ function promqlProblems(where: string, given: string, written: Map<string, strin
   const text = withoutComments(given);
   const reads = promqlReads(text);
   const unknown = [...new Set(reads.names)].filter((n) => !written.has(n));
-  if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so it reads nothing for ever (a panel's "No data", a rule that never fires) — the names there are: the servers' instruments in server-portable/*.ts (instrumentNamesIn reads their \`*.duration\` histograms and their observable gauges and up-down counters alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 37's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
+  if (unknown.length || reads.nameRegex) out.push(["name", `${where} reads ${[...unknown, ...(reads.nameRegex ? ["a __name__ matched by regex"] : [])].join(", ")}, which nothing in the stack writes as far as this check can hold, so it reads nothing for ever (a panel's "No data", a rule that never fires) — the names there are: the servers' instruments in server-portable/*.ts (instrumentNamesIn reads their \`*.duration\` histograms, their observable gauges and their observable up-down counters alone: a new server metric, of another kind or in a subdirectory, is taught to it, not listed as an image's) and check 37's DASHBOARD_IMAGE_SERIES, measured on the pinned images`]);
   const carried = new Set([...DASHBOARD_RESOURCE_LABELS, ...reads.made, ...reads.names.flatMap((n) => written.get(n) ?? [])]);
   const stray = [...new Set(reads.labels)].filter((l) => !carried.has(l));
   for (const [name, read] of reads.selectors) {
@@ -12815,6 +12815,7 @@ const INSTRUMENT_PROBES: [string, string, string][] = [
   ["…and is not the name with no unit", 'provider.getMeter("ob1").createObservableUpDownCounter("ob1.mcp.listen_wait", { unit: "s", description: "x" })', "!ob1_mcp_listen_wait"],
   ["an up-down counter that is not observed is not read", 'provider.getMeter("ob1").createUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}" })', "!ob1_mcp_listen_streams"],
   ["an observable counter is not read: its series would take `_total`, which this does not write", 'provider.getMeter("ob1").createObservableCounter("ob1.mcp.listens", { unit: "{listen}" })', "!ob1_mcp_listens"],
+  ["options that hold an object after the unit are read all the same (SMD-4458: a pattern that read strings and took no other brace read none of these)", 'provider.getMeter("ob1").createObservableGauge("process.uptime", { unit: "s", advice: { explicitBucketBoundaries: [1] } })', "process_uptime_seconds"],
 ];
 function checkDashboard() {
   if (typeof Bun === "undefined" || typeof Bun.YAML?.parse !== "function") {

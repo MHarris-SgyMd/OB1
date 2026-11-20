@@ -5141,17 +5141,17 @@ jobs:
       # that answer 0 where their family has series and their filter matches
       # nothing (`or 0 * …`:
       # the failure share, the store's three, the collector's three and its
-      # three totals), empty where it has none, and for the listen streams'
-      # count (SMD-4458), whose series no server sends until one holds streams
-      # (SMD-4347): its 0 is `vector(0)`'s, witnessed by the servers'
-      # process_uptime_seconds, so the step holds its witness and nothing of
-      # the count itself, its name, matchers or sum, which check 37 alone
-      # holds until a listen is opened here — but the NO_TRAFFIC panel,
+      # three totals), empty where it has none — but the NO_TRAFFIC panel,
       # whose events this traffic does not make; each Loki query must return
       # a record (one that parsed and has an outcome); each Tempo query must
       # find a trace (the stub's 404 ends a provider span in error). So this
-      # holds every name but that count's, and every label a matcher requires, on the pinned
-      # images; check 37 holds the names and labels without a running profile. Loki refuses every record with its
+      # holds every name, and every label a matcher requires, on the pinned
+      # images; check 37 holds the names and labels without a running profile.
+      # The listen streams' count (SMD-4458) is an exception: no server here
+      # sends its series until one holds streams (SMD-4347), so its query
+      # answers the 0 of its own `or vector(0)`, and this step holds only that
+      # the query parses and that its witness as written, the servers'
+      # process_uptime_seconds, reads a series. Loki refuses every record with its
       # disk past 90% (PR 3c, measured), so the runner's is read once lgtm's
       # image is pulled (in the background since the job's start, SMD-3199),
       # before Loki starts, and room made where it is tight. The step is the
