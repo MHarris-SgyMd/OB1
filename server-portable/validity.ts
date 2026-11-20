@@ -49,7 +49,11 @@ export type ValidityAnswer =
 
 const obj = (v: unknown): Record<string, unknown> | undefined => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined);
 const strings = (v: unknown): string[] | undefined => (Array.isArray(v) && v.every((s) => typeof s === "string") ? (v as string[]) : undefined);
-const records = (v: unknown): ValidityRecord[] | undefined => (Array.isArray(v) && v.every((r) => obj(r)) ? (v as ValidityRecord[]) : undefined);
+/** The records as the database wrote them, a record's `at` put in the API's timestamp form (jsonb gives `+00:00` and microseconds; review pass 2). */
+const records = (v: unknown): ValidityRecord[] | undefined =>
+  Array.isArray(v) && v.every((r) => obj(r))
+    ? (v as ValidityRecord[]).map((r) => (typeof r.at === "string" ? { ...r, at: isoTimestamp(r.at) } : r))
+    : undefined;
 const oneOf = <T extends string>(words: readonly T[], v: unknown): T | undefined => (typeof v === "string" && (words as readonly string[]).includes(v) ? (v as T) : undefined);
 const count = (v: unknown): number | undefined => (typeof v === "number" && Number.isSafeInteger(v) ? v : typeof v === "string" && /^\d+$/.test(v) ? Number(v) : undefined);
 

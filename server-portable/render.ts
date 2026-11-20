@@ -3152,8 +3152,8 @@ export const renderVerifyDeliverable = (o: Outcome<VerifyDeliverableResult, Veri
 
 // ── The validity read (SMD-3887 PR 2b, migration 149) ─────────────────────────
 // The value is the read's JSON (AS_JSON): each axis's records are data a client reads. The text gives each thought's
-// three states (validity's found state under an unknown), the records behind its validity, its newest three review
-// records with who decided or checked, its orphaned lineage rows counted, and what was not read; the rest is the value's.
+// three states (validity's found state under an unknown), the first three records behind its validity, its newest three
+// review records with who decided or checked, its orphaned lineage rows counted, and what was not read; the rest is the value's.
 
 const UNCALIBRATED = "uncalibrated";
 /** One record a validity state was read from, on one line, in the record's own words. */
@@ -3174,14 +3174,20 @@ const reviewRecordLine = (r: ValidityRecord): string => {
   if (r.kind === "verification") return `  review: verification ${String(r.status)}${who}${r.at ? ` at ${String(r.at)}` : ""}, checkpoint ${String(r.checkpoint_reads)}`;
   return `  review: ${oneLine(snipText(String(r.kind), 40))}`;
 };
+/** How many of an axis's records the text shows a thought; the value holds every one (review pass 2: 100 thoughts' citations unbounded). */
+const TEXT_RECORDS = 3;
+/** Review records, an undecided one (no `at`) first, then the newest: 149 lists the proposals before the verifications (review pass 2). */
+const newestFirst = (rs: ValidityRecord[]): ValidityRecord[] =>
+  [...rs].sort((a, b) => (a.at == null ? 0 : 1) - (b.at == null ? 0 : 1) || String(b.at ?? "").localeCompare(String(a.at ?? "")));
 const orphanCount = (t: ValidityFound): number => t.freshness.records.filter((r) => r.state === "orphaned").length;
 const validityFoundLines = (t: ValidityFound): string[] => [
   `- ${t.id}: validity ${t.validity.state}${t.validity.state === "unknown" ? ` (found ${t.validity.found})` : ""}; review ${t.review.state}; freshness ${t.freshness.state}`
     + `${t.freshness.kinds.length ? ` (${t.freshness.kinds.map((k) => `${k.kind} ${k.state}${k.no_pool ? ", no pool re-runs it" : ""}`).join("; ")})` : ""}`
     + `; version ${t.version.fingerprint.slice(0, 12)}${t.version.seq === null ? "" : `, seq ${t.version.seq}`}`,
-  ...t.validity.records.map(validityRecordLine),
-  ...t.review.records.slice(0, 3).map(reviewRecordLine),
-  ...(t.review.records.length > 3 ? [`  review: ${t.review.records.length - 3} more (the value lists them)`] : []),
+  ...t.validity.records.slice(0, TEXT_RECORDS).map(validityRecordLine),
+  ...(t.validity.records.length > TEXT_RECORDS ? [`  validity: ${t.validity.records.length - TEXT_RECORDS} more record(s) (the value lists them)`] : []),
+  ...newestFirst(t.review.records).slice(0, TEXT_RECORDS).map(reviewRecordLine),
+  ...(t.review.records.length > TEXT_RECORDS ? [`  review: ${t.review.records.length - TEXT_RECORDS} more (the value lists them)`] : []),
   ...(orphanCount(t) ? [`  freshness: ${orphanCount(t)} lineage row(s) whose artifact is gone, not read (orphaned)`] : []),
   ...(t.unread.length ? [`  not read: ${t.unread.join(", ")}`] : []),
 ];
