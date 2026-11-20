@@ -4413,16 +4413,25 @@ jobs:
       # takes: the stack's own coordinator container, on the stack's networks
       # with its host-gateway entry, dials the broker there with a brain's key
       # and is granted a slot. The port answers on the gateway alone — not on
-      # the runner's loopback, nor its own network address.
+      # the runner's loopback, nor its own network address. And the broker's
+      # one call out (SMD-3379 PR 3c-1): its container reads a model server's
+      # list of loaded models from the host at host.docker.internal, as it
+      # would Ollama's /api/ps — here a file served on the gateway — and says
+      # the residency rule is on.
       - name: The slot broker reached from a brain's coordinator at host.docker.internal
         working-directory: deploy
         run: |
-          trap 'rc=$?; if [ "$rc" != 0 ]; then bun --no-env-file federated/federated.ts logs --runtime docker 2>/dev/null & sleep 3; kill $! 2>/dev/null || true; fi; bun --no-env-file federated/federated.ts down --runtime docker > /dev/null 2>&1 || true; rm -f federated/federation.ci.yaml' EXIT
+          trap 'rc=$?; if [ "$rc" != 0 ]; then bun --no-env-file federated/federated.ts logs --runtime docker 2>/dev/null & sleep 3; kill $! 2>/dev/null || true; fi; kill "${list_pid:-}" 2>/dev/null || true; bun --no-env-file federated/federated.ts down --runtime docker > /dev/null 2>&1 || true; rm -rf federated/federation.ci.yaml /tmp/ps-list' EXIT
+          gw=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | awk '{print $1}')
+          mkdir -p /tmp/ps-list/api
+          printf '{"models":[{"name":"ci-model:1","model":"ci-model:1"}]}' > /tmp/ps-list/api/ps
+          python3 -m http.server 11499 --bind "$gw" --directory /tmp/ps-list > /tmp/ps-list.log 2>&1 &
+          list_pid=$!
           SLOT_KEY="slot_$(openssl rand -hex 32)"
           export SLOT_KEY
           echo "::add-mask::$SLOT_KEY"
           hash=$(bun --no-env-file -e 'import { hashKey } from "./federated/broker.ts"; console.log(hashKey(process.env.SLOT_KEY!))')
-          printf 'broker:\n  port: 8095\n  warm_s: 0\nservers:\n  o:\n    bases: [http://h:1/v1]\n    slots: 1\nbrains:\n  stable:\n    key: "%s"\n' "$hash" > federated/federation.ci.yaml
+          printf 'broker:\n  port: 8095\n  warm_s: 0\nservers:\n  o:\n    bases: [http://h:1/v1]\n    slots: 1\n    ps: http://host.docker.internal:11499/api/ps\nbrains:\n  stable:\n    key: "%s"\n' "$hash" > federated/federation.ci.yaml
           chmod 644 federated/federation.ci.yaml
           bun --no-env-file federated/federated.ts check --registry federated/federation.ci.yaml --runtime docker | tee /tmp/federated-check.out
           grep -F "Docker Engine on Linux, rootful: brains reach the broker at host.docker.internal, its port on the default bridge's gateway" /tmp/federated-check.out
@@ -4431,7 +4440,11 @@ jobs:
           # Again, as an operator does after a registry change: its own port on the gateway is known as its own.
           bun --no-env-file federated/federated.ts up --registry federated/federation.ci.yaml --runtime docker | tee /tmp/federated-reup.out
           grep -F 'a container reached the broker at host.docker.internal:8095' /tmp/federated-reup.out
-          gw=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' | awk '{print $1}')
+          # The list, read by the broker's own container at the host's name.
+          cid=$(docker ps -q --filter label=com.docker.compose.project=ob1-federated)
+          on='o: its loaded models read( again)? \(1 loaded\): the residency rule is on'
+          for _ in $(seq 1 20); do docker logs "$cid" > /tmp/federated-broker.log 2>&1 || true; if grep -E "$on" /tmp/federated-broker.log; then break; fi; sleep 1; done
+          grep -E "$on" /tmp/federated-broker.log > /dev/null || { echo "the broker's container did not read the list at host.docker.internal:11499" >&2; cat /tmp/federated-broker.log /tmp/ps-list.log >&2 || true; exit 1; }
           [ "$(curl -s --max-time 5 "http://$gw:8095/health" || true)" = ok ] || { echo "the broker does not answer on the bridge's gateway $gw" >&2; exit 1; }
           # A brain's coordinator: its image, its networks (data, egress) and its host-gateway entry, as compose runs it.
           got=$(docker compose -f compose.yaml run --rm --no-deps -T -e SLOT_KEY --entrypoint bun coordinator --no-env-file -e '
