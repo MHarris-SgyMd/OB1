@@ -18,8 +18,8 @@
  * the column exists they write it too, as the recipe wrote it (by the rules
  * below, which differ from the recipe's where they say so), for that schema's
  * readers (its search and stats functions, the bio worker, ops views). The
- * recipe's third script, enrich-thoughts, is SMD-2298's re-tag worker
- * (SMD-3318 PR 3b).
+ * recipe's third script, enrich-thoughts, is retired for SMD-2298's re-tag
+ * worker, db/retag.ts (SMD-3318 PR 3b).
  *
  * ── The passes ──────────────────────────────────────────────────────────────
  * type: a `metadata.type` the capture would have written otherwise — another
