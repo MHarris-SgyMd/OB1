@@ -24,7 +24,9 @@
 --
 --   THE CALL. Up to 100 distinct ids (a repeated id is answered once, the cap
 --   counts distinct ids, a call over it is refused whole: {ok: false, error:
---   TOO_MANY, cap, given}); NULL is NO_IDS; an empty array answers no thoughts.
+--   TOO_MANY, cap, given}; a list over ten times the cap is refused before it
+--   is de-duplicated); NULL is NO_IDS; an empty array answers no thoughts; a
+--   role that cannot read thoughts is NOT_READABLE.
 --   {ok: true, cap: 100, thoughts: [...]} in the order the ids were first given.
 --
 --   PER THOUGHT. An id that is no thought answers {id, found: false,
@@ -68,8 +70,12 @@
 --       worst row; the thought the worst kind (stale, requested, legacy,
 --       current), none with no such row; unknown when lineage, proposals or
 --       facets were not read. A row 067's test finds orphaned is listed as
---       orphaned and not read; history (a closed facet, a decided proposal) is
---       not read. A stale or requested kind no pool re-runs (metadata, section)
+--       orphaned and not read; history (a closed facet, a key's decision on a
+--       proposal) is not read, while a rejection the pass itself settled is,
+--       since 067 reopens it. A structured source pass (source:<system>) is
+--       not keyed on the text, and 067 keeps it: a moved text leaves it
+--       current. A relation row carries its judge's number. A kind carries its
+--       producers and what moved under it. A stale or requested kind no pool re-runs (metadata, section)
 --       says so (no_pool), on its rows and on the kind.
 --     * judges' numbers (row 9) ride under judge with calibrated: false.
 --     * unread: the record kinds the caller's role could not SELECT, by name.
@@ -87,11 +93,13 @@
 --   test-upgrade [20ck].
 --
 -- Prerequisites
---   016 (content_fingerprint_of), 029/063/114 (supersession_proposals with
---   stale and the reviewer), 042 (thought_facets, thought_facet_active), 061
---   and 063 (derivations with stale_since), 068 (ob1_superseded_by), 134
---   (deliverable_events), 139 (thought_forgotten). Applied by
---   `bun db/migrate.ts`.
+--   016 (content_fingerprint_of, thought_entities, ob1_entity_edges),
+--   029/063/114 (supersession_proposals with stale and the reviewer), 042
+--   (thought_facets, thought_facet_active), 046 and 050 (thought_audit's kind,
+--   agent and seq), 061 and 063 (derivations with stale_since), 068
+--   (ob1_superseded_by), 134 (deliverable_events), 139 (thought_forgotten and
+--   the audit's redacted_at). The refusal up front names the same set. Applied
+--   by `bun db/migrate.ts`.
 -- =============================================================================
 
 -- Refused up front, by name, on a schema the ledger records but does not hold
@@ -128,7 +136,7 @@ BEGIN
   ) m;
   IF v_missing IS NOT NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 148 needs 016, 029, 042, 046, 050, 063, 068, 114, 134 and 139; this schema lacks ' || v_missing,
+      MESSAGE = 'migration 148 needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134 and 139; this schema lacks ' || v_missing,
       -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
@@ -199,6 +207,15 @@ DECLARE
 BEGIN
   IF p_ids IS NULL THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NO_IDS', 'cap', c_cap);
+  END IF;
+  -- The cap bounds the work: a list ten times the cap is refused before it
+  -- is de-duplicated.
+  IF cardinality(p_ids) > 10 * c_cap THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'TOO_MANY', 'cap', c_cap, 'given', cardinality(p_ids));
+  END IF;
+  -- The thoughts themselves are the one table the read cannot do without.
+  IF NOT has_table_privilege('thoughts', 'SELECT') THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'NOT_READABLE', 'cap', c_cap, 'unread', jsonb_build_array('thought'));
   END IF;
   -- Distinct, in the order first given.
   SELECT COALESCE(array_agg(x.id ORDER BY x.first), '{}') INTO v_ids
@@ -325,9 +342,9 @@ BEGIN
         FROM deliverable_events e WHERE e.thought_id = v_id AND e.event = 'verification'
        ORDER BY e.seq DESC LIMIT 1;
       IF FOUND AND v_v.status = 'corrected' THEN
-        v_reads := CASE WHEN v_v.checkpoint IN (v_fp, v_fp_text) THEN 'current'
+        v_reads := CASE WHEN lower(v_v.checkpoint) IN (v_fp, v_fp_text) THEN 'current'
                         WHEN NOT r_audit THEN 'unknown'
-                        WHEN v_v.checkpoint = ANY(v_earlier) THEN 'earlier'
+                        WHEN lower(v_v.checkpoint) = ANY(v_earlier) THEN 'earlier'
                         ELSE 'unmatched' END;
         v_ckpt_unknown := v_reads = 'unknown';
         v_level := GREATEST(v_level, CASE WHEN v_reads IN ('earlier', 'unknown') THEN 3 ELSE 4 END);
@@ -416,9 +433,9 @@ BEGIN
         v_checked := true;
         v_rrecs := v_rrecs || jsonb_build_array(jsonb_build_object(
           'kind', 'verification', 'seq', v_v.seq, 'status', v_v.status, 'checkpoint', v_v.checkpoint,
-          'checkpoint_reads', CASE WHEN v_v.checkpoint IN (v_fp, v_fp_text) THEN 'current'
+          'checkpoint_reads', CASE WHEN lower(v_v.checkpoint) IN (v_fp, v_fp_text) THEN 'current'
                                    WHEN NOT r_audit THEN 'unknown'
-                                   WHEN v_v.checkpoint = ANY(v_earlier) THEN 'earlier' ELSE 'unmatched' END,
+                                   WHEN lower(v_v.checkpoint) = ANY(v_earlier) THEN 'earlier' ELSE 'unmatched' END,
           'by', jsonb_build_object('name', v_v.actor_name, 'kind', v_v.actor_kind), 'at', v_v.at));
       END LOOP;
       v_rstate := CASE WHEN v_pending THEN 'pending'
@@ -441,14 +458,19 @@ BEGIN
                   FROM unnest(d.input_ids, d.input_fingerprints) WITH ORDINALITY AS u(id, fp, ord)
                   LEFT JOIN thoughts x ON x.id = u.id
                  WHERE x.id IS NULL OR u.fp IS DISTINCT FROM COALESCE(x.content_fingerprint, content_fingerprint_of(x.content))) AS moved,
-               (SELECT p.status FROM supersession_proposals p WHERE d.artifact_kind = 'proposal' AND p.id = d.artifact_id) AS proposal_status
+               (SELECT p.status FROM supersession_proposals p WHERE d.artifact_kind = 'proposal' AND p.id = d.artifact_id) AS proposal_status,
+               (SELECT COALESCE(p.review_note LIKE 'settled by the pass:%', false) FROM supersession_proposals p
+                 WHERE d.artifact_kind = 'proposal' AND p.id = d.artifact_id) AS by_pass,
+               (SELECT jsonb_build_object('key', f.payload->>'judge_key', 'confidence', (f.payload->>'confidence')::numeric, 'calibrated', false)
+                  FROM thought_facets f WHERE d.artifact_kind = 'relation' AND f.id = d.artifact_id AND f.payload ? 'confidence') AS judge
           FROM derivations d
          WHERE d.input_ids @> ARRAY[v_id]
          ORDER BY d.artifact_kind, d.produced_by, d.artifact_id
       LOOP
         -- Whether the artifact still stands. History — a closed relation or
-        -- subject facet, a decided proposal — is not read (no re-run rewrites
-        -- it). An orphan by 067's test (its artifact gone: a deleted proposal,
+        -- subject facet, a key's decision on a proposal — is not read (no
+        -- re-run rewrites it; a rejection the pass itself settled is standing,
+        -- since 067 reopens it when a text moves). An orphan by 067's test (its artifact gone: a deleted proposal,
         -- no windows, no mentions or edges under the key, no embedding, no
         -- tags) is listed as orphaned and not read. A section's row is dropped
         -- with its section, so it stands while it is here.
@@ -456,7 +478,8 @@ BEGIN
           WHEN 'relation' THEN CASE WHEN EXISTS (SELECT 1 FROM thought_facets f WHERE f.id = v_d.artifact_id AND f.valid_until IS NULL) THEN 'standing' ELSE 'history' END
           WHEN 'subject'  THEN CASE WHEN EXISTS (SELECT 1 FROM thought_facets f WHERE f.id = v_d.artifact_id AND f.valid_until IS NULL) THEN 'standing' ELSE 'history' END
           WHEN 'proposal' THEN CASE WHEN v_d.proposal_status IS NULL THEN 'orphaned'
-                                    WHEN v_d.proposal_status IN ('pending', 'stale') THEN 'standing' ELSE 'history' END
+                                    WHEN v_d.proposal_status IN ('pending', 'stale') THEN 'standing'
+                                    WHEN v_d.proposal_status = 'rejected' AND v_d.by_pass THEN 'standing' ELSE 'history' END
           WHEN 'chunks'   THEN CASE WHEN EXISTS (SELECT 1 FROM thought_chunks c WHERE c.thought_id = v_d.artifact_id) THEN 'standing' ELSE 'orphaned' END
           WHEN 'entities' THEN CASE WHEN EXISTS (SELECT 1 FROM thought_entities m WHERE m.thought_id = v_d.artifact_id AND m.extraction_key = v_d.produced_by)
                                       OR EXISTS (SELECT 1 FROM ob1_entity_edges g WHERE g.thought_id = v_d.artifact_id AND g.extraction_key = v_d.produced_by)
@@ -470,27 +493,39 @@ BEGIN
             'kind', v_d.artifact_kind, 'artifact', v_d.artifact_id, 'produced_by', v_d.produced_by, 'state', 'orphaned'));
           CONTINUE;
         END IF;
+        -- A structured source pass (produced_by source:<system>) reads its
+        -- source's own record, not the text: 067 keeps it on a moved text, and
+        -- so does this read.
         v_row_state := CASE
           WHEN v_d.stale_since IS NOT NULL OR (v_d.artifact_kind = 'proposal' AND v_d.proposal_status = 'stale') THEN 'requested'
-          WHEN cardinality(v_d.moved) > 0 THEN 'stale'
+          WHEN cardinality(v_d.moved) > 0 AND v_d.produced_by NOT LIKE 'source:%' THEN 'stale'
           WHEN v_d.legacy THEN 'legacy'
           ELSE 'current' END;
         v_rank := CASE v_row_state WHEN 'stale' THEN 4 WHEN 'requested' THEN 3 WHEN 'legacy' THEN 2 ELSE 1 END;
         v_worst := GREATEST(v_worst, v_rank);
         -- The tags and a generated section have no pool: stale or marked
-        -- (063 and 067 leave them unqueued), only an operator's rebuild clears them.
+        -- (063 and 067 leave them unqueued), only an operator's rebuild clears
+        -- them. (A vector or windows row on a brain with no embedding settings
+        -- is unqueued too; this read does not name that case.) A relation
+        -- carries its judge's number, uncalibrated (row 9).
         v_frecs := v_frecs || jsonb_build_array(jsonb_build_object(
           'kind', v_d.artifact_kind, 'artifact', v_d.artifact_id, 'produced_by', v_d.produced_by, 'state', v_row_state,
           'moved', to_jsonb(v_d.moved), 'requested_for', CASE WHEN v_d.stale_since IS NOT NULL THEN v_d.stale_reason END,
-          'no_pool', v_row_state IN ('stale', 'requested') AND v_d.artifact_kind IN ('metadata', 'section')));
+          'no_pool', v_row_state IN ('stale', 'requested') AND v_d.artifact_kind IN ('metadata', 'section'))
+          || CASE WHEN v_d.judge IS NOT NULL THEN jsonb_build_object('judge', v_d.judge) ELSE '{}'::jsonb END);
       END LOOP;
       v_fstate := (ARRAY['none', 'current', 'legacy', 'requested', 'stale'])[v_worst + 1];
     END IF;
-    -- A kind's state is its worst row read (orphans aside), with no_pool when
-    -- any of its rows has it.
-    SELECT COALESCE(jsonb_agg(jsonb_build_object('kind', k.kind, 'state', k.state, 'no_pool', k.no_pool) ORDER BY k.kind), '[]'::jsonb) INTO v_kinds
+    -- A kind's state is its worst row read (orphans aside), with its
+    -- producers, what moved under any of its rows, and no_pool when any row
+    -- has it (the record's shape).
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('kind', k.kind, 'state', k.state, 'produced_by', k.produced_by,
+             'moved', COALESCE((SELECT to_jsonb(array_agg(DISTINCT m)) FROM jsonb_array_elements(v_frecs) r2, jsonb_array_elements_text(r2->'moved') m
+                                 WHERE r2->>'kind' = k.kind AND r2->>'state' <> 'orphaned'), '[]'::jsonb),
+             'no_pool', k.no_pool) ORDER BY k.kind), '[]'::jsonb) INTO v_kinds
       FROM (SELECT r->>'kind' AS kind,
                    (ARRAY['current', 'legacy', 'requested', 'stale'])[max(CASE r->>'state' WHEN 'stale' THEN 4 WHEN 'requested' THEN 3 WHEN 'legacy' THEN 2 ELSE 1 END)] AS state,
+                   to_jsonb(array_agg(DISTINCT r->>'produced_by')) AS produced_by,
                    bool_or(COALESCE((r->>'no_pool')::boolean, false)) AS no_pool
               FROM jsonb_array_elements(v_frecs) r WHERE r->>'state' <> 'orphaned' GROUP BY r->>'kind') k;
 
@@ -508,4 +543,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION thought_validity(uuid[]) IS
-  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given: {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending or stale proposal on it as the falling side with a text moved since judged, or stale; a corrected verification at an earlier checkpoint), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';
+  'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 148 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given (a list over ten times the cap refused before de-duplication; a role that cannot read thoughts NOT_READABLE): {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending or stale proposal on it as the falling side with a text moved since judged, or stale; a corrected verification at an earlier checkpoint), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; a pass-settled rejection read, a key''s decision not; a source: pass kept on a moved text, as 067 keeps it; a relation''s judge number carried; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 148 / SMD-3887.';

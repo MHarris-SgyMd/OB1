@@ -22348,10 +22348,12 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   const many = await read(Array.from({ length: 101 }, (_, i) => `3887e000-0000-4000-8000-${String(i).padStart(12, "0")}`));
   const hundred = await read([...Array.from({ length: 100 }, (_, i) => `3887e000-0000-4000-8000-${String(i).padStart(12, "0")}`), "3887e000-0000-4000-8000-000000000000"]);
   const ordered = await read([B, A, B, null, ghost]);
+  const flood = await read(Array.from({ length: 1001 }, () => A));
   assert(nulls.ok === false && nulls.error === "NO_IDS" && many.ok === false && many.error === "TOO_MANY" && many.cap === 100 && many.given === 101
          && hundred.ok === true && hundred.thoughts!.length === 100
          && ordered.ok === true && ordered.thoughts!.map((t) => t.id).join() === [B, A, ghost].join() && ordered.thoughts![2].found === false
-         && ordered.thoughts![2].forgotten === false && Array.isArray(ordered.thoughts![2].unread) && ordered.thoughts![2].unread.length === 0,
+         && ordered.thoughts![2].forgotten === false && Array.isArray(ordered.thoughts![2].unread) && ordered.thoughts![2].unread.length === 0
+         && flood.ok === false && flood.error === "TOO_MANY" && flood.given === 1001,
     `NULL NO_IDS, 101 distinct ids TOO_MANY (given 101), 100 distinct and a repeat answered, the order given with a repeat once and a NULL skipped, an unknown id found false (${nulls.error}, ${many.error}/${many.given}, ${hundred.thoughts?.length}, ${ordered.thoughts?.map((t) => t.found).join()})`);
 
   // No record: unchallenged, never supported; review none; freshness none; the version is the fingerprint now and the newest event's seq.
@@ -22462,6 +22464,49 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
          && kindState(asked, "metadata") === "requested" && askedRec?.no_pool === true && askedKind?.no_pool === true && kindState(again, "metadata") === "current",
     `freshness: current, stale once the text moves (M named moved, no pool re-runs tags), requested on a rebuild's request (no pool, on the row and the kind), current once re-derived (${kindState(fresh, "metadata")}, ${kindState(moved, "metadata")}, ${kindState(asked, "metadata")}/${askedRec?.no_pool}/${askedKind?.no_pool}, ${kindState(again, "metadata")})`);
 
+  // A kind carries its producers and what moved under it (the record's shape).
+  const movedKind = moved.freshness.kinds?.find((k) => k.kind === "metadata") as { produced_by?: string[]; moved?: string[] } | undefined;
+  assert(movedKind?.produced_by?.join() === "[133] tags" && movedKind?.moved?.join() === M,
+    `a kind carries its producers and what moved under it (${JSON.stringify(movedKind)})`);
+
+  // A structured source pass (source:<system>) reads the source's record, not the text: 067 keeps it on a moved text, and so does the read.
+  const SE = await thought("[133] SE: a synced ticket's text");
+  const ent = (await one<{ id: string }>(`INSERT INTO ob1_entities (entity_type, name, normalized_name) VALUES ('tool', '[133] board', '[133] board') RETURNING id::text AS id`)).id;
+  await db.query(`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES ($1::uuid, $2::uuid, 1, 'source:[133]')`, [SE, ent]);
+  await lineage("entities", SE, [SE], [await fp(SE)], "source:[133]");
+  await edit(SE, "[133] SE: a synced ticket's text, re-synced");
+  const sourced = await v(SE);
+  assert(kindState(sourced, "entities") === "current",
+    `a source: pass is kept on a moved text, as rebuild_derived keeps it (${kindState(sourced, "entities")})`);
+
+  // A relation carries its judge's number, uncalibrated.
+  const RN = await thought("[133] RN: the newer of a related pair"), RO = await thought("[133] RO: the older of a related pair");
+  await db.query(`SELECT record_thought_relation($1::uuid, $2::uuid, 'related', 0.91, 'consolidate:[133]@p1', NULL, $3, $4, '{"deterministic": false}'::jsonb)`, [RN, RO, await fp(RO), await fp(RN)]);
+  const related = await v(RN);
+  const relJudge = (related.freshness.records.find((r) => r.kind === "relation") as { judge?: { confidence: number; calibrated: boolean } } | undefined)?.judge;
+  assert(Number(relJudge?.confidence) === 0.91 && relJudge?.calibrated === false,
+    `a relation's freshness row carries its judge's 0.91, uncalibrated (${JSON.stringify(relJudge)})`);
+
+  // A rejection the pass itself settled is standing (067 reopens it on a moved text): its proposal kind reads stale once a side moves; a key's rejection is history.
+  const PS1 = await thought("[133] PS1: the older of a settled pair"), PS2 = await thought("[133] PS2: the newer of a settled pair");
+  const ps = await propose(PS1, PS2);
+  await db.query(`SELECT rebuild_derived($1::uuid, 'operator: force', false, NULL, true)`, [PS2]);
+  await db.query(`SELECT settle_supersession_proposal($1::uuid, 'settled by the pass: no conflict found again', $2::jsonb, 'consolidate:[133]@p1', $3, $4, '{"deterministic": false}'::jsonb)`,
+    [ps, JSON.stringify(W), await fp(PS1), await fp(PS2)]);
+  await edit(PS1, "[133] PS1: the older of a settled pair, edited");
+  const settled = await v(PS2);
+  const settledStatus = (await one<{ s: string }>(`SELECT status AS s FROM supersession_proposals WHERE id = $1::uuid`, [ps])).s;
+  assert(settledStatus === "rejected" && kindState(settled, "proposal") === "stale" && kindState(gRej, "proposal") === "absent",
+    `a pass-settled rejection is read (stale once a side moves); a key's rejection is history (${settledStatus}, ${kindState(settled, "proposal")}, ${kindState(gRej, "proposal")})`);
+
+  // A checkpoint is compared case-blind: the key in upper case reads current.
+  const out3 = await thought("[133] an output keyed in upper case");
+  await db.query(`SELECT record_deliverable($1, $2, $3, $4::jsonb)`, [out3, spec, (await fp(out3)).toUpperCase(), JSON.stringify(W)]);
+  await db.query(`SELECT verify_deliverable($1, 'corrected', 'review', 'wanting', $2::jsonb)`, [out3, JSON.stringify(V2)]);
+  const upper = await v(out3);
+  assert(upper.validity.state === "contested" && reads(upper) === "current",
+    `a checkpoint in upper case reads current (${upper.validity.state}/${reads(upper)})`);
+
   // The key now is the stored one, as rebuild_derived reads it (061, 067): a stored key that is not the text's own, lineage made on it, reads current.
   const K = await thought("[133] K: a stored key that differs");
   const storedKey = "3887" + "ab".repeat(30);
@@ -22504,11 +22549,19 @@ console.log("\n[133] Migration 148: thought_validity — a thought's state on th
   // Without the log, everything else readable: a corrected checkpoint that is not the text now cannot be placed — unknown, unresolved found, audit in unread.
   await db.exec(`GRANT SELECT ON derivations, ob1_superseded_by TO ob1_133_reader; REVOKE SELECT ON thought_audit FROM ob1_133_reader`);
   const [outNoAudit] = await asRole([out]);
+  // Without thoughts itself: NOT_READABLE, naming it, not a raised permission error.
+  await db.exec(`REVOKE SELECT ON thoughts FROM ob1_133_reader`);
+  await db.exec(`SET ROLE ob1_133_reader`);
+  let noThoughts: Out;
+  try { noThoughts = await read([A]); }
+  catch (e) { noThoughts = { ok: false, error: `raised ${String((e as { code?: string }).code ?? "?")}` }; }
+  finally { await db.exec(`RESET ROLE`); }
   await db.exec(`REVOKE ALL ON thoughts, supersession_proposals, deliverable_events, thought_facets, derivations, ob1_superseded_by, thought_chunks, thought_entities, ob1_entity_edges, thought_audit, thought_forgotten FROM ob1_133_reader; DROP ROLE ob1_133_reader`);
   assert(cNoPointer.validity.state === "unknown" && cNoPointer.validity.found === "unchallenged" && cNoPointer.unread.join() === "pointer" && cNoPointer.review.state === "pending"
          && eNoPointer.validity.state === "unknown" && eNoPointer.validity.found === "unresolved"
          && mNoLineage.freshness.state === "unknown" && mNoLineage.unread.join() === "pointer,lineage"
-         && outNoAudit.validity.state === "unknown" && outNoAudit.validity.found === "unresolved" && reads(outNoAudit) === "unknown" && outNoAudit.unread.join() === "audit",
+         && outNoAudit.validity.state === "unknown" && outNoAudit.validity.found === "unresolved" && reads(outNoAudit) === "unknown" && outNoAudit.unread.join() === "audit"
+         && noThoughts!.ok === false && noThoughts!.error === "NOT_READABLE",
     `an unread table: validity unknown with what was found named, pointer in unread, review standing; freshness unknown without lineage; without the log a corrected checkpoint reads unknown, validity unknown (${cNoPointer.validity.state}/${cNoPointer.validity.found}, ${eNoPointer.validity.found}, ${mNoLineage.freshness.state}, ${mNoLineage.unread.join()}, ${outNoAudit.validity.state}/${reads(outNoAudit)}/${outNoAudit.unread.join()})`);
 
   // Forgotten: found false, forgotten true with its time, no text.

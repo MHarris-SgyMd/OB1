@@ -794,7 +794,8 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // by name without 046 or 115 ([20cj]); 146 and 147 upsert ob1_config.schema_version
   // for the 2.1.0 and 2.2.0 cuts, needing only 006's table; 148 adds
   // thought_validity, a read of a thought's state on three axes, refusing by
-  // name without 016, 042, 063, 068, 114, 134 or 139 ([20ck]) — all recorded by the
+  // name without 016, 029, 042, 046, 050, 061, 063, 068, 114, 134 or 139
+  // ([20ck]) — all recorded by the
   // planted ledger with their
   // prerequisites present, so none becomes the plain-run failure point
   // above).
@@ -7187,7 +7188,7 @@ console.log("\n[20ck] Migration 148: onto a populated brain at the file before i
   const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the148 }).then(() => "applied", (e: Error) => e.message);
   await sql`ALTER TABLE ob1_superseded_by_away RENAME TO ob1_superseded_by`;
   const made = async () => (await sql`SELECT to_regprocedure('thought_validity(uuid[])') IS NOT NULL AS m`)[0].m as boolean;
-  assert(/^migration 148 needs 016, 029, 042, 046, 050, 063, 068, 114, 134 and 139; this schema lacks ob1_superseded_by/.test(without) && !(await made()),
+  assert(/^migration 148 needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134 and 139; this schema lacks ob1_superseded_by/.test(without) && !(await made()),
     `without 068's ob1_superseded_by the file is refused by name; thought_validity not made (${without.slice(0, 100)})`);
 
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the148 });
