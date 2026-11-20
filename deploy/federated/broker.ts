@@ -126,8 +126,9 @@
 // to it; its own short calls waited a read each.)
 // One load that has held the others HOLD_S — a load waiting on a model live calls keep busy, a call never given back
 // — is left out for HOLD_S and held to again, turn about, while it lasts (pass 2: left out until listed, the others'
-// background kept its load waiting 245 s past the live calls' end), and no drain is begun while it is left out: that
-// time is the loaded models' (pass 3: a drain for a third model, waiting on the stuck call, held them through it).
+// background kept its load waiting 245 s past the live calls' end), and no load for another model is begun while it
+// is left out: that time is the loaded models' (pass 3: a drain for a third model, waiting on the stuck call, held
+// them through it).
 // It is the same load still, judged as above when its calls end (pass 5: never judged, a model that failed 130 s into
 // each load was not backed off), its time left out ending with it or with its listing; and where the list names the
 // model or goes unreadable, a load in hand is over however it stood. (Pass 6, the maintainer's choice of 2026-11-19 to
@@ -214,15 +215,15 @@ export const BACKOFF_S = 60;
 export const BACKOFF_MOST = 10;
 /** A model gone from the list is one a load put out where a brain used it this lately before the load began: one idle
  *  longer the server's own timer may have unloaded (Ollama's is five minutes; review pass 5: an idle model's going
- *  was charged to whatever call was running). */
+ *  was charged to whatever call was running). And how long what such a load put out is taken for due (`owed`). */
 export const RECENT_S = 120;
 /** How often the line that a list cannot be read is said again while it lasts. */
 export const OFF_SAY_S = 3600;
 /** The least time between two reads of a list begun for a call's end (review pass 1: 7,000 a second, a brain's to
  *  drive), and between two turns of a server for a live call's end. */
 export const PS_GAP_MS = 250;
-/** The most models a server's residency remembers in each of its maps (ended calls, misses, those left out, owed
- *  or loading): a brain naming a new one each call. Past it the oldest is forgotten. */
+/** The most models a server's residency remembers in each of its maps (ended loads, misses, those left out, owed,
+ *  used, asked for or loading): a brain naming a new one each call. Past it the oldest is forgotten. */
 export const MAX_NOTED = 256;
 /** A server of this many pools or fewer is turned at each change; a larger one at the broker's next tick. */
 export const TURN_NOW = 64;
@@ -433,7 +434,7 @@ type Pool = {
    *  model's load was under way then (what the list does meanwhile is that load's doing); whether a call of the load
    *  has ended, after which no more of its asks are granted into it; and whether it has been left out at its bound
    *  with calls running on (`late`): the same load still, judged when they end. */
-  before?: Set<string> | null; beganAt: number; ebb: boolean; late: boolean;
+  before: Set<string> | null; beganAt: number; ebb: boolean; late: boolean;
   live: Set<Grant>; bg: Set<Grant>;
   /** Each brain's live grants here, by its index: counted as they come and go, not by a walk of `live`. */
   liveBy: number[];
@@ -475,8 +476,9 @@ type Residency = {
   /** The loads ended with the list never naming their model, not yet judged: the list at each one's beginning
    *  (null: no word), when it began, and the reads begun by its end. Each such model's count of them (`n`), of those
    *  running that put a model out (`loud`), and when its next load may begin. The models left out of the rule for a
-   *  while, and until when on the broker's clock. The models a load put out and did not replace, taken for due. When
-   *  a call to each model last ended (one with a call running cannot be put out). Each kept to MAX_NOTED (`note`). */
+   *  while, and until when on the broker's clock. The models a load put out and did not replace, and when that was
+   *  judged: taken for due RECENT_S after (`owed`). When a call to each model last ended (one with a call running
+   *  cannot be put out). Each kept to MAX_NOTED (`note`). */
   ended: Map<string, { before: Set<string> | null; at: number; seq: number }>;
   misses: Map<string, { loud: number; until: number; n: number }>;
   unlisted: Map<string, number>;
@@ -593,7 +595,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
       // An unnamed model is no name a list could say: taken for loaded, and counted with the server's background
       // (review pass 1: outside the rule's counts, a load was granted while its call ran).
       const res = residencies.get(server) ?? null;
-      p = { key, server, model: asked === "?" || !server.perModel ? "" : tagged(model), res, cls: 0, pendAt: 0, beganAt: 0, ebb: false, late: false, live: new Set(), bg: new Set(), liveBy: reg.brains.map(() => 0), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: clock(), last: -1 };
+      p = { key, server, model: asked === "?" || !server.perModel ? "" : tagged(model), res, cls: 0, pendAt: 0, before: null, beganAt: 0, ebb: false, late: false, live: new Set(), bg: new Set(), liveBy: reg.brains.map(() => 0), queues: reg.brains.map(() => new Set()), used: reg.brains.map(() => 0), usedAt: clock(), last: -1 };
       pools.set(key, p);
       res?.pools.add(p);
     }
@@ -742,13 +744,13 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
    *  and which judges it. */
   const over = (p: Pool) => {
     const r = p.res!;
-    if (r.loaded !== null && p.model !== "" && !r.loaded.has(p.model)) {
+    if (r.loaded !== null && !r.loaded.has(p.model)) {
       // Where the model's calls run on under another spelling, a pool of its own, theirs is the end that counts
       // (review pass 6: one brain's call given up while another's still loaded the model, "a model that does not load").
       let twin = false;
       for (const q of r.pools) if (q !== p && q.model === p.model && q.bg.size + q.live.size > 0) { twin = true; break; }
       if (!twin) {
-        note(r.ended, p.model, { before: p.before ?? null, at: p.beganAt, seq: r.seq });
+        note(r.ended, p.model, { before: p.before, at: p.beganAt, seq: r.seq });
         r.verifyFrom = r.seq + 1;
         soon(r);
         // Its time left out ends with it: the model is not taken for loaded after (review pass 6: its next ask went
@@ -768,7 +770,7 @@ export function startBroker(reg: Registry, opts: { hostname?: string; port?: num
   /** A model whose load has run HOLD_S unlisted left out for HOLD_S, or until the list names it or the load ends if
    *  sooner: the server's other background goes on, and its own asks wait for the load's end (`shut`). Said. */
   const leaveOut = (r: Residency, model: string) => {
-    // One more than MAX_NOTED puts the oldest back under the rule: its pools counted anew.
+    // One more than MAX_NOTED puts the oldest back under the rule.
     const full = r.unlisted.size >= MAX_NOTED && !r.unlisted.has(model);
     note(r.unlisted, model, clock() + HOLD_S * 1000);
     // Its pools counted anew, under whatever spelling; every pool, where one was put back.

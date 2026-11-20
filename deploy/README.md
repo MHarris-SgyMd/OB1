@@ -494,8 +494,8 @@ free:
     callers give up, the broker backs it off and loads what it put out,
     and the load, finished too late, is put out in turn. In a simulation
     of two such models with 150 s loads, the brains had 47 and 24 calls in
-    half an hour, against 415 and 131 with no rule. For scale: 1,600
-    loads on one Mac (Ollama 0.33.3) took 4.6 s on average and 46 s at
+    half an hour, against 415 and 131 with no rule. For scale: 1,670
+    loads on one Mac (Ollama 0.33.3) took 4.6 s on average and 50 s at
     most. Raise the timeout above the load time.
   - Models that would all fit still load one per `stay_s`, since the broker
     can't see the server's memory. After a server unloaded three idle
@@ -712,8 +712,8 @@ bun --no-env-file deploy/federated/federated.ts down
     it`: the model's name in a brain's settings differs from the server's,
     or the server doesn't know the model. The line names any model the
     server lists that no brain asks for. Until the name is fixed each call
-    to it waits its turn. Expect the line at the model's third load. Each
-    load waits its turn, so that can take several minutes.
+    to it waits its turn as a load, so the line, said at the model's third
+    load, can take several minutes to appear.
   - `left out of the residency rule 120 s`: a load waited two minutes on a
     model that calls kept busy, or a call to it was never given back.
   - `a model that does not load`: its load ended with a model that a brain

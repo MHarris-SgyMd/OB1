@@ -206,7 +206,7 @@ async function main(cmd: string, args: string[]) {
   const text = readFileSync(o.registry, "utf8");
   const { registry, problems, warnings } = parseRegistry(text);
   if (!registry) { console.error(`${o.registry}:\n${problems.map((p) => `  ${p}`).join("\n")}`); process.exit(2); }
-  // Taken, and said: a `ps` the broker's container may not reach as written (it reads each list itself, from there).
+  // Taken, and said: a `ps` that looks wrong as written (the broker's container reads each list itself, from there).
   for (const w of warnings) console.error(`federated: ${o.registry}: ${w}`);
   const refusals: string[] = [];
   for (const path of [o.registry, BROKER]) { const problem = modeProblem(statSync(path).mode, path); if (problem) refusals.push(problem); }
