@@ -491,7 +491,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "validity", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "retag pass", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -5174,6 +5174,110 @@ if (configFailed) {
               : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
           }
+        }
+
+        /**
+         * An unfinished re-tag pass (SMD-2298 PR 3a). db/retag.ts is the claim
+         * table's fourth consumer, under keys with the retag: prefix (one per
+         * metadata model and prompt version); its first writing run records
+         * its key in ob1_config.retag_key, and rebuild_derived requeues a
+         * stale tags row under that key (150). The re-embed and consolidate
+         * rows' rule: a pass is unfinished while a row under its key is
+         * pending, leased or failed. "Not yet in the pool" is the worker's own
+         * backlog, db/config.mjs's RETAG_BACKLOG_SQL, one definition. No
+         * follower or sleep pass runs it yet (SMD-2298 PR 4), so a live lease
+         * is a run in progress and anything else unfinished is a run that
+         * stopped. With nothing unfinished, a backlog waiting for a run is said
+         * beside "none unfinished": preflight's lineage row counts its kinds.
+         */
+        try {
+          const { RETAG_BACKLOG_SQL, RETAG_KEY_PREFIX, formatPassCounts, parseRetagKey, passUnfinished, retagKey } = await import("../db/config.mjs");
+          const { METADATA_PROMPT_VERSION } = await import("./metadata.ts");
+          const [{ claimsPresent, marksPresent, configPresent }] = await sql`
+            SELECT to_regclass('thought_work_claims') IS NOT NULL AS "claimsPresent",
+                   EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('derivations') AND attname = 'stale_since' AND NOT attisdropped) AS "marksPresent",
+                   to_regclass('ob1_config') IS NOT NULL AS "configPresent"`;
+          if (!claimsPresent) {
+            add("retag pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
+          } else if (!marksPresent) {
+            add("retag pass", "skip", "not checked — derivations.stale_since does not exist (migration 063 not applied)");
+          } else {
+            const recorded: string | null = configPresent
+              ? ((await sql`SELECT NULLIF(value, '') AS key FROM ob1_config WHERE key = 'retag_key'`) as { key: string | null }[])[0]?.key ?? null
+              : null;
+            const serverKey = retagKey(metaModel, METADATA_PROMPT_VERSION);
+            const rows = (await sql`
+              SELECT work_type, status, count(*)::int AS c,
+                     count(*) FILTER (WHERE status = 'claimed' AND NOT (ttl_expires_at < now()))::int AS live,
+                     count(*) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now())::int AS expired,
+                     to_char(max(ttl_expires_at) FILTER (WHERE status = 'claimed' AND NOT (ttl_expires_at < now())) AT TIME ZONE 'UTC', 'HH24:MI') AS live_until
+              FROM thought_work_claims WHERE work_type LIKE ${RETAG_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
+              ({ work_type: string; status: string; c: number } & LeaseRow)[];
+            const leases = leasesByKey(rows);
+            const byKey = new Map<string, PassCounts>();
+            for (const r of rows) {
+              const c = byKey.get(r.work_type) ?? { thoughts: 0, succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: 0 };
+              const n = Number(r.c);
+              if (r.status === "succeeded") c.succeeded = n;
+              else if (r.status === "failed") c.failed = n;
+              else if (r.status === "claimed") c.claimed = n;
+              else if (r.status === "pending") c.pending = n;
+              byKey.set(r.work_type, c);
+            }
+            type RetagBacklog = { missing: number; marked: number; stale: number; fallback: number; unpooled: number; due: number };
+            const backlogOf = async (key: string) => ((await sql.unsafe(RETAG_BACKLOG_SQL, [key])) as RetagBacklog[])[0];
+            // How a run reaches a key from this tree: under the key's own model, which the server's knob may name
+            // otherwise; a key at another prompt version than this tree's is not this tree's to run — its extractor
+            // writes its own version, so a run here is another key's, refused without --switch-key.
+            const runUnder = (key: string): { prefix: string } | { switchWords: string } => {
+              const parsed = parseRetagKey(key);
+              if (parsed && parsed.promptVersion !== METADATA_PROMPT_VERSION) {
+                return { switchWords: `This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${serverKey}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it.` };
+              }
+              return { prefix: parsed && parsed.model !== metaModel ? `OB1_METADATA_MODEL=${parsed.model} ` : "" };
+            };
+            let unfinished = 0;
+            for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
+              if (!passUnfinished(c)) continue;
+              unfinished++;
+              c.unpooled = Number((await backlogOf(key)).unpooled);
+              // The universe: what the key pooled, and the backlog not pooled under it (a re-tag is no corpus-wide pass).
+              c.thoughts = c.succeeded + c.failed + c.claimed + c.pending + c.unpooled;
+              const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts pooled or behind their tags — ");
+              const l = leases.get(key) ?? NO_LEASES;
+              if (l.live > 0) {
+                const r = runningRow(key, c, `${key}: ${counts} — ${runningWords(l, c)}`);
+                add("retag pass", r.status, r.detail, r.fix);
+                continue;
+              }
+              // A key other than the recorded one: a pool a --switch-key left (PR 2's record names it). db/retag.ts runs
+              // the recorded key, refusing any other without --switch-key, and rebuild_derived feeds it: nothing finishes
+              // this one, so it is said, with no remedy that would switch back.
+              if (recorded !== null && key !== recorded) {
+                add("retag pass", "ok", `${key}: ${counts} — an earlier model or prompt version's pool, which no worker runs any more: db/retag.ts and rebuild_derived re-tag under ${recorded} (ob1_config.retag_key), nothing here to finish or retry`);
+                continue;
+              }
+              const how = runUnder(key);
+              const failedNote = c.failed ? ` --retry-failed (it returns the ${c.failed} failed row(s) to the pool first, once their cause is fixed)` : "";
+              const finish = "switchWords" in how ? how.switchWords
+                : `Finish it: cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL${failedNote}; ${how.prefix}bun retag.ts --url $DATABASE_URL --status shows where it stands.`;
+              add("retag pass", "warn",
+                  `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : "a re-tag run under this key stopped before it finished"}`,
+                  fixOf(l.expired > 0 ? reclaim(key) : "", finish));
+            }
+            if (unfinished === 0) {
+              const b = await backlogOf(recorded ?? serverKey);
+              const behind = Number(b.missing) + Number(b.marked) + Number(b.stale) + Number(b.fallback);
+              const how = runUnder(recorded ?? serverKey);
+              const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? " (none has run here: ob1_config.retag_key is unset)" : ""}`;
+              if (behind === 0) add("retag pass", "ok", "none unfinished");
+              else if ("switchWords" in how) add("retag pass", "ok", `${words} — ${how.switchWords}`);
+              else add("retag pass", "ok", `${words} — cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL re-tags them`);
+            }
+          }
+        } catch (e) {
+          add("retag pass", "warn", `could not verify: ${(e as Error).message}`,
+              "The check reads thought_work_claims, derivations and ob1_config.retag_key.");
         }
 
         // The priority review's findings (SMD-3671 PR 2, migration 142): what
