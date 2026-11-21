@@ -71,6 +71,7 @@ export const CALLS = {
   capture_deliverable: (c, p, i) => c.captureDeliverable(p, i),
   verify_deliverable: (c, p, i) => c.verifyDeliverable(p, i),
   deliverable_history: (c, p, i) => c.deliverableHistory(p, i),
+  validity: (c, p, i) => c.validity(p, i),
   list_items: (c, p, i) => c.listItems(p, i),
   agenda: (c, p, i) => c.agenda(p, i),
   plan_context: (c, p, i) => c.planContext(p, i),
