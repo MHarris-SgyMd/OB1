@@ -142,6 +142,10 @@ function factsBlock(input: PrBodyInput): string {
     .map((s) => `- ${s.role}: ${s.turns ?? "?"} turns${s.costUsd !== null ? `, $${s.costUsd.toFixed(2)}` : ""}${s.ended !== "result" ? ` (ended ${s.ended})` : ""}`)
     .join("\n");
   if (sess) parts.push(`### Sessions\n\n${sess}`);
+  // A run goes on to the gate when its review did not finish (run.ts), so the body says so: no findings section then
+  // means no review, not a review that found nothing (SMD-4490).
+  const reviews = input.sessions.filter((s) => s.role === "review");
+  if (reviews.length > 0 && !reviews.some((s) => s.ended === "result")) parts.push("**The review session did not finish, so this branch was not reviewed by the runner.** No review findings were taken.");
   const stat = input.diffStat.trimEnd();
   if (stat !== "") parts.push(`### Changed files\n\n${fenced(cap(stat, DIFFSTAT_CAP))}`);
   return parts.join("\n\n");
