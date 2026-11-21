@@ -286,10 +286,11 @@ Records are pruned after 90 days.
   * each claim's token and lease, in `claims/<claim id>.json`.
 
   The sandbox denies reading the whole home directory, these files included. `scripts/agent-runner/setup.ts` places and verifies each secret by its shape (0600, owner-only, never printing the value), and the runner's README says how each one rotates.
-* **The install:** `~/.local/share/open-brain/agent-runner/install/`. It holds:
-  * a checkout of a commit of `main`, whole, since the runner imports from elsewhere in the repo (`db/linear-api.ts`, the one Linear client);
-  * the profile templates;
-  * the pinned Claude Code binary, with its checksum.
+* **The install:** `~/.local/share/open-brain/agent-runner/install/`, made and moved by `setup.ts checkout` (SMD-4491). It holds:
+  * a checkout of a commit of `main`, whole, since the runner imports from elsewhere in the repo (`db/linear-api.ts`, the one Linear client). It is a clone of the runner's bare repository on a detached HEAD;
+  * the profile templates.
+
+  The pinned Claude Code binary is beside it, at `~/.local/share/open-brain/agent-runner/claude/<version>`, copied by `setup.ts claude`: outside the checkout, so a move of the install leaves it alone, and outside Claude Code's own versions directory, which its updater prunes. The probe stamp records its checksum.
 
   Only the maintainer updates it, and no session can write there.
 * **Records:** one directory per run under `~/.local/share/open-brain/agent-runner/runs/<run>/`:
@@ -408,3 +409,5 @@ Cut 2a ran the probes on Claude Code 2.1.319 against a scripted stand-in for the
 7. **The login keychain is out of reach** of a sandboxed command, so the sessions stay in the maintainer's account ("Alternatives considered").
 8. **The Edit and Write tools can't write the temp directory** (review pass 1). The temp directory is Claude Code's own staging (`bash-edit-diff`, `tasks/`, `plugin-tool-staging`), and the Edit and Write tools run outside the sandbox; letting them write there could plant content Claude Code reads and acts on. So the tools write the clone alone; the shell still writes the bundle and its scratch there, inside the sandbox (layer 3, decision 5).
 9. **The self-check and probes gained teeth** (review pass 1). The profile's settings, environment and command line are now compared to a written-out literal, not to the function that makes them, and the allowlists (`GIT_LOCAL`, each tool's inputs, the credential strip-list, the stamp's file set) to a literal too, so a later widening — `CLAUDE_CONFIG_DIR` to `~/.claude`, a dropped credential, a new git subcommand — fails the self-check. The probes added the missing cases: a Write or Edit outside the clone, the temp-directory refusal, a positive Grep and Glob, a child that ignores SIGTERM, and the launcher's checksum and log helpers run rather than stubbed.
+
+**Since then.** The pin moved to 2.1.329 on 2026-11-20, where all 35 probes pass after one change: that version refuses to start on a profile that fails validation, with one error result and no init event, and the runner now reads a result before any init as a session that never started (SMD-4489; the runner's README has the finding).
