@@ -231,7 +231,7 @@ The runner runs the gate on the branch it imported, with tools from its own inst
   * none of the refused paths (layer 3), which are also what SMD-4086's criteria rule out;
   * under a size cap, with no new dependency;
   * no file over 1 MB, of a type CLAUDE.md refuses, or binary, no symlink or submodule, and no rename or copy (the gate reads adds, edits and deletes; a renamed file's old and new paths are both checked above);
-  * no secret, token or key pattern in any commit's added lines (each commit scanned, not just the net diff, since the PR carries the whole branch, not only its net change; taken with `--text`, no external diff or textconv), the commit messages or any model text bound for the PR. The scan is the session hook's own (`scanForSecrets` in `session-capture.mjs`, `wc_` tokens among its patterns).
+  * no secret, token or key pattern in any commit's added lines (each commit scanned, not just the net diff, since the PR carries the whole branch, not only its net change; taken with `--text`, no external diff or textconv), the commit messages or any model text bound for the PR. The scan is the session hook's own (`scanForSecrets`, in `lib/secrets.mjs` and exported by `session-capture.mjs`, `wc_` tokens among its patterns).
 
   A change to a file CI runs as a check is named at the top of the PR body, since CI runs the branch's copy: `scripts/check-*.ts`, `scripts/commitlint.config.ts` or `scripts/commit-grammar.ts`.
 * **The work:** each of the ticket's Verify items answered in the worker's report, and the review's findings fixed or listed.
