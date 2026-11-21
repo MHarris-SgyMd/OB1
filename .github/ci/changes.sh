@@ -63,8 +63,15 @@ HOLDS_THE_CUT="scripts/check-consistency.ts .github/ci/changes.sh"
 # path no gated job reads; a path not here runs every job. Check 53 holds
 # each entry to the files whose code names it and the jobs whose steps do.
 # Kept by hand: by_map counts it beside a job's own list (PR 3b-2), so a job
-# it names runs for its paths whatever the list holds.
-CHARGES="changes/*	deploy-stack db-schema
+# it names runs for its paths whatever the list holds. A job written with a
+# `?` after it is charged unless its list says otherwise (the maintainer,
+# 2026-11-20): where main's lists are read and the job's is whole, the list
+# decides, by by_map's rule; with no lists the row counts as any other.
+# Check 56 holds the mark to MAP_LISTS's jobs. changes/* marks db-schema: a
+# step of its names ingest-records.ts, which can read a record, and over
+# main's runs its list never held one, so it ran for every pull request
+# with a record and read none of them.
+CHARGES="changes/*	deploy-stack db-schema?
 scripts/check-consistency.ts	data-layer
 .github/ci/typecheck.sh	portable-server
 .github/ci/full-stack-up.sh	deploy-stack deploy-stack-brains deploy-stack-auth deploy-stack-observability
@@ -234,13 +241,14 @@ changed_ids() {
 }
 
 # by_job WF CHARGED: in a checkout whose every path off the list is an edit of
-# WORKFLOW (WF 1) or one CHARGES names, CHARGED the gated jobs those charge;
+# WORKFLOW (WF 1) or one CHARGES names, CHARGED the gated jobs those charge,
+# one marked `?` charged as the rest here (answer asks by_map after it);
 # prints "true<TAB>skip<TAB>why". skip names the gated jobs (a block holding
 # its own gate on skip) that nothing charged and, with WF 1, whose block is
 # unchanged; it is empty when an edit outside the jobs or of a RUN_ALL_JOBS
 # job, or an unreadable file, runs every job.
 by_job() {
-  local wf=$1 charged=$2 d f id changed='' skip='' rc=0 at=HEAD
+  local wf=$1 charged=${2//\?/} d f id changed='' skip='' rc=0 at=HEAD
   if [ "$wf" = 1 ]; then at='HEAD^1 and HEAD'; fi
   d=$(mktemp -d) || { printf 'true\t\tno scratch directory to read %s by job\n' "$WORKFLOW"; return; }
   mkdir "$d/base" "$d/head"
@@ -326,7 +334,7 @@ fetch_lists() {
 #   file it opened, or a .gitattributes there differs at all;
 # - a file is added or deleted whose name, less its extensions, is a folder
 #   above a file it opened;
-# - CHARGES names a path that differs, and the job;
+# - CHARGES names a path that differs, and the job with no `?` after it;
 # - its block of the workflow differs, or it holds no gate on skip.
 # Every job runs (skip empty) with no lists to read, lists of more than one
 # commit, an X that is not here and cannot be fetched, a symlink, a submodule
@@ -334,8 +342,10 @@ fetch_lists() {
 # cut, one that differs outside its jobs or in a RUN_ALL_JOBS job, or one that
 # differs beside HOLDS_THE_CUT's files. READS_MAP_DIR, when set, is where the
 # lists are read from in place of the fetch: the cases' own, and a replay's.
+# With ONLY, the jobs judged are those alone: the ones a CHARGES row marked
+# `?`, in a pull request whose other paths by_job has answered for.
 by_map() {
-  local why=$1 default=$2 d x='' name job cell f head re jobs='' bad='' ok='' meta p oldmode newmode s j wf=0 held='' changed='' charged='' id skip='' hit n=0
+  local why=$1 default=$2 only=${3:-} d x='' name job cell f head re jobs='' bad='' ok='' meta p oldmode newmode s j wf=0 held='' changed='' charged='' id skip='' hit n=0
   d=$(mktemp -d) || { printf 'true\t\t%s\n' "$why"; return; }
   # no_map REASON: every job runs, as before PR 3b-2, and the answer says why.
   no_map() { printf 'true\t\t%s; %s\n' "$why" "$1"; rm -rf "$d"; }
@@ -418,6 +428,7 @@ by_map() {
     done
   fi
   for job in $ok; do
+    if [ -n "$only" ]; then case " $only " in *" $job "*) ;; *) continue ;; esac; fi
     hit=''
     case " $changed " in *" $job "*) hit="its block of $WORKFLOW differs" ;; esac
     case " $charged " in *" $job "*) hit=${hit:-a path CHARGES gives it differs} ;; esac
@@ -484,7 +495,20 @@ answer() {
   if [ "${result%%$'\t'*}" = partial ]; then
     local rest=${result#partial$'\t'} jobs
     jobs=${rest#*$'\t'}; jobs=${jobs%%$'\t'*}
-    by_job "${rest%%$'\t'*}" "$jobs"; return
+    # The jobs a row marked `?` and none charged outright: by_job has them run, and by_map may clear them by their lists.
+    local j marked='' first mapped
+    for j in $jobs; do
+      case "$j" in *\?) case " $jobs " in *" ${j%\?} "*) ;; *) marked="$marked ${j%\?}" ;; esac ;; esac
+    done
+    first=$(by_job "${rest%%$'\t'*}" "$jobs")
+    if [ -z "$marked" ]; then printf '%s\n' "$first"; return; fi
+    rest=${first#*$'\t'}
+    mapped=$(by_map "${rest#*$'\t'}" "$default" "${marked# }")
+    mapped=${mapped#*$'\t'}
+    # shellcheck disable=SC2086 # split on purpose: one job a line
+    jobs=$(printf '%s\n' ${rest%%$'\t'*} ${mapped%%$'\t'*} | sort -u | tr '\n' ' ')
+    jobs=${jobs# }
+    printf 'true\t%s\t%s\n' "${jobs% }" "${mapped#*$'\t'}"; return
   fi
   if [ "${result%%$'\t'*}" = true ] && [ "${result##*$'\t'}" = map ]; then
     local why=${result#true$'\t'}
@@ -522,7 +546,7 @@ self_check() {
   check false pull_request docs/01-getting-started.md
   check false pull_request README.md recipes/x/README.md "docs/a b.md" docs/img/shot.png docs/diagram.svg
   check false pull_request db/README.md
-  CHARGED='db-schema deploy-stack' check partial pull_request changes/smd-1.md
+  CHARGED='db-schema? deploy-stack' check partial pull_request changes/smd-1.md
   check true pull_request docs/a.md docs/subject-anchored-claims.md
   check true pull_request integrations/telegram-capture/README.md
   check true pull_request recipes/schema-aware-routing/README.md
@@ -561,8 +585,8 @@ self_check() {
   # The CHARGES map (PR 3a): each path charges its jobs, together the union; a path off the map runs every job.
   CHARGED=data-layer check partial pull_request scripts/check-consistency.ts
   CHARGED='deploy-stack deploy-stack-auth deploy-stack-brains deploy-stack-observability' check partial pull_request .github/ci/full-stack-up.sh
-  CHARGED='db-schema deploy-stack portable-server' check partial pull_request changes/smd-1.md .github/ci/typecheck.sh docs/a.md
-  CHARGED='db-schema deploy-stack' check partial pull_request changes/smd-1.md .github/workflows/brain-checks.yml
+  CHARGED='db-schema? deploy-stack portable-server' check partial pull_request changes/smd-1.md .github/ci/typecheck.sh docs/a.md
+  CHARGED='db-schema? deploy-stack' check partial pull_request changes/smd-1.md .github/workflows/brain-checks.yml
   check true pull_request changes/smd-1.md server-portable/api.ts
   check true pull_request scripts/check-consistency.ts .github/workflows/brain-checks.yml
   check true pull_request .github/ci/changes.sh .github/workflows/brain-checks.yml
@@ -720,9 +744,16 @@ EOF
     BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer' run true pull_request main 'echo x >> db/a.ts'
     BASE_OPS=$mb run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS=: run true pull_request main 'echo x >> db/tool.sh'
-    # Docs alone are code=false still, and a record or a workflow edit alone is read as before, lists or no.
+    # Docs alone are code=false still. A record alone charges deploy-stack (no job here) and db-schema, marked `?`
+    # in CHARGES: charged with no lists, cleared by a list that holds nothing of changes/, and kept by one that listed it.
     BASE_OPS=$mb LISTS=$std run false pull_request main 'echo x >> docs/a.md'
-    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live g' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md'
+    BASE_OPS=$mb SKIP='data-layer db-live g' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md'
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live db-schema g' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md'
+    BASE_OPS="$mb && mkdir -p changes && echo o > changes/smd-0.md" LISTS="$std; list db-schema 'f db/migrations/1.sql' 'd db/migrations/' 'd changes/'" SKIP='data-layer db-live g' run true pull_request main 'echo x > changes/smd-1.md'
+    BASE_OPS=$mb LISTS="$std; STATUS=failure list db-schema" SKIP='data-layer db-live g' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md'
+    # …and a record beside a workflow edit: the job the edit reaches runs, the marked one is its list's.
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live db-schema' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; sub "echo g" "echo g2"'
+    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live g' run true pull_request main 'mkdir -p changes && echo x > changes/smd-1.md; sub "echo db-schema" "echo db-schema2"'
     # A list a job did not vouch for skips nothing of that job: one that failed, one blind, one of a matrix
     # job's missing, one whose header names another job.
     BASE_OPS=$mb LISTS="$std; STATUS=failure list db-schema" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
@@ -765,7 +796,8 @@ EOF
     BASE_OPS="$mb && mkdir -p lib/core.v2 && echo c > lib/core.v2/index.ts" LISTS="$std; list db-schema 'f db/migrations/1.sql' 'd db/migrations/' 'f lib/core.v2/index.ts'" SKIP='data-layer db-live' run true pull_request main 'echo c > lib/core.v2.d.ts'
     # The workflow since then: a job's own block, a path CHARGES gives a job, and what stops every skip.
     BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; sub "echo db-schema" "echo db-schema2"'
-    BASE_OPS=$mb LISTS=$std SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; mkdir -p changes && echo x > changes/smd-1.md'
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema db-live' run true pull_request main 'echo x >> db/tool.sh; mkdir -p scripts && echo x > scripts/check-consistency.ts'
+    BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh; mkdir -p changes && echo x > changes/smd-1.md'
     BASE_OPS=$mb LISTS=$std run true pull_request main 'echo x >> db/tool.sh; sub "name: f" "name: f2"'
     BASE_OPS=$mb LISTS=$std run true pull_request main 'echo x >> db/tool.sh; sub "runs-on: x" "runs-on: y"'
     BASE_OPS=$mb LISTS=$std run true pull_request main 'echo x >> db/tool.sh; sub "echo g" "echo g2"; mkdir -p scripts && echo x > scripts/check-consistency.ts'

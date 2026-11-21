@@ -656,8 +656,9 @@
  *      no job in it runs a compose stack, builds an image or mounts a path
  *      into a container, whose reads no list sees, or reads the event,
  *      since the lists are a push run's: both by allowlist, the commands a
- *      mapped job may give docker and the github names it may read
- *      (SMD-2435 PR 3b-2). Its probe pins what it refuses and passes
+ *      mapped job may give docker and the github names it may read; and a
+ *      CHARGES row leaves a job to its list (`job?`) only if MAP_LISTS has
+ *      one (SMD-2435 PR 3b-2). Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
  * beside its run (SMD-1870); checks 13, 14, 18, 20, 23, 28, 29, 32, 33, 34, 35, 36, 37, 38, 40, 44, 48, 50, 51, 55 and 56 parse YAML with Bun.YAML,
@@ -11369,15 +11370,17 @@ const JOB_MAP_READERS: Record<string, Record<string, MapReader>> = {
  * so a gated job running either must be charged by every row (review pass 7).
  */
 const JOB_MAP_HOMES = [CHANGES_SCRIPT, SELF];
-/** A CHARGES row: its pattern and the jobs it charges. */
-type ChargesRow = { pattern: string; jobs: string[] };
+/** A CHARGES row: its pattern, the jobs it charges, and which of them it leaves to their lists (`job?`), where it leaves any. */
+type ChargesRow = { pattern: string; jobs: string[]; marked?: string[] };
 /** CHARGES as CHANGES_SCRIPT prints it, or why it could not be read. */
 function chargesTable(): ChargesRow[] | string {
   const r = Bun.spawnSync(["bash", join(ROOT, CHANGES_SCRIPT), "--charges"]);
   if (r.exitCode !== 0) return `${CHANGES_SCRIPT} --charges exited ${r.exitCode}: ${r.stderr.toString().trim()}`;
   return r.stdout.toString().split("\n").filter((l) => l.trim()).map((l) => {
+    // A job written `job?` is charged unless its list says otherwise (PR 3b-2): the job, and its mark.
     const [pattern, jobs = ""] = l.split("\t");
-    return { pattern, jobs: jobs.split(" ").filter(Boolean) };
+    const names = jobs.split(" ").filter(Boolean);
+    return { pattern, jobs: names.map((j) => j.replace(/\?$/, "")), marked: names.filter((j) => j.endsWith("?")).map((j) => j.slice(0, -1)) };
   });
 }
 /** scripts/migrate-to-sql-shim.ts's walk, as compat-shim runs it over the tree: the top-level directories it skips, the files it reads, and the marked files its parse step builds (CODEMOD_MARKER; checkJobMap fills them). */
@@ -12338,6 +12341,10 @@ function checkMapLists() {
   if (!lists.length) fail(CHANGES_SCRIPT, "--map-lists printed nothing — MAP_LISTS names the lists a job may skip by (check 56, SMD-2435)");
   // Each message is its file's: MAP_LISTS is changes.sh's, MAP_ALWAYS_RUN and the choice between the two this file's, the rest the workflow's.
   for (const msg of mapListsProblems(lists, readFileSync(join(ROOT, WORKFLOW), "utf8"), AGGREGATE_GATED, MAP_ALWAYS_RUN)) fail(msg.startsWith("MAP_LISTS") ? CHANGES_SCRIPT : msg.startsWith("MAP_ALWAYS_RUN") || msg.startsWith("gated job") ? SELF : WORKFLOW, msg);
+  // A CHARGES row may leave a job to its list (`job?`) only where there is a list to leave it to.
+  const table = chargesTable();
+  if (typeof table === "string") fail(CHANGES_SCRIPT, `${table} — check 56 reads which jobs CHARGES leaves to their lists (SMD-2435)`);
+  else for (const row of table) for (const job of row.marked ?? []) if (!lists.some((l) => l === job || l.startsWith(`${job}.`))) fail(CHANGES_SCRIPT, `CHARGES marks ${job}? for ${row.pattern}, and MAP_LISTS names no list of ${job} — a job is left to its list only where main's lists are read for it; with none, the mark would never be looked at and reads as a promise (check 56, SMD-2435)`);
   if (!MAP_PUSH_ALONE_IFS.every((c) => /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}$/.test(c) && !/\|\||!\(/.test(c))) fail(SELF, "MAP_PUSH_ALONE_IFS holds a condition that does not end in a push to main, or that an `||` or a `!(` widens — each must run its step on a push to main alone (check 56, SMD-2435)");
 }
 checkMapLists();
