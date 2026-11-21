@@ -289,7 +289,9 @@ jobs:
       # SMD-4089: the runner's identity setup tool on a temp directory — the shape
       # gate, the 0600 write, the no-symlink write (O_NOFOLLOW), the owner-only read
       # and the directory check. No clipboard, no network, no key; placing the real
-      # secrets is the maintainer's, on the brain host.
+      # secrets is the maintainer's, on the brain host. SMD-4491: the same step runs
+      # the install's cases on git fixtures — the copy of a Claude Code binary, the
+      # runner's checkout made and moved, and the probe stamp's report.
       - name: The agent runner's identity setup
         run: bun scripts/agent-runner/setup.ts --self-check
       # SMD-4087 cut 2c-3: the real-deps executor's offline logic — the Verify and
