@@ -3898,6 +3898,50 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
   }
 }
 
+console.log("\n[28] The validity read through both doors (SMD-3887 PR 2b, migration 149): GET /v1/validity?ids=… and MCP validity, a read key's — a thought under a pending proposal contested, the other side unchallenged, both review pending, the judge's number uncalibrated, an unknown id found false, a repeat answered once in the order given; the text names each thought's three states; a review record's time in the API's form; over 100 ids refused by the input's rule (REST 400 REFUSED_INPUT, MCP isError); a malformed id refused 400 by the schema; a capture-only key refused 403");
+{
+  const ins = async (content: string) => String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, '{}'::jsonb) RETURNING id`)[0].id);
+  const older = await ins("[28] validity: the deploy window is noon"), newer = await ins("[28] validity: the deploy window is nine");
+  const ghost = "3887f028-0000-4000-8000-000000000028";
+  await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.83, '[28]', 0.9, 'consolidate:[28]@p1', NULL, NULL, NULL, NULL)`;
+  type T = { id: string; found: boolean; forgotten?: boolean | null; validity?: { state: string; records: { kind: string; judge?: { confidence: number; calibrated: boolean } }[] }; review?: { state: string } };
+  try {
+    const q = `/v1/validity?ids=${older}&ids=${newer}&ids=${older}&ids=${ghost}`;
+    const viaRest = await rest("GET", q, undefined, KEYS.reader);
+    const rt = (viaRest.body.thoughts ?? []) as T[];
+    const viaMcp = await mcp("validity", { ids: [older, newer, older, ghost] }, KEYS.reader);
+    const mt = (viaMcp.sc.thoughts ?? []) as T[];
+    const judge = rt[0]?.validity?.records.find((r) => r.kind === "proposal")?.judge;
+    assert(viaRest.status === 200 && viaRest.body.cap === 100 && rt.map((t) => t.id).join() === [older, newer, ghost].join()
+        && rt[0].validity?.state === "contested" && rt[1].validity?.state === "unchallenged" && rt[0].review?.state === "pending" && rt[1].review?.state === "pending"
+        && rt[2].found === false && rt[2].forgotten === false && Number(judge?.confidence) === 0.83 && judge?.calibrated === false
+        && !viaMcp.isError && same(mt, rt) && viaMcp.text.includes(`${older}: validity contested; review pending`) && viaMcp.text.includes(`${ghost}: not a thought`)
+        && viaMcp.text.includes("uncalibrated") && /review: proposal [0-9a-f-]{36} pending/.test(viaMcp.text),
+      `a read key reads both doors alike: the falling side contested, the other unchallenged, both pending, the judge's 0.83 uncalibrated, the unknown id found false, a repeat once in order (${viaRest.status} ${rt.map((t) => t.validity?.state ?? "missing").join("/")} ${JSON.stringify(judge)} ${viaMcp.isError})`);
+
+    // A verification's record carries its time in the API's form ('…Z'), not jsonb's '+00:00' (review pass 2).
+    const spec28 = await ins("[28] validity: the spec");
+    await sql`SELECT record_deliverable(${newer}::text, ${spec28}::text, 'c0ffee28', (${JSON.stringify({ name: "writer", scope: "write" })}::text)::jsonb)`;
+    await sql`SELECT verify_deliverable(${newer}::text, 'corrected', 'review', 'wanting', (${JSON.stringify({ name: "rival", scope: "write" })}::text)::jsonb)`;
+    const checked = ((await rest("GET", `/v1/validity?ids=${newer}`, undefined, KEYS.reader)).body.thoughts as { review: { records: { kind: string; at?: string }[] } }[])[0];
+    const checkedAt = checked.review.records.find((r) => r.kind === "verification")?.at ?? "";
+    assert(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(checkedAt),
+      `a review record's time is in the API's form, ISO with Z (${checkedAt})`);
+
+    const many = Array.from({ length: 101 }, (_, i) => `3887e028-0000-4000-8000-${String(i).padStart(12, "0")}`);
+    const tooRest = await rest("GET", `/v1/validity?${many.map((id) => `ids=${id}`).join("&")}`, undefined, KEYS.reader);
+    const tooMcp = await mcp("validity", { ids: many }, KEYS.reader);
+    const badId = await rest("GET", "/v1/validity?ids=not-a-uuid", undefined, KEYS.reader);
+    const byHook = await rest("GET", `/v1/validity?ids=${older}`, undefined, KEYS.hook);
+    assert(tooRest.status === 400 && tooRest.body.code === "REFUSED_INPUT" && tooMcp.isError
+        && badId.status === 400 && byHook.status === 403,
+      `over 100 ids refused by the input's rule (REST 400 REFUSED_INPUT, MCP isError); a malformed id 400; a capture key 403 (${tooRest.status}/${String(tooRest.body.code)} ${tooMcp.isError} ${badId.status} ${byHook.status})`);
+  } finally {
+    // Its own thoughts, as [19] removes its own; the proposal and the lineage rows go with them (029's cascade, 061's drop trigger).
+    await sql`DELETE FROM thoughts WHERE content LIKE '[28] validity:%'`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

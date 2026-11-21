@@ -53,6 +53,8 @@ export const TOOLS = [
   { name: "list_items", scope: "read" },
   // Deliverables (SMD-1715 PR 2, migration 134): the read is any key's; the writers below a write key's alone, as 134 refuses any other.
   { name: "deliverable_history", scope: "read" },
+  // The validity read (SMD-3887 PR 2b, migration 149): a thought's state on three axes, labels only.
+  { name: "validity", scope: "read" },
   // The agenda (SMD-3669, migration 123): a read over every kind of open item, ranked by effective priority.
   { name: "agenda", scope: "read" },
   // plan_context (SMD-2684): what the brain holds for a request, in one read — knowledge, board, tools and gaps.
