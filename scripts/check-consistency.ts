@@ -12134,24 +12134,13 @@ const MAP_DOCKER_MAY = new Set(["pull", "run", "exec", "logs", "inspect", "rm", 
  *
  * It is a reader of words, not a shell. Past it go a container a script the step runs makes, a runtime or a
  * mount passed through a variable that does not say so (`docker run $ARGS image`), and anything `eval` builds.
- * It also refuses more than it must: a `-v` anywhere after a `docker run` on its line, the next command's too.
+ * It also refuses more than it must: a `-v` anywhere after a `docker run` on its line, the next command's too,
+ * and what a step only says, an echo of "docker compose": two review passes each found a way to hide a command
+ * behind an echo that was passed over, so an echo's words are read as any others, and reworded if they must be.
  * What it is for is the plain edit, a mount or a stack added to a job whose list is trusted.
  */
 function containerProblem(line: string): string | null {
   // Each word as written less its leading quotes, where a flag shows, and bare, where a runtime's name does: what follows the last `$(`, `(`, backtick, quote or `=` in it.
-  // What an echo says is no command: its words go, up to the first `;`, `&&`, `||` or `|` outside quotes, where
-  // the next command starts, unless it says what a command printed (`$(` or a backtick), when all of it is read.
-  if (/^\s*(?:echo|printf)\s/.test(line) && !/\$\(|`/.test(line)) {
-    let quote = "", cut = -1;
-    for (let c = 0; c < line.length && cut === -1; c++) {
-      const ch = line[c];
-      if (quote) { if (ch === quote) quote = ""; }
-      else if (ch === '"' || ch === "'") quote = ch;
-      else if (ch === ";" || ch === "|" || (ch === "&" && line[c + 1] === "&")) cut = c;
-    }
-    if (cut === -1) return null;
-    line = line.slice(cut).replace(/^[;|&]+/, "");
-  }
   const raw = line.trim().split(/\s+/).map((w) => w.replace(/^["']+/, "").replace(/["']+$/, ""));
   const words = raw.map((w) => w.replace(/[`);]+$/, "").replace(/^.*(?:\$\(|["'`(=])/, ""));
   const mounts = (from: number) => raw.slice(from).some((x) => /^-[a-zA-Z]*v/.test(x) || /^--(?:volume|mount|volumes-from)(?:=|$)/.test(x));
@@ -12181,15 +12170,20 @@ function containerProblem(line: string): string | null {
 const MAP_NEUTRAL_CONTEXTS = new Set(["github.sha", "github.run_id", "github.run_attempt", "github.repository", "github.server_url", "github.workspace", "github.job"]);
 /** What a job MAP_LISTS names may ask of git in a step's own command: nothing that names or reads the tracked files. No mapped job asks it anything today. */
 const MAP_GIT_MAY = new Set(["rev-parse", "config", "version"]);
-/** The GITHUB_ variables a mapped job's commands may name: where a step writes, not what started it. */
-const MAP_NEUTRAL_VARIABLES = new Set(["GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_WORKSPACE"]);
+/** The GITHUB_ variables a mapped job's steps may name: where a step writes, and the names MAP_NEUTRAL_CONTEXTS has, not what started the run. */
+const MAP_NEUTRAL_VARIABLES = new Set(["GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_WORKSPACE", "GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_REPOSITORY", "GITHUB_SERVER_URL", "GITHUB_JOB"]);
+/** The actions a job MAP_LISTS names may use: the three they use. Another may build an image, run a container, or branch on the event in a script of its own. */
+const MAP_ACTIONS_MAY = new Set(["actions/checkout", "actions/upload-artifact", "oven-sh/setup-bun"]);
 /** The step conditions that run a step on a push to main alone, each verbatim: there a step can only add to what a list holds. */
 const MAP_PUSH_ALONE_IFS = [READS_KEEP_IF, "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}"];
 /** The `github` names an expression reads that MAP_NEUTRAL_CONTEXTS lacks; `github` alone and `github[` among them. */
 function eventNames(expression: string): string[] {
-  // In any case: GitHub reads `GitHub.Event_Name` as it reads `github.event_name`.
-  return [...expression.matchAll(/\bgithub\b((?:\s*\.\s*[A-Za-z_][\w-]*)*)(\s*\[)?/gi)]
-    .map((m) => `github${m[1].replace(/\s+/g, "").toLowerCase()}${m[2] ? "[" : ""}`)
+  // Less its string literals: `hashFiles('.github/ci/x')` names a path, not the context. In any case: GitHub
+  // reads `GitHub.Event_Name` as it reads `github.event_name`. With `github`, a secret (a pull request from another
+  // repository is given none) and what a needed job said (the changes job's answer is empty on a push).
+  const bare = expression.replace(/'(?:[^']|'')*'/g, "''");
+  return [...bare.matchAll(/\b(github|secrets|needs)\b((?:\s*\.\s*[A-Za-z_][\w-]*)*)(\s*\[)?/gi)]
+    .map((m) => `${m[1].toLowerCase()}${m[2].replace(/\s+/g, "").toLowerCase()}${m[3] ? "[" : ""}`)
     .filter((name) => !MAP_NEUTRAL_CONTEXTS.has(name));
 }
 /** Every string under a value, with the key it stands under. */
@@ -12199,13 +12193,13 @@ function stringsUnder(v: unknown, key = ""): [string, string][] {
   const m = mapping(v);
   return m ? Object.entries(m).flatMap(([k, x]) => stringsUnder(x, k)) : [];
 }
-/** What a value (a step, a job's key, the workflow's env) reads of the event: names in its expressions, in an `if:` whole unless it is a push-alone one, and GITHUB_ variables in a `run:`. */
+/** What a value (a step, a job's key, the workflow's env) reads of the event: names in its expressions, in an `if:` whole unless it is a push-alone one, and GITHUB_ variables in any of its strings. */
 function eventReads(v: unknown, key = ""): string[] {
   return [...new Set(stringsUnder(v, key).flatMap(([k, text]) => {
     if (k === "if") return MAP_PUSH_ALONE_IFS.includes(text.trim()) ? [] : eventNames(text);
-    // A secret too: a pull request from another repository's branch is given none, and a push to main has them.
-    const inExpressions = [...text.matchAll(/\$\{\{([\s\S]*?)\}\}/g)].flatMap((m) => [...eventNames(m[1]), ...[...m[1].matchAll(/\bsecrets\b(?:\s*\.\s*[\w-]+)?/gi)].map((x) => x[0].replace(/\s+/g, "").toLowerCase())]);
-    const variables = k === "run" ? [...text.matchAll(/\bGITHUB_[A-Z_]+/g)].map((m) => m[0]).filter((name) => !MAP_NEUTRAL_VARIABLES.has(name)) : [];
+    const inExpressions = [...text.matchAll(/\$\{\{([\s\S]*?)\}\}/g)].flatMap((m) => eventNames(m[1]));
+    // A variable wherever it stands, a command or an action's input.
+    const variables = [...text.matchAll(/\bGITHUB_[A-Z_]+/g)].map((m) => m[0]).filter((name) => !MAP_NEUTRAL_VARIABLES.has(name));
     return [...inExpressions, ...variables];
   }))];
 }
@@ -12261,7 +12255,7 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
       const step = mapping(st) ?? {};
       const run = step.run;
       const uses = typeof step.uses === "string" ? step.uses : "";
-      if (/^docker(?:\/|:)/.test(uses)) problems.push(`job ${key}, which MAP_LISTS names, uses ${uses.split("@")[0]} in step ${i + 1} — an image built or a container run by an action reads the checkout where no access time moves; take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
+      if (uses && !MAP_ACTIONS_MAY.has(uses.split("@")[0])) problems.push(`job ${key}, which MAP_LISTS names, uses ${uses.split("@")[0]} in step ${i + 1} — a mapped job uses only ${[...MAP_ACTIONS_MAY].join(", ")}: another action may build an image or run a container, which read the checkout where no access time moves, or do otherwise on a pull request than on the push its list is of (check 56, SMD-2435)`);
       const reads = eventReads(step);
       if (reads.length) problems.push(`job ${key}, which MAP_LISTS names, has step ${i + 1}${typeof step.name === "string" ? ` (${JSON.stringify(step.name)})` : ""} read the event that started the run (${reads.join(", ")}) — ${EVENT_WHY} (check 56, SMD-2435)`);
       const lines = typeof run === "string" ? run.replace(/\s*\\\n\s*/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)) : [];
@@ -12317,7 +12311,9 @@ function checkMapLists() {
     ["a runtime named through a variable", ["a", "m.x", "m.y"], wf(job("a", step("$DOCKER run -v /w:/w image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": $DOCKER, a container runtime named through a variable"]],
     ["a global flag whose value is a subcommand's name", ["a", "m.x", "m.y"], wf(job("a", step("docker --log-level info run -v /w:/w image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": `docker --log-level`, where a mapped job asks docker only to"]],
     ["a container asked after inside a test", ["a", "m.x", "m.y"], wf(job("a", "      - run: |\n          [ \"$(docker container inspect -f '{{.State.Running}}' postgres)\" = true ]\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
-    ["the word docker in what a step says", ["a", "m.x", "m.y"], wf(job("a", step("echo \"docker compose is the stack jobs'\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["what a step says of docker, read as what it does", ["a", "m.x", "m.y"], wf(job("a", step("echo \"docker compose is the stack jobs'\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": `docker compose`, where a mapped job asks docker only to"]],
+    ["a stack brought up in the background after an echo", ["a", "m.x", "m.y"], wf(job("a", step("echo starting & docker compose up -d")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": `docker compose`, where a mapped job asks docker only to"]],
+    ["a stack brought up after an echo of an escaped quote", ["a", "m.x", "m.y"], wf(job("a", "      - run: |\n          echo \"5\\\" disk\"; docker compose up -d\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": `docker compose`, where a mapped job asks docker only to"]],
     ["a container action by its image", ["a", "m.x", "m.y"], wf(job("a", "      - uses: docker://alpine:3\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, uses docker://alpine:3"]],
     ["a job with a service", ["a", "m.x", "m.y"], wf(job("a", step("true"), "    services:\n      pg:\n        image: postgres\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, sets services"]],
     ["a step run unless the event is a push", ["a", "m.x", "m.y"], wf(job("a", "      - if: ${{ !(github.event_name == 'push') }}\n        run: bun pr-only.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (github.event_name)"]],
@@ -12327,7 +12323,12 @@ function checkMapLists() {
     ["a command that reads the ref", ["a", "m.x", "m.y"], wf(job("a", step("case \"$GITHUB_REF\" in refs/pull/*) bun x.ts ;; esac")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (GITHUB_REF)"]],
     ["the event read in the job's env", ["a", "m.x", "m.y"], wf(job("a", step("if [ -n \"$BASE_SHA\" ]; then bun lint-changed.ts; fi"), "    env:\n      BASE_SHA: ${{ github.event.pull_request.base.sha }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["reads the event that started the run in its env (github.event.pull_request.base.sha)"]],
     ["the event read in the workflow's env", ["a", "m.x", "m.y"], `name: probe\non: push\npermissions:\n  contents: read\nenv:\n  EV: \${{ github.event_name }}\njobs:\n${job("a", step("true"))}${job("m", PG, MATRIX)}${job("s", step("true"))}`, ["a", "m", "s"], ALWAYS, ["the workflow's env reads the event that started the run (github.event_name)"]],
-    ["names that say nothing of the event", ["a", "m.x", "m.y"], wf(job("a", "      - run: echo \"$GITHUB_SHA\" >> \"$GITHUB_OUTPUT\"\n        env:\n          GITHUB_SHA: ${{ github.sha }}\n          RUN: ${{ github.run_id }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (GITHUB_SHA)"]],
+    ["names that say nothing of the event", ["a", "m.x", "m.y"], wf(job("a", "      - run: echo \"$GITHUB_SHA\" >> \"$GITHUB_OUTPUT\"\n        env:\n          GITHUB_SHA: ${{ github.sha }}\n          RUN: ${{ github.run_id }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["a path under .github in an expression, which is no context", ["a", "m.x", "m.y"], wf(job("a", "      - run: bun x.ts\n        env:\n          KEY: ${{ hashFiles('.github/ci/typecheck.sh') }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["a step run by the changes job's answer", ["a", "m.x", "m.y"], wf(job("a", "      - if: needs.changes.outputs.skip != ''\n        run: bun x.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (needs.changes.outputs.skip)"]],
+    ["the event's variable in an action's input", ["a", "m.x", "m.y"], wf(job("a", "      - uses: actions/checkout@v7\n        with:\n          ref: ${{ env.X }}\n          path: $GITHUB_HEAD_REF\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (GITHUB_HEAD_REF)"]],
+    ["an action that runs a script of its own", ["a", "m.x", "m.y"], wf(job("a", "      - uses: actions/github-script@v7\n        with:\n          script: if (context.eventName === 'pull_request') { await x() }\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, uses actions/github-script"]],
+    ["the three actions a mapped job uses", ["a", "m.x", "m.y"], wf(job("a", "      - uses: actions/checkout@v7\n      - uses: oven-sh/setup-bun@v2\n      - uses: actions/upload-artifact@v7\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a mount after a quoted argument that holds a ||", ["a", "m.x", "m.y"], wf(job("a", step("docker run -d --health-cmd \"pg_isready || exit 1\" -v \"$PWD/db/init:/init:ro\" image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": a container given a path"]],
     ["a mount flag in quotes", ["a", "m.x", "m.y"], wf(job("a", step("docker run -d \"--volume=$PWD:/w\" image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": a container given a path"]],
     ["a container made inside what an echo says", ["a", "m.x", "m.y"], wf(job("a", step("echo \"$(docker run --rm -v \"$PWD/db:/db:ro\" image psql -f /db/x.sql)\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": a container given a path"]],
@@ -12341,7 +12342,6 @@ function checkMapLists() {
     ["no permissions named, so the repository's default", ["a", "m.x", "m.y"], good.replace("permissions:\n  contents: read\n", ""), ["a", "m", "s"], ALWAYS, ["the workflow's permissions are null"]],
     ["a stack brought up after an echo", ["a", "m.x", "m.y"], wf(job("a", step("echo \"::group::stack\" && docker compose up -d")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": `docker compose`, where a mapped job asks docker only to"]],
     ["a mount after an echo and a semicolon", ["a", "m.x", "m.y"], wf(job("a", step("echo starting; docker run -d -v \"$PWD/db:/db:ro\" image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": a container given a path"]],
-    ["an echo whose words hold a semicolon and the word docker", ["a", "m.x", "m.y"], wf(job("a", step("echo \"docker compose up; then the stack is the stack jobs'\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a container's log after an echo", ["a", "m.x", "m.y"], wf(job("a", step("echo \"::group::log\"; docker logs postgres 2>&1 || true; echo \"::endgroup::\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a long mount flag in quotes of its own", ["a", "m.x", "m.y"], wf(job("a", step("docker run -d \"--volume\" \"$PWD:/w\" image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": a container given a path"]],
     ["a tracked file read from git's store", ["a", "m.x", "m.y"], wf(job("a", step("git show HEAD:db/x.sql | psql")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `git show HEAD:db/x.sql"]],

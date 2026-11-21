@@ -255,7 +255,8 @@ by_job() {
   if [ "$wf" = 1 ]; then at='HEAD^1 and HEAD'; fi
   d=$(mktemp -d) || { printf 'true\t\tno scratch directory to read %s by job\n' "$WORKFLOW"; return; }
   mkdir "$d/base" "$d/head"
-  if ! git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || { [ "$wf" = 1 ] && ! git show "HEAD^1:$WORKFLOW" > "$d/base.yml" 2> /dev/null; }; then
+  # Each a blob fetched when it is read, the workflow being outside the job's sparse cone: bounded, as by_map's are.
+  if ! limit 15 git show "HEAD:$WORKFLOW" > "$d/head.yml" 2> /dev/null || { [ "$wf" = 1 ] && ! limit 15 git show "HEAD^1:$WORKFLOW" > "$d/base.yml" 2> /dev/null; }; then
     printf 'true\t\t%s could not be read at %s\n' "$WORKFLOW" "$at"; rc=1
   elif ! cut_blocks "$d/head.yml" "$d/head" 2> /dev/null || { [ "$wf" = 1 ] && ! cut_blocks "$d/base.yml" "$d/base" 2> /dev/null; }; then
     printf 'true\t\t%s is not in the shape its jobs are read apart in\n' "$WORKFLOW"; rc=1
@@ -299,7 +300,9 @@ limit() { if command -v timeout > /dev/null 2>&1; then timeout "$@"; else shift;
 # Bounded: the gated jobs wait on this job, about two seconds for all of it,
 # and every call over the network here and in by_map has a limit, 135 s when
 # each runs to its own (15, 15 and 45 here; 30 for the commit and 15 for each
-# read of the workflow there), well inside the job's five minutes.
+# read of the workflow there), well inside the job's five minutes; by_job's
+# two reads of the workflow, 15 each, come before them for a pull request
+# of records alone.
 fetch_lists() {
   local dir=$1 default=$2 run id arts name ids=''
   if ! command -v gh > /dev/null 2>&1 || ! command -v unzip > /dev/null 2>&1 || [ -z "${GH_TOKEN:-}" ] || [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "$default" ]; then return 1; fi
@@ -361,8 +364,10 @@ by_map() {
     f="$d/lists/$name.txt" head=''
     if [ -f "$f" ]; then IFS= read -r head < "$f" || true; fi
     # A list is whole when its rows are as many of each kind as its header counted and its last line is
-    # ended: one cut short in its download, a row or part of one, would pass for a job that read less.
-    re="^# reads v1 job=$job cell=$cell commit=([0-9a-f]{40}) status=success sight=ok files=([0-9]+) dirs=([0-9]+) gone=([0-9]+) "
+    # ended: one cut short in its download, a row or part of one, would pass for a job that read less. And
+    # when it left no path out: reads.sh counts in odd= the paths it could not write, a tab or a newline in
+    # their names, and a list with one says less than its job read.
+    re="^# reads v1 job=$job cell=$cell commit=([0-9a-f]{40}) status=success sight=ok files=([0-9]+) dirs=([0-9]+) gone=([0-9]+) odd=0$"
     if [[ "$head" =~ $re ]] && [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]}" = "$(awk -F '\t' 'NR > 1 { n[$1]++ } END { print n["f"] + 0, n["d"] + 0, n["g"] + 0 }' "$f")" ] && [ -z "$(tail -c 1 "$f")" ]; then
       if [ -n "$x" ] && [ "$x" != "${BASH_REMATCH[1]}" ]; then no_map "main's lists of what its jobs read are of more than one commit"; return; fi
       x=${BASH_REMATCH[1]}
@@ -724,8 +729,8 @@ EOF
       printf '  repo-consistency:\n    steps:\n      - run: bun scripts/check-consistency.ts\n'
     } > "$dir/wfm.yml"
     # list NAME ROW...: NAME's list, each ROW "f path", "d folder/" or "g path", recorded at AT (HEAD^1, the
-    # base's tip, unless set); STATUS, SIGHT, COMMIT, AS (the job its header names) and FILES (the files its
-    # header counts, where not its rows') say otherwise.
+    # base's tip, unless set); STATUS, SIGHT, COMMIT, AS (the job its header names), FILES (the files its
+    # header counts, where not its rows') and ODD (the paths it left out) say otherwise.
     # shellcheck disable=SC2317,SC2329 # called from the cases' LISTS, which run() evals
     list() {
       local name=$1 cell=- row; shift
@@ -733,7 +738,7 @@ EOF
       local nf=0 nd=0 ng=0
       for row in "$@"; do case "$row" in f\ *) nf=$((nf + 1)) ;; d\ *) nd=$((nd + 1)) ;; g\ *) ng=$((ng + 1)) ;; esac; done
       {
-        printf '# reads v1 job=%s cell=%s commit=%s status=%s sight=%s files=%s dirs=%s gone=%s odd=0\n' "${AS:-${name%%.*}}" "$cell" "${COMMIT:-$(git rev-parse "${AT:-HEAD^1}")}" "${STATUS:-success}" "${SIGHT:-ok}" "${FILES:-$nf}" "$nd" "$ng"
+        printf '# reads v1 job=%s cell=%s commit=%s status=%s sight=%s files=%s dirs=%s gone=%s odd=%s\n' "${AS:-${name%%.*}}" "$cell" "${COMMIT:-$(git rev-parse "${AT:-HEAD^1}")}" "${STATUS:-success}" "${SIGHT:-ok}" "${FILES:-$nf}" "$nd" "$ng" "${ODD:-0}"
         for row in "$@"; do printf '%s\t%s\n' "${row%% *}" "${row#* }"; done
       } > "$dir/map/$name.txt"
     }
@@ -772,6 +777,7 @@ EOF
     BASE_OPS=$mb LISTS="$std; AS=data-layer list db-schema" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     # …nor does one cut short: a header that counts two files over one row.
     BASE_OPS=$mb LISTS="$std; FILES=2 list db-schema 'f db/migrations/1.sql'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="$std; ODD=1 list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     # shellcheck disable=SC2016 # as above
     BASE_OPS=$mb LISTS="$std"'; printf %s "$(cat "$dir/map/data-layer.txt")" > "$dir/map/cut" && mv "$dir/map/cut" "$dir/map/data-layer.txt"' SKIP='db-schema db-live' run true pull_request main 'echo x >> db/tool.sh'
     # Lists of two commits, or of one that is not here, skip nothing at all.
