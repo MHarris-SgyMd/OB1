@@ -5,8 +5,9 @@
  * hand-back (board.ts), the hand-back's Linear comment, and the claim's release.
  *
  * Cut 2c-3 does not push or open a PR (cut 3). So every run — a pass included, since there is nothing to publish yet —
- * ends with the branch in the runner's bare repository, the claim released and the ticket back in Backlog, so nothing is
- * left held. A pass or a work failure relabels the ticket for a person (so it is not taken again before cut 3 can
+ * ends with the claim released and the ticket back in Backlog, so nothing is left held; a run that got as far as
+ * importing the worker's branch leaves it in the runner's bare repository, and the hand-back comment names it only then
+ * (SMD-4516). A pass or a work failure relabels the ticket for a person (so it is not taken again before cut 3 can
  * publish); only an environment failure keeps the `agent-ready` label, so a later tick can retry.
  *
  * It takes the claim client, the Linear client and run() through injected deps, as run.ts takes its sessions, so the
@@ -19,7 +20,9 @@ import { brainReady, claimsDir, claimWork, deleteToken, releaseClaim, writeToken
 import { comment, handBack, moveToInProgress } from "./board.ts";
 import type { Config, Fetch } from "./facts.ts";
 import type { Gql } from "../../db/linear-api.ts";
-import type { Outcome } from "./record.ts";
+import { existsSync } from "node:fs";
+import { unreviewedLine } from "./publish.ts";
+import { bundleFile, diffFile, type Outcome } from "./record.ts";
 import type { RunInput, RunResult } from "./run.ts";
 import { maskTokens } from "./text.ts";
 
@@ -77,6 +80,13 @@ function claimWhy(reply: ClaimReply): string {
   return reply.kind;
 }
 
+/**
+ * Whether the run imported the worker's branch into the bare repository. run.ts keeps the bundle beside the record
+ * only once its import landed, so the kept bundle is the sign: a run that ended at prepare, on a worker session that
+ * did not finish, or on a bundle it refused, kept none and left no branch (SMD-4516).
+ */
+export const branchImported = (result: RunResult): boolean => existsSync(bundleFile(result.dir));
+
 /** A clean, value-safe hand-back comment from the run's own computed fields — never the sessions' model text (docs, "What the runner publishes"). */
 export function handbackComment(result: RunResult): string {
   const r = result.record;
@@ -87,7 +97,15 @@ export function handbackComment(result: RunResult): string {
     .map((s) => `${s.role} ${s.turns ?? "?"} turns${s.costUsd !== null ? ` $${s.costUsd.toFixed(2)}` : ""}${s.ended !== "result" ? ` (ended ${s.ended})` : ""}`)
     .join("; ");
   if (sessions) lines.push(`Sessions: ${sessions}.`);
-  lines.push(`Branch \`${r.branch}\` is in the runner's bare repository; it was not pushed (publishing is cut 3). The bundle and diff are kept with the run's record.`);
+  // Say only what the run left (SMD-4516): a run that ended before the import has nothing in the repository to read.
+  if (branchImported(result)) {
+    lines.push(`Branch \`${r.branch}\` is in the runner's bare repository; it was not pushed (publishing is cut 3). The bundle${existsSync(diffFile(result.dir)) ? " and diff are" : " is"} kept with the run's record.`);
+  } else {
+    lines.push("Nothing was imported into the runner's repository: the run ended before the worker's commits were taken. What its sessions left is in the run's record.");
+  }
+  // A run goes on to the gate when its review did not finish (run.ts): say so in the words the PR body uses.
+  const unreviewed = unreviewedLine(r.sessions);
+  if (unreviewed !== null) lines.push(unreviewed);
   lines.push(
     result.outcome === null
       ? "The run passed the gate — handed over for you to publish from the bundle."
@@ -168,7 +186,7 @@ export async function liveRun(input: LiveInput): Promise<LiveResult> {
   // (SMD-4087's "never an orphaned claim"), then move the ticket to Backlog and comment. Env failure keeps the label; a
   // pass or a work failure relabels for a person. No re-select race: the ticket stays In Progress until the atomic
   // Backlog+relabel move, and runs are serial (decision 7).
-  const reason = `agent-runner ${result.outcome ?? "passed the gate"} — run ${result.record.run}, branch ${result.record.branch} in the bare repository, not pushed (publishing is cut 3)`;
+  const reason = `agent-runner ${result.outcome ?? "passed the gate"} — run ${result.record.run}, ${branchImported(result) ? `branch ${result.record.branch} in the bare repository, not pushed (publishing is cut 3)` : "no branch imported"}`;
   const rel = await releaseClaim(d.fetch, ready.base, d.brainKey, { id: claimId, token, reason });
   const released = settleRelease(rel, d.runnerDir, claimId, owed);
 
