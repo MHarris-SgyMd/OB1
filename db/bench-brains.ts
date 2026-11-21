@@ -42,8 +42,9 @@
  *         Ollama's /api/ps when --ollama names it (an http or https url, a
  *         query it carries kept), appending one line per brain a round to
  *         --out. A line keeps its run's start, so another run of the arm's name
- *         appended to the file is told from it, and every pool's pending,
- *         claimed, failed and unpooled counts. Reads alone, so any tier. Exits
+ *         appended to the file is told from it, every pool's pending, claimed,
+ *         failed and unpooled counts, and the thoughts the brain holds. Reads
+ *         alone, so any tier. Exits
  *         1 if a brain never answered a round, and 128 + the signal's number
  *         when one cut it short, whatever the brains answered; a second signal
  *         exits at once.
@@ -88,38 +89,56 @@
  * call that ran without a slot (a type no share holds, the gate failing open)
  * counts too. A tally is a pass's, over every model and server it calls, so a
  * brain's figure can pass any one server's room. A row is one process's: the
- * sleep's, and board-sync's under it from board-sync's own stamps, which come
- * every five minutes while it is idle, so a window holds few. The two are not
- * summed: their stamps are other times. The api's vector mender's calls and a
- * detached job's hold slots too, stamp no tallies, and are in no row.
+ * sleep's, and board-sync's under it from board-sync's own stamps. Board-sync
+ * stamps as each pass starts and as it ends, a pass every
+ * OB1_BOARD_SYNC_INTERVAL (five minutes unless set), so a window holds few of
+ * them and a row's s can be one pass's seconds. The two are not summed: their
+ * stamps are other times. The api's vector mender's calls and a detached job's
+ * hold slots too, stamp no tallies, and are in no row.
  *
  * A process begun again. Tallies count since the process began, so across a
  * restart every pass's value is the increase since (windowOf), and the calls
- * the old process made after its last stamp are lost. A pair of stamps in
- * which a pass's tally falls, or a pass drops out, is a restart: the tallies'
- * own sign, and the only one on a brain with no coordinator, for a pass it
- * does not run, or in samples that kept no stamp time (those of 2026-11-16).
- * It misses a restart whose first stamp already passes the old one's on every
- * tally, so the coordinator's marks are read too (SMD-4382): each sample keeps
- * the coordinator's children and its stamp's time, and a child marked running
- * for for_s seconds began that long before the stamp (beginsOf). A beginning
- * with a fall beside it is that fall's restart, counted once; one with none is
- * a restart at the pair of stamps it lies between. A stamp half a second or
- * less after a beginning may be either process's (for_s is rounded, and a
- * sleep stamps its first tallies within a second of starting), and is taken
- * for the old one's last. Two runs that began within fifteen seconds read as
- * one. A sleep that has made no model call stamps no tallies, nor does a build
+ * the old process made after the last of its stamps a sample caught are lost.
+ * A pair of stamps in which a pass's tally falls, or a pass drops out, is a
+ * restart: the tallies' own sign, and the only one on a brain with no
+ * coordinator, for a pass it does not run, or in samples that kept no stamp
+ * time (those of 2026-11-16). It misses a restart whose first stamp already
+ * passes the old one's on every tally, so the coordinator's marks are read too
+ * (SMD-4382): each sample keeps the coordinator's children and its stamp's
+ * time, and a child marked running for for_s seconds began that long before
+ * the stamp (beginsOf). A beginning between a fall's stamps is that fall's
+ * restart, counted once; one with no fall is a restart at the pair of stamps
+ * it lies between (restartsOf). What the marks cannot say:
+ *   - A run no sample saw running has no mark: one that lived wholly between
+ *     two samples, in a crash loop or while samples failed, is read by its
+ *     tallies alone. The summary says in how many samples a pass's mark was not
+ *     "running".
+ *   - A beginning is read to the half second (for_s is rounded) and late by as
+ *     long as its mark's write took. A stamp half a second or less after one
+ *     may be either process's, and is taken for the old one's last: where it
+ *     was the new one's first, the pair after it reads as a restart and that
+ *     stamp's tallies count twice. The sleep's first tallies were stamped 0.9
+ *     and 1.3 s after it began at two real restarts; they come once its start's
+ *     probes have answered, however long those take.
+ *   - A beginning read up to ten seconds after a fall's later stamp is taken
+ *     for that fall's, a mark written late, unless a beginning already lies
+ *     between the fall's stamps: then it is a restart of its own.
+ *   - Two runs that began within fifteen seconds read as one.
+ * A sleep that has made no model call stamps no tallies, nor does a build
  * before SMD-3379 PR 2b-2a: its sleep's state is shown.
  *
  * The extraction rows are worker_status's under the key the brain says is its
  * own (`active`), extractionLine: pending or claimed, the thoughts with no row
- * yet (a pass pools them as it starts, so they are work to do), and the rows
- * failed. They are thoughts, the probes' among them. "Ran dry" is not said of a
- * pool that emptied while more of its rows failed, and an older key's leftover
- * rows are said apart. worker_status names a pool only once it has a row, so a
- * brain whose extraction has never run has none to read: that is said, not
- * read as empty. Samples from before SMD-4382 kept pending and claimed rows
- * alone, under every extract: key, and are read so.
+ * under the key, and the rows failed. A capture is pooled as it lands once the
+ * key is the brain's recorded one, so the thoughts with no row are those from
+ * before that, which a run pools at its first pass: work to do. They are
+ * thoughts, the probes' among them. "Ran dry" is not said of a pool where more
+ * rows had failed by the last sample than at the first, and an older key's
+ * leftover rows are said apart. worker_status names a pool only once it has a
+ * row, so a brain whose extraction has never run has none to read, whatever
+ * was loaded on it: that is said, with the thoughts it holds, not read as
+ * empty. Samples from before SMD-4382 kept pending and claimed rows alone,
+ * under every extract: key, and are read so.
  */
 
 import { appendFileSync, readFileSync } from "node:fs";
@@ -345,17 +364,20 @@ export const WRONG_SHAPE = "an answer of a shape the harness does not read";
 
 /**
  * A tool's answer as the harness reads it: bench-live.ts's outcome, and the structured content as an object. An answer
- * whose result is no object, whose content is no list of parts, or whose structured content is anything but an object is
- * not ok and is called WRONG_SHAPE: its reading threw a TypeError once, and that error's words were what a run printed
- * (SMD-4382). Never throws.
+ * is not ok and is called WRONG_SHAPE where its result is there and no object, where its reading throws (a content that
+ * is no list, a part that is null), or where it is otherwise ok and its structured content is there and no object: the
+ * reading threw a TypeError once, and that error's words were what a run printed (SMD-4382). A refusal keeps its own
+ * words whatever came beside them. Never throws.
  */
 export function readOf(status: number, msg: Record<string, any> | null, name: string): { ok: boolean; error?: string; id?: string; sc: Record<string, any> } {
   const wrong = { ok: false, error: WRONG_SHAPE, sc: {} };
+  const plain = (v: unknown) => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (status === 200 && msg !== null && msg.error === undefined && msg.result !== undefined && !plain(msg.result)) return wrong;
   let o: ReturnType<typeof outcomeOf>;
   try { o = outcomeOf(status, msg, name); } catch { return wrong; }
   const sc: unknown = msg?.result?.structuredContent;
   if (sc === undefined) return { ok: o.ok, error: o.error, id: o.id, sc: {} };
-  if (sc === null || typeof sc !== "object" || Array.isArray(sc)) return o.ok ? wrong : { ok: false, error: o.error, sc: {} };
+  if (!plain(sc)) return o.ok ? wrong : { ok: false, error: o.error, sc: {} };
   return { ok: o.ok, error: o.error, id: o.id, sc: sc as Record<string, any> };
 }
 
@@ -517,7 +539,7 @@ async function clean(b: Brain, ids: string, arm: string | undefined): Promise<nu
   return code;
 }
 
-/** What a sample keeps of brain_info: the tier, the commit, the provider's state, each heartbeat's state and model tallies,
+/** What a sample keeps of brain_info: the tier, the commit, the provider's state, the thoughts it holds, each heartbeat's state and model tallies,
  *  and the coordinator's relay mark, children and stamp time. */
 export function keptOf(info: Record<string, any>): Record<string, unknown> {
   const w = info?.database?.workers ?? {};
@@ -525,6 +547,7 @@ export function keptOf(info: Record<string, any>): Record<string, unknown> {
     tier: info?.tier ?? null,
     commit: info?.commit ?? null,
     provider: info?.provider?.status ?? null,
+    thoughts: typeof info?.database?.counts?.thoughts === "number" ? info.database.counts.thoughts : null,
     heartbeats: (Array.isArray(w.heartbeats) ? w.heartbeats : []).filter((h: unknown) => h !== null && typeof h === "object").map((h: Record<string, any>) => ({
       worker: h.worker, at: h.at, running: h.running, slept: h.slept ?? null, models: h.models ?? null, answers: h.malformed?.answers ?? null,
     })),
@@ -649,34 +672,44 @@ export function sampleExit(signal: "SIGINT" | "SIGTERM" | null, silent: number):
 type Tally = { calls: number; callMs: number; waited: number; waitMs: number };
 type Stamp = { at: number; byPass: Record<string, Tally> };
 
-/** Marks of one run differ by no more than this: a mark's seconds are rounded, and its row is written up to ten seconds
- *  after they were counted (supervise.ts's STAMP_TIMEOUT_MS). Two runs that began within it read as one: the first ran
- *  no longer than this, and the tallies' own rule still reads its stamps. */
+/** Marks of one run differ by no more than this: a mark's seconds are rounded, and its row's write is given up after ten
+ *  seconds (supervise.ts's STAMP_TIMEOUT_MS; a write given up is not called back, and may land later still). Two runs
+ *  that began within it read as one: the first ran no longer than this, and the tallies' own rule still reads its stamps. */
 const SAME_RUN_MS = 15_000;
 /** A run began no later than this after the time read for it: a mark's seconds are rounded to the nearest, and its row
- *  is written after they were counted, never before. So a stamp later than this is the new process's for certain. */
+ *  is stamped after they were counted (by the database's clock, the count by the coordinator's: one machine's). So a
+ *  stamp later than this is the new process's for certain. */
 const BEGIN_LATE_MS = 500;
-/** And, for a fall in the tallies to be the same restart, no earlier than this before it: the rounding, and a write
- *  half a second behind its count. */
-const BEGIN_EARLY_MS = 1_000;
+/** A fall in the tallies is a beginning's own restart where its later stamp is no more than this before the time read
+ *  for the beginning: the time is read late by as long as its mark's write took, a write given up after ten seconds. */
+const BEGIN_EARLY_MS = 10_000;
 
 /**
  * When each run of a pass the coordinator runs began, oldest first, from the samples' marks: a mark says the pass is
  * running and for how many seconds (`for_s`, counted back from the coordinator's stamp, coordinator.ts's
- * coordinatorValue), so its run began that long before the stamp's time. Marks within SAME_RUN_MS of a run's earliest
- * are that run's, and the earliest is the nearest to the truth: a late write only adds. Empty for a brain with no
- * coordinator, a pass it does not run, or samples from before they kept the stamp's time.
+ * coordinatorValue), so its run began that long before the stamp's time. Read in the stamps' order:
+ *   - a mark within SAME_RUN_MS of the run's time is that run's, and the earliest time is kept: a late write only adds,
+ *     and the rounding moves a mark half a second at most either way;
+ *   - a later time is another run only where it is no earlier than the run was last seen running, less SAME_RUN_MS: a
+ *     run does not begin while the one before it runs, so a mark that says so is the same run's, written late;
+ *   - an earlier time is an older run's mark landing late, and is passed over.
+ * Empty for a brain with no coordinator, a pass it does not run, or samples from before they kept the stamp's time. A
+ * run no sample saw running has no mark: one that lived wholly between two samples is read by its tallies alone.
  */
 export function beginsOf(rows: readonly Record<string, any>[], pass: string): number[] {
-  const marks: number[] = [];
+  const marks: { at: number; began: number }[] = [];
   for (const r of rows) {
     const m = r?.children?.[pass];
     const at = typeof r?.childrenAt === "string" ? Date.parse(r.childrenAt) : NaN;
-    if (m?.state === "running" && typeof m.for_s === "number" && Number.isFinite(m.for_s) && m.for_s >= 0 && !Number.isNaN(at)) marks.push(at - m.for_s * 1000);
+    if (m?.state === "running" && typeof m.for_s === "number" && Number.isFinite(m.for_s) && m.for_s >= 0 && !Number.isNaN(at)) marks.push({ at, began: at - m.for_s * 1000 });
   }
-  const begins: number[] = [];
-  for (const b of marks.sort((x, y) => x - y)) if (!begins.length || b > begins[begins.length - 1] + SAME_RUN_MS) begins.push(b);
-  return begins;
+  const runs: { began: number; seen: number }[] = [];
+  for (const m of marks.sort((x, y) => x.at - y.at || x.began - y.began)) {
+    const run = runs[runs.length - 1];
+    if (run === undefined || (m.began > run.began + SAME_RUN_MS && m.began >= run.seen - SAME_RUN_MS)) runs.push({ began: m.began, seen: m.at });
+    else if (m.began >= run.began - SAME_RUN_MS) { run.began = Math.min(run.began, m.began); run.seen = Math.max(run.seen, m.at); }
+  }
+  return runs.map((r) => r.began);
 }
 
 /** A sleep heartbeat's tallies, by pass: background calls, their time, and the slot waits. */
@@ -689,43 +722,73 @@ export function talliesOf(models: unknown): Record<string, Tally> | null {
   return out;
 }
 
+const TALLIED = ["calls", "callMs", "waited", "waitMs"] as const;
+
 /**
- * A window's increase over its stamps, stamp by stamp: null with fewer than two. A process's tallies count since it
- * began, so across a restart every pass's value is the increase since. A pair of stamps is one:
+ * The pairs of stamps a process began again between, each by the place of its later stamp. A process's tallies count
+ * since it began, so a pair is one:
  *   - where any pass's tally falls, or a pass drops out: the tallies' own sign, and the only one without `begins`;
- *   - where a run began between them (`begins`, beginsOf) and no such fall is beside that beginning: the restart the
- *     tallies cannot show, its first stamp already past the old one's on every tally. The pair is the one that ends at
- *     the first stamp surely the new process's, BEGIN_LATE_MS after the beginning read: a stamp nearer may be either's,
- *     and taking an old process's last stamp for a new one's first would count its whole life as the increase.
- * A beginning with a fall beside it is that fall's restart and counts once: a sleep stamps its first tallies within a
- * second of starting, so a stamp's time alone does not say whose it is (the rehearsal of SMD-4382 counted one restart
- * twice by it). Two restarts between one pair of stamps lose the calls before the second.
+ *   - where a run began between them (`begins`, beginsOf) and no such fall is that beginning's: the restart the tallies
+ *     cannot show, its first stamp already past the old one's on every tally. The pair is the one that ends at the
+ *     first stamp surely the new process's, BEGIN_LATE_MS after the beginning read: a stamp nearer may be either's, and
+ *     taking an old process's last stamp for a new one's first would count its whole life as the increase.
+ * A fall is a beginning's own, and that restart counts once, where the beginning read lies between the fall's stamps
+ * (BEGIN_LATE_MS before the earlier allowed): every run that began there, two between one pair of stamps among them.
+ * And where it lies up to BEGIN_EARLY_MS after the later stamp, a mark written late, for one such beginning and only
+ * a fall no beginning lies inside: a run that began after another's first stamp is a restart of its own. A stamp's
+ * time alone does not say whose it is — a sleep was seen to stamp its first tallies 0.9 s after it began, and the
+ * rehearsal of SMD-4382 counted one restart twice by a rule that took the time alone. Over every stamp of the arm,
+ * not a window's: a window that opens on a new process's first stamp has the fall before it (review pass 1).
  */
-export function windowOf(stamps: Stamp[], begins: readonly number[] = []): { s: number; total: Tally; byPass: Record<string, Tally>; restarts: number } | null {
-  if (stamps.length < 2) return null;
-  const zero = (): Tally => ({ calls: 0, callMs: 0, waited: 0, waitMs: 0 });
-  const fields = ["calls", "callMs", "waited", "waitMs"] as const;
-  const total = zero();
-  const byPass: Record<string, Tally> = {};
-  const fell = (k: number) => Object.keys(stamps[k - 1].byPass).some((pass) => !(pass in stamps[k].byPass) || fields.some((f) => stamps[k].byPass[pass][f] < stamps[k - 1].byPass[pass][f]));
-  const unseen = new Set<number>();
-  for (const b of begins) {
-    if (stamps.some((_, k) => k > 0 && fell(k) && stamps[k - 1].at <= b + BEGIN_LATE_MS && stamps[k].at >= b - BEGIN_EARLY_MS)) continue;
-    const k = stamps.findIndex((st) => st.at > b + BEGIN_LATE_MS);
-    if (k > 0) unseen.add(k);
-  }
-  let restarts = 0;
+export function restartsOf(stamps: readonly Stamp[], begins: readonly number[] = []): Set<number> {
+  const falls: number[] = [];
   for (let k = 1; k < stamps.length; k++) {
     const [prev, cur] = [stamps[k - 1].byPass, stamps[k].byPass];
-    const restarted = unseen.has(k) || fell(k);
+    if (Object.keys(prev).some((pass) => !(pass in cur) || TALLIED.some((f) => cur[pass][f] < prev[pass][f]))) falls.push(k);
+  }
+  const again = new Set(falls);
+  const owned = new Set<number>();
+  const outside: number[] = [];
+  for (const b of begins) {
+    const inside = falls.filter((k) => stamps[k - 1].at <= b + BEGIN_LATE_MS && b <= stamps[k].at);
+    if (inside.length) for (const k of inside) owned.add(k);
+    else outside.push(b);
+  }
+  for (const b of outside) {
+    const late = falls.find((k) => !owned.has(k) && stamps[k].at < b && stamps[k].at >= b - BEGIN_EARLY_MS);
+    if (late !== undefined) { owned.add(late); continue; }
+    const k = stamps.findIndex((st) => st.at > b + BEGIN_LATE_MS);
+    if (k > 0) again.add(k);
+  }
+  return again;
+}
+
+/**
+ * A window's increase over its stamps, stamp by stamp, from `lo` up to `hi`: null with fewer than two there. Across a
+ * restart (restartsOf, read over every stamp given) every pass's value is the increase since. Two restarts between one
+ * pair of stamps lose the calls before the second.
+ */
+export function windowOf(stamps: readonly Stamp[], begins: readonly number[] = [], lo = -Infinity, hi = Infinity): { s: number; total: Tally; byPass: Record<string, Tally>; restarts: number } | null {
+  const inside = (st: Stamp) => st.at >= lo && st.at < hi;
+  const within = stamps.filter(inside);
+  if (within.length < 2) return null;
+  const zero = (): Tally => ({ calls: 0, callMs: 0, waited: 0, waitMs: 0 });
+  const total = zero();
+  const byPass: Record<string, Tally> = {};
+  const again = restartsOf(stamps, begins);
+  let restarts = 0;
+  for (let k = 1; k < stamps.length; k++) {
+    if (!inside(stamps[k - 1]) || !inside(stamps[k])) continue;
+    const [prev, cur] = [stamps[k - 1].byPass, stamps[k].byPass];
+    const restarted = again.has(k);
     if (restarted) restarts++;
     for (const [pass, t] of Object.entries(cur)) {
       const p = restarted ? zero() : prev[pass] ?? zero();
       const b = (byPass[pass] ??= zero());
-      for (const f of fields) { b[f] += t[f] - p[f]; total[f] += t[f] - p[f]; }
+      for (const f of TALLIED) { b[f] += t[f] - p[f]; total[f] += t[f] - p[f]; }
     }
   }
-  return { s: (stamps[stamps.length - 1].at - stamps[0].at) / 1000, total, byPass, restarts };
+  return { s: (within[within.length - 1].at - within[0].at) / 1000, total, byPass, restarts };
 }
 
 /** An arm's extraction backlog in sample order: first, last and most, and when it ran dry — the first empty sample after
@@ -741,37 +804,45 @@ export function backlogLine(sizes: readonly { t: string; n: number }[]): string 
 /**
  * An arm's extraction rows from the pools each sample kept (poolsOf), under the brain's own extraction key alone: an
  * older key's rows are said apart, where they once added a constant that made "never dry" permanent. To do is the rows
- * pending or claimed and the thoughts not yet pooled, which a pass pools as it starts: so a brain's loaded notes count
- * before its first pass has pooled them, where it has a pool at all. A sample with no row under the key is not empty but
- * unread: worker_status names a pool only once it has a row. The rows ran dry at the first sample with nothing to do
- * after the last with some, when the last has none; and where more rows have failed by then than at the first sample
- * with a pool, that is said in place of "ran dry", which would read as every note extracted.
+ * pending or claimed and the thoughts with no row under the key. A capture is pooled as it lands once the key is the
+ * brain's recorded one (migration 016's trigger), so those are thoughts captured before that, which a run pools at its
+ * first pass. A sample with no row under the key is not empty but unread: worker_status names a pool only once it has
+ * a row, and a brain whose extraction has never run has none, whatever was loaded on it; the thoughts it holds are
+ * said then, where the samples kept them. The rows ran dry at the first sample with nothing to do after the last with
+ * some, when the last has none. Where more rows had failed by the last sample than at the first with a pool, that is
+ * said in place of "ran dry" or "nothing to do", which would read as every note extracted: rows can come and fail
+ * between two samples. A key that changed in the arm is said, and no such count drawn across two pools.
  */
-export function extractionLine(samples: readonly { t: string; pools: Record<string, PoolKept> }[]): string {
-  if (!samples.length) return "-";
-  const own = samples.map((s) => {
-    const mine = Object.entries(s.pools).filter(([k, p]) => k.startsWith("extract:") && p.active === true).map(([, p]) => p);
-    const others = Object.entries(s.pools).filter(([k, p]) => k.startsWith("extract:") && p.active !== true).reduce((n, [, p]) => n + p.pending + p.claimed, 0);
-    const sum = (f: (p: PoolKept) => number) => mine.reduce((n, p) => n + f(p), 0);
-    return { t: s.t, pooled: mine.length > 0, rows: sum((p) => p.pending + p.claimed), unpooled: sum((p) => p.unpooled), failed: sum((p) => p.failed), others };
+export function extractionLine(samples: readonly { t: string; pools: Record<string, PoolKept> | null; thoughts?: number | null }[]): string {
+  const kept = samples.filter((s) => s.pools !== null);
+  if (!kept.length) return "-";
+  const own = kept.map((s) => {
+    const pools = Object.entries(s.pools!).filter(([k, p]) => k.startsWith("extract:") && p !== null && typeof p === "object");
+    const mine = pools.filter(([, p]) => p.active === true);
+    const others = pools.filter(([, p]) => p.active !== true).reduce((n, [, p]) => n + p.pending + p.claimed, 0);
+    const sum = (f: (p: PoolKept) => number) => mine.reduce((n, [, p]) => n + f(p), 0);
+    return { t: s.t, key: mine.map(([k]) => k).sort().join(" + "), pooled: mine.length > 0, rows: sum((p) => p.pending + p.claimed), unpooled: sum((p) => p.unpooled), failed: sum((p) => p.failed), others };
   });
-  const span = (f: (o: (typeof own)[number]) => number, most = false) => {
-    const read = own.filter((o) => o.pooled);
-    return `${f(read[0])} first, ${f(read[read.length - 1])} last${most ? `, ${Math.max(...read.map(f))} most` : ""}`;
-  };
+  const read = own.filter((o) => o.pooled);
+  const span = (f: (o: (typeof own)[number]) => number, most = false) => `${f(read[0])} first, ${f(read[read.length - 1])} last${most ? `, ${Math.max(...read.map(f))} most` : ""}`;
   const older = own.some((o) => o.others > 0) ? `; an older key's rows pending or claimed, not in these: ${own[0].others} first, ${own[own.length - 1].others} last` : "";
-  if (!own.some((o) => o.pooled)) return `no row under the brain's extraction key in any sample: its extraction has pooled nothing yet, so notes loaded on it are not counted${older}`;
+  const noPools = kept.length < samples.length ? `; ${samples.length - kept.length} of ${samples.length} samples kept no pools` : "";
+  if (!read.length) {
+    const held = kept.map((s) => s.thoughts).filter((n): n is number => typeof n === "number");
+    const thoughts = held.length === kept.length ? ` (${held[0]} thoughts on the brain first, ${held[held.length - 1]} last, none of them pooled)` : "";
+    return `no row under the brain's extraction key in any sample: its extraction has pooled nothing yet, so notes loaded on it are not counted${thoughts}${older}${noPools}`;
+  }
   const todo = (o: (typeof own)[number]) => o.rows + o.unpooled;
   const lastBusy = own.map((o) => !o.pooled || todo(o) > 0).lastIndexOf(true);
-  const firstRead = own.find((o) => o.pooled)!;
   const dry = lastBusy < own.length - 1 ? own[lastBusy + 1] : null;
-  const failedSince = dry ? dry.failed - firstRead.failed : 0;
-  const end = lastBusy === -1 ? "nothing to do throughout"
+  const moved = new Set(read.map((o) => o.key)).size > 1;
+  const failedMore = moved ? 0 : read[read.length - 1].failed - read[0].failed;
+  const end = lastBusy === -1 ? (failedMore > 0 ? `nothing to do in any sample, but ${failedMore} more rows had failed by the last than at the first: rows came and failed between samples` : "nothing to do throughout")
     : !dry ? "never dry at the end"
-    : failedSince > 0 ? `nothing left to do at ${dry.t}, but ${failedSince} more rows had failed than at the first sample: not every note was extracted`
+    : failedMore > 0 ? `nothing left to do at ${dry.t}, but ${failedMore} more rows had failed by the last sample than at the first: not every note was extracted`
     : `ran dry at ${dry.t}`;
-  const unread = own.filter((o) => !o.pooled).length;
-  return `pending or claimed ${span((o) => o.rows, true)}; not yet pooled ${span((o) => o.unpooled)}; failed ${span((o) => o.failed)}; ${end}${unread ? `; ${unread} of ${own.length} samples had no row under the key yet` : ""}${older}`;
+  const unread = own.length - read.length;
+  return `pending or claimed ${span((o) => o.rows, true)}; not yet pooled ${span((o) => o.unpooled)}; failed ${span((o) => o.failed)}; ${end}${moved ? "; the brain's own key changed in the arm, so first and last are two pools'" : ""}${unread ? `; ${unread} of ${own.length} samples had no row under the key yet` : ""}${older}${noPools}`;
 }
 
 /** One of bench-live.ts's samples. */
@@ -779,7 +850,7 @@ type Live = { label: string; kind: string; ms: number; ok: boolean };
 
 /** What the table's columns are, printed under it: the reading no row can carry. */
 export const LEGEND = "  s: from the window's first sleep stamp to its last. in flight: the sleep's call s over s; a call counts whole at the stamp after it ends, its wait inside the model server (a model loading, a call ahead of it) included, its wait for a slot not.\n" +
-  "  by pass: calls/call s, and its slot waits. A row that names no brain is the brain above's board-sync, over its own stamps (one every five minutes while it is idle); a brain with none stamped no board-sync tallies. The api's background calls (its vector mender, a detached job) are in no row.";
+  "  by pass: calls/call s, and its slot waits. A row that names no brain is the brain above's board-sync, over its own stamps (one as a pass starts and one as it ends, a pass every five minutes unless set); a brain with none stamped no board-sync tallies. The api's background calls (its vector mender, a detached job) are in no row.";
 
 /** A worker's stamps in an arm's samples of a brain, oldest first, each once however often it was sampled. */
 function stampsOf(rows: readonly Record<string, any>[], worker: string): Stamp[] {
@@ -828,7 +899,7 @@ export function summaryLines(lines: readonly Record<string, any>[], splitMin: nu
       const windows = [["before", t0, split], ["after", split, t1 + 1]] as const;
       for (const [name, lo, hi] of windows) {
         const inWindow = all.filter((s) => s.at >= lo && s.at < hi);
-        const w = windowOf(inWindow, began);
+        const w = windowOf(all, began, lo, hi);
         if (w === null) {
           const sleeping = rows.filter((r) => Date.parse(r.t) >= lo && Date.parse(r.t) < hi);
           if (!sleeping.length && !inWindow.length) {
@@ -852,13 +923,21 @@ export function summaryLines(lines: readonly Record<string, any>[], splitMin: nu
       const syncBegan = beginsOf(rows, "board-sync");
       if (sync.length) for (const [name, lo, hi] of windows) {
         const inWindow = sync.filter((s) => s.at >= lo && s.at < hi);
-        const w = windowOf(inWindow, syncBegan);
+        const w = windowOf(sync, syncBegan, lo, hi);
         out.push(w === null ? `  ${"".padEnd(10)} ${name.padEnd(8)} its board-sync: ${inWindow.length} stamp(s) in the window, fewer than two` : windowRow("", name, w, "its board-sync", "it"));
       }
-      // The pools each sample kept, where every one of the brain's has them; else the rows a sample before SMD-4382 kept.
-      const pooled = rows.every((r) => r.pools !== null && typeof r.pools === "object" && !Array.isArray(r.pools));
+      // A run no sample saw running leaves no mark (beginsOf), so the samples in which a pass was not running are said:
+      // a restart between two of them is read by the tallies alone (review pass 1).
+      for (const [pass, whose] of [["sleep", "the sleep"], ["board-sync", "board-sync"]] as const) {
+        const states = rows.map((r) => r.children?.[pass]?.state).filter((st): st is string => typeof st === "string");
+        const off = new Map<string, number>();
+        for (const st of states) if (st !== "running") off.set(st, (off.get(st) ?? 0) + 1);
+        if (off.size) out.push(`  ${"".padEnd(10)} the coordinator's mark for ${whose} said ${[...off].map(([st, n]) => `${st} in ${n}`).join(", ")} of ${states.length} samples: a run that began and ended between two samples has no mark, and is read by its tallies alone`);
+      }
+      // The pools the samples kept, where any of the brain's has them; else the rows a sample before SMD-4382 kept.
+      const hasPools = (r: Record<string, any>) => r.pools !== null && typeof r.pools === "object";
       const sizes = rows.map((r) => ({ t: r.t as string, n: Object.entries(r.backlog ?? {}).filter(([k]) => k.startsWith("extract:")).reduce((s, [, n]) => s + Number(n), 0) }));
-      const said = pooled ? `extraction rows under the brain's own key: ${extractionLine(rows.map((r) => ({ t: r.t as string, pools: r.pools as Record<string, PoolKept> })))}` : `extraction rows pending or claimed: ${backlogLine(sizes)}`;
+      const said = rows.some(hasPools) ? `extraction rows under the brain's own key: ${extractionLine(rows.map((r) => ({ t: r.t as string, pools: hasPools(r) ? (r.pools as Record<string, PoolKept>) : null, thoughts: r.thoughts })))}` : `extraction rows pending or claimed: ${backlogLine(sizes)}`;
       out.push(`  ${"".padEnd(10)} ${said}${unread ? `; ${unread} of ${asked.length} samples failed` : ""}`);
     }
     const olAsked = mine.filter((l) => l.brain === MODEL_SERVER);
@@ -905,10 +984,11 @@ function linesOf(text: string, what: string, shape: (v: Record<string, any>) => 
   return out;
 }
 
-/** sample's --out as samples: each an ISO time, an arm and a brain, its heartbeats a list where it has them. */
+/** sample's --out as samples: each an ISO time, an arm and a brain, its heartbeats a list where it has them, its pools an object of pools. */
 export function samplesOf(text: string, what: string): Record<string, any>[] {
   return linesOf(text, what, (v) => typeof v.t === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d/.test(v.t) && !Number.isNaN(Date.parse(v.t)) && typeof v.arm === "string" && typeof v.brain === "string"
-    && (v.heartbeats === undefined || Array.isArray(v.heartbeats)), "sample");
+    && (v.heartbeats === undefined || Array.isArray(v.heartbeats))
+    && (v.pools === undefined || v.pools === null || (typeof v.pools === "object" && !Array.isArray(v.pools) && Object.values(v.pools).every((p) => p !== null && typeof p === "object" && !Array.isArray(p)))), "sample");
 }
 
 /** A --live file as bench-live.ts's samples: each a label, a kind, its milliseconds and whether it was ok. */
@@ -926,7 +1006,7 @@ function summary(out: string, splitMin: number, live: readonly string[]): number
 }
 
 /** A floor under the self-check's rows, raised as it grows: fewer means some of it did not run. */
-const ROWS_AT_LEAST = 140;
+const ROWS_AT_LEAST = 160;
 
 /** A string shaped like a key, for the rows that put one where a path, a file's text or an id belongs. */
 const KEYISH = "abcdef0123456789abcdef0123456789";
@@ -967,8 +1047,8 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
   const kept = keptOf(info) as { heartbeats: { worker: string; answers: number }[]; relay: unknown; tier: string };
   ok(kept.tier === "canary" && kept.heartbeats[0].worker === "sleep" && kept.heartbeats[0].answers === 5 && JSON.stringify(kept.relay) === '{"broker":"up"}', "a sample keeps the tier, each heartbeat's state and tallies, and the relay mark");
   // Every field, whole (review pass 2): a sample that dropped `models` or `at` would read "no model tallies" only after an arm had run.
-  const whole = keptOf({ ...info, database: { workers: { ...info.database.workers, coordinator: { relay: { broker: "up" }, children: { sleep: { for_s: 9 } }, at: "2026-11-16T00:00:01Z" } } } });
-  ok(JSON.stringify(whole) === JSON.stringify({ tier: "canary", commit: "c", provider: "answering", heartbeats: [{ worker: "sleep", at: "2026-11-16T00:00:00Z", running: true, slept: { from: "x", to: null }, models: { extract: { calls: { background: 3 } } }, answers: 5 }], relay: { broker: "up" }, children: { sleep: { for_s: 9 } }, childrenAt: "2026-11-16T00:00:01Z" }), "a sample keeps each heartbeat's time, state, sleep and tallies whole, the provider's state, the commit, and the coordinator's children and stamp time");
+  const whole = keptOf({ ...info, database: { counts: { thoughts: 7 }, workers: { ...info.database.workers, coordinator: { relay: { broker: "up" }, children: { sleep: { for_s: 9 } }, at: "2026-11-16T00:00:01Z" } } } });
+  ok(JSON.stringify(whole) === JSON.stringify({ tier: "canary", commit: "c", provider: "answering", thoughts: 7, heartbeats: [{ worker: "sleep", at: "2026-11-16T00:00:00Z", running: true, slept: { from: "x", to: null }, models: { extract: { calls: { background: 3 } } }, answers: 5 }], relay: { broker: "up" }, children: { sleep: { for_s: 9 } }, childrenAt: "2026-11-16T00:00:01Z" }), "a sample keeps each heartbeat's time, state, sleep and tallies whole, the provider's state, the commit, the thoughts the brain holds, and the coordinator's children and stamp time");
   ok(JSON.stringify(backlogOf({ pools: [{ workType: "extract:m@p2", pending: 4, claimed: 1 }, { workType: "reembed:e", pending: 0, claimed: 0 }] })) === '{"extract:m@p2":5}', "the backlog is the pools with pending or claimed rows");
   ok(JSON.stringify(backlogOf({ pools: [{ workType: 5, pending: 2 }, { pending: 1 }] })) === "{}", "a pool with no work type named is no pool");
 
@@ -1122,7 +1202,7 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
     && throws(() => brainOf("s", { connector: "bare" }, noKeyEntry, () => ""), /^brain s: its connector's entry in ~\/\.claude\.json has no key /) && !throws(() => brainOf("s", { connector: "bare" }, noKeyEntry, () => ""), /bare/),
     "a connector's failure names the brain and never the connector's value (a key put there by mistake): no entry of that name, a prototype's name among them, or an entry with no key");
   ok(throws(() => brainOf("s", null, claude, () => "k"), /give "connector"/) && throws(() => brainOf("s", { mcp: "", keyFile: "/k" }, claude, () => "k"), /give "connector"/) && throws(() => brainOf("s", { mcp: "http://h/mcp", keyFile: "" }, claude, () => "k"), /give "connector"/), "an entry that is null, or whose url or key file is blank, is no entry");
-  ok(JSON.stringify(keptOf({})) === '{"tier":null,"commit":null,"provider":null,"heartbeats":[],"relay":null,"children":null,"childrenAt":null}', "a brain_info with nothing in it is kept as nothing, not a throw");
+  ok(JSON.stringify(keptOf({})) === '{"tier":null,"commit":null,"provider":null,"thoughts":null,"heartbeats":[],"relay":null,"children":null,"childrenAt":null}' && keptOf({ database: { counts: { thoughts: "7" } } }).thoughts === null, "a brain_info with nothing in it is kept as nothing, not a throw");
   ok(noteKind("smd-3379 measure note (arm A #1). x") === "none" && noteKind("SMD-3379 Measure Note (arm A #1). x") === "none", "a heading in another case is none, not a lookalike to say on every run");
   ok(JSON.stringify(TAKES) === '{"load":["brains","brain","arm","ids","notes","parallel"],"sample":["brains","arm","minutes","every","out","ollama"],"clean":["brains","brain","ids","arm"],"summary":["out","split","live"]}', "each subcommand's flags, whole");
   ok(throws(() => liveOf('{"label":"l","kind":"search","ok":true}\n', "f"), /^f line 1 is no bench-live\.ts sample$/) && throws(() => liveOf('{"label":"l","kind":"search","ms":5}\n', "f"), /^f line 1 is no bench-live\.ts sample$/)
@@ -1159,6 +1239,11 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
   const marked = (forS: unknown, at: number | null, state = "running", pass = "sleep") => ({ children: { [pass]: { state, for_s: forS } }, ...(at === null ? {} : { childrenAt: iso(at) }) });
   const begins = beginsOf([marked(5, 400), marked(100, 100), marked(161, 160.4), marked(30, 200, "waiting"), marked(-1, 300), marked("9", 300), marked(7, null), marked(7, 300, "running", "board-sync"), {}, { children: null, childrenAt: iso(1) }], "sleep");
   ok(JSON.stringify(begins) === JSON.stringify([T0 - 600, T0 + 395_000]) && beginsOf([], "sleep").length === 0, "a run began its mark's seconds before the coordinator's stamp: two marks a rounding apart are one run, its earliest the one kept; a mark not running, of another pass, with no seconds or no stamp time is none");
+  const bg = (ms: [number, number][]) => beginsOf(ms.map(([forS, at]) => marked(forS, at)), "sleep").map((b) => (b - T0) / 1000).join();
+  ok(bg([[0, 90]]) === "90" && bg([[0, 100], [45, 160]]) === "100" && bg([[0, 100], [44.999, 160]]) === "100,115.001" && bg([[60, 160.4], [0, 100.2]]) === "100.2" && bg([[0, 100.4], [60, 160.1]]) === "100.1",
+    "a mark written as the run starts reads 0 seconds and is a mark; marks fifteen seconds apart are one run and a millisecond more two; the earliest time is kept, whichever mark gave it");
+  ok(bg([[0, 100], [60, 160], [60, 176]]) === "100" && bg([[0, 100], [60, 160], [0, 230]]) === "100,230" && bg([[0, 100], [300, 290]]) === "100" && bg([[0, 100], [300, 290], [0, 150]]) === "100,150" && bg([[1000, 0], [0, 100], [0, 200], [60, 260.3]]) === "-1000,100,200",
+    "a mark that puts a beginning inside the time its run was seen running is that run's, written late, not a run of its own; a run that began after it was last seen is; an older run's mark landing late is passed over; a third run's marks are one run");
   const ran = (at: number, calls: number) => ({ at: at * 1000, byPass: { extract: { calls, callMs: calls * 1000, waited: 0, waitMs: 0 } } });
   const win = (stamps: ReturnType<typeof ran>[], began: number[]) => { const x = windowOf(stamps, began.map((b) => b * 1000)); return x === null ? "none" : `${x.restarts}/${x.total.calls}`; };
   const rising = [ran(0, 10), ran(60, 14), ran(120, 20), ran(180, 26)];
@@ -1173,8 +1258,50 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
   ok(win(close, [90]) === "1/31" && win(close, [90.31]) === "1/31" && win(close, [89.7]) === "1/30" && win([ran(0, 10), ran(60, 14)], [60.2]) === "0/4",
     "the unseen restart is at the first stamp surely the new process's, more than half a second after the beginning read: a stamp nearer is taken for the old one's last, whose whole tally would else count as an increase");
 
-  // Board-sync's calls, apart from the sleep's: a row of their own under the brain's.
   const syncRow = (lines: string[], win: string) => cells(lines.find((l) => l.includes("its board-sync") && l.includes(` ${win} `)) ?? "").join(" ");
+  // Review pass 1's rows: whose a fall is, and which beginnings it is.
+  const fallThen = [ran(0, 10), ran(60, 2), ran(120, 5), ran(180, 9)];
+  ok(win(fallThen, [150]) === "2/14" && win(fallThen, [30, 150]) === "2/14" && win(fallThen, [30, 62]) === "2/11" && win(fallThen, [30, 40]) === "1/9" && win(fallThen, [30]) === "1/9",
+    "a fall long before a beginning is not that beginning's restart; a fall is one beginning's, so a second run that began after its later stamp is a restart of its own, and one that began before it is the same pair's");
+  ok(win([ran(481.8, 62), ran(664.5, 1), ran(670.4, 1)], [541.8, 664.03]) === "1/1" && win([ran(0, 10), ran(60, 2), ran(120, 5)], [61, 62]) === "2/7",
+    "two runs that began between one fall's stamps are that fall's one restart, the second's first stamp within half a second of it or not; of two read after its later stamp, one is the fall's and the other a restart of its own");
+  const lateRead = [ran(0, 10), ran(60, 2), ran(120, 5)];
+  ok(win(lateRead, [69.9]) === "1/5" && win(lateRead, [70]) === "1/5" && win(lateRead, [70.001]) === "2/7" && win([ran(5, 100), ran(60, 110), ran(92, 50), ran(104, 60), ran(118, 80), ran(130, 90)], [94]) === "1/100",
+    "a beginning read up to ten seconds after a fall's later stamp is that fall's, as a mark written late reads it: one restart, not the fall and then the next pair again");
+  ok(win([ran(0, 10), ran(59.8, 14), ran(60.4, 1), ran(70, 5)], [60]) === "1/9" && win([ran(0, 10), ran(60.2, 14), ran(60.4, 1), ran(70, 5)], [60]) === "1/9" && win([ran(0, 10), ran(60, 14), ran(90.5, 15), ran(150, 20)], [90]) === "1/25" && win([ran(0, 10), ran(60, 14), ran(90.5, 15), ran(150, 20)], [89.999]) === "1/24",
+    "a fall whose earlier stamp is just before the beginning, or within half a second after the time read for it, is its own; a stamp exactly half a second after a beginning is still taken for the old process's, a millisecond more is the new one's");
+  // A window is read with the stamps before it: one that opens on a new process's first stamp has its fall outside.
+  const opens = [ran(40, 50), ran(100.4, 2), ran(160, 9), ran(220, 15)];
+  const inWin = (lo: number) => { const x = windowOf(opens, [100_000], lo * 1000, Infinity); return x === null ? "none" : `${x.restarts}/${x.total.calls}/${x.s}`; };
+  const later = windowOf([ran(0, 5), ran(60, 9), ran(120, 2), ran(180, 6)], [], 60_000, Infinity);
+  ok(later !== null && later.restarts === 1 && later.total.calls === 6 && later.s === 120 && inWin(100) === "0/13/119.6" && inWin(0) === "1/15/180" && inWin(200) === "none" && win([ran(100.4, 2), ran(160, 9), ran(220, 15)], [100]) === "1/15",
+    "a window's restarts are those between its own stamps, wherever in the arm it begins; one that opens on the new process's first stamp counts no restart inside it, the fall before it read; the same stamps with none before them are the half second's doubt, taken as a restart");
+  const across = [0, 30, 60.4, 120, 180].map((t, k) => ({ t: iso(t), arm: "V", brain: "b", backlog: {}, childrenAt: iso(t), children: Object.fromEntries(["sleep", "board-sync"].map((pass) => [pass, { state: "running", for_s: k < 2 ? 1000 + t : Math.round(t - 60) }])),
+    heartbeats: ["sleep", "board-sync"].map((worker) => ({ worker, at: iso(t), models: { extract: { calls: { background: [50, 55, 2, 9, 15][k] }, callMs: [50, 55, 2, 9, 15][k] * 1000 } } })) }));
+  const acrossRows = safely(() => summaryLines(across, 1, []));
+  const afterRow = acrossRows.find((l) => l.trim().startsWith("b ") && l.includes(" after ")) ?? "";
+  ok(cells(afterRow).slice(0, 8).join(" ") === "b after 120 13 13 0.11 0 0.0" && afterRow.endsWith("   extract 13/13s") && syncRow(acrossRows, "after") === "after 120 13 13 0.11 0 0.0 its board-sync" && syncRow(acrossRows, "before") === "before 30 5 5 0.17 0 0.0 its board-sync" && cells(rowOf(acrossRows, "V")).slice(0, 8).join(" ") === "b before 30 5 5 0.17 0 0.0",
+    "the summary reads each window's restarts over the arm's stamps, the sleep's and board-sync's: a restart across the split is in neither window, and the window after it counts none");
+  const marksOf = (states: string[]) => safely(() => summaryLines(states.map((state, k) => ({ t: iso(k * 60), arm: "M", brain: "b", backlog: {}, heartbeats: [], childrenAt: iso(k * 60), children: { sleep: { state, for_s: 5 }, "board-sync": { state: "running", for_s: 5 } } })), 5, []));
+  ok(marksOf(["running", "waiting", "waiting", "held", "running"]).includes(`  ${"".padEnd(10)} the coordinator's mark for the sleep said waiting in 2, held in 1 of 5 samples: a run that began and ended between two samples has no mark, and is read by its tallies alone`)
+    && !marksOf(["running", "running"]).some((l) => l.includes("the coordinator's mark")) && !marksOf(["running", "waiting"]).some((l) => l.includes("mark for board-sync")) && !table.some((l) => l.includes("the coordinator's mark")),
+    "the samples in which the coordinator's mark for a pass was not running are counted by state, for that pass alone: a run between two of them leaves no mark; none said where every mark was running, or there was none");
+  const rowText = [`  ${"".padEnd(10)}`, "before".padEnd(8), "120".padStart(5), "1000".padStart(7), "18000".padStart(7), "150.00".padStart(10), "0".padStart(7), "0.0".padStart(7)].join(" ") + "   its board-sync";
+  const heading = table.find((l) => l.trim().startsWith("brain ")) ?? "";
+  ok(table.includes(rowText) && heading.indexOf("window") === rowText.indexOf("before") && heading.indexOf("window") === line("canary", "before").indexOf("before"), "board-sync's row sits under the table's columns, its window under the heading's");
+  const oneSync = safely(() => summaryLines([0, 60].map((t) => ({ t: iso(t), arm: "U", brain: "b", backlog: {}, heartbeats: [{ worker: "board-sync", at: iso(0), models: { "-": { calls: { background: 3 }, callMs: 9000 } } }] })), 5, []));
+  ok(oneSync.filter((l) => l.includes("its board-sync")).join("|") === [`  ${"".padEnd(10)} before   its board-sync: 1 stamp(s) in the window, fewer than two`, `  ${"".padEnd(10)} after    its board-sync: 0 stamp(s) in the window, fewer than two`].join("|"),
+    "a board-sync that stamped its tallies once in the arm is said so, in both windows");
+  const pair = safely(() => summaryLines([...armOf("P", 0, [0, 2, 4], [0, 30, 60]).map((l) => ({ ...l, run: iso(0) })), ...armOf("P", 3600, [1, 2, 3], [1, 2, 3]).map((l) => ({ ...l, run: iso(3600) }))], 5, [])).filter((l) => l.startsWith("\narm "));
+  ok(pair.length === 2 && pair[0].startsWith("\narm P (run 1 of 2 of that name in the file): ") && pair[1].startsWith("\narm P (run 2 of 2 of that name in the file): "), "two runs of a name are each headed with their place of two");
+  const three = summaryLines([], 3, [[{ label: "a", kind: "search", ms: 1, ok: true }], [{ label: "b", kind: "search", ms: 2, ok: true }], [{ label: "c", kind: "search", ms: 3, ok: true }]], ["only.jsonl"]);
+  ok(three.filter((l) => l.includes(" search ")).map((l) => cells(l).join(" ")).join("|") === "a search 1 1 1 1 1 1|b search 1 1 2 2 2 2|c search 1 1 3 3 3 3" && three[three.length - 1] === "  --live: 1 only.jsonl", "every --live file has its rows, a third as the first two; one file named is named under the table");
+  ok(JSON.stringify(loadedOf({ models: [{ name: 5 }, { name: "a" }] })) === '["?","a"]' && throws(() => brainsOf('{"a":{},"(ollama)":{}}'), /names a brain \(ollama\)/), "a model's name that is no string is not passed on; the model server's name is refused wherever in the file it is");
+  const odd = ["x", 5, true, [], [1, 2]].map((result) => readOf(200, { jsonrpc: "2.0", id: 1, result } as never, "brain_info"));
+  ok(odd.every((r) => !r.ok && r.error === WRONG_SHAPE) && readOf(200, { error: { code: -1, message: "no" }, result: "x" } as never, "fetch").error === '{"code":-1,"message":"no"}' && readOf(500, { result: "x" } as never, "fetch").error === "HTTP 500",
+    "a result that is a string, a number or a list is of no shape the harness reads, and is not passed on as an empty answer; an error beside it, or a failed request, is said as itself");
+
+  // Board-sync's calls, apart from the sleep's: a row of their own under the brain's.
   ok(syncRow(table, "before") === "before 120 1000 18000 150.00 0 0.0 its board-sync" && syncRow(table, "after") === "after 180 1500 27000 150.00 0 0.0 its board-sync" && table.filter((l) => l.includes("its board-sync")).length === 2
     && table.findIndex((l) => l.includes("its board-sync")) === table.findIndex((l) => l.trim().startsWith("canary") && l.includes(" after ")) + 1,
     "a brain's board-sync has rows of its own under the sleep's, from its own stamps: 1,000 calls before the split and 1,500 after, none of them in the sleep's 9 and 20; a brain whose board-sync stamped no tallies has none");
@@ -1194,8 +1321,26 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
   ok(ex([{ [OWN]: pool(0, 0, 150, 2) }, { [OWN]: pool(140, 3, 0, 2) }, { [OWN]: pool(0, 0, 0, 2) }, { [OWN]: pool(0, 0, 0, 2) }]) === "pending or claimed 0 first, 0 last, 143 most; not yet pooled 150 first, 0 last; failed 2 first, 2 last; ran dry at t2",
     "the extraction line says the rows pending or claimed, the thoughts not yet pooled and the rows failed: notes a first pass has not pooled are work to do, and rows that had failed before the arm are no reason to doubt it ran dry");
   const failedLine = ex([{ [OWN]: pool(100, 2, 0, 0) }, { [OWN]: pool(0, 0, 0, 12) }, { [OWN]: pool(0, 0, 0, 12) }]);
-  ok(failedLine === "pending or claimed 102 first, 0 last, 102 most; not yet pooled 0 first, 0 last; failed 0 first, 12 last; nothing left to do at t1, but 12 more rows had failed than at the first sample: not every note was extracted" && !failedLine.includes("ran dry"),
+  ok(failedLine === "pending or claimed 102 first, 0 last, 102 most; not yet pooled 0 first, 0 last; failed 0 first, 12 last; nothing left to do at t1, but 12 more rows had failed by the last sample than at the first: not every note was extracted" && !failedLine.includes("ran dry"),
     "a pool that emptied while its rows failed is not said to have run dry: the rows that failed since the first sample are counted");
+  ok(ex([{ [OWN]: pool(4, 0, 0, 5) }, { [OWN]: pool(0, 0, 0, 5) }, { [OWN]: pool(0, 0, 0, 9) }]).endsWith("failed 5 first, 9 last; nothing left to do at t1, but 4 more rows had failed by the last sample than at the first: not every note was extracted")
+    && ex([{ [OWN]: pool(0, 0, 0, 0) }, { [OWN]: pool(0, 0, 0, 12) }]).endsWith("failed 0 first, 12 last; nothing to do in any sample, but 12 more rows had failed by the last than at the first: rows came and failed between samples")
+    && ex([{ [OWN]: pool(2, 0, 0, 0) }, { [OWN]: pool(0, 0, 0, 1) }]).includes("but 1 more rows had failed") && ex([{ [OWN]: pool(2, 0, 0, 3) }, { [OWN]: pool(0, 0, 0, 3) }]).endsWith("failed 3 first, 3 last; ran dry at t1"),
+    "rows that failed after the pool emptied, or came and failed between two samples with none seen pending, are counted too, one row enough: the count is the last sample's over the first's");
+  ok(ex([{}, { [OWN]: pool(2, 0, 0, 3) }, { [OWN]: pool(0, 0, 0, 3) }]).endsWith("failed 3 first, 3 last; ran dry at t2; 1 of 3 samples had no row under the key yet")
+    && ex([{ [OWN]: pool(5, 0, 0, 0) }, { [OWN]: pool(5, 0, 0, 0) }, {}]) === "pending or claimed 5 first, 5 last, 5 most; not yet pooled 0 first, 0 last; failed 0 first, 0 last; never dry at the end; 1 of 3 samples had no row under the key yet"
+    && ex([{ [OWN]: pool(1, 0, 0, 0) }, { [OWN]: pool(1, 0, 0, 0), "extract:old@p1": pool(4, 0, 0, 0, false) }]).endsWith("never dry at the end; an older key's rows pending or claimed, not in these: 0 first, 4 last"),
+    "the rows failed are counted from the first sample that had a row, not from one before it; a last sample with no row is no 0 and no dry pool; an older key's rows that show only later are said");
+  ok(ex([{ "extract:a": pool(3, 0, 0, 0) }, { "extract:a": pool(0, 0, 0, 0, false), "extract:b": pool(2, 0, 0, 7) }, { "extract:a": pool(0, 0, 0, 0, false), "extract:b": pool(0, 0, 0, 7) }])
+    === "pending or claimed 3 first, 0 last, 3 most; not yet pooled 0 first, 0 last; failed 0 first, 7 last; ran dry at t2; the brain's own key changed in the arm, so first and last are two pools'",
+    "a key that changed in the arm is said, and another pool's failed rows are not counted as failed in it");
+  const lined = (xs: { pools: Record<string, PoolKept> | null; thoughts?: number | null }[]) => extractionLine(xs.map((x, k) => ({ t: `t${k}`, ...x })));
+  ok(lined([{ pools: {}, thoughts: 30 }, { pools: { "consolidate:x": pool(1, 0, 0, 0, null) }, thoughts: 180 }]) === "no row under the brain's extraction key in any sample: its extraction has pooled nothing yet, so notes loaded on it are not counted (30 thoughts on the brain first, 180 last, none of them pooled)"
+    && !lined([{ pools: {}, thoughts: 30 }, { pools: {} }]).includes("thoughts on the brain") && !lined([{ pools: {}, thoughts: 30 }, { pools: {}, thoughts: null }]).includes("thoughts on the brain"),
+    "a brain with no row under its key has its thoughts said, first and last, where every sample kept them: the backlog its extraction has not pooled");
+  ok(lined([{ pools: { [OWN]: pool(1, 0, 0, 0) } }, { pools: null }, { pools: { [OWN]: pool(0, 0, 0, 0) } }]) === "pending or claimed 1 first, 0 last, 1 most; not yet pooled 0 first, 0 last; failed 0 first, 0 last; ran dry at t2; 1 of 3 samples kept no pools"
+    && lined([{ pools: null }, { pools: null }]) === "-" && lined([{ pools: {} }, { pools: null }]).endsWith("are not counted; 1 of 2 samples kept no pools"),
+    "a sample that kept no pools is passed over and counted, not a reason to read the arm another way");
   ok(ex([{ [OWN]: pool(5, 0, 0, 0), "extract:old@p1": pool(7, 0, 900, 3, false) }, { [OWN]: pool(0, 0, 0, 0), "extract:old@p1": pool(7, 0, 900, 3, false) }]) === "pending or claimed 5 first, 0 last, 5 most; not yet pooled 0 first, 0 last; failed 0 first, 0 last; ran dry at t1; an older key's rows pending or claimed, not in these: 7 first, 7 last",
     "an older key's leftover rows are said apart and keep no pool from running dry, nor are its unpooled thoughts or failed rows the brain's");
   ok(ex([{}, { "consolidate:x": pool(4, 0, 0, 0, null), "reembed:e": pool(9, 0, 0, 0) }]) === "no row under the brain's extraction key in any sample: its extraction has pooled nothing yet, so notes loaded on it are not counted"
@@ -1208,17 +1353,25 @@ async function selfRows(ok: (pass: boolean, what: string) => void): Promise<void
     "only a key the brain says is its own is read as its own: one it says nothing of is another's, with one it says is not, and theirs are said first to last");
   ok(ex([{}, { [OWN]: pool(9, 0, 3, 1) }, { [OWN]: pool(2, 0, 0, 1) }]) === "pending or claimed 9 first, 2 last, 9 most; not yet pooled 3 first, 0 last; failed 1 first, 1 last; never dry at the end; 1 of 3 samples had no row under the key yet",
     "first and last are of the samples that had a row under the key: one from before it had any is no 0");
-  const kept2 = poolsOf({ pools: [{ workType: OWN, pending: 4, claimed: 1, succeeded: 90, failed: 2, unpooled: 30, thoughts: 127, stale: 0, active: true }, { workType: "consolidate:x", pending: 0, claimed: 0, failed: 0, unpooled: 0, active: null }, { workType: "extract:old", pending: "7", claimed: -1, failed: null, active: "yes" }, { pending: 3 }, null, "x"] });
-  ok(JSON.stringify(kept2) === JSON.stringify({ [OWN]: pool(4, 1, 30, 2), "consolidate:x": pool(0, 0, 0, 0, null), "extract:old": pool(0, 0, 0, 0, null) }) && poolsOf({}) === null && poolsOf({ pools: "x" }) === null && JSON.stringify(poolsOf({ pools: [] })) === "{}",
+  const kept2 = poolsOf({ pools: [{ workType: OWN, pending: 4, claimed: 1, succeeded: 90, failed: 2, unpooled: 30, thoughts: 127, stale: 0, active: true }, { workType: "consolidate:x", pending: 0, claimed: 0, failed: 0, unpooled: 0, active: null }, { workType: "extract:old", pending: "7", claimed: -1, failed: null, active: "yes" }, { workType: "extract:gone", pending: 1, active: false }, { pending: 3 }, null, "x"] });
+  ok(JSON.stringify(kept2) === JSON.stringify({ [OWN]: pool(4, 1, 30, 2), "consolidate:x": pool(0, 0, 0, 0, null), "extract:old": pool(0, 0, 0, 0, null), "extract:gone": pool(1, 0, 0, 0, false) }) && poolsOf({}) === null && poolsOf({ pools: "x" }) === null && JSON.stringify(poolsOf({ pools: [] })) === "{}",
     "a sample keeps every pool worker_status names, an idle one too: its pending, claimed, failed and unpooled counts and whether the key is the brain's own; a count that is no count is 0, and an answer with no list of pools is kept as none");
   const aLine = sampleLine(iso(60), "A", iso(0), "b", info, { pools: [{ workType: OWN, pending: 4, claimed: 1, failed: 2, unpooled: 30, active: true }] });
-  ok(Object.keys(aLine).join() === "t,arm,run,brain,tier,commit,provider,heartbeats,relay,children,childrenAt,backlog,pools" && aLine.t === iso(60) && aLine.arm === "A" && aLine.run === iso(0) && aLine.brain === "b" && aLine.tier === "canary"
+  ok(Object.keys(aLine).join() === "t,arm,run,brain,tier,commit,provider,thoughts,heartbeats,relay,children,childrenAt,backlog,pools" && aLine.t === iso(60) && aLine.arm === "A" && aLine.run === iso(0) && aLine.brain === "b" && aLine.tier === "canary"
     && JSON.stringify(aLine.backlog) === `{"${OWN}":5}` && JSON.stringify(aLine.pools) === JSON.stringify({ [OWN]: pool(4, 1, 30, 2) }) && samplesOf(JSON.stringify(aLine), "f").length === 1 && sampleLine(iso(0), "A", iso(0), "b", {}, {}).pools === null,
     "a brain's line of a round keeps its time, its arm, the run's start and the brain, what a sample keeps of brain_info, and the pools beside the rows an older summary read; it is a sample as the summary reads one");
-  const poolArm = (pools: (Record<string, PoolKept> | undefined)[]) => safely(() => summaryLines(pools.map((p, k) => ({ t: iso(k * 60), arm: "E", brain: "b", backlog: { [OWN]: 9 }, heartbeats: [], ...(p === undefined ? {} : { pools: p }) })), 5, []));
+  const poolArm = (pools: (Record<string, PoolKept> | null | undefined)[]) => safely(() => summaryLines(pools.map((p, k) => ({ t: iso(k * 60), arm: "E", brain: "b", backlog: { [OWN]: 9 }, heartbeats: [], ...(p === undefined ? {} : { pools: p }) })), 5, []));
   ok(poolArm([{ [OWN]: pool(1, 0, 0, 0) }, { [OWN]: pool(0, 0, 0, 0) }]).includes(`  ${"".padEnd(10)} extraction rows under the brain's own key: pending or claimed 1 first, 0 last, 1 most; not yet pooled 0 first, 0 last; failed 0 first, 0 last; ran dry at ${iso(60)}`)
-    && poolArm([{ [OWN]: pool(1, 0, 0, 0) }, undefined]).includes(`  ${"".padEnd(10)} extraction rows pending or claimed: 9 first, 9 last, 9 most; never dry at the end`),
-    "the summary reads the pools where every sample of the brain kept them, and the rows an older sample kept where one did not");
+    && poolArm([{ [OWN]: pool(1, 0, 0, 0) }, undefined]).includes(`  ${"".padEnd(10)} extraction rows under the brain's own key: pending or claimed 1 first, 1 last, 1 most; not yet pooled 0 first, 0 last; failed 0 first, 0 last; never dry at the end; 1 of 2 samples kept no pools`)
+    && poolArm([{ [OWN]: pool(1, 0, 0, 0) }, null]).some((l) => l.endsWith("never dry at the end; 1 of 2 samples kept no pools"))
+    && poolArm([undefined, undefined]).includes(`  ${"".padEnd(10)} extraction rows pending or claimed: 9 first, 9 last, 9 most; never dry at the end`) && poolArm([null, null]).includes(`  ${"".padEnd(10)} extraction rows pending or claimed: 9 first, 9 last, 9 most; never dry at the end`),
+    "the summary reads the pools where any sample of the brain kept them, one that kept none counted and no throw; and the rows an older sample kept where none did");
+  ok(safely(() => summaryLines([30, 180].map((thoughts, k) => ({ t: iso(k * 60), arm: "N", brain: "b", backlog: {}, heartbeats: [], pools: {}, thoughts })), 5, [])).some((l) => l.endsWith("are not counted (30 thoughts on the brain first, 180 last, none of them pooled)")),
+    "the summary passes each sample's thoughts on to the line for a brain with no row under its key");
+  const poolLine = (pools: unknown) => `{"t":"${iso(0)}","arm":"X","brain":"b","pools":${JSON.stringify(pools)}}\n`;
+  ok(samplesOf(poolLine({ [OWN]: pool(1, 0, 0, 0) }), "f").length === 1 && samplesOf(poolLine(null), "f").length === 1 && samplesOf(poolLine({}), "f").length === 1
+    && [{ [OWN]: null }, [], "x", 5, { [OWN]: [1] }, { [OWN]: "p" }].every((bad) => throws(() => samplesOf(poolLine(bad), "f"), /^f line 1 is no sample$/)),
+    "a sample's pools, where it has them, are an object of pools: one whose pool is null, or whose pools are a list, is no sample, said by its line and not as an error from the summary's reading");
 
   // Two runs of one arm's name in one file; the live table's files; the model server's name and url; an answer of no shape.
   const twoRuns = safely(() => summaryLines([...armOf("P", 0, [0, 2, 4], [0, 30, 60]).map((l) => ({ ...l, run: iso(0) })), ...armOf("P", 3600, [100, 105, 110], [900, 1020, 1140]).map((l) => ({ ...l, run: iso(3600) })), ...armOf("P", 7200, [1, 2, 3], [1, 2, 3]), ...armOf("Q", 9000, [1, 2, 3], [1, 2, 3]).map((l) => ({ ...l, run: iso(9000) }))], 5, []));
