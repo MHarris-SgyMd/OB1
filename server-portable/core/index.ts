@@ -17,6 +17,7 @@ import * as threads from "./threads.ts";
 import * as relations from "./relations.ts";
 import * as items from "./items.ts";
 import * as deliverables from "./deliverables.ts";
+import * as validityRead from "./validity.ts";
 import * as agendaRead from "./agenda.ts";
 import * as planRead from "./plan.ts";
 import { pluginChat, type ModelAnswer, type ModelCaller, type ModelRequest } from "./model.ts";
@@ -93,6 +94,7 @@ export function createCore(deps: CoreDeps) {
     captureDeliverable: bind(ctx, deliverables.captureDeliverable),
     verifyDeliverable: bind(ctx, deliverables.verifyDeliverable),
     deliverableHistory: bind(ctx, deliverables.deliverableHistory),
+    validity: bind(ctx, validityRead.validity),
     agenda: bind(ctx, agendaRead.agenda),
     planContext: bind(ctx, planRead.planContext),
     /**

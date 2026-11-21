@@ -187,6 +187,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   // Deliverables (SMD-1715 PR 2, migration 134): a deliverable by its thought's id in the path, a verification posted to it.
   capture_deliverable: { method: "POST", path: "/v1/deliverables", ok: 200, call: CALLS.capture_deliverable },
   deliverable_history: { method: "GET", path: "/v1/deliverables/{id}", ok: 200, call: CALLS.deliverable_history },
+  // A thought's state on three axes (149, SMD-3887 PR 2b): the ids in the query, `ids` once per id.
+  validity: { method: "GET", path: "/v1/validity", ok: 200, call: CALLS.validity },
   verify_deliverable: { method: "POST", path: "/v1/deliverables/{id}/verifications", ok: 200, call: CALLS.verify_deliverable },
 };
 
