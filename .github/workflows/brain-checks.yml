@@ -84,7 +84,7 @@ jobs:
   # block is unchanged (PR 2; an edit outside the jobs, of this job or of
   # repo-consistency, which runs the checker, runs them all). A path its
   # CHARGES map names counts against the gated jobs it gives alone (PR 3a),
-  # one it marks `?` only when that job's list of what it read agrees.
+  # one it marks `:list` only when that job's list of what it read agrees.
   # Any other path ran every job until PR 3b-2: now the jobs MAP_LISTS names
   # skip it when nothing they read on main's newest green run differs from
   # that commit to this checkout. The classifier fetches those lists itself,

@@ -657,7 +657,7 @@
  *      into a container, whose reads no list sees, or reads the event,
  *      since the lists are a push run's: both by allowlist, the commands a
  *      mapped job may give docker and the github names it may read; and a
- *      CHARGES row leaves a job to its list (`job?`) only if MAP_LISTS has
+ *      CHARGES row leaves a job to its list (`job:list`) only if MAP_LISTS has
  *      one (SMD-2435 PR 3b-2). Its probe pins what it refuses and passes
  *
  * Run: bun scripts/check-consistency.ts   (a Bun script — TypeScript, type-checked in CI
@@ -11370,17 +11370,17 @@ const JOB_MAP_READERS: Record<string, Record<string, MapReader>> = {
  * so a gated job running either must be charged by every row (review pass 7).
  */
 const JOB_MAP_HOMES = [CHANGES_SCRIPT, SELF];
-/** A CHARGES row: its pattern, the jobs it charges, and which of them it leaves to their lists (`job?`), where it leaves any. */
+/** A CHARGES row: its pattern, the jobs it charges, and which of them it leaves to their lists (`job:list`), where it leaves any. */
 type ChargesRow = { pattern: string; jobs: string[]; marked?: string[] };
 /** CHARGES as CHANGES_SCRIPT prints it, or why it could not be read. */
 function chargesTable(): ChargesRow[] | string {
   const r = Bun.spawnSync(["bash", join(ROOT, CHANGES_SCRIPT), "--charges"]);
   if (r.exitCode !== 0) return `${CHANGES_SCRIPT} --charges exited ${r.exitCode}: ${r.stderr.toString().trim()}`;
   return r.stdout.toString().split("\n").filter((l) => l.trim()).map((l) => {
-    // A job written `job?` is charged unless its list says otherwise (PR 3b-2): the job, and its mark.
+    // A job written `job:list` is charged unless its list says otherwise (PR 3b-2): the job, and its mark.
     const [pattern, jobs = ""] = l.split("\t");
     const names = jobs.split(" ").filter(Boolean);
-    return { pattern, jobs: names.map((j) => j.replace(/\?$/, "")), marked: names.filter((j) => j.endsWith("?")).map((j) => j.slice(0, -1)) };
+    return { pattern, jobs: names.map((j) => j.replace(/:list$/, "")), marked: names.filter((j) => j.endsWith(":list")).map((j) => j.slice(0, -":list".length)) };
   });
 }
 /** scripts/migrate-to-sql-shim.ts's walk, as compat-shim runs it over the tree: the top-level directories it skips, the files it reads, and the marked files its parse step builds (CODEMOD_MARKER; checkJobMap fills them). */
@@ -12139,10 +12139,21 @@ const MAP_DOCKER_MAY = new Set(["pull", "run", "exec", "logs", "inspect", "rm", 
  */
 function containerProblem(line: string): string | null {
   // Each word as written less its leading quotes, where a flag shows, and bare, where a runtime's name does: what follows the last `$(`, `(`, backtick, quote or `=` in it.
-  const raw = line.trim().split(/\s+/).map((w) => w.replace(/^["']+/, ""));
-  const words = raw.map((w) => w.replace(/["'`);]+$/, "").replace(/^.*(?:\$\(|["'`(=])/, ""));
-  // What an echo says is no command, unless it says what a command printed.
-  if (/^(?:echo|printf)$/.test(raw[0] ?? "") && !/\$\(|`/.test(line)) return null;
+  // What an echo says is no command: its words go, up to the first `;`, `&&`, `||` or `|` outside quotes, where
+  // the next command starts, unless it says what a command printed (`$(` or a backtick), when all of it is read.
+  if (/^\s*(?:echo|printf)\s/.test(line) && !/\$\(|`/.test(line)) {
+    let quote = "", cut = -1;
+    for (let c = 0; c < line.length && cut === -1; c++) {
+      const ch = line[c];
+      if (quote) { if (ch === quote) quote = ""; }
+      else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === ";" || ch === "|" || (ch === "&" && line[c + 1] === "&")) cut = c;
+    }
+    if (cut === -1) return null;
+    line = line.slice(cut).replace(/^[;|&]+/, "");
+  }
+  const raw = line.trim().split(/\s+/).map((w) => w.replace(/^["']+/, "").replace(/["']+$/, ""));
+  const words = raw.map((w) => w.replace(/[`);]+$/, "").replace(/^.*(?:\$\(|["'`(=])/, ""));
   const mounts = (from: number) => raw.slice(from).some((x) => /^-[a-zA-Z]*v/.test(x) || /^--(?:volume|mount|volumes-from)(?:=|$)/.test(x));
   for (let at = 0; at < words.length; at++) {
     const w = words[at], next = words[at + 1] ?? "";
@@ -12168,6 +12179,8 @@ function containerProblem(line: string): string | null {
  * and `github[…]` are refused with every other name not here, wherever in the job they stand.
  */
 const MAP_NEUTRAL_CONTEXTS = new Set(["github.sha", "github.run_id", "github.run_attempt", "github.repository", "github.server_url", "github.workspace", "github.job"]);
+/** What a job MAP_LISTS names may ask of git in a step's own command: nothing that names or reads the tracked files. No mapped job asks it anything today. */
+const MAP_GIT_MAY = new Set(["rev-parse", "config", "version"]);
 /** The GITHUB_ variables a mapped job's commands may name: where a step writes, not what started it. */
 const MAP_NEUTRAL_VARIABLES = new Set(["GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_WORKSPACE"]);
 /** The step conditions that run a step on a push to main alone, each verbatim: there a step can only add to what a list holds. */
@@ -12190,7 +12203,8 @@ function stringsUnder(v: unknown, key = ""): [string, string][] {
 function eventReads(v: unknown, key = ""): string[] {
   return [...new Set(stringsUnder(v, key).flatMap(([k, text]) => {
     if (k === "if") return MAP_PUSH_ALONE_IFS.includes(text.trim()) ? [] : eventNames(text);
-    const inExpressions = [...text.matchAll(/\$\{\{([\s\S]*?)\}\}/g)].flatMap((m) => eventNames(m[1]));
+    // A secret too: a pull request from another repository's branch is given none, and a push to main has them.
+    const inExpressions = [...text.matchAll(/\$\{\{([\s\S]*?)\}\}/g)].flatMap((m) => [...eventNames(m[1]), ...[...m[1].matchAll(/\bsecrets\b(?:\s*\.\s*[\w-]+)?/gi)].map((x) => x[0].replace(/\s+/g, "").toLowerCase())]);
     const variables = k === "run" ? [...text.matchAll(/\bGITHUB_[A-Z_]+/g)].map((m) => m[0]).filter((name) => !MAP_NEUTRAL_VARIABLES.has(name)) : [];
     return [...inExpressions, ...variables];
   }))];
@@ -12231,6 +12245,8 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
     else {
       const values = mapping(matrix)?.[axes[0]];
       want = (Array.isArray(values) ? values : []).map((v) => `${key}.${String(v)}`);
+      const odd = (Array.isArray(values) ? values : []).map(String).filter((v) => !/^[A-Za-z0-9_-]+$/.test(v));
+      if (odd.length) problems.push(`MAP_LISTS names ${key}, whose matrix has the cell${odd.length === 1 ? "" : "s"} ${odd.join(", ")} — a cell is named in its list's file and in its artifact, where a dot or another character is written two ways, so its list would never be found; letters, digits, - and _ alone (check 56, SMD-2435)`);
     }
     const missing = want.filter((w) => !mine.includes(w)), extra = mine.filter((m) => !want.includes(m));
     if (missing.length || extra.length) problems.push(`MAP_LISTS names ${mine.join(", ")} for job ${key}, whose lists are ${want.join(", ")} — ${missing.length ? `without ${missing.join(", ")} the job would skip by its other cells' reads` : `${extra.join(", ")} is no list of its`} (check 56, SMD-2435)`);
@@ -12249,8 +12265,8 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
       const reads = eventReads(step);
       if (reads.length) problems.push(`job ${key}, which MAP_LISTS names, has step ${i + 1}${typeof step.name === "string" ? ` (${JSON.stringify(step.name)})` : ""} read the event that started the run (${reads.join(", ")}) — ${EVENT_WHY} (check 56, SMD-2435)`);
       const lines = typeof run === "string" ? run.replace(/\s*\\\n\s*/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)) : [];
-      const byIndex = lines.find((l) => /\bgit\s+(?:-C\s+\S+\s+)?(?:ls-files|ls-tree|grep)\b/.test(l));
-      if (byIndex) problems.push(`job ${key}, which MAP_LISTS names, runs \`${byIndex.trim().slice(0, 80)}\` in step ${i + 1} — git names the tracked files from its index, listing no folder, so a file added where the job listed and read nothing would be one it reads and its list cannot say so (check 56, SMD-2435)`);
+      const byGit = lines.find((l) => [...l.matchAll(/(?:^|[\s;|&(`"'=])git((?:\s+-[cC]\s+\S+)*)\s+([A-Za-z-]+)/g)].some((m) => !MAP_GIT_MAY.has(m[2])));
+      if (byGit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${byGit.trim().slice(0, 80)}\` in step ${i + 1} — git names the tracked files from its index and reads their bytes from its own store, listing no folder and opening no file, so the job's list would say less than it read; a mapped job asks git only to ${[...MAP_GIT_MAY].join(", ")} (check 56, SMD-2435)`);
       const hit = lines.map((l) => [l, containerProblem(l)] as const).find(([, why]) => why !== null);
       if (hit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${hit[0].trim().slice(0, 80)}\` in step ${i + 1}: ${hit[1]} — a container reads the checkout where no access time moves, so the job's list would say less than it read; write it one of the ways check 56 can read, or take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
     });
@@ -12323,6 +12339,16 @@ function checkMapLists() {
     ["the tree read through git's index", ["a", "m.x", "m.y"], wf(job("a", step("git grep -n supabase -- '*.ts'")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `git grep -n supabase"]],
     ["a token that can write", ["a", "m.x", "m.y"], good.replace("  contents: read\n", "  contents: read\n  pull-requests: write\n"), ["a", "m", "s"], ALWAYS, ["the workflow's permissions are {\"contents\":\"read\",\"pull-requests\":\"write\"}"]],
     ["no permissions named, so the repository's default", ["a", "m.x", "m.y"], good.replace("permissions:\n  contents: read\n", ""), ["a", "m", "s"], ALWAYS, ["the workflow's permissions are null"]],
+    ["a stack brought up after an echo", ["a", "m.x", "m.y"], wf(job("a", step("echo \"::group::stack\" && docker compose up -d")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": `docker compose`, where a mapped job asks docker only to"]],
+    ["a mount after an echo and a semicolon", ["a", "m.x", "m.y"], wf(job("a", step("echo starting; docker run -d -v \"$PWD/db:/db:ro\" image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": a container given a path"]],
+    ["an echo whose words hold a semicolon and the word docker", ["a", "m.x", "m.y"], wf(job("a", step("echo \"docker compose up; then the stack is the stack jobs'\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["a container's log after an echo", ["a", "m.x", "m.y"], wf(job("a", step("echo \"::group::log\"; docker logs postgres 2>&1 || true; echo \"::endgroup::\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["a long mount flag in quotes of its own", ["a", "m.x", "m.y"], wf(job("a", step("docker run -d \"--volume\" \"$PWD:/w\" image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": a container given a path"]],
+    ["a tracked file read from git's store", ["a", "m.x", "m.y"], wf(job("a", step("git show HEAD:db/x.sql | psql")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `git show HEAD:db/x.sql"]],
+    ["the tree copied out of git's store", ["a", "m.x", "m.y"], wf(job("a", step("git -C . archive HEAD db | tar -x -C /tmp/copy")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `git -C . archive HEAD db"]],
+    ["git asked which commit this is", ["a", "m.x", "m.y"], wf(job("a", step("echo \"at $(git rev-parse --short HEAD)\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
+    ["a secret, which a pull request from elsewhere lacks", ["a", "m.x", "m.y"], wf(job("a", "      - run: bun x.ts\n        env:\n          KEY: ${{ secrets.SOME_KEY }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (secrets.some_key)"]],
+    ["a cell with a dot in its name", ["a", "m.16.4", "m.17.2"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        pg: [\"16.4\", \"17.2\"]\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["whose matrix has the cells 16.4, 17.2"]],
     ["a step run on a push alone", ["a", "m.x", "m.y"], wf(job("a", "      - if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n        run: bun keep.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a matrix of one value, named whole, as its list step names its list with no cell", ["a", "m"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x]\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a matrix with a cell added by include", ["a", "m.x", "m.y"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x, y]\n        include:\n          - shard: z\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["it sets include, which add and take cells no axis lists"]],
@@ -12341,10 +12367,10 @@ function checkMapLists() {
   if (!lists.length) fail(CHANGES_SCRIPT, "--map-lists printed nothing — MAP_LISTS names the lists a job may skip by (check 56, SMD-2435)");
   // Each message is its file's: MAP_LISTS is changes.sh's, MAP_ALWAYS_RUN and the choice between the two this file's, the rest the workflow's.
   for (const msg of mapListsProblems(lists, readFileSync(join(ROOT, WORKFLOW), "utf8"), AGGREGATE_GATED, MAP_ALWAYS_RUN)) fail(msg.startsWith("MAP_LISTS") ? CHANGES_SCRIPT : msg.startsWith("MAP_ALWAYS_RUN") || msg.startsWith("gated job") ? SELF : WORKFLOW, msg);
-  // A CHARGES row may leave a job to its list (`job?`) only where there is a list to leave it to.
+  // A CHARGES row may leave a job to its list (`job:list`) only where there is a list to leave it to.
   const table = chargesTable();
   if (typeof table === "string") fail(CHANGES_SCRIPT, `${table} — check 56 reads which jobs CHARGES leaves to their lists (SMD-2435)`);
-  else for (const row of table) for (const job of row.marked ?? []) if (!lists.some((l) => l === job || l.startsWith(`${job}.`))) fail(CHANGES_SCRIPT, `CHARGES marks ${job}? for ${row.pattern}, and MAP_LISTS names no list of ${job} — a job is left to its list only where main's lists are read for it; with none, the mark would never be looked at and reads as a promise (check 56, SMD-2435)`);
+  else for (const row of table) for (const job of row.marked ?? []) if (!lists.some((l) => l === job || l.startsWith(`${job}.`))) fail(CHANGES_SCRIPT, `CHARGES marks ${job}:list for ${row.pattern}, and MAP_LISTS names no list of ${job} — a job is left to its list only where main's lists are read for it; with none, the mark would never be looked at and reads as a promise (check 56, SMD-2435)`);
   if (!MAP_PUSH_ALONE_IFS.every((c) => /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}$/.test(c) && !/\|\||!\(/.test(c))) fail(SELF, "MAP_PUSH_ALONE_IFS holds a condition that does not end in a push to main, or that an `||` or a `!(` widens — each must run its step on a push to main alone (check 56, SMD-2435)");
 }
 checkMapLists();
