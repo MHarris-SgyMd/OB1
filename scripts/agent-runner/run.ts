@@ -134,14 +134,23 @@ export function resumeDecision(findings: string[], firstRunCostUsd: number | nul
  * too, so a result alone is not a session that finished:
  *   - "finished": a result of subtype `success` with `is_error` false. Its text alone is a report;
  *   - "no-result": the session ended some other way (session.ts's `ended`);
- *   - "api-error": the result's terminal reason is `api_error` (a refused key, a rate limit, an overloaded API). Its
- *     subtype is `success` and its text is the API's error, which read as a report until now;
+ *   - "api-error": the result's terminal reason is `api_error`. Its subtype is `success` and its text is the API's
+ *     error, which read as a report until now. `unanswered` says whether the API failed to answer (no status, a
+ *     refused key: 401 or 403, a timeout: 408, a rate limit: 429, or a server error: 500 and up) or answered and
+ *     refused this request (any other status, such as a 400 for a brief too large), which no later run mends;
  *   - "limit": the turn or the budget limit stopped it (`error_max_turns`, `error_max_budget_usd`);
  *   - "error-result": any other result that is not a plain success. Unknown shapes land here, never in "finished".
  */
-export type Ending = { kind: "finished" | "no-result" | "api-error" | "limit" | "error-result"; why: string };
+export type Ending = { kind: "finished" | "no-result" | "limit" | "error-result"; why: string } | { kind: "api-error"; why: string; unanswered: boolean };
 
-const LIMIT_SUBTYPES: Record<string, string> = { error_max_turns: "turn", error_max_budget_usd: "budget" };
+const LIMIT_SUBTYPES = new Map([["error_max_turns", "turn"], ["error_max_budget_usd", "budget"]]);
+
+/** Whether an API error's status is the API not answering, which a later run may find mended: none at all, 401, 403, 408, 429, or 500 and up. A status that is not a whole number in HTTP's range is not one the runner knows, so it is not. */
+function apiUnanswered(status: unknown): boolean {
+  if (status === null || status === undefined) return true;
+  if (typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599) return false;
+  return status === 401 || status === 403 || status === 408 || status === 429 || status >= 500;
+}
 
 /** Reads a session's ending from its outcome. `why` is the runner's own words and the result's subtype, never the result's text. */
 export function sessionEnding(out: SessionOutcome): Ending {
@@ -149,8 +158,11 @@ export function sessionEnding(out: SessionOutcome): Ending {
   const r = out.result;
   if (r === null) return { kind: "error-result", why: "ended with a result the runner kept nothing of" };
   if (r.subtype === "success" && r.isError === false) return { kind: "finished", why: "" };
-  if (r.terminalReason === "api_error") return { kind: "api-error", why: "ended on an API error (its result's terminal reason is api_error)" };
-  const limit = typeof r.subtype === "string" ? LIMIT_SUBTYPES[r.subtype] : undefined;
+  if (r.terminalReason === "api_error") {
+    const status = r.apiErrorStatus === null || r.apiErrorStatus === undefined ? "no status" : `status ${shownText(String(r.apiErrorStatus), 20)}`;
+    return { kind: "api-error", why: `ended on an API error (${status})`, unanswered: apiUnanswered(r.apiErrorStatus) };
+  }
+  const limit = typeof r.subtype === "string" ? LIMIT_SUBTYPES.get(r.subtype) : undefined;
   if (limit !== undefined) return { kind: "limit", why: `was stopped by its ${limit} limit (${r.subtype})` };
   return { kind: "error-result", why: `ended with an error result (subtype ${shownText(String(r.subtype), 80)}, is_error ${shownText(String(r.isError), 20)})` };
 }
@@ -261,10 +273,12 @@ export async function run(input: RunInput): Promise<RunResult> {
   const workerBrief = buildBrief({ ticket, clonePath: clone, branch, base, claimId: claimForBrief, bundlePath });
   const w = await deps.runWorker({ root: clone, prompt: workerBrief, maxBudgetUsd: limits.workerBudgetUsd, timeLimitMs: limits.workerMs });
   const wEnd = recordSession(dir, "worker", w, null);
-  // An API error before the worker made any tool call is the environment's: Anthropic did not answer before the work
-  // started (docs, "On a failure"), so the label is kept for a later run. Once it has made a call, any ending but a
-  // plain success is a work failure, a limit included: the clone may hold part of the work, and a person decides.
-  if (wEnd.kind === "api-error" && w.calls.length === 0) return finish("work", "env-failure", `the worker session ${wEnd.why} before its first tool call`, false);
+  // The API not answering before the worker made any tool call is the environment's: Anthropic did not answer before
+  // the work started (docs, "On a failure"), so the label is kept for a later run. An API error that refused this
+  // request (a 400, say) would be refused again each run, so it goes to a person. Once the worker has made a call, any
+  // ending but a plain success is a work failure, a limit included: the clone may hold part of the work.
+  if (wEnd.kind === "api-error" && wEnd.unanswered && w.calls.length === 0) return finish("work", "env-failure", `the worker session ${wEnd.why} before its first tool call`, false);
+  if (wEnd.kind === "api-error" && w.calls.length === 0) return finish("work", "work-failure", `the worker session ${wEnd.why} before its first tool call: the API refused the request, which a later run would send again`, false);
   if (wEnd.kind === "api-error") return finish("work", "work-failure", `the worker session ${wEnd.why} after ${w.calls.length} tool call(s)`, false);
   if (wEnd.kind !== "finished") return finish("work", "work-failure", `the worker session ${wEnd.why}`, false);
 

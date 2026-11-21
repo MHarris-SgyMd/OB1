@@ -34,7 +34,7 @@ function outcome(p: { ended?: Ended; report?: string; cost?: number | null; turn
     ended,
     why: ended === "result" ? "its result: success" : `ended ${ended}`,
     init,
-    result: ended === "result" ? { subtype: "success", isError: false, numTurns: p.turns ?? 2, totalCostUsd: p.cost ?? 1, permissionDenials: [], terminalReason: null, ...p.result } : null,
+    result: ended === "result" ? { subtype: "success", isError: false, numTurns: p.turns ?? 2, totalCostUsd: p.cost ?? 1, permissionDenials: [], terminalReason: null, apiErrorStatus: undefined, ...p.result } : null,
     report: p.report ?? "",
     exitCode: ended === "result" ? 0 : 1,
     signal: null,
@@ -291,7 +291,7 @@ export async function selfCheck(): Promise<number> {
 
     // SMD-4490: Claude Code ends a session it could not finish with a result too. The shapes below are the result's
     // kept fields; API_401 is the one measured on 2.1.329 (subtype success, is_error true, terminal reason api_error).
-    const API_401: Partial<ResultSummary> = { subtype: "success", isError: true, terminalReason: "api_error", numTurns: 1, totalCostUsd: 0 };
+    const API_401: Partial<ResultSummary> = { subtype: "success", isError: true, terminalReason: "api_error", apiErrorStatus: 401, numTurns: 1, totalCostUsd: 0 };
     const API_TEXT = "Invalid API key · Fix external API key";
     const MAX_TURNS: Partial<ResultSummary> = { subtype: "error_max_turns", isError: true, terminalReason: "max_turns" };
     const hasBranch = (bare: string, branch: string) => git(["-C", bare, "rev-parse", "--verify", "--quiet", refOf(branch)]).code === 0;
@@ -300,10 +300,17 @@ export async function selfCheck(): Promise<number> {
       // The stub writes a good bundle, so only the rule keeps the run from importing it and going on to the gate.
       const { result, record, bare, branch } = await runScenario({ worker: { first: { act: commitAndBundle("the thing changed\n"), report: API_TEXT, result: API_401 } }, review: { report: "No issues." } });
       ok(result.outcome === "env-failure" && result.gatePassed === false, "the run is an environment failure");
-      ok(record.step === "work" && note(record, "API error") && note(record, "before its first tool call"), "it ended at the work step, the note naming the API error before any call");
+      ok(record.step === "work" && note(record, "API error (status 401)") && note(record, "before its first tool call"), "it ended at the work step, the note naming the API error and its status before any call");
       ok(!hasBranch(bare, branch) && !note(record, "bundle"), "no bundle import was tried: the branch is not in the bare repository");
       ok(record.sessions.length === 1 && record.sessions[0]?.ended === "api-error", "only the worker ran, recorded as ended api-error, not result");
       ok(!record.notes.some((n) => n.includes("Invalid API key")), "the API's text is in no note");
+    });
+
+    await section("a worker whose request the API refused before any tool call is a work failure: a later run would send it again", async () => {
+      const { result, record, bare, branch } = await runScenario({ worker: { first: { act: commitAndBundle("the thing changed\n"), report: "Prompt is too long", result: { ...API_401, apiErrorStatus: 400 } } }, review: { report: "No issues." } });
+      ok(result.outcome === "work-failure" && record.step === "work", "the run is a work failure, so the ticket goes to a person");
+      ok(note(record, "API error (status 400)") && note(record, "the API refused the request"), "the note names the status and says why it is not the environment's");
+      ok(!hasBranch(bare, branch) && record.sessions[0]?.ended === "api-error", "its bundle is not imported, and the session is recorded as ended api-error");
     });
 
     await section("a worker whose result is an API error after tool calls is a work failure", async () => {
@@ -356,6 +363,11 @@ export async function selfCheck(): Promise<number> {
       ok(kind({ subtype: "success", isError: true }) === "error-result" && kind({ subtype: "success", isError: undefined }) === "error-result" && kind({ subtype: "success", isError: "false" }) === "error-result", "a success whose is_error is not exactly false did not finish");
       ok(sessionEnding({ ...outcome({}), result: null }).kind === "error-result", "an ending of result with no result kept did not finish");
       const rlo = String.fromCodePoint(0x202e);
+      const unanswered = (status: unknown) => { const e = sessionEnding(outcome({ result: { ...API_401, apiErrorStatus: status } })); return e.kind === "api-error" ? e.unanswered : null; };
+      ok([undefined, null, 401, 403, 408, 429, 500, 529].every((s) => unanswered(s) === true), "no status, 401, 403, 408, 429 and 500 and up are the API not answering");
+      ok([400, 404, 413, 422, 499, 200, 600, 401.5, 500.5, "401", Number.NaN].every((s) => unanswered(s) === false), "any other status, and one that is not a whole HTTP status, is not");
+      ok(sessionEnding(outcome({ result: { ...API_401, apiErrorStatus: undefined } })).why.includes("no status"), "an API error with no status says so");
+      ok(["constructor", "toString", "__proto__", "hasOwnProperty"].every((subtype) => { const e = sessionEnding(outcome({ result: { subtype, isError: true } })); return e.kind === "error-result" && e.why.includes(`subtype ${subtype},`); }), "a subtype named as an object's inherited property is an error result, not a limit");
       const hidden = sessionEnding(outcome({ result: { subtype: `odd${rlo}type`, isError: true } })).why;
       ok(hidden.includes("<U+202E>") && !hidden.includes(rlo), "an unknown subtype is shown with its hidden character named");
     });

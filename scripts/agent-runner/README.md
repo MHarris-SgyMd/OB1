@@ -257,9 +257,23 @@ On a run that passed the gate, the runner publishes as the bot (cut 3a is the lo
 
 The real GitHub client (the push, the REST call that opens the PR), `publish` wired into the live run, and step 0's reconcile are cut 3b; the launchd schedule is 3c. Both need SMD-4089's GitHub identity, and the schedule needs SMD-3606.
 
+## How a run reads a session's ending (`run.ts`, SMD-4490)
+
+Claude Code ends a session it could not finish with a result too, so a result alone is not a session that finished. A session finished only if its result is a plain success: subtype `success` with `is_error` false. `sessionEnding` reads anything else by kind, and the run acts on it:
+
+| The session's ending | Worker | Review | Resumed worker |
+| --- | --- | --- | --- |
+| The API did not answer, before any tool call: no status, 401, 403, 408, 429, 500 and up | environment failure, the label kept | no findings, no resume | the pre-resume branch kept |
+| The API refused the request, before any tool call: any other status | work failure | no findings, no resume | the pre-resume branch kept |
+| An API error after a tool call | work failure | no findings, no resume | the pre-resume branch kept |
+| The turn or budget limit | work failure | no findings, no resume | the pre-resume branch kept |
+| Any other result that is not a plain success | work failure | no findings, no resume | the pre-resume branch kept |
+
+A worker's bundle is imported only when it finished. A review that did not finish does not stop the run: the note says so, and the PR body says the branch was not reviewed. The run's record names the kind (`api-error`, `limit`, `error-result`) as the session's ending. A note carries the runner's words, the result's subtype and the API's status, never the result's text.
+
 ## Cuts still to come
 
-Cut 2's local run is built: the sessions' profile and its probes (2a, SMD-4088), and the run's local steps on it (2b) — the record, the clone, the brief, the worker and review sessions, the bundle and its import, the gate, and the orchestrator (`run.ts`) that ties them into one run on the record. The orchestrator drives the two sessions through a seam, so its self-check (`run-check.ts`) runs whole runs over a real bare repository with the sessions stubbed, offline and with no key. A session finished only if its result is a plain success (subtype `success`, `is_error` false); Claude Code ends a session it could not finish with a result too (SMD-4490). A worker's API error before its first tool call is an environment failure, and any other error result of the worker's, a turn or budget limit included, is a work failure with no bundle imported. A review or a resumed worker that ends that way gives no findings and no new branch: the run goes on with what it had, and the note says the review did not finish. Driving real sessions end to end needs a model (cut 2c).
+Cut 2's local run is built: the sessions' profile and its probes (2a, SMD-4088), and the run's local steps on it (2b) — the record, the clone, the brief, the worker and review sessions, the bundle and its import, the gate, and the orchestrator (`run.ts`) that ties them into one run on the record. The orchestrator drives the two sessions through a seam, so its self-check (`run-check.ts`) runs whole runs over a real bare repository with the sessions stubbed, offline and with no key. Driving real sessions end to end needs a model (cut 2c).
 
 * **2c:** the outward steps, over the runner's own keys (SMD-4089): the claim and its release with a reason, and the ticket's moves on Linear. It also covers the brain's identity, CLAUDE.md's amendment for a runner (decision 6), and a first real run with a model.
 * **3:** publishing, reconciliation and the launchd schedule, in three PRs — **3a, the publish step (`publish.ts`), is built** (offline); **3b** the live GitHub client, the wiring into the live run and reconcile (needs SMD-4089's GitHub identity); **3c** the launchd schedule (needs SMD-3606).
