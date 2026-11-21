@@ -37,6 +37,7 @@ import { run, type RunDeps, type RunInput, type RunLimits, type RunSession, type
 import { liveRun, type LiveDeps, type LiveResult } from "./live.ts";
 import { REAL_DEPS, runSession, type Pinned } from "./session.ts";
 import { profileHashes, settingsText, type SessionLimits, type SessionPaths } from "./profile.ts";
+import { hostNow, stampReport } from "./install.ts";
 import { PROBES, STAMP_FILE, developerGit, hostStamp, stampProblem } from "./probes.ts";
 import type { Commitlint, GitRun, ScanSecrets } from "./gate.ts";
 
@@ -78,7 +79,8 @@ export function ensureBareRepo(git: GitRun, bareRepo: string, mainCheckout: stri
   }
   // Fetch the checkout's main into the bare repo's own main, so the base is the maintainer's current origin/main.
   const fetched = git(["-C", bareRepo, "fetch", "--quiet", "--no-tags", mainCheckout, "refs/remotes/origin/main:refs/heads/main"]);
-  if (fetched.code !== 0) return { ok: false, problem: `fetch main into the bare repo failed: ${fetched.stderr.trim()}` };
+  // --quiet leaves a refused update without a word: the usual one is a main here that the checkout's origin/main is not ahead of.
+  if (fetched.code !== 0) return { ok: false, problem: `fetch main into the bare repo failed: ${fetched.stderr.trim() || `git said nothing (exit ${fetched.code}); ${bareRepo}'s main may not be an ancestor of ${mainCheckout}'s origin/main`}` };
   const rev = git(["-C", bareRepo, "rev-parse", "main"]);
   if (rev.code !== 0 || !/^[0-9a-f]{40}$/.test(rev.stdout.trim())) return { ok: false, problem: `the bare repo has no main to build on: ${rev.stderr.trim()}` };
   return { ok: true, base: rev.stdout.trim() };
@@ -358,6 +360,8 @@ export async function main(io: Io): Promise<number> {
       `  Verify:   ${t.verify.length} item(s)${t.verify.length ? `\n${t.verify.map((v, i) => `    ${i + 1}. ${v}`).join("\n")}` : ""}`,
       `  names:    ${t.named.length ? t.named.join(", ") : "(none)"}`,
       `  stable:   ${cfg.restUrl}`,
+      // What the probe stamp makes of its binary, its install and the host, said before --execute is tried (SMD-4491).
+      ...stampReport(STATE_DIR, installDir(), await hostNow()).lines.map((l) => `  stamp:    ${l.ok ? "" : "NO — "}${l.text}`),
       "",
       "--plan only: no session, no claim, no Linear write, no spend. --execute claims, runs the sessions (~$13) and hands back; no PR.",
     ].join("\n")));

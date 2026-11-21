@@ -441,6 +441,46 @@ let episodesLines;
   const es = segment([CWD("/wt/ob1"), BR("me/es-2015-target-smd-610"), P("smd-610 now")]).episodes[0];
   assert(headerTickets(es).tickets.join() === "SMD-610" && ticketsIn("ES-2015 and CC-12 and FY-2026").length === 0,
     `a prefix the brain denies is no place's ticket nor any ask's: es-2015-target-smd-610 is SMD-610's (${JSON.stringify(headerTickets(es))})`);
+  // SMD-4292: an ask's tickets were read off the raw ask, so a ticket-shaped value a secret held (`password=ABC-1234`)
+  // headed the summary under redact, the brain keyed it as a subject, and it began an episode ("begun with ABC-1234").
+  // The asks' tickets are read with the secrets blanked: none where no team is known, a team's key the same, no episode
+  // split by it; and one an ask also names outside the secret stays.
+  const blanked = (...ev) => { const eps = segment(ev).episodes, ep = eps[0], r = redactEpisode(ep); return { episodes: eps.length, named: [...ep.named].join(), head: headerTickets(r.ep), text: eps.map((e) => redactEpisode(e).text).join("\n") }; };
+  const noTeam = blanked(CWD("/wt/ob1"), BR("main"), P("set password=ABC-1234 and go"));
+  const teamKey = blanked(CWD("/wt/ob1"), BR("me/smd-610-x"), P("set password=smd-4321 and go"));
+  const noSplit = blanked(CWD("/wt/ob1"), BR("main"), P("tidy the readme"), P("set password=ABC-1234 and go"));
+  const alsoNamed = blanked(CWD("/wt/ob1"), BR("main"), P("for ABC-1234, set password=ABC-1234 and go"));
+  assert(noTeam.named === "" && noTeam.head.from === null && !/ABC-1234/i.test(noTeam.text)
+      && teamKey.named === "" && teamKey.head.from === "place" && teamKey.head.tickets.join() === "SMD-610" && !/4321/.test(teamKey.text)
+      && noSplit.episodes === 1 && !/ABC-1234/i.test(noSplit.text)
+      && alsoNamed.named === "ABC-1234" && alsoNamed.head.from === "asks" && /^Session summary — ABC-1234 — /.test(alsoNamed.text),
+    `a ticket-shaped value inside a secret is no ticket: it heads no summary, begins no episode and is in no text, with no team known or as the team's key; one an ask also names outside the secret stays (${JSON.stringify([noTeam, teamKey, noSplit, alsoNamed].map((x) => ({ episodes: x.episodes, named: x.named, head: x.head })))})`);
+  // Review pass 1 (cold read): blanking can join a word to its marker into a ticket shape, here XY-12 before a Slack
+  // webhook's URL, which the scan blanks from its first letter; only tickets the raw ask names are kept.
+  const joined = blanked(CWD("/wt/ob1"), BR("main"), P("XY-12https://hooks.slack.com/services/T0ABC/B0DEF/abcdefghijklmnop1234 and SMD-12"));
+  // Review pass 3 (mutant): the raw ask is read with the same teams, so a lower-case mention of the key before any team
+  // is known (no ticket) does not let in the one the marker made.
+  const joinedLower = blanked(CWD("/wt/ob1"), BR("main"), P("about abc-12: ABC-12https://hooks.slack.com/services/T0ABC/B0DEF/abcdefghijklmnop1234 ok"));
+  assert(joined.named === "SMD-12" && joined.head.tickets.join() === "SMD-12" && joinedLower.named === "" && joinedLower.head.from === null,
+    `blanking adds no ticket: a word the scan's marker makes ticket-shaped is not one, a lower-case mention of it before a team is known included (${JSON.stringify([joined, joinedLower].map((x) => ({ named: x.named, head: x.head })))})`);
+  // Review pass 1 (secrets adversary): a quoted secret whose closing quote is on the next line. Blanked as written, the
+  // scan cut it at its first space and its ticket-shaped part headed the summary; the summary blanks the prompt on one
+  // line, whole, and the ask's tickets are read that way too.
+  const quoted = blanked(CWD("/wt/ob1"), BR("main"), P('set password = "hunter22\nQQZ-9876" and go'));
+  const quotedSecond = blanked(CWD("/wt/ob1"), BR("main"), P("tidy the readme"), P('export DB_PASSWORD="hunter22 \\\nQQZ-9876" now'));
+  assert(quoted.named === "" && quoted.head.from === null && !/QQZ-9876/.test(quoted.text) && quotedSecond.episodes === 1 && !/QQZ-9876/.test(quotedSecond.text),
+    `a quoted secret across a line break is no ticket either, as the first ask or as a later one (${JSON.stringify([quoted, quotedSecond].map((x) => ({ episodes: x.episodes, named: x.named, head: x.head })))})`);
+  // Review pass 2 (secrets adversary): the title too is blanked as the summary shows it, on one line. Blanked as written,
+  // an ai-title's quoted value whose closing quote is on the next line was cut there and the rest was sent.
+  const titledSecret = redactEpisode(segment([CWD("/wt/ob1"), BR("main"), P("tidy the readme"), { t: "title", text: 'set password = "hunter22\nQQZ-9876" now' }]).episodes[0]);
+  assert(/^Title: set password = "?\[redacted:[^\]]+\]"? now$/m.test(titledSecret.text) && !/QQZ-9876|hunter22/.test(titledSecret.text),
+    `a title's quoted secret across a line break is blanked whole (${titledSecret.text.split("\n").find((l) => l.startsWith("Title:"))})`);
+  // Review pass 3 (mutant): the title is blanked whole before the summary clips it at 120 characters, so a key the clip
+  // cuts leaves no part of itself.
+  const titledLong = redactEpisode(segment([CWD("/wt/ob1"), BR("main"), P("tidy the readme"), { t: "title", text: "a".repeat(100) + " sk-ant-api03-" + "Ab1".repeat(12) + " now" }]).episodes[0]);
+  const longTitle = titledLong.text.split("\n").find((l) => l.startsWith("Title:")) ?? "";
+  assert(/\[redacted:/.test(longTitle) && !/sk-ant|Ab1Ab1/.test(longTitle) && titledLong.redactions.some((r) => r.in === "the title"),
+    `a key the title's clip would cut is blanked whole in the title, before the clip (${longTitle.slice(-40)})`);
   // Review pass 2 (cold read, mutants): the move to a branch by its own ticket; the gate judged where the session moved to;
   // a cd within any of the episode's roots.
   assert(asks(CWD("/wt/ob1"), BR("main"), P("do SMD-700"), BR("me/node-22-smd-700-x"), P("go")) === "do SMD-700|go",
@@ -1187,6 +1227,25 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(askedPrep.code === 0 && /^Session summary — SMD-2013 — /.test(askedPrep.payload?.text ?? "") && askedPrep.payload.tickets_from === "asks",
     `…an ask naming its ticket: the header lists it, and the payload says the asks named it (${askedPrep.payload?.tickets_from}; ${askedPrep.payload?.text?.split("\n")[0]})`);
   if (askedPrep.payloadPath) unlinkSync(askedPrep.payloadPath);
+  // SMD-4292, through the hook's own prepare: a ticket-shaped password is blanked in the ask and heads no summary, so
+  // the payload sends it nowhere and says no asks named a ticket.
+  const pwT = join(TMP, "ticket-password.jsonl");
+  writeFileSync(pwT, claudeTranscript().replaceAll("now push and open the PR", "now push and open the PR, and set password=ABC-1234 and go"));
+  const pwPrep = prepare({ ...base, session_id: "s-ticket-password", transcript_path: pwT });
+  assert(pwPrep.code === 0 && pwPrep.payload && !/ABC-1234/i.test(JSON.stringify(pwPrep.payload)) && pwPrep.payload.tickets_from === undefined
+      && /\[redacted:password assignment\]/.test(pwPrep.payload.text) && pwPrep.payload.redactions?.length === 1,
+    `a ticket-shaped password is blanked, one redaction counted, and heads no summary: the payload carries it nowhere, and no tickets_from (${pwPrep.payload?.text?.split("\n")[0]}; ${pwPrep.payload?.tickets_from}; redactions: ${JSON.stringify(pwPrep.payload?.redactions)})`);
+  if (pwPrep.payloadPath) unlinkSync(pwPrep.payloadPath);
+  // Review pass 1: under refuse too. Read raw, the secret's ask split off an episode of its own, which was refused, and
+  // the clean episode before it was sent saying "ended when ABC-1234 was taken up". Read blanked, it splits nothing,
+  // and the one episode holding it is refused whole, as one holding any other secret is.
+  const pwRefuseT = join(TMP, "ticket-password-refuse.jsonl");
+  writeFileSync(pwRefuseT, [user("tidy the readme", { origin: { kind: "human" } }), assistant([{ type: "text", text: "tidied" }]),
+    user("set password=ABC-1234 and go", { origin: { kind: "human" } }), assistant([{ type: "text", text: "set" }])].join("\n"));
+  const pwRefuse = prepare({ ...base, session_id: "s-ticket-password-refuse", transcript_path: pwRefuseT }, { onSecret: "refuse" });
+  assert(pwRefuse.code === 1 && (pwRefuse.payloadPaths ?? []).length === 0 && /^refused — the summary for session /.test(pwRefuse.message) && /nothing sent/.test(pwRefuse.message) && !/ABC-1234/i.test(pwRefuse.message),
+    `under refuse a ticket-shaped password splits off no episode: the one episode holding it is refused whole, and no clean episode is sent naming it (${pwRefuse.message.slice(0, 160)})`);
+  for (const f of pwRefuse.payloadPaths ?? []) unlinkSync(f);
   // Review pass 4 (mutants): the place's tickets three at most; a payload prepared on a branch naming a ticket says
   // `place`.
   const placedFour = headerTickets({ named: new Set(), cwd: "/x/ob1", branch: "smd-11-smd-12-smd-13-smd-14" });
@@ -2620,6 +2679,14 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   // Review pass 6 (mutant: a null word named lived): a summary whose header lists no ticket names no word.
   assert(/^--- would send: source=claude-code, derived_from=3 id\(s\)(?: \[[^\]]*\])?$/m.test(dry.out), `…a header listing no ticket names no metadata.tickets_from (${dry.out.split("\n").find((l) => l.startsWith("--- would send"))})`);
   assert(!/Checkpoint:/.test(dry.out), "…with no checkpoint line: a dry run has no event");
+  // SMD-4292: the dry run's line per episode lists the tickets as the text would send them, so a ticket-shaped password
+  // a blanked ask held is printed nowhere, the segmentation's lines included.
+  const pwDryT = join(TMP, "ticket-password-dry.jsonl");
+  writeFileSync(pwDryT, [user("set password=ABC-1234 and go", { origin: { kind: "human" } }), assistant([{ type: "text", text: "set" }]),
+    user("This session is being continued from a previous conversation that ran out of context.", { isCompactSummary: true }), user("carry on", { origin: { kind: "human" } }), assistant([{ type: "text", text: "done" }])].join("\n"));
+  const pwDry = await run(["--dry-run", pwDryT]);
+  assert(pwDry.code === 0 && /--- 2 episodes — one thought each/.test(pwDry.out) && /^ {4}1\. no ticket — /m.test(pwDry.out) && /^ {4}2\. no ticket — /m.test(pwDry.out) && !/ABC-1234/i.test(pwDry.out + pwDry.err),
+    `--dry-run's episode lines and texts carry no ticket-shaped password (${pwDry.out.split("\n").filter((l) => /^ {4}\d\. /.test(l)).join(" | ")})`);
   const dryCp = await run(["--dry-run", CLAUDE_T, "--event", "PreCompact", "--trigger", "auto"]);
   assert(dryCp.code === 0 && /\n\nCheckpoint: compacted at 2026-09-22 13:20 \(auto\), continuing/.test(dryCp.out) && /\n\nCheckpoint: turn ended at /.test((await run(["--dry-run", CLAUDE_T, "--event", "Stop"])).out),
     "--dry-run --event previews the checkpoint line the hook would write for that event (first review pass)");

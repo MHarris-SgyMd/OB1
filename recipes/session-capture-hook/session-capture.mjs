@@ -800,6 +800,33 @@ export function ticketsIn(text, teams) {
   return out;
 }
 /**
+ * The tickets an ask names, read with its secrets blanked (SMD-4292): a ticket-shaped value a secret holds
+ * (`password=ABC-1234`) is no ticket. Read off the raw ask, it headed the summary while the ask that held it was
+ * blanked, the brain keyed it as a subject, it began an episode ("begun with ABC-1234") and it decided where the
+ * session split. Both readers of an ask's tickets, `named` and the segmenter's boundaries, go through here.
+ * In both modes: under `refuse`, read raw, the secret split off an episode of its own, and the clean episode before it
+ * was sent saying "ended when ABC-1234 was taken up" (review pass 1: limiting this rule to `redact` kept sending that
+ * line). Read blanked, it splits nothing, and its episode is refused whole, as one holding `password=hunter2` always
+ * was. A real ticket the scan takes for a secret (`Password: SMD-12 (reset flow)`) is dropped too: its ask is blanked
+ * in the text as well.
+ * The ask is blanked on one line, as `redactEpisode` blanks each prompt: blanked as written, a quoted secret whose
+ * closing quote is on the next line (`password = "hunter22⏎QQZ-9876"`) was cut at its first space, and its
+ * ticket-shaped part headed the summary while the prompt showed it blanked (review pass 1, secrets adversary).
+ * Only tickets the raw ask names, read with the same teams, are kept: blanking can join a word to its marker into a
+ * ticket shape (`XY-12` before a Slack webhook's URL; review pass 1, cold read), and a lower-case mention of that key
+ * before any team is known is no ticket (review pass 3, mutant).
+ * The cost: the scan runs once per ask, cached per event (the segmenter and the episode both read it), and only for an
+ * ask whose raw text names a ticket: about 20 ms per MB of such asks, nothing for an ask naming none.
+ */
+const blankedAsks = new WeakMap();
+const askTickets = (ev, teams) => {
+  const raw = ticketsIn(ev.text, teams);
+  if (!raw.length) return [];
+  let text = blankedAsks.get(ev);
+  if (text === undefined) { text = redactSecrets(oneLine(ev.text)).text; blankedAsks.set(ev, text); }
+  return ticketsIn(text, teams).filter((id) => raw.includes(id));
+};
+/**
  * A place's own tickets (SMD-4291): the first ticket-shaped word of `text` is the place's ticket, and the other keys of
  * its team are tickets beside it (`smd-610-and-smd-611`); a word of another team is the place's description, no ticket
  * and no team (`node-22` of `smd-610-bump-node-22`). Before, every ticket-shaped word of a branch or a directory was a
@@ -843,7 +870,7 @@ function apply(x, ev, teams) {
     case "time": if (!x.first) x.first = ev.at; x.last = ev.at; break;
     case "cwd": x.cwd = ev.v; x.roots.add(ev.v); break;
     case "branch": x.branch = ev.v; break;
-    case "prompt": x.prompts.push(ev.text); for (const id of ticketsIn(ev.text, teams)) x.named.add(id); break;
+    case "prompt": x.prompts.push(ev.text); for (const id of askTickets(ev, teams)) x.named.add(id); break;
     case "outcome": x.outcome = ev.text; x.assistant.push(ev.text); if (x.assistant.length > LIMITS.modelMsgs) x.assistant.shift(); break; // `outcome` is the last, for the derived text; `assistant` keeps the recent window for the model (SMD-2014)
     case "file": x.files.add(ev.path); break;
     case "commit": x.commits++; break;
@@ -1023,7 +1050,7 @@ export function segment(events, s = emptySummary()) {
       continue;
     }
     if (ev.t === "prompt") {
-      const named = ticketsIn(ev.text, teams);
+      const named = askTickets(ev, teams);
       if (cur.prompts.length) {
         const known = knownTickets(cur), fresh = named.filter((id) => !known.has(id));
         const moved = away();
@@ -1579,7 +1606,9 @@ export function redactEpisode(ep) {
   };
   // The DISTINCT prompts, as the summary lists them: a retried prompt is one
   // line in the text and one redaction in the count.
-  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
+  // The title as the summary shows it, on one line, as the prompts are (SMD-4292 review pass 2, secrets adversary: blanked
+  // as written, a quoted value whose closing quote is on the next line was cut there, and the rest shown).
+  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(typeof ep.title === "string" ? oneLine(ep.title) : ep.title, "the title") };
   const text = take(renderSummary(redacted), "the text");
   return { ep: redacted, text, redactions, blocks };
 }
