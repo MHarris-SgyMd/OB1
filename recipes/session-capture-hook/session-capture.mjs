@@ -96,7 +96,8 @@ import { SECRET_MODES, SECRET_PATTERNS, countRedactions, describeRedactions, red
 import { CaptureError, REFUSAL_RE, SDK_ERROR_RE, parseRpcBody, resultText, rpc, textOfResult } from "./lib/rpc.mjs";
 import { BRAIN_NAME_RE, CONNECTOR_RE, endpointOf, loadBrains, loadConfig, splitUserinfo, urlSource } from "./lib/config.mjs";
 import { CLAIMS_DIRNAME, UUID_ONLY_RE, checkClaims, claimFiles, noteAgentClaimCall, renewClaim, renewClaims, renewEveryMs, scrubTokens, worktreeRoot } from "./lib/claims.mjs";
-// Every export the file had before its split (SMD-4338): the suite, the agent runner and server-portable's suite import them from here.
+// The exports that moved to lib/ (SMD-4338), re-exported so every name this file exported before is still its own: the suite,
+// the agent runner, server-portable's suite and db/test-live.ts import from here.
 export { CLAIMS_DIRNAME, CONFIG_PATH, CaptureError, REFUSAL_RE, SDK_ERROR_RE, SECRET_MODES, SECRET_PATTERNS, STATE_BASE, STATE_DIR, claimFiles, describeRedactions, endpointOf, loadBrains, loadConfig, parseRpcBody, readState, redactSecrets, redactionMarker, renewClaim, renewClaims, renewEveryMs, resultText, rpc, scanForSecrets, secretMode, shownUrl, splitUserinfo, useStateRoot, worktreeRoot };
 
 // This file, by its own url: the path its detached children re-run and its guard compares (lib/state.mjs, SELF).
@@ -106,8 +107,8 @@ useSelf(fileURLToPath(import.meta.url));
 
 /**
  * The hook's version, the one source of it (SMD-4378). It is a constant, not a
- * read of `metadata.json`, because an installed hook is a copy of this file
- * and its lib/, without the recipe's other files. The suite fails if it
+ * read of `metadata.json`, because an installed hook may be a copy of this
+ * file and its lib/, without the recipe's other files. The suite fails if it
  * differs from `metadata.json`'s. `--version`
  * prints it, `--check` and `--dry-run` name it first, and each summary carries
  * it as `metadata.hook_version`: the hook that prepared the payload, whose

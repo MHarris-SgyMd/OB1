@@ -3,8 +3,8 @@
  * entry file a detached child re-runs (`SELF`), the config's path, and the
  * state root with its queue (pending/, inflight/, dead/), its per-session
  * chains, its claims on payloads and its log. The one owner of the state root:
- * `useStateRoot` is the only writer of `STATE_DIR`, which every other module
- * reads as an import, so each read sees the root of the brain the run is on.
+ * `useStateRoot` is the only writer of `STATE_DIR`, which a module that reads
+ * it reads as an import, so each read sees the root of the brain the run is on.
  */
 
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, appendFileSync, statSync } from "node:fs";

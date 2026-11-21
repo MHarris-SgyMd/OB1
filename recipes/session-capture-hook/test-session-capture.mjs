@@ -2612,7 +2612,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   assert(verNull.code === 0 && verNull.out === `${VERSION_LINE}\n` && !nullMadeState && verPipedFresh.code === 0 && existsSync(join(freshState, "log")),
     `--version on /dev/null with no state dir makes none; piped, the log is written (SMD-4378 review pass 2) (${nullMadeState})`);
   // A copy of the hook under another name, its lib/ beside it (SMD-4338): the file names itself, so its guard runs main
-  // and its children and printed hooks re-run the copy (review pass 1: lib/ derived the entry as `session-capture.mjs`,
+  // and the hooks it prints name the copy, as its children do, re-running SELF (review pass 1: lib/ derived the entry as `session-capture.mjs`,
   // and such a copy ran nothing, exit 0, saying nothing).
   const renamedDir = join(TMP, "renamed-copy"), renamed = join(renamedDir, "ob1-capture.mjs");
   mkdirSync(join(renamedDir, "lib"), { recursive: true });
