@@ -1877,8 +1877,8 @@ goes on reading that for its lookback, five minutes unless set otherwise, and a
 sum over servers is too high for as long (measured on the image: three streams
 open at a kill were still counted beside the next server's one 286 s on, and no
 longer at 302 s). The observability profile's dashboard shows that sum, as
-**Listen streams open** in its Requests row (below), and its description says
-the same of itself.
+**Listen streams open** in its Requests row (below), and the panel's
+description says the same.
 
 On its keyed `/health`, as `listen`, read as the route answers: `open`, the two
 bounds (`max` for the server and `perCaller` for one caller) and `callers`, one

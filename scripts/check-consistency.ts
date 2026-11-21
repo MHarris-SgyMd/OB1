@@ -12543,9 +12543,7 @@ function instrumentNamesIn(texts: string[]): Map<string, string[]> {
     names.set(`${base}_bucket`, [...labels, "le"]);
     for (const suffix of ["_count", "_sum"]) names.set(base + suffix, labels);
   }
-  // Two of the three observable kinds, gauges and up-down counters, by one pattern (SMD-4458). `unit: "{stream}"` ends the options at its own brace, so that unit is not read:
-  // no unit is what a braced annotation names, so the name is right, and a pattern that reads strings was tried and taken back (review
-  // pass 1: it left ten ordinary shapes of options unread that this one reads, and read five this one does not).
+  // Two of the three observable kinds, gauges and up-down counters, by one pattern (SMD-4458). `unit: "{stream}"` ends the options at its own brace, so that unit is not read: no unit is what a braced annotation names, so the name is right, and a pattern that reads strings was tried and taken back (review pass 1: it left ten ordinary shapes of options unread that this one reads, and read five this one does not).
   for (const m of all.matchAll(/createObservable(?:Gauge|UpDownCounter)\("([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)*)",\s*\{([^}]{0,300})\}/g)) {
     const unit = /\bunit:\s*"([^"]+)"/.exec(m[2])?.[1];
     const base = `${m[1].replace(/\./g, "_")}${(unit && DASHBOARD_UNITS[unit]) ?? ""}`;
@@ -12813,7 +12811,7 @@ const INSTRUMENT_PROBES: [string, string, string][] = [
   ["…and with no `_total`, the name of a sum that only rises", 'provider.getMeter("ob1").createObservableUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}", description: "x" })', "!ob1_mcp_listen_streams_total"],
   ["an observable up-down counter in seconds takes its unit, as a gauge does", 'provider.getMeter("ob1").createObservableUpDownCounter("ob1.mcp.listen_wait", { unit: "s", description: "x" })', "ob1_mcp_listen_wait_seconds"],
   ["…and is not the name with no unit", 'provider.getMeter("ob1").createObservableUpDownCounter("ob1.mcp.listen_wait", { unit: "s", description: "x" })', "!ob1_mcp_listen_wait"],
-  ["an up-down counter that is not observed is not read", 'provider.getMeter("ob1").createUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}" })', "!ob1_mcp_listen_streams"],
+  ["an up-down counter that is not observable is not read", 'provider.getMeter("ob1").createUpDownCounter("ob1.mcp.listen_streams", { unit: "{stream}" })', "!ob1_mcp_listen_streams"],
   ["an observable counter is not read: its series would take `_total`, which this does not write", 'provider.getMeter("ob1").createObservableCounter("ob1.mcp.listens", { unit: "{listen}" })', "!ob1_mcp_listens"],
   ["options that hold an object after the unit are read all the same (SMD-4458: a pattern that read strings and took no other brace read none of these)", 'provider.getMeter("ob1").createObservableGauge("process.uptime", { unit: "s", advice: { explicitBucketBoundaries: [1] } })', "process_uptime_seconds"],
   ["…and so are options whose single-quoted string holds one double quote (a pattern that reads double-quoted strings reads none of these)", `provider.getMeter("ob1").createObservableGauge("process.uptime", { description: 'a 5" disk', unit: "s" })`, "process_uptime_seconds"],
