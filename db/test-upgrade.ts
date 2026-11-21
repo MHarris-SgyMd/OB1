@@ -796,12 +796,11 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // update_thought on its own body, refusing by name without 073 or 063's
   // derivations.stale_since ([20ck]); 149 adds thought_validity, a read of a
   // thought's state on three axes, refusing by name without 016, 029, 042,
-  // 046, 050, 061, 063, 068, 114, 134 or 139 ([20cl]); 150 redefines 067's rebuild_derived on its
-  // own body, refusing by name without 063, 067 or 016's requeue_thought_work
-  // ([20cm]) — all recorded by the
-  // planted ledger with their
-  // prerequisites present, so none becomes the plain-run failure point
-  // above).
+  // 046, 050, 061, 063, 068, 114, 134 or 139 ([20cl]); 150 redefines 067's
+  // rebuild_derived on its own body, refusing by name without 063, 067 or
+  // 016's requeue_thought_work ([20cm]) — all recorded by the planted ledger
+  // with their prerequisites present, so none becomes the plain-run failure
+  // point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
   assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 121, `030 is among the last one hundred and twenty-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;

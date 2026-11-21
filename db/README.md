@@ -2522,9 +2522,10 @@ claim revoked as every arm's requeue does: its holder's write meets
 from the new text in the same run; with the text as the worker read it
 (`--force`, or a raw move read before the rebuild) the write settles the row and
 the release finds the claim gone; the thought's next claim finds the row current,
-calls no model and settles the claim. With no key recorded the row is marked alone, as before. The
-worker still pools at each run what no rebuild marks: a thought tagged before
-061, a capture that fell back, a text moved raw with no rebuild.
+calls no model and settles the claim. With no key recorded the row is marked
+alone, as before. The worker still pools at each run what no rebuild marks: a
+thought tagged before 061, a capture that fell back, a text moved raw with no
+rebuild.
 
 Migration 148 has a re-tag that came out the same settle the tags' row (SMD-2298
 PR 1a). 061's `update_thought` recorded the tags' lineage only when the event moved
@@ -6214,9 +6215,9 @@ call; a tag key the row holds and the answer leaves out is cleared (a list to
 edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
 key other than the recorded one needs `--switch-key`; `--status` and
 `--dry-run` write nothing. `rebuild_derived` requeues a tags row it marks
-under the recorded key since migration 150 (PR 2). Not yet:
-preflight's rows and the prompt version's `--switch` (PR 3), a sleep pass and
-`--follow` (PR 4). test-live [29] drives it against a stub chat endpoint.
+under the recorded key since migration 150 (PR 2). Not yet: preflight's
+rows and the prompt version's `--switch` (PR 3), a sleep pass and `--follow`
+(PR 4). test-live [29] drives it against a stub chat endpoint.
 
 ## Extensions
 

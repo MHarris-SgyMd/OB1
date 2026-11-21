@@ -47,8 +47,8 @@
 --   nothing changes shape, no data step: rows marked before this file stay
 --   marked, and db/retag.ts's next run pools them. EXECUTE as before
 --   (CREATE OR REPLACE keeps the grants). Re-applying 067, or 063, puts the
---   older arm back; this file, applied after it, restores it (`bun
---   migrate.ts --reapply` restores every file).
+--   older arm back; this file, applied after it, restores the requeue
+--   (`bun migrate.ts --reapply` restores every file).
 --
 -- Prerequisites
 --   067 (the six-argument rebuild_derived this file carries; 063's mark,
@@ -473,15 +473,16 @@ BEGIN
         -- (ob1_config.retag_key), as the extraction arm hands an extract:
         -- row to entity_extraction_key's; the worker's write settles the row
         -- (148). With no key recorded, marked alone, unqueued, as before.
+        v_pool := v_cfg_retag;
         UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
         v_marked := v_marked + 1;
-        IF v_cfg_retag IS NULL THEN
+        IF v_pool IS NULL THEN
           v_unqueued := v_unqueued + 1;
-        ELSIF NOT ((v_cfg_retag || '|' || v_a.id::text) = ANY(v_claims)) THEN
-          PERFORM requeue_thought_work(v_cfg_retag, v_a.id);
-          v_claims := v_claims || (v_cfg_retag || '|' || v_a.id::text);
+        ELSIF NOT ((v_pool || '|' || v_a.id::text) = ANY(v_claims)) THEN
+          PERFORM requeue_thought_work(v_pool, v_a.id);
+          v_claims := v_claims || (v_pool || '|' || v_a.id::text);
           v_enqueued := v_enqueued + 1;
-          IF NOT (v_cfg_retag = ANY(v_pools)) THEN v_pools := v_pools || v_cfg_retag; END IF;
+          IF NOT (v_pool = ANY(v_pools)) THEN v_pools := v_pools || v_pool; END IF;
         END IF;
       ELSE
         v_kept := v_kept + 1;
@@ -547,4 +548,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
-  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the first request standing is kept) — and, since 150 (SMD-2298), the tags'' row to db/retag.ts''s pool under ob1_config.retag_key when one is recorded (marked alone, unqueued, when not) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass and a person''s decision on a proposal are kept; a generated page section (064) is marked with no pool, as the tags were before 150; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067, 150 / SMD-1732, SMD-2297, SMD-2298.';
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the re-tag key db/retag.ts recorded (ob1_config.retag_key) for the tags since 150 (SMD-2298), the judge''s key — with stale_since/stale_reason set on the lineage row (marked; with no re-tag key recorded the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass and a person''s decision on a proposal are kept; a generated page section (064) is marked with no pool, as the tags were before 150; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals and the vector''s and tags'' rows counted for the cascade. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067, 150 / SMD-1732, SMD-2297, SMD-2298.';

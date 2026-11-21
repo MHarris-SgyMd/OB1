@@ -109,12 +109,12 @@
  * requeued under the key this worker recorded (migration 150, SMD-2298 PR 2).
  * Each run pools the rest of the backlog itself, what no rebuild marked (a
  * thought tagged before 061, a capture that fell back, a text moved raw with
- * no rebuild) — the thoughts not in the pool are added (enqueue_thoughts, which skips a
- * pooled one), and a thought re-tagged before and back in the backlog since
- * is put back (requeue_thought_work's reset, on a row still `succeeded` when it is
- * locked: review pass 1); a failed one waits for --retry-failed,
- * and a claimed one is its holder's. Not here (SMD-2298's later PRs):
- * preflight's retag rows (PR 3), the --switch for a prompt
+ * no rebuild) — the thoughts not in the pool are added (enqueue_thoughts,
+ * which skips a pooled one), and a thought re-tagged before and back in the
+ * backlog since is put back (requeue_thought_work's reset, on a row still
+ * `succeeded` when it is locked: review pass 1); a failed one waits for
+ * --retry-failed, and a claimed one is its holder's. Not here (SMD-2298's
+ * later PRs): preflight's retag rows (PR 3), the --switch for a prompt
  * version (PR 3), and a sleep pass and --follow on the shared follower
  * (PR 4). recipes/thought-enrichment's enrich-thoughts.mjs, which wrote its
  * own tag set through the SQL shim, is retired for this (decided 2026-11-15:

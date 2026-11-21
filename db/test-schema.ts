@@ -215,16 +215,15 @@ function definedIn(file: string): string[] {
  * agenda it needs ([110] drops both). 139 is 055's audit gate with the
  * redact arm (SMD-1723) and carries 055, whose diff rule, capture payload
  * and backfill it does not define; a re-apply of 046 reverts them ([51]).
- * 150 is 067's rebuild_derived with the tags' arm feeding the re-tag pool
- * (SMD-2298) and carries 067, whose settle function and comments it does
- * not restate.
  * 141 is 061's record_thought_entities
  * with its prune sparing an entity someone stated a priority on (SMD-4241),
  * and carries 061: a restore of the writer re-applied 061, whose other
  * functions it restored and whose DROP took 053's six-argument writer ([52]
  * re-applies 053). 056 and 136, whose apply_entity_type_gate and
  * merge_entities it also carries, are not carried: 056 runs the gate over the
- * rows at each apply.
+ * rows at each apply. 150 is 067's rebuild_derived with the tags' arm
+ * feeding the re-tag pool (SMD-2298) and carries 067, whose settle function
+ * and comments it does not restate.
  */
 const CARRIES: Record<string, string[]> = { "148": ["073"], "150": ["067"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
@@ -10372,8 +10371,7 @@ console.log("\n[61] Migration 067: the consolidation pass settles a stale propos
   const SETTLE_SIG = "settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)", REBUILD_SIG = "rebuild_derived(uuid, text, boolean, text[], boolean, boolean)";
 
   // The shape: one settle function, 067 its last definer (150 rebuild_derived's, carrying 067's body), the two
-  // sentinels, the marker literal held to the TypeScript constant, the
-  // comments naming 067.
+  // sentinels, the marker literal held to the TypeScript constant, the comments naming 067.
   assert((await functionsNamed("settle_supersession_proposal")) === 1 && lastDefinerOf("settle_supersession_proposal").startsWith("067") && lastDefinerOf("rebuild_derived").startsWith("150"),
     `one settle function; 067 is its last definer, and 150 rebuild_derived's, on 067's body (${lastDefinerOf("rebuild_derived")})`);
   const rebuildSrc = await src(REBUILD_SIG), settleSrc = await src(SETTLE_SIG);
@@ -22751,7 +22749,7 @@ console.log("\n[135] Migration 150: rebuild_derived hands a stale tags row to th
   const body = async () => String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).s);
   const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
   assert((await functionsNamed("rebuild_derived")) === 1 && lastDefinerOf("rebuild_derived") === file && /ob1:tags-requeued-under-retag-key/.test(await body())
-      && /ob1:rebuild-acts-on-a-held-frontier/.test(await body()) && /150 \(SMD-2298\)/.test(comment) && /SMD-2298/.test(comment),
+      && /ob1:rebuild-acts-on-a-held-frontier/.test(await body()) && /150 \(SMD-2298\)/.test(comment),
     `150's one rebuild_derived: the tags' sentinel beside 063's, its comment naming 150 (SMD-2298) (${lastDefinerOf("rebuild_derived")})`);
 
   // Nothing else moves: 150's function is 067's, less the retag key's read and the tags' arm.

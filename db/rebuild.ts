@@ -109,7 +109,7 @@ type Report = {
 };
 
 /**
- * The worker that drains a pool, by the key's prefix (db/config.mjs's three key shapes, and subject.ts's
+ * The worker that drains a pool, by the key's prefix (db/config.mjs's four key shapes, and subject.ts's
  * subjectPoolKey). A subject pool (113, SMD-3306) is drained only while ob1_config.subject_pool_key names it, by the
  * run its key's question names: none for the rules', reasoning off for one without its `r`. Any other subject pool
  * is one no run takes (review pass 5: a pool left by a switch read as the rules' run, which --switch-key would name

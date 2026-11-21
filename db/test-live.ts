@@ -23901,7 +23901,6 @@ if (want("29")) {
       await move(A, "[29] A, moved a second time");
       const [{ r: fed }] = (await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move again') AS r`) as { r: { enqueued: number; unqueued: number; pools: string[] } }[];
       const aFed = (await claims()).find((c) => c.id === A)?.status;
-      const { drainer } = await import("./rebuild.ts");
       await move(M, "[29] M, moved with no rebuild");
       const status2 = await cli("--status");
       assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
@@ -24046,8 +24045,7 @@ if (want("29")) {
       rebuiltId = RB;
       const rbFrom = bodies.length;
       const rbRun = await retag({ limit: 1, pausesMs: [10] });
-      const rbRow = await tagsRow(RB);
-      assert(rebuiltDone && settled(rbRow) && bodies.slice(rbFrom).filter((b) => b.includes("[29] rebuilt")).length === 2
+      assert(rebuiltDone && settled(await tagsRow(RB)) && bodies.slice(rbFrom).filter((b) => b.includes("[29] rebuilt")).length === 2
           && (await claims()).find((c) => c.id === RB)?.status === "succeeded" && /1 changed while re-tagged/.test(rbRun.out) && !/no longer this worker's/.test(rbRun.out + rbRun.err),
         `a text moved and rebuilt while the call is out: requeued by 150, the worker re-tags it from the new text in the same run, counted changed, not lost (${line(rbRun.out, "re-tagged (")})`);
 
