@@ -182,7 +182,7 @@ if (!URL_) {
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["5d", "10g", "26", "37b", "38", "38c"],
+  sleep: ["5d", "10g", "26", "37b", "38", "38c", "38y"],
   long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
   sweep: ["38s", "50", "51", "38p"],
@@ -26252,8 +26252,8 @@ async function sleepScaffold(sql: SQL) {
   const MODEL = "stub-sleep";
   const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
   await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
-  /** Each model call, in order: an extraction, a judgement or the subject sweep's question ([38s]), and when it arrived. */
-  const modelCalls: { kind: "extract" | "judge" | "subject"; at: number }[] = [];
+  /** Each model call, in order: an extraction, a judgement or the subject sweep's question ([38s]), when it arrived and, once answered, when ([38y]). */
+  const modelCalls: { kind: "extract" | "judge" | "subject"; at: number; end?: number }[] = [];
   /** Each embedding's input but the probe's, in order (SMD-2679 PR 4b: re-embed first). */
   const embedCalls: { input: string; at: number }[] = [];
   /** What the stub reads at each request, which a case sets and puts back, and the counters it bumps (judgesHeld, probes, embedProbes). */
@@ -26335,12 +26335,14 @@ async function sleepScaffold(sql: SQL) {
     hangs: 0,
     /** A probe the hang holds answered after this long instead, unless its client aborts it first: a model server of one slot ending its call in hand. */
     hungProbeMs: 0,
+    /** Models the stub serves besides the scaffold's own: a judge model of its own ([38y], SMD-4495). */
+    alsoServed: [] as string[],
   };
   const stub = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
-      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
+      if (req.method === "GET") return Response.json({ object: "list", data: [MODEL, ...sw.alsoServed].map((id) => ({ id })) });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; input?: string };
       // Embeddings, apart from the chat switches below (SMD-2679 PR 4b: the scheduler runs re-embed): a vector on the
       // input's axis, unless a case says the embedding provider is down (503) or refuses the key (401).
@@ -26400,7 +26402,8 @@ async function sleepScaffold(sql: SQL) {
       // The subject sweep's own question ([38s], SMD-3306 PR 6b-2), before the judge's, whose <thought_a> it shares: a
       // subject, or none (subjectNothing), held as slowJudge holds a judgement.
       if (prompt.startsWith("Each item is one stored thought.")) {
-        modelCalls.push({ kind: "subject", at: Date.now() });
+        const asked: { kind: "subject"; at: number; end?: number } = { kind: "subject", at: Date.now() };
+        modelCalls.push(asked);
         if (sw.subjectDown !== null && prompt.includes(sw.subjectDown)) return Response.json({ error: { message: "stub: overloaded" } }, { status: 503 });
         if (sw.slowSubject) {
           sw.subjectsHeld++;
@@ -26409,11 +26412,13 @@ async function sleepScaffold(sql: SQL) {
           hold.aborted = await Promise.race([Bun.sleep(sw.slowSubject).then(() => false), new Promise<boolean>((r) => req.signal.addEventListener("abort", () => r(true), { once: true }))]);
           sw.subjectsHeld--;
         }
+        asked.end = Date.now();
         return Response.json({ choices: [{ message: { content: JSON.stringify({ subject: sw.subjectNothing ? "" : "the sleep case work", deliverables: [] }) } }], model: body.model });
       }
       const judging = /<thought_a>/.test(prompt);
       if (sw.badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
-      modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
+      const call: { kind: "judge" | "extract"; at: number; end?: number } = { kind: judging ? "judge" : "extract", at: Date.now() };
+      modelCalls.push(call);
       if (sw.slow) await Bun.sleep(sw.slow);
       if (!judging && sw.onExtract) {
         const first = sw.onExtract;
@@ -26442,8 +26447,10 @@ async function sleepScaffold(sql: SQL) {
           // SMD-1873 PR 2: the deploy note relates to both billing notes — a relation write in the period.
           : /deploy/.test(a + b) ? { verdict: "related", supersedes: "unknown", confidence: 0.9, reason: "the billing deploy" }
           : { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
+        call.end = Date.now();
         return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
       }
+      call.end = Date.now();
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
@@ -30306,6 +30313,146 @@ if (want("38c")) await (async () => {
       `…and after an extraction model's switch, thoughts carrying only the old key's entities are backlog: sixteen pooled again behind the inflow hold the join through 8 s of it, all sixteen still to extract, and once it ends they are extracted under the current key and every note is judged (joined during it ${joinedInFlowE}; ${leftE} of ${archive.length} still to extract at its end; ${retiredE} retired row(s) left; ${e.inflow.length} captured, all judged after ${e.allJudged}; exit ${e.code}${!joinedInFlowE && e.allJudged ? "" : lastLines()})`);
   } finally {
     await unpoolSubjects().catch(() => {});
+    await done();
+  }
+})();
+
+if (want("38y")) await (async () => {
+  console.log("\n[38y] db/sleep.ts: the judge model's passes yield to extraction where they share a model server's slot or load another model on it (SMD-4495, the maintainer's rule) — with a judge model of its own, or extraction's background share one slot, consolidation and the subject sweep wait between calls while an extraction call is asked for or running, from consolidation's start to the period's end, a drain between captures ending nothing; a stretch of extraction's calls holds them --max-wait at most; with one model and slots to spare, the judge runs beside extraction as SMD-4468 made it");
+  const sql = new SQL({ url: URL_, max: 4 });
+  const { EX, CO, modelCalls, sw, env, capture, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
+  const JUDGE = "stub-judge";
+  const CO2 = consolidateKey(JUDGE);
+  const unpoolSubjects = async () => {
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'subjects:%'`;
+  };
+  /** The brain emptied of this section's thoughts and claims, between cases. */
+  const reset = async () => {
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO}, ${CO2})`;
+    await unpoolSubjects();
+  };
+  /** Of `ids`, those judged under `co`. */
+  const judgedOf = async (co: string, ids: string[]) => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${co} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...ids], "TEXT")}::uuid[])`)[0].c);
+  /**
+   * The judge model's calls from `from` on that arrived while an extraction call had been running 250 ms or more: each
+   * passed the gate with extraction's call in flight. A call admitted just before extraction's next began arrives within
+   * a few ms of it, inside the margin.
+   */
+  const beside = (from: number) => {
+    const ex = modelCalls.filter((c) => c.kind === "extract" && c.at >= from);
+    return modelCalls.filter((c) => c.kind !== "extract" && c.at >= from && ex.some((e) => c.at > e.at + 250 && c.at < (e.end ?? Infinity))).length;
+  };
+  const YIELD_START = /^ {2}yield: {2}/;
+  const YIELDING = /^ {2}consolidation and the subject sweep yield to extraction's calls for the rest of the period — /;
+  const lastLines = () => `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`;
+  /**
+   * One --follow run (poll 250 ms, one worker a pass) on six older notes on axis 63, two to seven days old, each a
+   * neighbour of every capture today, under `runEnv`; `phase` runs while it goes on — writing captures every
+   * `everyMs` through `flow` — then each capture is waited to be judged under `co` (60 s) and the run stopped.
+   */
+  const withRun = async (runEnv: Record<string, string | undefined>, co: string, o: { subjects?: boolean; yieldCapMs?: number }, phase: (flow: (label: string, everyMs: number, forMs: number) => Promise<string[]>) => Promise<void>) => {
+    lines.length = 0;
+    await reset();
+    for (let i = 0; i < 6; i++) await capture(`An older note on the ledger, number ${i}.`, "sync-sleep", 2 + i, 63);
+    const written: string[] = [];
+    const flow = async (label: string, everyMs: number, forMs: number) => {
+      const mine: string[] = [];
+      const until = Date.now() + forMs;
+      for (let i = 0; Date.now() < until; i++) {
+        mine.push(await capture(`A capture on the ${label}, number ${i}.`, "sync-sleep", 0, 63));
+        await Bun.sleep(everyMs);
+      }
+      written.push(...mine);
+      return mine;
+    };
+    const ac = new AbortController();
+    const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, workers: 1, signal: ac.signal, env: runEnv, yieldGraceMs: 200, ...(o.yieldCapMs ? { yieldCapMs: o.yieldCapMs } : {}), ...(o.subjects ? { subjects: true } : {}) });
+    let allJudged = false, code = -9;
+    try {
+      await phase(flow);
+      allJudged = await pollUntil(async () => (await judgedOf(co, written)) === written.length, 60_000);
+    } finally {
+      ac.abort();
+      code = await bounded(run, ac);
+      sw.slowExtract = 0;
+      sw.slowJudge = 0;
+      sw.slowSubject = 0;
+    }
+    return { allJudged, code, written };
+  };
+  try {
+    // A judge model of its own, the canary's shape (a 7B extracting, a 27B judging, on one Ollama): each turn between the
+    // two can load the other (stub runs: 141 loads in 300 s of captures, 18 of 74 extracted by its end). Four captures
+    // drained first, so consolidation joins and the subject sweep starts on the drain — then captures every 1.2 s for
+    // 10 s, extraction 500 ms a call: no judgement nor subject question passes the gate while an extraction call runs,
+    // the drain having ended no yield, and both go on in the gaps.
+    sw.alsoServed = [JUDGE];
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    sw.slowSubject = 200;
+    let joinedA = false, judgedGapsA = 0, besideA = -1, yieldSaidA = false, startSaidA = false;
+    const a = await withRun({ ...env, OB1_JUDGE_MODEL: JUDGE }, CO2, { subjects: true }, async (flow) => {
+      await flow("drain", 100, 400);
+      joinedA = await pollUntil(async () => lines.some((l) => /consolidating beside it/.test(l)) && lines.some((l) => /^ {2}the subject sweep starts beside consolidation/.test(l)), 30_000);
+      const from = Date.now();
+      await flow("ledger", 1200, 10_000);
+      judgedGapsA = modelCalls.filter((c) => c.kind !== "extract" && c.at >= from).length;
+      besideA = beside(from);
+      startSaidA = lines.some((l) => YIELD_START.test(l) && l.includes(`the judge's model, ${JUDGE}, is not extraction's`));
+      yieldSaidA = lines.some((l) => YIELDING.test(l));
+    });
+    assert(joinedA && startSaidA && yieldSaidA && besideA === 0 && judgedGapsA > 0 && a.allJudged && a.code === 0,
+      `a judge model of its own: said at the start and as consolidation joins, the subject sweep started on a drain, and from then to the period's end no judgement or subject question passes the gate while an extraction call runs, under captures every 1.2 s, both going on in its gaps (joined and swept ${joinedA}; start line ${startSaidA}, yield line ${yieldSaidA}; ${besideA} call(s) beside one, ${judgedGapsA} of the judge model's during the captures; ${a.written.length} captured, all judged ${a.allJudged}; exit ${a.code}${joinedA && besideA === 0 && judgedGapsA > 0 ? "" : lastLines()})`);
+
+    // One model, extraction's background share one slot (OB1_MODEL_SLOTS=2, one left for live calls): each judge call
+    // takes extraction's turn. Captures every 1.2 s from before the run, so consolidation joins on the backlog alone.
+    sw.alsoServed = [];
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    let startSaidB = false, besideB = -1, judgedB = 0;
+    const b = await withRun({ ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: "2" }, CO, {}, async (flow) => {
+      const from = Date.now();
+      await flow("register", 1200, 12_000);
+      startSaidB = lines.some((l) => YIELD_START.test(l) && l.includes("extraction's background share of stub-sleep is one slot"));
+      besideB = beside(from);
+      judgedB = modelCalls.filter((c) => c.kind === "judge" && c.at >= from).length;
+    });
+    assert(startSaidB && besideB === 0 && judgedB > 0 && b.allJudged && b.code === 0,
+      `…one model with extraction's background share one slot (OB1_MODEL_SLOTS=2): said at the start, and no judgement passes the gate while an extraction call runs, judging in its gaps (start line ${startSaidB}; ${besideB} beside one, ${judgedB} judged during the captures; ${b.written.length} captured, all judged ${b.allJudged}; exit ${b.code}${startSaidB && besideB === 0 ? "" : lastLines()})`);
+
+    // One model and slots to spare (the defaults' three of four): no yield, the judge beside extraction (SMD-4468).
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    let besideC = -1, saidC = true;
+    const c = await withRun({ ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: undefined }, CO, {}, async (flow) => {
+      const from = Date.now();
+      await flow("journal", 1200, 12_000);
+      besideC = beside(from);
+      saidC = lines.some((l) => YIELD_START.test(l) || YIELDING.test(l));
+    });
+    assert(!saidC && besideC > 0 && c.allJudged && c.code === 0,
+      `…one model with slots to spare: no yield said, and the judge runs beside extraction's calls (said ${saidC}; ${besideC} judgement(s) beside one; ${c.written.length} captured, all judged ${c.allJudged}; exit ${c.code}${!saidC && besideC > 0 ? "" : lastLines()})`);
+
+    // Captures faster than extraction takes them, under a judge model of its own: extraction's calls never stop, so
+    // the yield's cap (1.5 s here, --max-wait's 60 s shipped) is what lets a judgement through while they go on.
+    sw.alsoServed = [JUDGE];
+    sw.slowExtract = 400;
+    sw.slowJudge = 150;
+    let judgedD = 0, joinedD = false;
+    const d = await withRun({ ...env, OB1_JUDGE_MODEL: JUDGE }, CO2, { yieldCapMs: 1500 }, async (flow) => {
+      const flowing = flow("archive", 250, 14_000);
+      joinedD = await pollUntil(async () => lines.some((l) => YIELDING.test(l)), 12_000);
+      const from = Date.now();
+      await flowing;
+      judgedD = modelCalls.filter((c) => c.kind === "judge" && c.at >= from).length;
+    });
+    assert(joinedD && judgedD > 0 && d.allJudged && d.code === 0,
+      `…and captures faster than extraction takes them: its calls never stop, and the yield's cap lets judgements through while they go on (yielding ${joinedD}; ${judgedD} judged during the captures after; ${d.written.length} captured, all judged ${d.allJudged}; exit ${d.code}${joinedD && judgedD > 0 ? "" : lastLines()})`);
+  } finally {
+    sw.alsoServed = [];
+    await reset().catch(() => {});
     await done();
   }
 })();

@@ -253,8 +253,51 @@ function timed<T>(call: ResolvedModelCall, run: () => Promise<T>): () => Promise
   };
 }
 
+/** Each pass's model calls in this process, from asked to settled — a wait on the hook included — and who hears the count change (SMD-4495). */
+const inFlight = new Map<string, number>();
+const passWatchers = new Map<string, Set<(n: number) => void>>();
+
+/** A pass's count moved by `by`, its watchers told the new count. */
+function countPassCall(pass: string, by: 1 | -1): void {
+  const n = (inFlight.get(pass) ?? 0) + by;
+  if (n > 0) inFlight.set(pass, n);
+  else inFlight.delete(pass);
+  for (const fn of [...(passWatchers.get(pass) ?? [])]) fn(Math.max(0, n));
+}
+
+/**
+ * Watches `pass`'s model calls in this process: `fn` told the count of them asked and not yet settled, a wait for a
+ * slot included, at once and at each change (SMD-4495: the sleep scheduler's consolidation yields to extraction's
+ * calls). Returns the unwatch.
+ */
+export function watchPassCalls(pass: string, fn: (n: number) => void): () => void {
+  let set = passWatchers.get(pass);
+  if (!set) passWatchers.set(pass, (set = new Set()));
+  set.add(fn);
+  fn(inFlight.get(pass) ?? 0);
+  return () => {
+    set.delete(fn);
+    if (set.size === 0 && passWatchers.get(pass) === set) passWatchers.delete(pass);
+  };
+}
+
 /** One model call: `run` is the whole exchange, its deadline started inside it; through the hook when one is set. */
 export function modelCall<T>(call: ModelCall, plain: () => Promise<T>): Promise<T> {
+  const pass = context.getStore()?.pass;
+  if (pass === undefined) return callThrough(call, plain);
+  countPassCall(pass, 1);
+  let answer: Promise<T>;
+  try {
+    answer = callThrough(call, plain);
+  } catch (e) {
+    countPassCall(pass, -1);
+    throw e;
+  }
+  return answer.finally(() => countPassCall(pass, -1));
+}
+
+/** modelCall's own work, the pass's count kept around it. */
+function callThrough<T>(call: ModelCall, plain: () => Promise<T>): Promise<T> {
   const { cls, ...rest } = call;
   const store = context.getStore();
   const resolved: ResolvedModelCall = { ...rest, cls: cls ?? store?.cls ?? "background", pass: store?.pass };
