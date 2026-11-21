@@ -38,6 +38,8 @@ import type { DecideItemCloseCode, DecideItemCloseResult, ItemHistoryCode, ItemH
 import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
 import type { Deliverable, DeliverableEvent, DeliverableVerification } from "./deliverables.ts";
+import type { ValidityCode, ValidityResult } from "./core/validity.ts";
+import type { ValidityFound, ValidityRecord, ValidityThought } from "./validity.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type CapSet, type CapSetCode, type HolderRelease, type HolderReleaseCode, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
@@ -3147,6 +3149,58 @@ export const renderCaptureDeliverable = (o: Outcome<CaptureDeliverableResult, Ca
 export const renderVerifyDeliverable = (o: Outcome<VerifyDeliverableResult, VerifyDeliverableCode>): Reply => render(o, (v) =>
   `Set it ${v.to} (it was ${v.from}): ${deliverableLine(v.deliverable)}${v.deliverable.verification ? `; ${verificationLine(v.deliverable.verification)}` : ""}.`,
   deliverableRefusal, AS_JSON);
+
+// ── The validity read (SMD-3887 PR 2b, migration 149) ─────────────────────────
+// The value is the read's JSON (AS_JSON): each axis's records are data a client reads. The text gives each thought's
+// three states (validity's found state under an unknown), the first three records behind its validity, its newest three
+// review records with who decided or checked, its orphaned lineage rows counted, and what was not read; the rest is the value's.
+
+const UNCALIBRATED = "uncalibrated";
+/** One record a validity state was read from, on one line, in the record's own words. */
+const validityRecordLine = (r: ValidityRecord): string => {
+  const judge = r.judge as { confidence?: number | string | null } | undefined;
+  const conf = judge?.confidence == null ? "" : `, the judge's ${Number(judge.confidence).toFixed(2)} (${UNCALIBRATED})`;
+  if (r.kind === "pointer") return `  - superseded by ${String(r.superseded_by)}${r.proposal ? `, by accepted proposal ${String(r.proposal)}` : ""}`;
+  if (r.kind === "proposal") return `  - proposal ${String(r.id)} ${String(r.status)}, ${String(r.verdict)}, reads ${String(r.reads)}${conf}`;
+  if (r.kind === "verification") return `  - verification ${String(r.status)} at checkpoint ${quoted(String(r.checkpoint), 80)} (${String(r.checkpoint_reads)}), reads ${String(r.reads)}`;
+  if (r.kind === "citation") return `  - cites ${String(r.source)}, its source ${String(r.source_reads)}${r.supports ? ", supporting" : ""}`;
+  return `  - ${oneLine(snipText(String(r.kind), 40))}`;
+};
+/** One record review was read from: a proposal's status and who decided it, or a verification's status and who checked. */
+const reviewRecordLine = (r: ValidityRecord): string => {
+  const by = r.by as { name?: string | null; kind?: string | null; pass?: boolean } | null | undefined;
+  const who = by?.name ? ` by ${oneLine(snipText(by.name, 80))}${by.kind ? ` (${by.kind})` : ""}${by.pass ? ", the pass's own settle" : ""}` : "";
+  if (r.kind === "proposal") return `  review: proposal ${String(r.id)} ${String(r.status)}${who}${r.at ? ` at ${String(r.at)}` : ""}`;
+  if (r.kind === "verification") return `  review: verification ${String(r.status)}${who}${r.at ? ` at ${String(r.at)}` : ""}, checkpoint ${String(r.checkpoint_reads)}`;
+  return `  review: ${oneLine(snipText(String(r.kind), 40))}`;
+};
+/** How many of an axis's records the text shows a thought; the value holds every one (review pass 2: 100 thoughts' citations unbounded). */
+const TEXT_RECORDS = 3;
+/** Review records, an undecided one (no `at`) first, then the newest: 149 lists the proposals before the verifications (review pass 2). */
+const newestFirst = (rs: ValidityRecord[]): ValidityRecord[] =>
+  [...rs].sort((a, b) => (a.at == null ? 0 : 1) - (b.at == null ? 0 : 1) || String(b.at ?? "").localeCompare(String(a.at ?? "")));
+const orphanCount = (t: ValidityFound): number => t.freshness.records.filter((r) => r.state === "orphaned").length;
+const validityFoundLines = (t: ValidityFound): string[] => [
+  `- ${t.id}: validity ${t.validity.state}${t.validity.state === "unknown" ? ` (found ${t.validity.found})` : ""}; review ${t.review.state}; freshness ${t.freshness.state}`
+    + `${t.freshness.kinds.length ? ` (${t.freshness.kinds.map((k) => `${k.kind} ${k.state}${k.no_pool ? ", no pool re-runs it" : ""}`).join("; ")})` : ""}`
+    + `; version ${t.version.fingerprint.slice(0, 12)}${t.version.seq === null ? "" : `, seq ${t.version.seq}`}`,
+  ...t.validity.records.slice(0, TEXT_RECORDS).map(validityRecordLine),
+  ...(t.validity.records.length > TEXT_RECORDS ? [`  validity: ${t.validity.records.length - TEXT_RECORDS} more record(s) (the value lists them)`] : []),
+  ...newestFirst(t.review.records).slice(0, TEXT_RECORDS).map(reviewRecordLine),
+  ...(t.review.records.length > TEXT_RECORDS ? [`  review: ${t.review.records.length - TEXT_RECORDS} more record(s) (the value lists them)`] : []),
+  ...(orphanCount(t) ? [`  freshness: ${orphanCount(t)} lineage row(s) whose artifact is gone, not read (orphaned)`] : []),
+  ...(t.unread.length ? [`  not read: ${t.unread.join(", ")}`] : []),
+];
+const validityLines = (t: ValidityThought): string[] =>
+  t.found ? validityFoundLines(t)
+  : [`- ${t.id}: not a thought${t.forgotten === true ? `, forgotten${t.forgottenAt ? ` at ${t.forgottenAt}` : ""}` : t.forgotten === null ? " (whether it was forgotten was not read)" : ""}`];
+
+export const renderValidity = (o: Outcome<ValidityResult, ValidityCode>): Reply => render(o, (v) =>
+  [
+    `${v.thoughts.length} thought(s) on three axes — validity, review, freshness (up to ${v.cap} ids a call). A judge's confidence is raw model output, ${UNCALIBRATED}.`,
+    ...v.thoughts.flatMap(validityLines),
+  ].join("\n"),
+  unknownRefusal, AS_JSON);
 
 export const renderDeliverableHistory = (o: Outcome<DeliverableHistoryResult, DeliverableHistoryCode>): Reply => render(o, (v) =>
   [
