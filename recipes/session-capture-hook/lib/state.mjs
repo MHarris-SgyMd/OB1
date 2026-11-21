@@ -14,9 +14,10 @@ import { homedir } from "node:os";
 /**
  * The entry file, which a detached child re-runs and the entry's own guard
  * compares with the command line: set by the entry at load (useSelf), from its
- * own `import.meta.url`, so a copy under another name, or one beside a linked
- * lib/, names itself (SMD-4338 review pass 1: derived here as lib/'s parent's
- * `session-capture.mjs`, such a copy ran nothing and said nothing).
+ * own `import.meta.url`, so a copy under another name names itself (SMD-4338
+ * review pass 1: derived here as lib/'s parent's `session-capture.mjs`, such a
+ * copy ran nothing and said nothing). One process, one entry: two entry files
+ * loading this one module would share the last one's.
  */
 let SELF = "";
 function useSelf(path) { SELF = path; }
