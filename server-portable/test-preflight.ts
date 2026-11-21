@@ -3395,6 +3395,38 @@ else {
       assert(/!  deliverables\s+the server's role holds no deliverable_events INSERT, deliverable_events_seq_seq USAGE, thought_facets INSERT, thought_facets UPDATE: capture_deliverable and verify_deliverable fail naming the table, and nothing else does/.test(missingBoth.out)
              && /--grant <role> --groups deliverables/.test(missingBoth.out),
              `…and the deliverables group it lacks is a warning naming each write and the sequence, the two writers alone failing for it (${missingBoth.out.split("\n").find((l) => /!  deliverables\s/.test(l))?.trim().slice(0, 220)})`);
+      // 149's validity read (SMD-3887 PR 2b): a table it reads that the role may not SELECT is named, the axes resting on
+      // it read unknown — not a failure; with every table readable, ok.
+      const validityLine = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+validity\s/.test(l))?.trim() ?? "(no validity row)";
+      let noAudit: { out: string };
+      await claims.unsafe("REVOKE SELECT ON thought_audit FROM ob1_pf_capture");
+      try { noAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { await claims.unsafe("GRANT SELECT ON thought_audit TO ob1_pf_capture"); }
+      // The function gone while the ledger records 149 (a --baseline adoption): a failure naming the re-run, not a skip —
+      // read as the owner, who reads the ledger; this role cannot, and is told so in a warning.
+      let noFn: { out: string }, noFnUnread: { out: string };
+      // This suite's brain keeps no ledger: plant one recording 149 (as [ledger] below plants 014's), removed after.
+      const plantedLedger = (await claims`SELECT to_regclass('schema_migrations') IS NULL AS absent`)[0].absent as boolean;
+      if (plantedLedger) await claims.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+      // On a brain that keeps one, the row this adds is removed after, and the role's own SELECT on it held back for the
+      // unread-ledger run (review pass 2).
+      const added = (await claims.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('149_thought_validity.sql', 'test') ON CONFLICT DO NOTHING RETURNING name`)).length > 0;
+      const roleReads = !plantedLedger && Boolean((await claims`SELECT has_table_privilege('ob1_pf_capture', 'schema_migrations', 'SELECT') AS r`)[0].r);
+      await claims.unsafe("ALTER FUNCTION thought_validity(uuid[]) RENAME TO thought_validity_away_pf");
+      try {
+        noFn = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
+        if (roleReads) await claims.unsafe("REVOKE SELECT ON schema_migrations FROM ob1_pf_capture");
+        noFnUnread = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      } finally {
+        await claims.unsafe("ALTER FUNCTION thought_validity_away_pf(uuid[]) RENAME TO thought_validity");
+        if (roleReads) await claims.unsafe("GRANT SELECT ON schema_migrations TO ob1_pf_capture");
+        if (plantedLedger) await claims.unsafe(`DROP TABLE schema_migrations`);
+        else if (added) await claims.unsafe(`DELETE FROM schema_migrations WHERE name = '149_thought_validity.sql' AND sha256 = 'test'`);
+      }
+      assert(/!  validity\s+the server's role cannot SELECT thought_audit: the validity read answers the axes resting on them unknown, naming them in unread/.test(noAudit.out)
+             && /✓  validity\s+thought_validity present; the server's role reads every table it reads/.test(missingBoth.out)
+             && /✗  validity\s+migration 149's thought_validity\(uuid\[\]\) missing though the ledger records 149; the validity tool faults on every call/.test(noFn.out)
+             && /!  validity\s+thought_validity\(uuid\[\]\) missing, and .*so whether migration 149 is recorded is unknown/.test(noFnUnread.out),
+             `…and the validity row names a table its read cannot SELECT, a warning; with every table readable, ok; the function gone while the ledger records 149, a failure, and to a role that cannot read the ledger a warning (${validityLine(noAudit.out)} | ${validityLine(missingBoth.out)} | ${validityLine(noFn.out)} | ${validityLine(noFnUnread.out)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
