@@ -19591,8 +19591,9 @@ if (want("16")) {
     // and judge's door, each carrying the one before it (SMD-3306 PR 6b-2: [38s], after this section in the rest shard,
     // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
     // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 134's validator, which
-    // carries 120's with the deliverable kind (SMD-1715).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) });
+    // carries 120's with the deliverable kind (SMD-1715), and the settled parts' file, whose lineage writer carries
+    // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an
@@ -24335,6 +24336,44 @@ if (want("31")) {
   } finally {
     await cA.close();
     await cB.close();
+  }
+
+  // SMD-4446 (151): settled parts through the door. A text moved under a pending part is reported set stale beside
+  // the proposals' clause and a person's accept is kept; a leaving thought's parts are counted for the cascade.
+  {
+    const cap151 = async (content: string, at: number) =>
+      (await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
+    const po = await cap151("151 live: the plan is to ship the importer by Friday", 4);
+    const pn = await cap151("151 live: the importer shipped on Thursday", 5);
+    const partOf = async (statement: string, shown: string) =>
+      String(((await sql`SELECT record_settled_part(${po.id}::uuid, ${pn.id}::uuid, 'older', ${statement}, ${shown}, 'implements', 'the later note reports it done', ${JUDGE}::text, ${po.fingerprint}, ${pn.fingerprint}, '{"deterministic": false}'::jsonb) AS r`)[0].r as { action: string; id: string }).id);
+    const partStatus = async (id: string) => String((await sql`SELECT status FROM settled_parts WHERE id = ${id}::uuid`)[0]?.status);
+    const pendingPart = await partOf("ship the importer by Friday", "the importer shipped on Thursday");
+    const acceptedPart = await partOf("the plan is to ship", "shipped on Thursday");
+    const accept = (await sql`SELECT review_settled_part(${acceptedPart}::uuid, 'accept', 'right', ${JSON.stringify(ACTOR)}::text::jsonb) AS r`)[0].r as { ok: boolean };
+    await sql`UPDATE thoughts SET content = '151 live: the importer shipped on Wednesday', content_fingerprint = content_fingerprint_of('151 live: the importer shipped on Wednesday') WHERE id = ${pn.id}::uuid`;
+    const movedPart = await rebuildTs("--input", pn.id, "--reason", "live: a part's text moved");
+    // The counts are read whole: "; 1 settled" is not the end of 11 or 21, and the kept line's number is the one
+    // accepted part, which the line's fixed words alone would not say.
+    assert(accept.ok === true && movedPart.code === 0 && /marked:[^\n]*; 1 settled part\(s\) set stale, as a proposal is \(151\)/.test(movedPart.out)
+        && /kept:\s+1 \(a structured pass reads its source, not the text; a person's decision on a proposal or a settled part stands\)/.test(movedPart.out)
+        && (await partStatus(pendingPart)) === "stale" && (await partStatus(acceptedPart)) === "accepted",
+      `the door reports a pending part set stale by a moved text, and counts a person's accept kept (exit ${movedPart.code}: ${movedPart.out.split("\n").find((l) => /marked:/.test(l))?.trim().slice(0, 200)}; ${movedPart.out.split("\n").find((l) => /kept:/.test(l))?.trim().slice(0, 60)}; ${await partStatus(pendingPart)}, ${await partStatus(acceptedPart)})`);
+    const leavingPart = await rebuildTs("--input", pn.id, "--gone", "--dry-run");
+    assert(leavingPart.code === 0 && /cascade:\s+0 proposal\(s\), 2 settled part\(s\) and \d+ lineage row\(s\) go with the row delete \(029's, 151's and 061's triggers\)/.test(leavingPart.out)
+        && (await partStatus(pendingPart)) === "stale" && (await partStatus(acceptedPart)) === "accepted",
+      `a leaving thought's two parts are counted for the cascade under their file's trigger, and both stand after the dry run (exit ${leavingPart.code}: ${leavingPart.out.split("\n").find((l) => /cascade:/.test(l))?.trim()})`);
+    // The census (--status) counts a lineage row whose first input's text moved. A part's row is left out, as a
+    // proposal's is: once a rebuild has run its status is its mark, and a decided part keeps the fingerprints it was judged at. The
+    // older thought is the first input of both parts' rows, so its text moving adds its own rows to the count and neither part's.
+    const staleCount = async () => Number(/stale:\s+(\d+) row\(s\)/.exec((await rebuildTs("--status")).out)?.[1] ?? NaN);
+    const staleBefore = await staleCount();
+    await sql`UPDATE thoughts SET content = '151 live: the plan was to ship the importer by Friday', content_fingerprint = content_fingerprint_of('151 live: the plan was to ship the importer by Friday') WHERE id = ${po.id}::uuid`;
+    const own = (await sql`SELECT count(*) FILTER (WHERE artifact_kind = 'part')::int AS parts, count(*) FILTER (WHERE artifact_kind NOT IN ('part', 'proposal'))::int AS others
+                             FROM derivations WHERE input_ids[1] = ${po.id}::uuid`)[0] as { parts: number; others: number };
+    const staleAfter = await staleCount();
+    assert(own.parts === 2 && own.others >= 1 && staleAfter - staleBefore === own.others,
+      `the census counts the moved thought's own lineage rows stale and neither of its two parts' (${staleBefore} before, ${staleAfter} after; ${own.others} of its own, ${own.parts} parts')`);
   }
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM derivations`;
