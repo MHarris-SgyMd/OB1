@@ -5057,6 +5057,70 @@ The labels were returned as a list and written into a copy of the sheet by scrip
 `fixtures/inferred-priority.json` records the run's calls, both raters' labels, the population's counts and the
 registration's hash.
 
+## Does the validity read agree with the truth? (SMD-3887)
+
+`eval-claim-validity.ts`, its rules in `claim-validity.ts`. Migration 149's `thought_validity` reads a thought's
+validity, review and freshness from the records the brain keeps (`docs/claim-validity.md`). This measures it against
+what a person reads in the texts, on a sample of the canary drawn before it is read (SMD-3887 PR 2c).
+
+```bash
+bun eval-claim-validity.ts --self-check                 # the rules, the registration and the fixture's shape; no database
+D=~/.cache/smd-3887/2c/<run>   # private files live outside any repo; every step refuses one in a git work tree
+bun eval-claim-validity.ts --print-sql --pilot > $D/draw.sql     # or --salt <the announcing comment's uuid>, once pinned
+podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA -f - < $D/draw.sql > $D/draw.jsonl
+bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot   # parts A and B, each with a reply file; the maintainer's apart
+bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <a-2> <b-1> <b-2> --pilot   # two raters' κ per axis, each disagreement
+bun eval-claim-validity.ts --splits $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out $D/splits.txt
+bun eval-claim-validity.ts --freeze $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [$D/splits.txt] --salt <uuid> --note "…"
+bun eval-claim-validity.ts --adjudicate $D/adjudication.txt   # each miss's cause, into the fixture
+bun eval-claim-validity.ts                              # the report and the verdict, from the fixture
+```
+
+The maintainer's choices, 2026-11-21, before any draw:
+
+* **The criterion is the truth, on all three axes,** not the records:
+  * **validity:** whether the thought still holds;
+  * **review:** whether a question about it is still open;
+  * **freshness:** whether its derived views still describe its text.
+
+  A rater reads the texts and never the read's answer. Freshness covers the views a person can read: entities,
+  metadata and subjects. A vector, chunks, a judged relation and a proposal are judged by their fingerprint alone,
+  and are left out.
+* **The raters:**
+  * two blind agent raters, on different models, label every item;
+  * the maintainer labels 20 of the items blind;
+  * a 10-item pilot checks κ before the registration is pinned.
+* **The gold:**
+  * where the two agents agree, their label;
+  * where they split, the maintainer's;
+  * if the maintainer's 20 agree with the agents' gold on under 0.8 of items on any axis, the maintainer labels
+    every item, and those labels are the gold.
+* **The sample:** 120 thoughts, 40 from each stratum: in a supersedes pointer, in a proposal, in neither. The draw
+  key uses the id of the SMD-3887 comment that announces the draw, posted after the pin. The pilot is drawn first by
+  a fixed salt and kept out of the main draw. Agreement is weighted back to each stratum's population.
+* **The bar is every miss explained.** A miss is one of:
+  * **a label error;**
+  * **a read bug,** fixed before 2c merges;
+  * **a record gap:** the read reported its records right, but they are wrong or missing. It is filed to the
+    writer's ticket;
+  * **a rule divergence:** the read follows an accepted row of the record, and the truth differs. It is reported by
+    row.
+
+  `unresolved` and `legacy` make no single claim, and are counted apart. A gold of `unclear` is not scored.
+
+**Each item has two parts.** Part A shows the item's text, its views, and up to eight texts a record links it to,
+with no record's verdict. It also shows the five nearest later texts that no record links, so a record gap can show.
+These are listed in one fixed order. Part B shows the questions judges raised on the item, and is opened only after
+part A is labelled.
+
+**The snapshot** is one read-only, repeatable-read transaction. It holds:
+* the population and its strata;
+* the draw, keyed as the rules key it, which `--sheets` re-draws and checks;
+* each item's material;
+* the read's answer for each item.
+
+It holds texts and the read's answers, so it lives outside any repo. The fixture holds only ids and indexes.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
