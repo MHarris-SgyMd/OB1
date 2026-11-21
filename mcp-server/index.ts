@@ -120,7 +120,9 @@ if (import.meta.main) {
     close: async () => false,
     // The listen streams are not waited on: the stop closes them itself, each with its closing frame, after the
     // flush, or at its cut. Given only where the server holds any, so a server that holds none stops as it always has.
-    ...(listenStreams.hold ? { heldCount: () => listenStreams.count, closeHeld: () => listenStreams.close(), onDrainEnd: () => { stop.drainEnded = true; } } : {}),
+    // As the drain ends, each stream still open has its end recorded, as the stop's (SMD-4459): then, and not at its
+    // close, so that the flush sends it.
+    ...(listenStreams.hold ? { heldCount: () => listenStreams.count, closeHeld: () => listenStreams.close(), onDrainEnd: () => { stop.drainEnded = true; listenStreams.stopped(); } } : {}),
     // The telemetry still batched goes under a bound of its own, said on its own; cut short, what each signal still
     // held is said by count (as the REST core's, SMD-2902).
     mark: markTelemetry,

@@ -1623,7 +1623,9 @@ to stderr, as before; their method and tool are the caller's strings, cut to
 64 printable characters. Stdout carries lines that are not JSON as well —
 preflight's report at every start (each check, then `preflight OK`), Bun's
 `Started server: …`, and a stop's `SIGTERM: …` or `SIGINT: …` lines (two, and one more for each further signal) — so select
-the JSON lines before handing them to `jq`.
+the JSON lines before handing them to `jq`. And one kind of JSON line is no
+request's: a listen stream's end, which has `event` where a request's line has
+`outcome` (below, with the count of open streams).
 
 The `agent` is a key's name as the operator wrote it in `MCP_ACCESS_KEYS`: name
 keys after the client or device they are for (`laptop`, `claude-desktop`), not
@@ -1632,9 +1634,12 @@ after a person, so the log stays free of names and addresses.
 ```bash
 # every request that did not end `ok`, on each server (the default project's
 # containers; another brain's are <project>-mcp-1 and -api-1): /mcp's in the
-# MCP server's; the REST core's own, n8n's among them, in the REST core's
-docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
-docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.outcome != "ok")'
+# MCP server's; the REST core's own, n8n's among them, in the REST core's.
+# `has("outcome")` keeps to requests: a listen stream's end is a line with none
+docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(has("outcome") and .outcome != "ok")'
+docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(has("outcome") and .outcome != "ok")'
+# the listen streams that ended, on a server that holds them
+docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.event == "listen_end")'
 ```
 
 **Every service in `deploy/`'s stacks has a bounded log**: the json-file driver,
@@ -1969,6 +1974,44 @@ to pull twice. What a client does when its stream ends is its own: Claude Code
 asks again 6, 8 and 12 seconds on and then stops asking (measured, SMD-4347),
 its documentation says five reopens in an hour make it wait about six hours,
 and no other client has been measured.
+
+A listen stream's end writes a line of its own (SMD-4459), where the request
+lines go, on a server that holds them:
+
+```
+{"ts":"2026-11-21T09:12:44.118Z","door":"mcp","event":"listen_end","agent":"laptop","end":"client","held_ms":8043117,"trace":"5b8aa5a2d2c872e8321cf37308d69df2"}
+```
+
+It is no request's line. It has `event`, and no `method`, `status` or
+`outcome`: a filter for requests asks that a line have an `outcome`, as the
+one above does, since `jq` takes a missing key for one that is not `ok`. The
+stream's request has its own line, `ok`, written when the stream opened. `agent` is the caller's
+name as that line has it, and `trace` that line's `trace`, where it has one, so
+the two are found together. `held_ms` is the milliseconds from the stream's
+opening to its end. `end` says how it ended, and none of the three is a failure:
+
+| `end` | What ended the stream |
+| -- | -- |
+| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one word here. The proxy's access log has each stream's end as the proxy saw it |
+| `stop` | The server's stop closed it. The line is written as the stop's drain ends, before its flush, so that a collector has it; the stream itself is closed after that flush where the drain finished. So `held_ms` is short of the real close by the flush: milliseconds as a rule, and up to 5 s where a collector is slow to answer |
+| `server` | The server ended it itself: a listen that asks for nothing this server sends is acknowledged and closed at once |
+
+A stream that keeps dropping (a tunnel that cuts streams, a proxy's timeout, a
+client that reopens in a loop) is a run of `client` ends under one name, each a
+short `held_ms` after an `ok` line; a healthy stream is held until its client
+goes or the server restarts. After a restart each stream that was open has a
+`stop` line. A server that is killed writes none for the streams it drops, and
+a frozen client's stream has no end until its connection goes.
+
+Where the server sends telemetry, an end is also a log record named
+`ob1.listen_end`, at `INFO`, its body the line's fields, under no span (the
+stream's request ended its span when the stream opened); and one point on
+`ob1.mcp.listen_stream.duration`, a histogram of the seconds held, from one
+second to a day, labelled `ob1.end` and nothing else. Its count is the ends,
+by how they ended. An end adds nothing to `http.server.request.duration`, which
+has the stream's request once, at its opening, and nothing the failure alert
+counts. The stop's ends are sent by its flush; where that flush does not get
+out, stdout has them alone. No panel of the dashboard reads either yet.
 
 `bun preflight.ts --deep` makes each provider probe a span and a point under
 the same names, marked `ob1.probe` (`preflight`) so a backend tells them from

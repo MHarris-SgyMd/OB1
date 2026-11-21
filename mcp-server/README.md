@@ -145,7 +145,10 @@ It is built to answer as `server-portable/index.ts` did, from the same pieces; s
   `callers`, one `{ name, open }` for each caller that holds a stream, the most
   first. Any key that may read the record sees every caller's name. The same
   total is a metric, `ob1.mcp.listen_streams`, where the server sends metrics;
-  `deploy/README.md` says what each reads and when.
+  `deploy/README.md` says what each reads and when. A stream's end writes a
+  line of its own, `listen_end` (SMD-4459): whose it was, how it ended
+  (`client`, `stop` or `server`) and how long it was held; with a log record
+  and a point on `ob1.mcp.listen_stream.duration` where telemetry is sent.
 - **The keyed mirrors.** `/worker-status`, `/worker-retry-failed`,
   `/worker-release-leases`, `/worker-run`, `/jobs/<id>` and `/jobs/<id>/stream` are the
   REST core's operations, with the same gates, inputs and words as server-portable's
