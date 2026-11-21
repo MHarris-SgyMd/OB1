@@ -286,10 +286,11 @@ Records are pruned after 90 days.
   * each claim's token and lease, in `claims/<claim id>.json`.
 
   The sandbox denies reading the whole home directory, these files included. `scripts/agent-runner/setup.ts` places and verifies each secret by its shape (0600, owner-only, never printing the value), and the runner's README says how each one rotates.
-* **The install:** `~/.local/share/open-brain/agent-runner/install/`. It holds:
-  * a checkout of a commit of `main`, whole, since the runner imports from elsewhere in the repo (`db/linear-api.ts`, the one Linear client);
-  * the profile templates;
-  * the pinned Claude Code binary, with its checksum.
+* **The install:** `~/.local/share/open-brain/agent-runner/install/`, made and moved by `setup.ts checkout` (SMD-4491). It holds:
+  * a checkout of a commit of `main`, whole, since the runner imports from elsewhere in the repo (`db/linear-api.ts`, the one Linear client). It is a clone of the runner's bare repository on a detached HEAD;
+  * the profile templates.
+
+  The pinned Claude Code binary is beside it, at `~/.local/share/open-brain/agent-runner/claude/<version>`, copied by `setup.ts claude`: outside the checkout, so a move of the install leaves it alone, and outside Claude Code's own versions directory, which its updater prunes. The probe stamp records its checksum.
 
   Only the maintainer updates it, and no session can write there.
 * **Records:** one directory per run under `~/.local/share/open-brain/agent-runner/runs/<run>/`:
