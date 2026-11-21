@@ -542,17 +542,17 @@ free:
     loaded: 16 of the 40 captures took over 30 s, 33 to 86 s. Fifteen
     waited out what was left of the judge model's call in hand (71 s a
     call on average there); the last waited behind a load of the judge
-    model that itself waited 46 s for room.
+    model that waited 46 s for room.
   - **With the wait at 600 s** the judge model loaded twice, 607 and
     611 s after it was asked for, and one capture took over 30 s. The
     price is the backlogged brain's: its judge model ended 2 calls in the
     20 minutes, not 8. That run differed in another way too, not
     explained: after both of the judge model's loads the metadata model
-    loaded next and fitted beside it, where in the run before the embedder
-    always loaded next and the metadata model then waited for room.
-    Whether the order or the memory free at those moments made the
-    difference was not established, so the last row owes to that as well
-    as to the wait.
+    loaded next and fitted beside it, where in the run with `ps` and the
+    wait unset the embedder always loaded next and the metadata model then
+    waited for room. Whether the order or the memory free at those moments
+    made the difference was not established, so the last row owes to that
+    as well as to the wait.
   - Without `ps`, two of the 40 searches were answered by exact matches
     alone, the embedder not answering in time.
 
@@ -658,13 +658,13 @@ bun --no-env-file deploy/federated/federated.ts down
     Mac, read every 15 ms, the list first named the model within 0.7 s of
     Ollama logging `loaded runners`, 13 ms after at the median, and never
     while it loaded. A model put out for another is gone from the list as
-    the other begins to load, so the list can be empty for a whole load;
-    the broker grants background to no other model while a load it
-    counts is under way, and begins no other load past that load's 120 s
-    bound, so it doesn't take that for a server with nothing loaded. A
-    load by a caller it doesn't count (a brain not keyed to it, another
-    client of the server) does read that way while the list is empty.
-    None of 254,000 reads during loads and evictions failed; the
+    the other begins to load, so the list can be empty for a whole load.
+    The broker doesn't take that for a server with nothing loaded: it
+    grants background to no other model while a load it counts is under
+    way, and begins no other load even once that load is past its 120 s
+    bound. A load by a caller it doesn't count (a brain not keyed to it,
+    another client of the server) does read that way while the list is
+    empty. None of 254,000 reads during loads and evictions failed; the
     slowest took 0.7 s, while a 22 GiB model was put out, inside the
     broker's 2 s limit on a read. A server that lists a model from the
     start of its load ends the hold on the others early, counts `stay_s`
@@ -694,7 +694,7 @@ bun --no-env-file deploy/federated/federated.ts down
   use 60). On a server with `ps` it is how long that brain's background
   ask for a model that isn't loaded waits before the broker drains for
   it. To keep one brain's background from putting out models another
-  brain's live calls use, raise that brain's `OB1_SLEEP_MAX_WAIT`: its
+  brain's live calls use, raise the first brain's `OB1_SLEEP_MAX_WAIT`: its
   sleep's loads then wait until the server has had no background call for
   5 s and no live call for two minutes, or until the ask is that old.
   Then they wait for a moment with no live call running, and for the
