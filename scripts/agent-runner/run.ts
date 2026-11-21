@@ -152,7 +152,7 @@ function apiUnanswered(status: unknown): boolean {
   return status === 401 || status === 403 || status === 408 || status === 429 || status >= 500;
 }
 
-/** Reads a session's ending from its outcome. `why` is the runner's own words and the result's subtype, never the result's text. */
+/** Reads a session's ending from its outcome. `why` is the runner's own words, the result's subtype and the API's status, never the result's text. */
 export function sessionEnding(out: SessionOutcome): Ending {
   if (out.ended !== "result") return { kind: "no-result", why: `ended ${out.ended}: ${trunc(out.why)}` };
   const r = out.result;
