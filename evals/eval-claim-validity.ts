@@ -59,10 +59,10 @@ const FIXTURE = join(HERE, "fixtures", "claim-validity.json");
 
 /**
  * The registration this measurement is decided on: claim-validity.ts's registered section, hashed. Pinned after the
- * pilot and before the draw; a change to the section is a new registration, and a verdict holds only at the one its
- * fixture records. Null until pinned: nothing is drawn or frozen before then.
+ * pilots and before the draw (2026-11-21); a change to the section is a new registration, and a verdict holds only at
+ * the one its fixture records.
  */
-export const REGISTERED: string | null = null;
+export const REGISTERED: string | null = "0275b08cf87e7bf1";
 
 /** The UUID shape the salt (the announcing comment's id) and every thought id take. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
