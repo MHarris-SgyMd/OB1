@@ -1586,7 +1586,7 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
-| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500 — or its refusal is the brain's own embedding provider failing, `EMBEDDING_PROVIDER_ERROR`, SMD-2892); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED`, `STORE_UNAVAILABLE` or `EMBEDDING_PROVIDER_ERROR`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok` (but a listen refused at a bound, on a server that holds listen streams, is `refused` with its code, though it too is a 200, or the 202 of a notification). A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
+| `outcome` | on every request's line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500 — or its refusal is the brain's own embedding provider failing, `EMBEDDING_PROVIDER_ERROR`, SMD-2892); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED`, `STORE_UNAVAILABLE` or `EMBEDDING_PROVIDER_ERROR`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok` (but a listen refused at a bound, on a server that holds listen streams, is `refused` with its code, though it too is a 200, or the 202 of a notification). A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
 | `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which), or at a bound on listen streams, `LISTEN_SERVER_FULL` or `LISTEN_CALLER_FULL` (on a server that holds them: none yet, SMD-4347); the REST core's from its 4xx or 5xx answer |
 | `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
 | `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
@@ -1638,8 +1638,12 @@ after a person, so the log stays free of names and addresses.
 # `has("outcome")` keeps to requests: a listen stream's end is a line with none
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(has("outcome") and .outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(has("outcome") and .outcome != "ok")'
-# the listen streams that ended, on a server that holds them
+# the listen streams that ended, on a server that holds them; the same,
+# counted by caller and by how they ended, with each one's shortest hold;
+# and the requests that opened them
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.event == "listen_end")'
+docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -sc 'map(select(.event == "listen_end")) | group_by([.agent, .end])[] | {agent: .[0].agent, end: .[0].end, ends: length, shortest_ms: (map(.held_ms) | min)}'
+docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.rpc == "subscriptions/listen")'
 ```
 
 **Every service in `deploy/`'s stacks has a bounded log**: the json-file driver,
@@ -1987,21 +1991,36 @@ It is no request's line. It has `event`, and no `method`, `status` or
 one above does, since `jq` takes a missing key for one that is not `ok`. The
 stream's request has its own line, `ok`, written when the stream opened. `agent` is the caller's
 name as that line has it, and `trace` that line's `trace`, where it has one, so
-the two are found together. `held_ms` is the milliseconds from the stream's
-opening to its end. `end` says how it ended, and none of the three is a failure:
+the two are found together. A line has a `trace` where the server sends spans
+or trusts a proxy's `traceparent`; a default install does neither, and there an
+end's opening is the `subscriptions/listen` line under its `agent` about
+`held_ms` before the end's `ts`, which several sessions on one key can make
+ambiguous. `held_ms` is the milliseconds from the stream's opening to its end. `end` says how it ended, and none of the three is a failure:
 
 | `end` | What ended the stream |
 | -- | -- |
-| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one word here. The proxy's access log has each stream's end as the proxy saw it |
-| `stop` | The server's stop closed it. The line is written as the stop's drain ends, before its flush, so that a collector has it; the stream itself is closed after that flush where the drain finished. So `held_ms` is short of the real close by the flush: milliseconds as a rule, and up to 5 s where a collector is slow to answer |
+| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one word here. That was measured with the client at the server; behind the proxy the server's peer is the proxy, and what it passes on of a client's leaving, and how soon, was not measured. The proxy's access log has a line for the stream's request (`RequestPath` `/mcp`) with how long the proxy held it; whether it tells a close from a drop was not measured either |
+| `stop` | The server's stop closed it, or was about to: a stream still open as the stop's drain ends is the stop's, though its client may leave in the moment before it is closed. The line is written as the stop's drain ends, before its flush, so that a collector has it; the stream itself is closed after that flush where the drain finished. So `held_ms` is short of the real close by the flush: milliseconds as a rule, and up to 5 s where a collector is slow to answer |
 | `server` | The server ended it itself: a listen that asks for nothing this server sends is acknowledged and closed at once |
 
 A stream that keeps dropping (a tunnel that cuts streams, a proxy's timeout, a
-client that reopens in a loop) is a run of `client` ends under one name, each a
-short `held_ms` after an `ok` line; a healthy stream is held until its client
-goes or the server restarts. After a restart each stream that was open has a
-`stop` line. A server that is killed writes none for the streams it drops, and
-a frozen client's stream has no end until its connection goes.
+client that reopens in a loop) is `client` ends under one name, each a short
+`held_ms` after an `ok` line, for as long as its client asks again; a healthy
+stream is held until its client goes or the server restarts. What a client
+does when its stream ends is its own (above): one that has stopped asking
+leaves a `client` end with no `subscriptions/listen` line after it. A
+connection that goes silent, with no close and no reset, ends late or not at
+all: a frozen client's stream had no end until the client was killed
+(SMD-4493), so its `held_ms` can run past its client's leaving, and its end
+can follow that client's next opening.
+
+A stop writes a `stop` line for each stream that was open, in the log of the
+container that stopped. `docker logs` reads the container that is there: an
+upgrade's `up -d` recreates the container, and the old one's log goes with it,
+so after an upgrade those lines are a collector's or no one's. A server that
+is killed writes none for the streams it drops: the sign is a
+`subscriptions/listen` line, `ok`, with no end before the next
+`Started server:` line.
 
 Where the server sends telemetry, an end is also a log record named
 `ob1.listen_end`, at `INFO`, its body the line's fields, under no span (the
@@ -2189,9 +2208,14 @@ What it holds, from the servers (the workers send nothing, SMD-2910):
   a pipeline tier's `deployment_environment_name` its tier. Two more are single
   series with no label of their own: `process_uptime_seconds`, which every
   server sends from its start, and `ob1_mcp_listen_streams`, which a server
-  sends only where it holds listen streams (none does yet; SMD-4458).
+  sends only where it holds listen streams (none does yet; SMD-4458). Such a
+  server also sends one more histogram, `ob1.mcp.listen_stream.duration`, the
+  seconds each stream was held, labelled `ob1_end` (SMD-4459). Its name here
+  was not measured: by the rule the six above follow, and as check 37 reads
+  it, `ob1_mcp_listen_stream_duration_seconds`.
 - **Log records** in Loki: each request's, its body the line's fields, under
-  `service_name`.
+  `service_name`; and, from a server that holds listen streams, each stream's
+  end (`ob1.listen_end`), which has no `outcome`.
 - **The database's own numbers** in Prometheus under `job` `postgres`, from
   `pg-exporter` (postgres_exporter, pinned by digest) every 30 s:
   `pg_stat_statements_calls_total`, `_seconds_total`, `_rows_total` and the

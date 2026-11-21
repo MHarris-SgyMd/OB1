@@ -10,6 +10,10 @@
 // checked against its own rule as the line is written, so a caller's string
 // that reaches a field by mistake is `?`, not the string.
 //
+// One line is no request's: the end of a listen stream the MCP server held open
+// (endListenStream, SMD-4459). It is built here too and held to the same
+// rules, and its point and its log record are its own, not a request's.
+//
 // Lines go to stdout, which compose's log rotation bounds (deploy/compose.yaml,
 // x-logging). Each request is also an OpenTelemetry span (PR 2b), whose
 // attributes are the line's checked values and nothing else, a point on the
@@ -920,7 +924,7 @@ export function endsWithStream(trace: RequestTrace, signal: AbortSignal): Stream
  * - `client`: its client's side went. Its client closed it, or its connection dropped: the server is told one thing
  *   for both (measured on Bun 1.4.3: a fetch aborted, its reader cancelled, the client's exit, its kill, a socket
  *   half-closed, destroyed and reset each reach the request as "The connection was closed"), so the record has one
- *   word for them. The proxy's access log is where the two differ;
+ *   word for them. The proxy's access log is where the two may differ, which was not measured;
  * - `stop`: the server's stop closed it. Written as the stop's drain ends, before its flush, so the record is sent;
  * - `server`: the server ended it itself: a listen that asks for nothing this server sends is acknowledged and
  *   closed at once.
@@ -977,10 +981,15 @@ export function listenEndLine(r: ListenEndRecord, now: Date = new Date()): strin
  * no span, the stream's request having ended its own when the stream opened. Nothing is held open for it either: a
  * stream has no record between its opening's and this one.
  * It throws nothing: it is called from a stream's end and from the stop, and a sink or an SDK that throws loses the
- * record and nothing else.
+ * record and nothing else. Nor for a record it cannot read (a name that is no string), which it leaves unsaid.
  */
 export function endListenStream(r: ListenEndRecord): void {
-  const fields = checkedEnd(r);
+  let fields: ReturnType<typeof checkedEnd>;
+  try {
+    fields = checkedEnd(r);
+  } catch {
+    return;
+  }
   try {
     sink(JSON.stringify({ ts: new Date().toISOString(), ...fields }));
   } catch {}

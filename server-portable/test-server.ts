@@ -5899,6 +5899,8 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       useRequestLog(() => { throw new Error("the sink threw"); });
       try {
         endListenStream({ agent: "desk", end: "server", heldMs: 2 });
+        // …and a record it cannot read is left unsaid, not thrown on.
+        endListenStream({ agent: 7 as never, end: "client", heldMs: 1 });
       } catch (e) {
         endThrew = (e as Error).message;
       }
@@ -5924,10 +5926,10 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       && heldBy("client")?.value.buckets.boundaries.join() === "1,5,15,60,300,900,3600,14400,43200,86400" && requestPointsBefore > 0 && requestPointsNow() === requestPointsBefore,
       `…and each end one point on ob1.mcp.listen_stream.duration, in seconds from one to a day, labelled with how it ended and nothing else; none on the request-duration histogram, which counts the requests it did (${JSON.stringify(heldPoints.map((p) => [p.attributes, p.value.count, p.value.sum]))}; ${requestPointsBefore} request point(s) before, ${requestPointsNow()} after)`);
     const endRecords = logged.getFinishedLogRecords().filter((r) => r.eventName === "ob1.listen_end");
-    assert(endThrew === "" && endRecords.length === 4 && endRecords.every((r) => r.severityText === "INFO" && !traceApi.isSpanContextValid(r.spanContext ?? { traceId: "", spanId: "", traceFlags: 0 }))
+    assert(endThrew === "" && endRecords.length === 4 && endRecords.every((r) => r.severityText === "INFO" && !traceApi.isSpanContextValid(r.spanContext ?? { traceId: "", spanId: "", traceFlags: 0 }) && Math.abs(msOf(r.hrTime) - Date.now()) < 10_000)
       && JSON.stringify(endRecords.slice(0, 3).map((r) => r.body)) === JSON.stringify(endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; })) && (endRecords[3].body as Record<string, unknown>).end === "server"
       && requestRecordsBefore > 0 && requestRecordsNow() === requestRecordsBefore,
-      `…and one log record, ob1.listen_end at INFO, its body the line's fields, under no span, and no request's record more; a sink that throws loses its line alone, and nothing is thrown (threw ${JSON.stringify(endThrew)}; ${JSON.stringify(endRecords.map((r) => [r.eventName, r.severityText, r.body]))})`);
+      `…and one log record, ob1.listen_end at INFO, its time its end's, its body the line's fields, under no span, and no request's record more; a sink that throws loses its line alone, a record that cannot be read is left unsaid, and nothing is thrown (threw ${JSON.stringify(endThrew)}; ${JSON.stringify(endRecords.map((r) => [r.eventName, r.severityText, r.body]))})`);
 
     // A fault on its span: the throw's kind and code, never its message (the webhook's, review on SMD-2310).
     spans.reset();

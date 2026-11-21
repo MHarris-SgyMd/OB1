@@ -597,8 +597,8 @@ export function createMcpApp(deps: McpDeps): Hono {
   }, { legacy: "reject", responseMode: "sse", onerror: (err) => { const said = handlerSaid.getStore(); if (said) said.err ??= err; }, ...(listen ? { maxSubscriptions: listen.max } : {}) });
   // The entry's stop ends the streams through this, after its flush or at its cut (listen-streams.ts): the handler's own close, which sends each its closing frame.
   if (listen) listen.close = () => modern.close();
-  // The streams held open, each by what says its end as the stop's (SMD-4459).
-  const heldOpen = new Set<() => void>();
+  // The streams held open whose end is not yet said, each by what says it (SMD-4459).
+  const unsaid = new Set<(end: ListenEnd) => void>();
   /**
    * A stream held open from now, under the place `release` gives back: what its ends call. Each gives the place
    * back and records the stream's end, once, with how it ended and how long it was held (telemetry.ts's
@@ -606,27 +606,25 @@ export function createMcpApp(deps: McpDeps): Hono {
    * where the stop's drain has ended. The stop's own word comes first as a rule: as its drain ends it has each
    * stream still open recorded (`listen.stopped`, below), the place kept until the stream is really closed, since
    * the stop counts the streams by their places; that close then records nothing.
+   * A stream is in `unsaid` until its end is said, and an end is said only by taking it out: one thing says each end
+   * once and keeps the set to the streams still open (review pass 1: a flag said it once and a line of its own
+   * emptied the set, which no row held; without that line an entry kept eight objects for every stream it had held).
    * Made here and handed plain values: a function made in the route would keep that request's scope, its body with
    * it, for as long as the stream is held (SMD-4347: 30 streams opened with 3 MiB bodies kept 90 MiB).
    */
   const holdStream = (release: () => void, agent: string, trace: string | undefined): { client: () => void; server: () => void } => {
     const from = performance.now();
-    let said = false;
     const say = (end: ListenEnd) => {
-      if (said) return;
-      said = true;
-      endListenStream({ agent, end, heldMs: performance.now() - from, trace });
+      if (unsaid.delete(say)) endListenStream({ agent, end, heldMs: performance.now() - from, trace });
     };
-    const stopped = () => say("stop");
-    heldOpen.add(stopped);
+    unsaid.add(say);
     const ended = (end: ListenEnd) => {
-      heldOpen.delete(stopped);
       release();
       say(end);
     };
     return { client: () => ended("client"), server: () => ended(drainEndedNow() ? "stop" : "server") };
   };
-  if (listen) listen.stopped = () => { for (const stopped of [...heldOpen]) stopped(); };
+  if (listen) listen.stopped = () => { for (const say of [...unsaid]) say("stop"); };
   /** What the handler is given for one request: no token and no identity of the SDK's, only the function that builds the caller's server. */
   const forRequest = (build: () => McpServer): AuthInfo => ({ token: "", clientId: "", scopes: [], extra: { build } });
 

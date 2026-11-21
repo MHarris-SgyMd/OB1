@@ -871,7 +871,7 @@ console.log("\n[8f] The entry's stop: it waits for a tool call past its client's
     `SIGTERM with a tool call running: the stop waits on it, then cuts it, one \`cut\` line naming its key (exit ${code}; ${JSON.stringify(cut)}; ${err.split("\n").filter(Boolean).slice(0, 2).join(" | ").slice(0, 200)})`);
 }
 
-console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): it waits for the rest and closes each stream itself, with its closing frame, after its flush or at its cut; a server that holds none stops as before");
+console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): it waits for the rest and closes each stream itself, with its closing frame, after its flush or at its cut; a server that holds none stops as before; each stream's end recorded (SMD-4459)");
 {
   const counted = { total: 3, oldest: "2026-10-01T00:00:00Z", newest: "2026-10-02T00:00:00Z", types: { idea: 3 }, topics: { rest: 2 }, people: {}, aggregated: 3 };
   const restServer = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: (req) => restApp.fetch(req) });
@@ -900,8 +900,8 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
   type OtlpPairs = { key: string; value: OtlpValue }[];
   const pairsOf = (pairs: OtlpPairs | undefined) => Object.fromEntries((pairs ?? []).map(({ key, value }) => [key, value.stringValue ?? Number(value.intValue ?? value.doubleValue)]));
   /** The log records the collector has had since the `from`th export, each with its name and its body's fields. */
-  const recordsOf = (from: number) => logged.slice(from).flatMap((t) => (JSON.parse(t) as { resourceLogs: { scopeLogs: { logRecords: { eventName?: string; severityText?: string; body?: { kvlistValue?: { values: OtlpPairs } } }[] }[] }[] }).resourceLogs)
-    .flatMap((r) => r.scopeLogs).flatMap((x) => x.logRecords).map((r) => ({ name: r.eventName, severity: r.severityText, body: pairsOf(r.body?.kvlistValue?.values) }));
+  const recordsOf = (from: number) => logged.slice(from).flatMap((t) => (JSON.parse(t) as { resourceLogs: { scopeLogs: { logRecords: { eventName?: string; severityText?: string; traceId?: string; spanId?: string; body?: { kvlistValue?: { values: OtlpPairs } } }[] }[] }[] }).resourceLogs)
+    .flatMap((r) => r.scopeLogs).flatMap((x) => x.logRecords).map((r) => ({ name: r.eventName, severity: r.severityText, body: pairsOf(r.body?.kvlistValue?.values), under: `${r.traceId ?? ""}${r.spanId ?? ""}` }));
   /** A histogram's points in the last export since the `from`th that carries it (its counts are cumulative): each one's labels, count and sum. */
   const histogramOf = (name: string, from: number) => (metered.slice(from).map((t) => (JSON.parse(t) as { resourceMetrics: { scopeMetrics: { metrics: { name: string; histogram?: { dataPoints: { attributes?: OtlpPairs; count: number | string; sum?: number }[] } }[] }[] }[] }).resourceMetrics
     .flatMap((r) => r.scopeMetrics).flatMap((x) => x.metrics).filter((m) => m.name === name).flatMap((m) => m.histogram?.dataPoints ?? [])).filter((points) => points.length > 0).at(-1) ?? [])
@@ -965,14 +965,19 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     answer = () => ok({});
     const plain = await start(false, collector.port!);
     const plainSays = await capabilityOf(plain);
+    // A listen, which it acknowledges honouring nothing and ends: no stream held, so no end to say (below).
+    const plainListened = await (await plain.send("subscriptions/listen", listenParams)).text();
     const plainStopped = await plain.stop();
+    /** The listen spans today's entry sent this collector, which the holding entries' counts below leave out. */
+    const plainListenSpans = listenSpans();
     assert(plain.up && plainSays === false && plainStopped.code === 0 && !/held open/.test(plainStopped.out), `the entry as it is holds no listen stream, and stops as before (listChanged ${plainSays}; exit ${plainStopped.code}; ${plainStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
     // …and it sends no count of streams (SMD-4458): its metrics reached the collector, the uptime gauge among them, and no such series.
     assert(pointsOf("process.uptime", 0).length >= 1 && pointsOf("ob1.mcp.listen_streams", 0).length === 0,
       `…and its metrics, sent at its stop, hold no count of listen streams (${pointsOf("process.uptime", 0).length} uptime point(s); ${JSON.stringify(pointsOf("ob1.mcp.listen_streams", 0))})`);
     // …and nothing of a stream's end (SMD-4459): no such line, no such record, no such series.
-    assert(!plainStopped.lines.some((l) => "event" in l) && recordsOf(0).length >= 1 && recordsOf(0).every((r) => r.name === "ob1.request") && histogramOf("ob1.mcp.listen_stream.duration", 0).length === 0 && histogramOf("http.server.request.duration", 0).length >= 1,
-      `…and it says nothing of a stream's end: no \`listen_end\` line, its log records all requests', and no histogram of time held beside the requests' own (${plainStopped.lines.filter((l) => "event" in l).length} line(s); ${JSON.stringify([...new Set(recordsOf(0).map((r) => r.name))])}; ${histogramOf("ob1.mcp.listen_stream.duration", 0).length} point(s))`);
+    assert(plainListened.includes('"resultType":"complete"') && plainStopped.lines.filter((l) => l.rpc === "subscriptions/listen" && l.outcome === "ok").length === 1 && plainListenSpans === 1
+      && !plainStopped.lines.some((l) => "event" in l) && recordsOf(0).length >= 1 && recordsOf(0).every((r) => r.name === "ob1.request") && histogramOf("ob1.mcp.listen_stream.duration", 0).length === 0 && histogramOf("http.server.request.duration", 0).length >= 1,
+      `…and of a listen it answers and ends at once it says no end: one request's line, no \`listen_end\` line, its log records all requests', and no histogram of time held beside the requests' own (${plainStopped.lines.filter((l) => l.rpc === "subscriptions/listen").length} listen line(s), ${plainStopped.lines.filter((l) => "event" in l).length} end line(s); ${JSON.stringify([...new Set(recordsOf(0).map((r) => r.name))])}; ${histogramOf("ob1.mcp.listen_stream.duration", 0).length} point(s))`);
     // …and its cut is the one it had: the connections go at the bound. A call of each revision whose work ends 300 ms
     // after it is not answered then, though a silent collector holds the process a second longer.
     answer = (n) => (n === "thoughtStats" ? Bun.sleep(1_500).then(() => ok(counted)) : ok({}));
@@ -1008,7 +1013,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const endAt = aloneOut.findIndex((l) => l.includes('"event":"listen_end"'));
     assert(aloneEnds.length === 1 && Object.keys(aloneEnds[0]).join() === "ts,door,event,agent,end,held_ms" && aloneEnds[0].door === "mcp" && aloneEnds[0].agent === "laptop" && aloneEnds[0].end === "stop"
       && (aloneEnds[0].held_ms as number) >= 190 && (aloneEnds[0].held_ms as number) < 2_000 && endAt > aloneOut.findIndex((l) => /SIGTERM: no longer accepting/.test(l)) && endAt < aloneOut.findIndex((l) => /SIGTERM: stopped in/.test(l)),
-      `…and one line for its end: \`listen_end\`, the stop's, with the 200 ms and more it was held, between the stop's two lines; no outcome, no status (${JSON.stringify(aloneEnds)})`);
+      `…and one line for its end: \`listen_end\`, the stop's, with about the 200 ms it was held, between the stop's two lines; no outcome, no status (${JSON.stringify(aloneEnds)})`);
 
     // A stream open and a call that ends inside the bound: the call is waited on and answered in full, and the stream closed after it.
     answer = (n) => (n === "thoughtStats" ? Bun.sleep(600).then(() => ok(counted)) : ok({}));
@@ -1031,7 +1036,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     assert(bothStopped.code === 0 && answered.status === 200 && total === 3 && heldText.includes('"resultType":"complete"') && callEndedAt > 0 && heldStream.endedAt() >= callEndedAt
       && /1 request in flight.*; 1 stream held open, not waited on/.test(bothStopped.out) && bothStopped.lines.some((l) => l.tool === "thought_stats" && l.outcome === "ok"),
       `a stop with a stream open and a call running: the call is waited on and answered in full, then the stream is closed with its frame, exit 0 (exit ${bothStopped.code} in ${Math.round(bothStopped.ms)} ms; call ${answered.status}, total ${total}; the stream ended ${Math.round(heldStream.endedAt() - callEndedAt)} ms after the call; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")})`);
-    const spansBoth = listenSpans();
+    const spansBoth = listenSpans() - plainListenSpans;
     assert(spansBoth === 1 && /; telemetry sent; 1 held stream closed; exit 0/.test(bothStopped.out), `…and with a collector, the stream's span has been sent by the stop's end (${spansBoth} span(s) in all; ${bothStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     // The count of open streams (SMD-4458): 1 while the stream was open, and 0 as the stop's flush read it, though the stream is closed only after that flush.
     // With a collector that answers, the flush's is the last point this server sends: left at 1, a panel that sums the servers would count the stream beside the next server's.
@@ -1063,7 +1068,7 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     assert(cutStopped.code === 1 && cutCall.length === 2 && cutCall.every((l) => l.outcome === "cut") && cutListen.length === 24 && cutListen.every((l) => l.outcome === "ok") && framed === 24
       && /2 requests still in flight.*closed unfinished/.test(cutStopped.out) && /24 held streams closed; exit 1/.test(cutStopped.out) && /cut off by the server's stop/.test(cutStopped.err),
       `a stop with 24 streams open and two calls that never end, one of each revision: the calls cut at the bound and counted alone, each line \`cut\`; each stream's line \`ok\` and its closing frame read all the same; exit 1 (exit ${cutStopped.code} in ${Math.round(cutStopped.ms)} ms; ${JSON.stringify(cutCall.map((l) => l.outcome))}; ${cutListen.filter((l) => l.outcome === "ok").length} lines ok; ${framed} of 24 frames read; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")}; ${cutStopped.err.split("\n").filter(Boolean).join(" | ").slice(0, 240)})`);
-    const spansCut = listenSpans();
+    const spansCut = listenSpans() - plainListenSpans;
     assert(spansCut === 25 && /; telemetry sent; 24 held streams closed; exit 1/.test(cutStopped.out), `…their spans sent too by the stop's end (${spansCut} span(s) in all; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     // The count of open streams was 24 while they were open, the entry's own count and not a 1 for any; at this stop's flush it is 0 too.
     const openSeenAtCut = pointsOf("ob1.mcp.listen_streams", meteredAtCut);
@@ -1074,9 +1079,10 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     assert(hung.every((x) => x.endsWith("dropped")) && cutStopped.err.split("\n").filter((l) => /cut off by the server's stop/.test(l)).length === 2,
       `…and each cut call's own answer is dropped with its connection, not ended as a whole answer of nothing; one warning for each (${hung.join(", ")}; ${cutStopped.err.split("\n").filter((l) => /cut off/.test(l)).length} warning(s))`);
 
-    // The end of a stream (SMD-4459), on the entry with a collector. One stream its client closes after 400 ms, and
-    // one held to the stop. Each end is a line, a log record and a point of its own; the stop's is recorded as its
-    // drain ends, so its flush sends it, and the request-duration histogram has the two openings and nothing more.
+    // The end of a stream (SMD-4459), on the entry with a collector. One stream its client closes after 400 ms, one
+    // the server ends itself (a listen that asks for nothing), and one held to the stop. Each end is a line, a log
+    // record and a point of its own; the stop's is recorded as its drain ends, so its flush sends it, and the
+    // request-duration histogram has the three openings and nothing more.
     answer = () => ok({});
     const loggedAtEnds = logged.length;
     const meteredAtEnds = metered.length;
@@ -1090,6 +1096,8 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     await Bun.sleep(400);
     const leftAt = performance.now();
     leaving.abort();
+    // Read to its end inside its request, as the server ends it there: its record must be under no span all the same.
+    const askedNothing = await (await ending.send("subscriptions/listen", { notifications: {} })).text();
     const staying = toEnd(await ending.send("subscriptions/listen", listenParams));
     await Bun.sleep(250);
     const endingStopped = await ending.stop();
@@ -1097,23 +1105,25 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const ends = endingStopped.lines.filter((l) => l.event === "listen_end");
     const opens = endingStopped.lines.filter((l) => l.rpc === "subscriptions/listen");
     const [clientEnd, stopEnd] = [ends.find((l) => l.end === "client"), ends.find((l) => l.end === "stop")];
-    assert(ending.up && leavingStream.status === 200 && ends.length === 2 && opens.length === 2 && clientEnd !== undefined && Object.keys(clientEnd).join() === "ts,door,event,agent,end,held_ms,trace" && clientEnd.agent === "chatgpt"
+    assert(ending.up && leavingStream.status === 200 && ends.length === 3 && opens.length === 3 && clientEnd !== undefined && Object.keys(clientEnd).join() === "ts,door,event,agent,end,held_ms,trace" && clientEnd.agent === "chatgpt"
       && (clientEnd.held_ms as number) >= leftAt - openedAt - 1 && (clientEnd.held_ms as number) <= leftAt - askedAt + 250 && clientEnd.trace === opens.find((l) => l.agent === "chatgpt")?.trace && typeof clientEnd.trace === "string",
       `a stream its client closes after 400 ms: one line for its end, \`client\`, under its caller's name, held about as long, with the trace id of the line that opened it (${JSON.stringify(clientEnd)}; closed ${Math.round(leftAt - openedAt)} ms after it opened; ${ends.length} end(s), ${opens.length} opening(s))`);
-    assert(endingStopped.code === 0 && stopEnd !== undefined && stopEnd.agent === "laptop" && (stopEnd.held_ms as number) >= 240 && stopEnd.trace === opens.find((l) => l.agent === "laptop")?.trace && stayingText.includes('"resultType":"complete"')
-      && /; telemetry sent; 1 held stream closed; exit 0/.test(endingStopped.out) && endingStopped.ms < 1_000 && !ends.some((l) => "outcome" in l || "status" in l || "method" in l || "rpc" in l),
-      `…and the one held to the stop: one line, \`stop\`, the stream still closed with its frame after the flush, and the stop no longer for it; neither line has anything a request's has (${JSON.stringify(stopEnd)}; exit ${endingStopped.code} in ${Math.round(endingStopped.ms)} ms; ${endingStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
+    assert(endingStopped.code === 0 && stopEnd !== undefined && stopEnd.agent === "laptop" && (stopEnd.held_ms as number) >= 240 && typeof stopEnd.trace === "string" && opens.filter((l) => l.agent === "laptop" && l.trace === stopEnd.trace).length === 1 && stayingText.includes('"resultType":"complete"')
+      && /; telemetry sent; 1 held stream closed; exit 0/.test(endingStopped.out) && endingStopped.ms < 1_000 && !ends.some((l) => "outcome" in l || "status" in l || "method" in l || "rpc" in l)
+      && askedNothing.includes('"resultType":"complete"') && ends.filter((l) => l.end === "server" && l.agent === "laptop" && (l.held_ms as number) < 500).length === 1,
+      `…and the one held to the stop: one line, \`stop\`, the stream still closed with its frame after the flush, and the stop no longer for it; the one that asked for nothing, \`server\`; no end's line has anything a request's has (${JSON.stringify(stopEnd)}; exit ${endingStopped.code} in ${Math.round(endingStopped.ms)} ms; ${endingStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     const endRecords = recordsOf(loggedAtEnds).filter((r) => r.name === "ob1.listen_end");
     const heldPoints = histogramOf("ob1.mcp.listen_stream.duration", meteredAtEnds);
     const listenRequests = histogramOf("http.server.request.duration", meteredAtEnds).filter((pt) => pt.labels["mcp.method.name"] === "subscriptions/listen");
     const without = (l: Record<string, unknown>) => { const { ts: _ts, ...rest } = l; return JSON.stringify(rest); };
-    assert(endRecords.length === 2 && endRecords.every((r) => r.severity === "INFO") && endRecords.map((r) => JSON.stringify(r.body)).sort().join() === ends.map(without).sort().join()
-      && recordsOf(loggedAtEnds).filter((r) => r.name === "ob1.request" && r.body.rpc === "subscriptions/listen").length === 2,
-      `…and the collector has each end as a log record of its own name, the stop's among them by the stop's end, its body the line's fields; the two openings are the requests' records (${JSON.stringify(endRecords)})`);
-    assert(heldPoints.length === 2 && heldPoints.map((pt) => `${JSON.stringify(pt.labels)} ${pt.count}`).sort().join() === '{"ob1.end":"client"} 1,{"ob1.end":"stop"} 1'
+    const listenRecords = recordsOf(loggedAtEnds).filter((r) => r.name === "ob1.request" && r.body.rpc === "subscriptions/listen");
+    assert(endRecords.length === 3 && endRecords.every((r) => r.severity === "INFO" && r.under === "") && endRecords.map((r) => JSON.stringify(r.body)).sort().join() === ends.map(without).sort().join()
+      && listenRecords.length === 3 && listenRecords.every((r) => r.under.length === 48),
+      `…and the collector has each end as a log record of its own name, the stop's among them by the stop's end, its body the line's fields, under no span, the server's own end too, which is said inside its request; the three openings are the requests' records, each under its span (${JSON.stringify(endRecords)})`);
+    assert(heldPoints.length === 3 && heldPoints.map((pt) => `${JSON.stringify(pt.labels)} ${pt.count}`).sort().join() === '{"ob1.end":"client"} 1,{"ob1.end":"server"} 1,{"ob1.end":"stop"} 1'
       && Math.abs((heldPoints.find((pt) => pt.labels["ob1.end"] === "client")?.sum ?? 0) - (clientEnd?.held_ms as number) / 1000) < 0.002
-      && listenRequests.reduce((n, pt) => n + pt.count, 0) === 2 && listenRequests.every((pt) => pt.labels["ob1.outcome"] === "ok" && pt.sum < 1),
-      `…and one point each on the histogram of time held, by how it ended, the stop's sent by its flush; the request-duration histogram has the two openings, \`ok\` and a request's length, and no end (${JSON.stringify(heldPoints)}; ${JSON.stringify(listenRequests.map((pt) => [pt.labels["ob1.outcome"], pt.count, pt.sum]))})`);
+      && listenRequests.reduce((n, pt) => n + pt.count, 0) === 3 && listenRequests.every((pt) => pt.labels["ob1.outcome"] === "ok" && pt.sum < 1),
+      `…and one point each on the histogram of time held, by how it ended, the stop's sent by its flush; the request-duration histogram has the three openings, \`ok\` and a request's length, and no end (${JSON.stringify(heldPoints)}; ${JSON.stringify(listenRequests.map((pt) => [pt.labels["ob1.outcome"], pt.count, pt.sum]))})`);
 
     // The holding entry cut with a collector that never answers. Its streams are closed at the bound, each with its
     // frame, and its connections after them, as a server that holds none closes its own: a call's work and a job
@@ -1412,7 +1422,7 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   const frames = listened.split("\n").filter((l) => l.startsWith("data: ")).map((l) => JSON.parse(l.slice(6)) as { method?: string; params?: { notifications?: unknown }; result?: { resultType?: unknown } });
   assert(frames.length === 2 && frames[0].method === "notifications/subscriptions/acknowledged" && same(frames[0].params?.notifications, {}) && frames[1].result?.resultType === "complete",
     `subscriptions/listen: acknowledged with nothing honoured, then its result, and the stream ends (${frames.length} frames; ${JSON.stringify(frames[0]?.params?.notifications)}${frames.length === 0 ? `; ${listened}` : ""})`);
-  assert(last().rpc === "subscriptions/listen" && last().outcome === "ok", `…its line written at once, not when a client leaves (${JSON.stringify(last())})`);
+  assert(last().rpc === "subscriptions/listen" && last().outcome === "ok" && !lines.some((l) => "event" in l), `…its line written at once, not when a client leaves, and no line for an end: no stream was held (SMD-4459; ${JSON.stringify(last())}; ${lines.filter((l) => "event" in l).length} other line(s))`);
 
   // What the SDK's handler refuses, it refuses in its own words; the line says so by its status.
   const crossed = await rpc("tools/list", {}, "read-raw", { modern: true, headers: { "mcp-method": "tools/call" } });
@@ -1565,7 +1575,7 @@ console.log("\n[9b] The 2026-07-28 revision beside the 2025-era ones (SMD-4345 P
   useRequestLog(before);
 }
 
-console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it opens, no stall and no abandonment, a place under two bounds; the entry holds none yet");
+console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it opens, no stall and no abandonment, a place under two bounds, a line of its own at its end (SMD-4459); the entry holds none yet");
 {
   const { useRequestLog } = await import("../server-portable/telemetry.ts");
   const { createListenStreams, HOLD_LISTEN_STREAMS, LISTEN_STREAMS_MAX, LISTEN_STREAMS_PER_CALLER } = await import("./listen-streams.ts");
@@ -1969,7 +1979,7 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
     // stop's, and keeps its place: the stop counts its streams by their places until they are closed. The close that
     // follows gives the places back and records nothing more. One whose client went before the stop was said then.
     const endStop = { cut: false, drainEnded: false };
-    const endStreams = createListenStreams(true, 3, 2);
+    const endStreams = createListenStreams(true, 4, 2);
     const endApp = createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: () => {}, listen: endStreams, stop: endStop });
     const askEnd = async (key: string) => reading(await endApp.fetch(requestFor("subscriptions/listen", listenParams, key, { modern: true })));
     const [e1, e2, e3] = [await askEnd("write-raw"), await askEnd("read-raw"), await askEnd("write-raw")];
@@ -1977,6 +1987,8 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
     await e3.close();
     await until(() => endStreams.count === 2);
     await Bun.sleep(30);
+    const e4 = await askEnd("write-raw");
+    await e4.read(50);
     const endsAtStop = endsSaid().length;
     endStop.drainEnded = true;
     endStreams.stopped();
@@ -1987,9 +1999,9 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
     const placesBack = await until(() => endStreams.count === 0);
     await Bun.sleep(30);
     const afterClose = endsSaid().slice(endsAtStop);
-    assert(atDrain.length === 2 && atDrain.every((l) => l.end === "stop") && atDrain.map((l) => l.agent).sort().join() === "chatgpt,laptop" && placesAtDrain === 2
-      && e1Read.ended && e2Read.ended && e1Read.text.includes('"resultType":"complete"') && placesBack && afterClose.length === 2,
-      `the stop's drain ended with two streams open, one more closed by its client before it: each of the two is recorded then, \`stop\`, its place kept; the close that follows gives the places back and records nothing more (${JSON.stringify(atDrain.map((l) => [l.agent, l.end]))}; ${placesAtDrain} place(s) at the drain's end, ${endStreams.count} after the close; ${afterClose.length} end(s) in all)`);
+    assert(atDrain.length === 3 && atDrain.every((l) => l.end === "stop") && atDrain.map((l) => l.agent).sort().join() === "chatgpt,laptop,laptop" && placesAtDrain === 3
+      && e1Read.ended && e2Read.ended && e1Read.text.includes('"resultType":"complete"') && (await e4.read(500)).ended && placesBack && afterClose.length === 3,
+      `the stop's drain ended with three streams open, one more closed by its client before it: each of the three is recorded then, \`stop\`, its place kept; the close that follows gives the places back and records nothing more (${JSON.stringify(atDrain.map((l) => [l.agent, l.end]))}; ${placesAtDrain} place(s) at the drain's end, ${endStreams.count} after the close; ${afterClose.length} end(s) in all)`);
     // A close after the drain's end that the app was not told of as above is the stop's all the same, said at the close.
     const flaggedStop = { cut: false, drainEnded: false };
     const flaggedStreams = createListenStreams(true, 3, 2);
