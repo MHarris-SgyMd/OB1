@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 148: settled parts — a statement in one thought that another
+-- Migration 151: settled parts — a statement in one thought that another
 --                thought settles, proposed by the consolidation pass and
 --                decided by a reviewer, both thoughts left standing
 --                (SMD-4446 PR 1)
@@ -139,7 +139,9 @@
 --     the kinds the order does not name, which share what the walk's cap of
 --     2,000 rows leaves, and behind a thought's own proposals, so a thought
 --     with 2,000 of those leaves its parts unwalked: the cap is SMD-4476's).
---   * rebuild_derived is 067's body with the part beside the proposal. When a
+--   * rebuild_derived is 150's body with the part beside the proposal: 067's
+--     with the tags' arm feeding the re-tag pool (SMD-2298), carried whole,
+--     since this file is its last definer after 150. When a
 --     text moves, a pending part goes stale and its newer thought is queued
 --     again under the part's judge key. A decided part stands. A lineage row
 --     whose part is gone is deleted. The result gains stale_parts and
@@ -254,19 +256,21 @@
 --   validates over its own kind.
 --   An earlier definer applied by hand over this file puts its bodies back.
 --   063's three know no part: its lineage writer refuses the kind, so a
---   part's write fails, and its rebuild_derived, like 067's, has no arm for
---   one, so a moved text sets no pending part stale. Preflight reads 067's
---   sentinel and not this file's. Where it finds rebuild_derived from before
---   067 with the parts' table standing, its remedy names this file after
---   067 (review pass 5: it named 067 alone, which left the three bodies as
---   063's and 067's). 067 alone re-applied over this file it does not see.
---   MINOR under MAINTAINING.md's version rules. test-schema [133],
---   test-upgrade [20ck].
+--   part's write fails, and its rebuild_derived, like 067's and 150's, has
+--   no arm for one, so a moved text sets no pending part stale. Preflight
+--   reads 067's sentinel and not this file's. Where it finds rebuild_derived
+--   from before 067 with the parts' table standing, its remedy names this
+--   file after 067 (review pass 5: it named 067 alone, which left the three
+--   bodies as 063's and 067's). 067 or 150 alone re-applied over this file
+--   it does not see.
+--   MINOR under MAINTAINING.md's version rules. test-schema [136],
+--   test-upgrade [20cn].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of, requeue_thought_work), 029
---   (supersession_proposals), 061 (derivations), 063 and 067
---   (derivation_descendants, rebuild_derived), 111 (ob1_record_derivation)
+--   (supersession_proposals), 061 (derivations), 063
+--   (derivation_descendants), 067 and 150 (rebuild_derived, whose body as
+--   150 leaves it this file carries), 111 (ob1_record_derivation)
 --   and 114 (ob1_stamp_proposal_reviewer). Applied by `bun db/migrate.ts`.
 --   Re-applied: the table, its indexes and its constraints stand, the
 --   triggers are dropped and made again, the lineage table's kind CHECK is
@@ -291,7 +295,7 @@ BEGIN
   FOR i IN 1 .. array_length(v_need, 1) LOOP
     IF to_regprocedure(v_need[i][1]) IS NULL THEN
       RAISE EXCEPTION USING
-        MESSAGE = format('migration 148 needs %s; this schema lacks it', v_need[i][2]),
+        MESSAGE = format('migration 151 needs %s; this schema lacks it', v_need[i][2]),
         -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
         HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
         ERRCODE = 'invalid_schema_definition';
@@ -299,7 +303,7 @@ BEGIN
   END LOOP;
   IF to_regclass('supersession_proposals') IS NULL OR to_regclass('derivations') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 148 needs 029 and 061 (supersession_proposals, derivations); this schema lacks one',
+      MESSAGE = 'migration 151 needs 029 and 061 (supersession_proposals, derivations); this schema lacks one',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
@@ -369,7 +373,7 @@ CREATE TABLE IF NOT EXISTS settled_parts (
 );
 
 COMMENT ON TABLE settled_parts IS
-  'One row per settled part: a statement in one thought of a pair that the other thought shows is no longer true or no longer open, with the quote from each, a reason and the word (docs/subject-anchored-claims.md, rows 8 to 10). Proposed by the consolidation pass through record_settled_part and decided by a reviewer through review_settled_part. An accepted part sets no supersedes pointer and demotes no thought: both thoughts stand. A pair may hold several parts, and one statement of one thought once; it may hold a whole-thought proposal (029) beside them. A row is one judgement and no UPDATE changes it (settled_parts_keep_judgement): when the pass judges a statement again and its row is undecided and no longer a judgement of the texts as they stand, the judgement is another row with another id, and otherwise it is not recorded. Deleting either thought takes the row, and its lineage rows with it. The planner keeps no statistics on its words. Migration 148 / SMD-4446.';
+  'One row per settled part: a statement in one thought of a pair that the other thought shows is no longer true or no longer open, with the quote from each, a reason and the word (docs/subject-anchored-claims.md, rows 8 to 10). Proposed by the consolidation pass through record_settled_part and decided by a reviewer through review_settled_part. An accepted part sets no supersedes pointer and demotes no thought: both thoughts stand. A pair may hold several parts, and one statement of one thought once; it may hold a whole-thought proposal (029) beside them. A row is one judgement and no UPDATE changes it (settled_parts_keep_judgement): when the pass judges a statement again and its row is undecided and no longer a judgement of the texts as they stand, the judgement is another row with another id, and otherwise it is not recorded. Deleting either thought takes the row, and its lineage rows with it. The planner keeps no statistics on its words. Migration 151 / SMD-4446.';
 COMMENT ON COLUMN settled_parts.holder IS
   'Which thought of the pair holds the statement: older or newer, by capture order. The other thought holds shown_by. holder_id is that thought''s id.';
 COMMENT ON COLUMN settled_parts.statement IS
@@ -383,7 +387,7 @@ COMMENT ON COLUMN settled_parts.word_group IS
 COMMENT ON COLUMN settled_parts.judged_at IS
   'When the transaction that recorded the row''s judgement began (now()). A row is one judgement: a later judgement of its statement is another row with its own time, or is not recorded (record_settled_part). It is not the order rows commit in: a listing that pages by it can pass over a row whose transaction began before the page was read and committed after.';
 COMMENT ON COLUMN settled_parts.status IS
-  'pending: the part awaits a reviewer. accepted or rejected: a decision (review_settled_part). stale: rebuild_derived found one of the pair''s texts moved since the judge saw them, or was called with p_force; the row stays stale if the text moves back, and the next judgement of its statement replaces it with a new row. A pending row whose texts have moved with no rebuild since is replaced the same way. Migration 148.';
+  'pending: the part awaits a reviewer. accepted or rejected: a decision (review_settled_part). stale: rebuild_derived found one of the pair''s texts moved since the judge saw them, or was called with p_force; the row stays stale if the text moves back, and the next judgement of its statement replaces it with a new row. A pending row whose texts have moved with no rebuild since is replaced the same way. Migration 151.';
 COMMENT ON COLUMN settled_parts.reviewed_by IS
   'Who decided the row, from the decision''s actor envelope, with reviewed_by_agent_id and reviewed_by_kind: written only by settled_parts_stamp_reviewer, which runs 114''s ob1_stamp_proposal_reviewer. The last decision''s alone: a reversal replaces it. NULL while unreviewed, and on a decided row whose decision carried no actor envelope.';
 
@@ -456,7 +460,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_keep_part_judgement() IS
-  'BEFORE UPDATE OF the judgement''s columns on settled_parts (settled_parts_keep_judgement, 148). Refuses, with check_violation and a message that carries no value, an UPDATE that changes a part''s id, pair, holder, statement, showing words, word, reason, either fingerprint, judge key, judging agent or time judged, on a row in any status: a row is one judgement, and record_settled_part makes another row for another. The status is not held: a role holding UPDATE can move it by hand, as it can a proposal''s. A part''s quotes leave by the cascade from its two thoughts, so a row never points at others. Migration 148 / SMD-4446.';
+  'BEFORE UPDATE OF the judgement''s columns on settled_parts (settled_parts_keep_judgement, 151). Refuses, with check_violation and a message that carries no value, an UPDATE that changes a part''s id, pair, holder, statement, showing words, word, reason, either fingerprint, judge key, judging agent or time judged, on a row in any status: a row is one judgement, and record_settled_part makes another row for another. The status is not held: a role holding UPDATE can move it by hand, as it can a proposal''s. A part''s quotes leave by the cascade from its two thoughts, so a row never points at others. Migration 151 / SMD-4446.';
 
 DROP TRIGGER IF EXISTS settled_parts_keep_judgement ON settled_parts;
 CREATE TRIGGER settled_parts_keep_judgement
@@ -475,7 +479,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_drop_part_derivation() IS
-  'AFTER DELETE on settled_parts (settled_parts_drop_derivation, 148): drops the part''s `derivations` rows, as 061 drops a proposal''s. A part goes by the cascade from either of its thoughts, so a deleted or forgotten thought leaves neither its parts'' quotes nor their recipes. Migration 148 / SMD-4446.';
+  'AFTER DELETE on settled_parts (settled_parts_drop_derivation, 151): drops the part''s `derivations` rows, as 061 drops a proposal''s. A part goes by the cascade from either of its thoughts, so a deleted or forgotten thought leaves neither its parts'' quotes nor their recipes. Migration 151 / SMD-4446.';
 
 DROP TRIGGER IF EXISTS settled_parts_drop_derivation ON settled_parts;
 CREATE TRIGGER settled_parts_drop_derivation
@@ -571,13 +575,13 @@ END;
 $$;
 
 COMMENT ON FUNCTION ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid) IS
-  'Records one derived artifact''s lineage in `derivations`, upserting on (artifact_kind, artifact_id, produced_by) and moving produced_at: the inputs and their fingerprints (parallel, no NULL), the pass, the recipe (a JSON object with a boolean `deterministic`), the agent. Refuses a bad shape with a RAISE — a producer that cannot record its lineage must not commit its artifact either. Nine kinds since 148: chunks, entities, proposal, vector, metadata (061), section (064, a page section a machine wrote), relation (084, a judged relation between two thoughts), subject (111, a thought''s own subject) and part (148, a settled part of a pair of thoughts); the upsert clears 063''s mark (ob1:rerun-clears-the-mark). Migrations 061, 063, 064, 084, 111, 148 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306, SMD-4446.';
+  'Records one derived artifact''s lineage in `derivations`, upserting on (artifact_kind, artifact_id, produced_by) and moving produced_at: the inputs and their fingerprints (parallel, no NULL), the pass, the recipe (a JSON object with a boolean `deterministic`), the agent. Refuses a bad shape with a RAISE — a producer that cannot record its lineage must not commit its artifact either. Nine kinds since 151: chunks, entities, proposal, vector, metadata (061), section (064, a page section a machine wrote), relation (084, a judged relation between two thoughts), subject (111, a thought''s own subject) and part (151, a settled part of a pair of thoughts); the upsert clears 063''s mark (ob1:rerun-clears-the-mark). Migrations 061, 063, 064, 084, 111, 151 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306, SMD-4446.';
 
 COMMENT ON TABLE derivations IS
-  'Lineage for every derived artifact (SMD-1731, Phase 1b of SMD-1729): one row per artifact per producing pass, written in the transaction that writes the artifact. artifact_kind names the tier — chunks (a thought''s window set), entities (a thought''s extraction under one extraction_key), proposal (one supersession proposal), vector (a thought''s embedding), metadata (a thought''s capture-time tags), since 064 section (a page section a machine wrote — SMD-1812), since 084 relation (a judged relation between two thoughts, a `relation` facet — SMD-1873), since 111 subject (a thought''s own subject, a `subject` facet — SMD-3306), and since 148 part (a settled part of a pair of thoughts — SMD-4446); artifact_id is the thought''s id for the four keyed by a thought, the proposal''s id for a proposal, the section''s id for a section, the facet''s id for a relation or a subject, the part''s id for a part. input_ids and input_fingerprints are parallel arrays naming what the artifact was computed from and the text it was computed from — a row whose fingerprints no longer match its inputs'' is stale, which is a read (preflight counts them), not a trigger. produced_by is the pass; recipe is a JSON object carrying a boolean `deterministic` (what rebuild_derived reads, migration 063: a re-derivation the database owns against a re-run a worker owns) and the producer''s own record — model, prompt_version, prompt_hash, window parameters; `legacy: true` on a row 061 backfilled, `declared: false` where a caller sent no recipe. stale_since and stale_reason (063) carry a rebuild''s request for a re-run until the producer writes the row again. No foreign key: thoughts_drop_derivations, supersession_proposals_drop_derivation, page_sections_drop_derivations, thought_facets_drop_relation_derivation, thought_facets_drop_subject_derivation and settled_parts_drop_derivation drop the rows a deleted thought, proposal, section, relation, subject or part keyed; rebuild_derived deletes a row whose artifact is gone while its thought stands. Migrations 061, 063, 064, 084, 111, 148 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306, SMD-4446.';
+  'Lineage for every derived artifact (SMD-1731, Phase 1b of SMD-1729): one row per artifact per producing pass, written in the transaction that writes the artifact. artifact_kind names the tier — chunks (a thought''s window set), entities (a thought''s extraction under one extraction_key), proposal (one supersession proposal), vector (a thought''s embedding), metadata (a thought''s capture-time tags), since 064 section (a page section a machine wrote — SMD-1812), since 084 relation (a judged relation between two thoughts, a `relation` facet — SMD-1873), since 111 subject (a thought''s own subject, a `subject` facet — SMD-3306), and since 151 part (a settled part of a pair of thoughts — SMD-4446); artifact_id is the thought''s id for the four keyed by a thought, the proposal''s id for a proposal, the section''s id for a section, the facet''s id for a relation or a subject, the part''s id for a part. input_ids and input_fingerprints are parallel arrays naming what the artifact was computed from and the text it was computed from — a row whose fingerprints no longer match its inputs'' is stale, which is a read (preflight counts them), not a trigger. produced_by is the pass; recipe is a JSON object carrying a boolean `deterministic` (what rebuild_derived reads, migration 063: a re-derivation the database owns against a re-run a worker owns) and the producer''s own record — model, prompt_version, prompt_hash, window parameters; `legacy: true` on a row 061 backfilled, `declared: false` where a caller sent no recipe. stale_since and stale_reason (063) carry a rebuild''s request for a re-run until the producer writes the row again. No foreign key: thoughts_drop_derivations, supersession_proposals_drop_derivation, page_sections_drop_derivations, thought_facets_drop_relation_derivation, thought_facets_drop_subject_derivation and settled_parts_drop_derivation drop the rows a deleted thought, proposal, section, relation, subject or part keyed; rebuild_derived deletes a row whose artifact is gone while its thought stands. Migrations 061, 063, 064, 084, 111, 151 / SMD-1731, SMD-1732, SMD-1812, SMD-1873, SMD-3306, SMD-4446.';
 
 COMMENT ON FUNCTION ob1_stamp_proposal_reviewer() IS
-  'BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind on supersession_proposals (supersession_proposals_stamp_reviewer, 114): the one writer of the reviewer columns. reviewed_at NULL clears them; otherwise they are the envelope present (ob1.actor: its name, its agent in the server''s id form, and for an agent the registry''s kind), never the statement''s values. review_supersession_proposal sets the envelope from p_actor, so its accept and reject, and 067''s settle through it, are stamped with the key that decided; 067''s reopen clears them. Migration 114 / SMD-2608. Since 148 (SMD-4446) the same function stamps settled_parts (settled_parts_stamp_reviewer), whose three reviewer columns are these: review_settled_part sets the envelope from p_actor. On a part a later decision replaces them, with nothing when it carries no envelope, as a write of the note by hand does, and a status taken back by hand clears them; a part a later judgement replaces is another row, unreviewed.';
+  'BEFORE INSERT OR UPDATE OF status, reviewed_at, review_note, reviewed_by, reviewed_by_agent_id, reviewed_by_kind on supersession_proposals (supersession_proposals_stamp_reviewer, 114): the one writer of the reviewer columns. reviewed_at NULL clears them; otherwise they are the envelope present (ob1.actor: its name, its agent in the server''s id form, and for an agent the registry''s kind), never the statement''s values. review_supersession_proposal sets the envelope from p_actor, so its accept and reject, and 067''s settle through it, are stamped with the key that decided; 067''s reopen clears them. Migration 114 / SMD-2608. Since 151 (SMD-4446) the same function stamps settled_parts (settled_parts_stamp_reviewer), whose three reviewer columns are these: review_settled_part sets the envelope from p_actor. On a part a later decision replaces them, with nothing when it carries no envelope, as a write of the note by hand does, and a status taken back by hand clears them; a part a later judgement replaces is another row, unreviewed.';
 
 -- ---------------------------------------------------------------------------
 -- 3. The walk: 063's body verbatim, `part` in its kind order beside
@@ -631,7 +635,7 @@ BEGIN
     -- The lineage rows this frontier fed: one GIN probe (`&&`, array_ops).
     -- Kind order is the primitive's order of action, then the artifact and
     -- the pass — deterministic, so a cap truncates the same way twice.
-    -- 148: a part beside the proposal. A kind the order does not name
+    -- 151: a part beside the proposal. A kind the order does not name
     -- sorts after every kind it does, by artifact, and shares what the
     -- cap leaves: on a thought that fed 2,100 judged relations, 7 of 50
     -- parts went unwalked, and no later call reached them (SMD-4446,
@@ -681,7 +685,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION derivation_descendants(uuid, int, int) IS
-  'Walks `derivations` FORWARD from an input: every lineage row the input (and, level by level, the artifacts those rows produced) fed, with the row''s inputs, fingerprints, recipe and mark, at its depth; and the input''s derived_from children (025) as prose rows (artifact_kind thought, produced_by derived_from, prose true), listed once and not expanded. 026''s shape: an iterative level-by-level walk with a walk-global seen set, each node expanded once (a thought''s own rows name the thought — the self-loop the set guards); depth clamped 1..10 (default 3), rows capped 1..2000 (default 2000), the same order every time (kind, artifact, pass; since 148 a settled part beside the proposal, and a kind the order does not name after all it does). On the graph the producers write today the walk is one level deep; the clamps are for a producer that one day records an artifact fed by another artifact. Read by rebuild_derived, and by SMD-1734''s trust propagation. Migrations 063, 148 / SMD-1732, SMD-4446.';
+  'Walks `derivations` FORWARD from an input: every lineage row the input (and, level by level, the artifacts those rows produced) fed, with the row''s inputs, fingerprints, recipe and mark, at its depth; and the input''s derived_from children (025) as prose rows (artifact_kind thought, produced_by derived_from, prose true), listed once and not expanded. 026''s shape: an iterative level-by-level walk with a walk-global seen set, each node expanded once (a thought''s own rows name the thought — the self-loop the set guards); depth clamped 1..10 (default 3), rows capped 1..2000 (default 2000), the same order every time (kind, artifact, pass; since 151 a settled part beside the proposal, and a kind the order does not name after all it does). On the graph the producers write today the walk is one level deep; the clamps are for a producer that one day records an artifact fed by another artifact. Read by rebuild_derived, and by SMD-1734''s trust propagation. Migrations 063, 151 / SMD-1732, SMD-4446.';
 
 -- ---------------------------------------------------------------------------
 -- 4. record_settled_part — the pass's one write
@@ -789,7 +793,7 @@ BEGIN
   -- COMMITTED: a forget refuses above it, and db/rebuild.ts and the sleep
   -- scheduler's sweep run at their session's level, which is that unless
   -- the database or the role defaults higher (preflight's `transaction
-  -- isolation` row). rebuild_derived (067's body) has no guard of its own:
+  -- isolation` row). rebuild_derived (a carried body) has no guard of its own:
   -- one whose transaction is REPEATABLE READ or SERIALIZABLE, having waited
   -- here, reads the store as its transaction first saw it and misses the
   -- part, 20 times in 20 (review pass 3).
@@ -887,7 +891,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid) IS
-  'The consolidation pass''s one write of a settled part (148, SMD-4446): the pair, which thought holds the statement, the statement and the words of the other thought that show it, the word, the reason, the judge''s key, the fingerprint of each text as judged and the judge''s recipe. Refuses with a RAISE (invalid_parameter_value) a holder that is not older or newer, a word outside the eight settling labels, a statement or showing words missing, of white space alone or past 2000 characters, a reason so or past 1000, a missing key, fingerprint or recipe, and a pair that is one thought or lacks one; and (feature_not_supported) a call above READ COMMITTED. No refusal echoes an argument: a length is said. Three answers write nothing and are values. {ok: false, error: NOT_FOUND, older_gone, newer_gone} when either thought is not there as it reads them, said before a fingerprint is compared (a thought deleted by hand after that read fails the foreign key, whose error names the id alone). {ok: false, error: EDITED_SINCE, older_edited, newer_edited} when a fingerprint given is not its text''s as it stands: a judgement of a text that has moved is not recorded, and its caller is to put the thought back for its new text. {ok: true, action: stands, id, status}, the id and status of the row that already holds that statement of that thought on the pair, the statement read as 016''s fingerprint reads a text (case, runs of white space and white space at either end folded): a pending row at these fingerprints, or a decided row whatever its texts have done since (stale only where a status was moved by hand under the write: write again); that row is locked until the write''s transaction ends, nothing is written to it, and the judgement given is not recorded. Otherwise {ok: true, action: recorded, id, status: pending, replaced}: a new row, replaced being the id of the row it took the place of, or null. A row is one judgement, and none is written over another: an undecided row holding the statement that is no longer a judgement of these texts (stale, or pending at other fingerprints) is deleted with its lineage row and the judgement recorded as a new row. An undecided part''s id ends there, and a foreign key to it that does not let the reference go would refuse the write. The part''s lineage row (kind part) commits with it. It does not check that the words are in the texts, nor the pair''s order: the quote check is the pass''s (SMD-4442). Takes the supersession advisory lock, which a decision on a proposal or a part, a rebuild, delete_thought and forget_thought each take first, so that no rebuild at READ COMMITTED runs between its read of the two texts and its commit (rebuild_derived has no guard of its own, and one above READ COMMITTED that waited on the lock misses the part); it locks no thought''s row beyond its foreign keys'' key share, so no edit waits for it; the lock is held to the end of the caller''s transaction, so call it as a statement of its own, with no thought''s or claim''s row held when it is called and nothing awaited before the commit. Writes no thought. Migration 148 / SMD-4446.';
+  'The consolidation pass''s one write of a settled part (151, SMD-4446): the pair, which thought holds the statement, the statement and the words of the other thought that show it, the word, the reason, the judge''s key, the fingerprint of each text as judged and the judge''s recipe. Refuses with a RAISE (invalid_parameter_value) a holder that is not older or newer, a word outside the eight settling labels, a statement or showing words missing, of white space alone or past 2000 characters, a reason so or past 1000, a missing key, fingerprint or recipe, and a pair that is one thought or lacks one; and (feature_not_supported) a call above READ COMMITTED. No refusal echoes an argument: a length is said. Three answers write nothing and are values. {ok: false, error: NOT_FOUND, older_gone, newer_gone} when either thought is not there as it reads them, said before a fingerprint is compared (a thought deleted by hand after that read fails the foreign key, whose error names the id alone). {ok: false, error: EDITED_SINCE, older_edited, newer_edited} when a fingerprint given is not its text''s as it stands: a judgement of a text that has moved is not recorded, and its caller is to put the thought back for its new text. {ok: true, action: stands, id, status}, the id and status of the row that already holds that statement of that thought on the pair, the statement read as 016''s fingerprint reads a text (case, runs of white space and white space at either end folded): a pending row at these fingerprints, or a decided row whatever its texts have done since (stale only where a status was moved by hand under the write: write again); that row is locked until the write''s transaction ends, nothing is written to it, and the judgement given is not recorded. Otherwise {ok: true, action: recorded, id, status: pending, replaced}: a new row, replaced being the id of the row it took the place of, or null. A row is one judgement, and none is written over another: an undecided row holding the statement that is no longer a judgement of these texts (stale, or pending at other fingerprints) is deleted with its lineage row and the judgement recorded as a new row. An undecided part''s id ends there, and a foreign key to it that does not let the reference go would refuse the write. The part''s lineage row (kind part) commits with it. It does not check that the words are in the texts, nor the pair''s order: the quote check is the pass''s (SMD-4442). Takes the supersession advisory lock, which a decision on a proposal or a part, a rebuild, delete_thought and forget_thought each take first, so that no rebuild at READ COMMITTED runs between its read of the two texts and its commit (rebuild_derived has no guard of its own, and one above READ COMMITTED that waited on the lock misses the part); it locks no thought''s row beyond its foreign keys'' key share, so no edit waits for it; the lock is held to the end of the caller''s transaction, so call it as a statement of its own, with no thought''s or claim''s row held when it is called and nothing awaited before the commit. Writes no thought. Migration 151 / SMD-4446.';
 
 -- ---------------------------------------------------------------------------
 -- 5. review_settled_part — the reviewer's decision
@@ -1002,15 +1006,16 @@ END;
 $$;
 
 COMMENT ON FUNCTION review_settled_part(uuid, text, text, jsonb, boolean, text) IS
-  'The reviewer''s decision on one settled part (148, SMD-4446): accept or reject, with a note. Refuses, as values, each {ok: false, error, id}: NOT_FOUND, which is also the answer for the id of a part a later judgement has replaced (a row is one judgement: record_settled_part deletes an undecided row that is no longer a judgement of the texts as they stand, and records another); STALE_READ, with status, the row''s, when p_was is given and the row''s status is another (a second reviewer decided, or a rebuild set it stale, since the caller read it); ALREADY_ACCEPTED and ALREADY_REJECTED, for a decision that repeats the row''s status; EDITED_SINCE, with older_edited and newer_edited, for an accept when either text has moved since it was judged, unless p_force. A reject reads no text. A reviewer may reverse a decision, and may decide a stale row as one may a stale proposal: reject it, or accept it, which a moved text refuses unless p_force. The row keeps the last decision alone, its note or none with it. A forced accept is recorded as any accept is: the row says neither that it was forced nor at which texts. The decision asks no actor: made with no envelope, in a transaction and a session that set none, it names no reviewer. A decision that gives no p_was is made on the row in whatever status it stands, and p_was is the status alone: decisions in between that leave it as the caller read it are not seen. An acceptance updates the part''s own row and writes no thought: no supersedes pointer is set and nothing is demoted. p_actor is set on ob1.actor, from which settled_parts_stamp_reviewer stamps who decided. Raises (invalid_parameter_value) on a decision that is neither, or a p_was that is no status, without echoing either, and (feature_not_supported) above READ COMMITTED, where an accept that waited would read the texts as they were. Takes the supersession advisory lock, then the row, as review_supersession_proposal does. Returns {ok, id, status, was}. Migration 148 / SMD-4446.';
+  'The reviewer''s decision on one settled part (151, SMD-4446): accept or reject, with a note. Refuses, as values, each {ok: false, error, id}: NOT_FOUND, which is also the answer for the id of a part a later judgement has replaced (a row is one judgement: record_settled_part deletes an undecided row that is no longer a judgement of the texts as they stand, and records another); STALE_READ, with status, the row''s, when p_was is given and the row''s status is another (a second reviewer decided, or a rebuild set it stale, since the caller read it); ALREADY_ACCEPTED and ALREADY_REJECTED, for a decision that repeats the row''s status; EDITED_SINCE, with older_edited and newer_edited, for an accept when either text has moved since it was judged, unless p_force. A reject reads no text. A reviewer may reverse a decision, and may decide a stale row as one may a stale proposal: reject it, or accept it, which a moved text refuses unless p_force. The row keeps the last decision alone, its note or none with it. A forced accept is recorded as any accept is: the row says neither that it was forced nor at which texts. The decision asks no actor: made with no envelope, in a transaction and a session that set none, it names no reviewer. A decision that gives no p_was is made on the row in whatever status it stands, and p_was is the status alone: decisions in between that leave it as the caller read it are not seen. An acceptance updates the part''s own row and writes no thought: no supersedes pointer is set and nothing is demoted. p_actor is set on ob1.actor, from which settled_parts_stamp_reviewer stamps who decided. Raises (invalid_parameter_value) on a decision that is neither, or a p_was that is no status, without echoing either, and (feature_not_supported) above READ COMMITTED, where an accept that waited would read the texts as they were. Takes the supersession advisory lock, then the row, as review_supersession_proposal does. Returns {ok, id, status, was}. Migration 151 / SMD-4446.';
 
 -- ---------------------------------------------------------------------------
--- 6. The primitive: 067's body verbatim, the part beside the proposal. Four
---    places: the artifact's thought is not read for a part's row, as it is
---    not for a proposal's; a part's lineage row is an orphan when the part
---    is gone (a statement after the other kinds' CASE, not an arm of it);
---    it is counted for the cascade when the input leaves; and a moved text
---    stales a pending part.
+-- 6. The primitive: 150's body verbatim, which is 067's with the tags' arm
+--    feeding the re-tag pool (SMD-2298), and the part beside the proposal.
+--    Four places: the artifact's thought is not read for a part's row, as it
+--    is not for a proposal's; a part's lineage row is an orphan when the
+--    part is gone (a statement after the other kinds' CASE, not an arm of
+--    it); it is counted for the cascade when the input leaves; and a moved
+--    text stales a pending part.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION rebuild_derived(
   p_input        uuid,
@@ -1032,13 +1037,14 @@ DECLARE
   v_a            record;             -- the artifact's thought, per row
   v_a_found      boolean := false;
   v_p            record;             -- the proposal, per row
-  v_s            record;             -- the part, per row (148)
+  v_s            record;             -- the part, per row (151)
   v_row          record;             -- one walk row
   v_fp           text;               -- the input's current fingerprint
   v_cur          text;               -- the artifact's thought's current fingerprint
   v_cfg_model    text;
   v_cfg_dim      text;
   v_cfg_key      text;
+  v_cfg_retag    text;               -- 150: db/retag.ts's recorded key, the tags' pool; NULL where unset
   v_model        text;
   v_pool         text;
   v_snap_ok      boolean;            -- a usable snapshot row for the vector arm (no variable of the vector type: the body must run with pgvector off the search_path — db/test-search-path.ts)
@@ -1105,6 +1111,7 @@ BEGIN
   SELECT NULLIF(value, '') INTO v_cfg_model FROM ob1_config WHERE key = 'embedding_model';
   SELECT NULLIF(value, '') INTO v_cfg_dim   FROM ob1_config WHERE key = 'embedding_dim';
   SELECT NULLIF(value, '') INTO v_cfg_key   FROM ob1_config WHERE key = 'entity_extraction_key';
+  SELECT NULLIF(value, '') INTO v_cfg_retag FROM ob1_config WHERE key = 'retag_key';
 
   -- The input leaving: the snapshot fingerprints, computed while the input's
   -- own lineage rows still stand — its OWN position on each (a proposal's row
@@ -1161,7 +1168,7 @@ BEGIN
       WHEN 'metadata' THEN NOT v_a_found OR NOT COALESCE(v_a.metadata ? 'type' OR v_a.metadata ? 'topics', false)
       WHEN 'proposal' THEN NOT EXISTS (SELECT 1 FROM supersession_proposals p WHERE p.id = v_row.artifact_id)
       ELSE false END;
-    -- 148: a part's row, tested in a statement of its own. One arm more in
+    -- 151: a part's row, tested in a statement of its own. One arm more in
     -- the CASE above would have every caller's plan read settled_parts:
     -- under a generic plan Postgres checks each arm's table, whichever
     -- kind the row is, so a role without SELECT there was refused on
@@ -1238,7 +1245,7 @@ BEGIN
       CONTINUE;
     END IF;
     IF p_input_gone AND v_row.artifact_kind = 'part' THEN
-      -- 148: the part's own cascade takes it at the caller's row delete, and
+      -- 151: the part's own cascade takes it at the caller's row delete, and
       -- its lineage row goes by the part's drop trigger.
       v_casc_part := v_casc_part + 1;
       CONTINUE;
@@ -1411,7 +1418,7 @@ BEGIN
         SELECT s.id, s.status, s.newer_id, s.judge_key INTO v_s
           FROM settled_parts s WHERE s.id = v_row.artifact_id FOR UPDATE;
         -- ob1:a-moved-text-stales-its-parts - a CONTRACT SENTINEL (the 014
-        -- convention), read by db/test-schema.ts. 148: a pending part
+        -- convention), read by db/test-schema.ts. 151: a pending part
         -- quotes texts that have now moved, so it goes stale and its newer
         -- thought is queued again under the part's judge key; a part
         -- already stale is queued again and not counted again. A decided
@@ -1438,16 +1445,29 @@ BEGIN
         -- 064's generated page section (SMD-1812): no pool regenerates it —
         -- its generator calls write_page_section, whose lineage upsert
         -- clears the mark — so it is marked for the operator, as the tags
-        -- are. Before this file the row fell to the kept arm below, unmarked
+        -- were before 150. Before 067 the row fell to the kept arm below, unmarked
         -- and uncounted as waiting (067's post-merge review pass, run-it).
         UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
         v_marked   := v_marked + 1;
         v_unqueued := v_unqueued + 1;
       WHEN 'metadata' THEN
-        -- No pool re-tags a thought: marked for the operator, nothing more.
+        -- ob1:tags-requeued-under-retag-key — a CONTRACT SENTINEL, not prose
+        -- (the 014 convention). 150 (SMD-2298): marked, and handed to the
+        -- re-tag worker's pool when db/retag.ts has recorded its key
+        -- (ob1_config.retag_key), as the extraction arm hands an extract:
+        -- row to entity_extraction_key's; the worker's write settles the row
+        -- (148). With no key recorded, marked alone, unqueued, as before.
+        v_pool := v_cfg_retag;
         UPDATE derivations SET stale_since = COALESCE(stale_since, now()), stale_reason = COALESCE(stale_reason, p_reason) WHERE id = v_row.derivation_id;
-        v_marked   := v_marked + 1;
-        v_unqueued := v_unqueued + 1;
+        v_marked := v_marked + 1;
+        IF v_pool IS NULL THEN
+          v_unqueued := v_unqueued + 1;
+        ELSIF NOT ((v_pool || '|' || v_a.id::text) = ANY(v_claims)) THEN
+          PERFORM requeue_thought_work(v_pool, v_a.id);
+          v_claims := v_claims || (v_pool || '|' || v_a.id::text);
+          v_enqueued := v_enqueued + 1;
+          IF NOT (v_pool = ANY(v_pools)) THEN v_pools := v_pools || v_pool; END IF;
+        END IF;
       ELSE
         v_kept := v_kept + 1;
     END CASE;
@@ -1512,7 +1532,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION rebuild_derived(uuid, text, boolean, text[], boolean, boolean) IS
-  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the judge''s key — with stale_since/stale_reason set on the lineage row (marked; the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not), and for a pending settled part its status set stale and its newer thought queued under the part''s judge key (148; stale_parts; a part already stale is queued again and not counted again; a decided part is kept, a rejection included: nothing settles a part yet); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass, a person''s decision on a proposal and a decided part are kept; a generated page section (064) is marked with no pool, as the tags are; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals, the parts and the vector''s and tags'' rows counted for the cascade, as the walk saw them. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, stale_parts, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067, 148 / SMD-1732, SMD-2297, SMD-4446.';
+  'The one primitive over the lineage table (SMD-1732, Phase 1c of SMD-1729): walks `derivations` forward from p_input (derivation_descendants) and acts on every descendant. A row whose artifact is gone is deleted. With the input standing, a row whose inputs'' fingerprints moved (or p_force) is: re-derived when the database can — a vector whose current text has a snapshot row at the model, by ob1_refresh_thought_vector (rebuilt); otherwise handed to the worker that owns the recipe through requeue_thought_work under the worker''s current key — the reembed pool for a vector or the windows, the extraction key for an extract: pass, the re-tag key db/retag.ts recorded (ob1_config.retag_key) for the tags since 150 (SMD-2298), the judge''s key — with stale_since/stale_reason set on the lineage row (marked; with no re-tag key recorded the tags have no pool: unqueued; the first request standing is kept) — and, for a pending proposal or one the consolidation pass itself rejected (a review_note beginning ''settled by the pass:'', 067), its status set stale with reviewed_at and the note cleared (the status is the mark; stale_proposals; the next pass replaces the row when it finds the conflict again and settles it when it does not), and for a pending settled part its status set stale and its newer thought queued under the part''s judge key (151; stale_parts; a part already stale is queued again and not counted again; a decided part is kept, a rejection included: nothing settles a part yet); under p_force a vector whose text did not move, at the configured model, is re-recorded, not re-embedded (one at another model goes to the pool); a source: pass, a person''s decision on a proposal and a decided part are kept; a generated page section (064) is marked with no pool, as the tags were before 150; an unmoved row is current. With p_input_gone (SMD-1723''s forget, called BEFORE the row delete in its transaction): the windows, the input''s mentions and edges (entities locked first, orphans pruned) and their lineage rows are deleted, the snapshot rows at the input''s own fingerprints and p_fingerprints removed where no standing thought holds them, the proposals, the parts and the vector''s and tags'' rows counted for the cascade, as the walk saw them. derived_from children are listed as irreproducible. Refuses an empty reason; answers a replay with REPLAYING and a missing input with NOT_FOUND. Takes the supersession advisory lock, then the input''s row. With p_orphans_only (the sweep''s mode) only the orphan rule runs. Returns {ok, input, reason, input_gone, force, orphans_only, walked, depth, at_cap, rebuilt, enqueued, deleted, marked, unqueued, stale_proposals, stale_parts, kept, current, legacy, irreproducible, cascading, pools}. Migrations 063, 067, 150, 151 / SMD-1732, SMD-2297, SMD-2298, SMD-4446.';
 
 -- ---------------------------------------------------------------------------
 -- 7. supersession_proposals' grants, copied

@@ -2497,15 +2497,15 @@ export const ROLE_GRANTS = Object.freeze({
     // stays the worker group's (INSERT).
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "UPDATE"]), since: "029" }),
     // A settled part (SMD-4446) is listed and decided as a proposal is, by
-    // 148's SECURITY INVOKER review_settled_part, which updates the row as
+    // 151's SECURITY INVOKER review_settled_part, which updates the row as
     // the caller. No server code reads the table yet: the listing and the
-    // decision arrive with the ticket's review surfaces, and 148 carries
+    // decision arrive with the ticket's review surfaces, and 151 carries
     // this grant to the roles that hold the proposals' (SELECT and UPDATE
     // both) so those surfaces need no grant of their own. An accept reads both thoughts' texts, which is
     // the capture group's SELECT on `thoughts`: with this group alone a
     // reject is made and an accept refused there. Recording a part stays the
     // worker group's (INSERT, DELETE).
-    Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "UPDATE"]), since: "148" }),
+    Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "UPDATE"]), since: "151" }),
     // brain_info reads what became of the findings board-sync posted to the
     // board (SMD-2682). Soft as the rest: without it the Findings row says
     // the table is not readable by this role, and nothing else changes.
@@ -2537,13 +2537,13 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),           since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
     // The pass's settled parts (SMD-4446; consolidate.ts does not write them
-    // yet): 148's record_settled_part and review_settled_part run as the
+    // yet): 151's record_settled_part and review_settled_part run as the
     // caller, as 029's do, and rebuild_derived sets a part stale as it does
     // a proposal. DELETE, which the proposals' row above lacks: a part's row
     // is one judgement, so the write deletes an undecided row that is stale
     // or pending at other texts and records the new judgement as another
     // row, where 063 rewrites a stale proposal in place.
-    Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "148" }),
+    Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "151" }),
     // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
     // forget: the forget arm removes the snapshot rows at a leaving thought's
     // fingerprints — the one DELETE on 060's table, and this file's arm of the

@@ -49,7 +49,7 @@ const TABLES = [
   "extraction_progress",
   "thought_work_claims",
   "supersession_proposals",
-  // 148's settled parts (SMD-4446): two foreign keys to `thoughts`, so before it.
+  // 151's settled parts (SMD-4446): two foreign keys to `thoughts`, so before it.
   "settled_parts",
   "ob1_entity_edges",
   "thought_entities",
@@ -585,7 +585,7 @@ const FUNCTIONS = [
   "ob1_text_forgotten_at(text)",
   "ob1_forget_leftovers()",
   "ob1_forget_thought_body(uuid, jsonb, boolean)",
-  // 148 (SMD-4446): settled parts — the pass's write, the reviewer's decision, the guard on a part's judgement and
+  // 151 (SMD-4446): settled parts — the pass's write, the reviewer's decision, the guard on a part's judgement and
   // the lineage row's drop.
   "record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)",
   "review_settled_part(uuid, text, text, jsonb, boolean, text)",
