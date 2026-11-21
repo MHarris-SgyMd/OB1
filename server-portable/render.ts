@@ -3187,21 +3187,20 @@ const validityFoundLines = (t: ValidityFound): string[] => [
   ...t.validity.records.slice(0, TEXT_RECORDS).map(validityRecordLine),
   ...(t.validity.records.length > TEXT_RECORDS ? [`  validity: ${t.validity.records.length - TEXT_RECORDS} more record(s) (the value lists them)`] : []),
   ...newestFirst(t.review.records).slice(0, TEXT_RECORDS).map(reviewRecordLine),
-  ...(t.review.records.length > TEXT_RECORDS ? [`  review: ${t.review.records.length - TEXT_RECORDS} more (the value lists them)`] : []),
+  ...(t.review.records.length > TEXT_RECORDS ? [`  review: ${t.review.records.length - TEXT_RECORDS} more record(s) (the value lists them)`] : []),
   ...(orphanCount(t) ? [`  freshness: ${orphanCount(t)} lineage row(s) whose artifact is gone, not read (orphaned)`] : []),
   ...(t.unread.length ? [`  not read: ${t.unread.join(", ")}`] : []),
 ];
 const validityLines = (t: ValidityThought): string[] =>
   t.found ? validityFoundLines(t)
   : [`- ${t.id}: not a thought${t.forgotten === true ? `, forgotten${t.forgottenAt ? ` at ${t.forgottenAt}` : ""}` : t.forgotten === null ? " (whether it was forgotten was not read)" : ""}`];
-const validityRefusal = (r: Refusal) => `Refused: ${r.code}.`;
 
 export const renderValidity = (o: Outcome<ValidityResult, ValidityCode>): Reply => render(o, (v) =>
   [
     `${v.thoughts.length} thought(s) on three axes — validity, review, freshness (up to ${v.cap} ids a call). A judge's confidence is raw model output, ${UNCALIBRATED}.`,
     ...v.thoughts.flatMap(validityLines),
   ].join("\n"),
-  validityRefusal, AS_JSON);
+  unknownRefusal, AS_JSON);
 
 export const renderDeliverableHistory = (o: Outcome<DeliverableHistoryResult, DeliverableHistoryCode>): Reply => render(o, (v) =>
   [

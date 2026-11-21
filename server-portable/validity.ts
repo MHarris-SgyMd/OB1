@@ -4,7 +4,8 @@
 //
 // The axes' states are checked against the record's words, and an answer naming another throws: the server never
 // passes on a state it was not told of. The records behind each state ride as the database wrote them (the record's
-// "The shape" names their keys); the server reads none of them.
+// "The shape" names their keys); the server checks only that each
+// is an object, and puts a record's `at` in the API's timestamp form (review pass 2).
 
 import { isoTimestamp } from "./store.ts";
 
@@ -14,13 +15,17 @@ export const VALIDITY_STATES = ["superseded", "contested", "unresolved", "suppor
 export const REVIEW_STATES = ["pending", "decided", "checked", "unchecked", "none", "unknown"] as const;
 /** Freshness's states, worst first, then none and unknown (row 6). */
 export const FRESHNESS_STATES = ["stale", "requested", "legacy", "current", "none", "unknown"] as const;
-/** The cap on ids a call may ask for: 149's c_cap on distinct ids, held by the operation's schema on the list itself. */
+/**
+ * The cap on ids a call may ask for: 149's c_cap on distinct ids, held by the operation's schema on the list itself,
+ * since a REST request line carries some 400 ids before Bun refuses it (431), short of 149's raw bound of 1,000
+ * (review pass 1).
+ */
 export const VALIDITY_CAP = 100;
 
 export type ValidityState = (typeof VALIDITY_STATES)[number];
 export type ReviewState = (typeof REVIEW_STATES)[number];
 export type FreshnessState = (typeof FRESHNESS_STATES)[number];
-/** A record a state was read from, as the database wrote it. */
+/** A record a state was read from, as the database wrote it, its `at` in the API's form. */
 export type ValidityRecord = Record<string, unknown>;
 /** One freshness kind: its worst row's state, its producers, what moved under its stale rows, and whether no pool re-runs it. */
 export type FreshnessKind = { kind: string; state: FreshnessState; produced_by: string[]; moved: string[]; no_pool: boolean };

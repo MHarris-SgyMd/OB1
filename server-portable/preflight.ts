@@ -3358,8 +3358,8 @@ if (configFailed) {
         /**
          * Migration 149's validity read (SMD-3887 PR 2b): thought_validity under 149's signature, which the validity
          * tool calls, and which of the tables it reads the server's role may SELECT. A table it may not leaves the axes
-         * resting on it unknown, named in each answer's `unread`; thoughts itself faults the tool. Nothing to read
-         * before 149: a skip.
+         * resting on it unknown, named in each answer's `unread`; thoughts itself faults the tool. Before 149 a skip;
+         * the function missing where the ledger records 149, a failure, and where the role cannot read the ledger, a warning.
          */
         {
           const VALIDITY_TABLES = ["thoughts", "ob1_superseded_by", "supersession_proposals", "deliverable_events", "thought_facets", "derivations",

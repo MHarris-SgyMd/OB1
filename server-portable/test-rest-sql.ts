@@ -3898,7 +3898,7 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
   }
 }
 
-console.log("\n[28] The validity read through both doors (SMD-3887 PR 2b, migration 149): GET /v1/validity?ids=… and MCP validity, a read key's — a thought under a pending proposal contested, the other side unchallenged, both review pending, the judge's number uncalibrated, an unknown id found false, a repeat answered once in the order given; the text names each thought's three states; over 100 ids refused by the input's rule (REST 400 REFUSED_INPUT, MCP isError); a malformed id refused 400 by the schema; a capture-only key refused 403");
+console.log("\n[28] The validity read through both doors (SMD-3887 PR 2b, migration 149): GET /v1/validity?ids=… and MCP validity, a read key's — a thought under a pending proposal contested, the other side unchallenged, both review pending, the judge's number uncalibrated, an unknown id found false, a repeat answered once in the order given; the text names each thought's three states; a review record's time in the API's form; over 100 ids refused by the input's rule (REST 400 REFUSED_INPUT, MCP isError); a malformed id refused 400 by the schema; a capture-only key refused 403");
 {
   const ins = async (content: string) => String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, '{}'::jsonb) RETURNING id`)[0].id);
   const older = await ins("[28] validity: the deploy window is noon"), newer = await ins("[28] validity: the deploy window is nine");

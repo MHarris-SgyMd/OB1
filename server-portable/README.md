@@ -1716,7 +1716,7 @@ REST and MCP alike:
 - **It labels only.** No rank moves and no other read changes.
 - **The records keep the database's keys** (`superseded_by`, `checkpoint_reads`,
   `produced_by`), as the record's shape names them; a judge's number carries
-  `calibrated: false`.
+  `calibrated: false`, and a record's `at` is in the API's time form.
 - A server role that cannot read `thoughts` faults it. A role that cannot read another of
   its tables reads the axes resting on that table as `unknown`, naming it in `unread`.
   Preflight's `validity` row says which, and fails when the ledger records 149 but the
