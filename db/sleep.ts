@@ -230,14 +230,26 @@
  * which carry no model, re-embeds them in its first periods — one call a row,
  * a pause's abort setting the one in hand back — and the start line and
  * --dry-run count them (reembed.ts --dry-run before upgrading). The
- * extraction follower runs alone until its pool is drained — nothing
- * pending, in flight or not yet in the pool — because consolidation judges
- * a thought against neighbours that must be extracted first (consolidate.ts's
+ * extraction follower runs alone until no thought captured before the period
+ * began is left to extract — none pending or in flight without an entity
+ * under extraction's key, a write during the period dated today aside, and
+ * none not yet pooled (backlogCut, SMD-4468) — because consolidation judges a
+ * thought against neighbours that must be extracted first (consolidate.ts's
  * header; deploy/README.md's "Extraction alone on a backlog", a rule there
  * until now). The consolidation follower then joins it, beside it as the
  * coordinator's workers pass runs the two (SMD-2424): safe for what arrives
- * from then on, as a candidate was captured on an
- * earlier UTC date. It joins as well once extraction holds nothing but
+ * from then on, as a candidate was captured on an earlier UTC date (029) —
+ * but across 00:00 UTC, consolidate.ts's exception, and a write dated an
+ * earlier day landing after the join, which no read waits for. Until SMD-4468
+ * the join waited for extraction's whole pool, which seldom drained while
+ * writes kept arriving — 016's trigger pools each as it is written — so
+ * consolidation joined only at a poll that found it empty, mostly once they
+ * stopped. Where consolidation joins on the backlog, the subject sweep waits
+ * for the whole pool, below. A limit stands (review passes 1 and 2, the
+ * maintainer's choice to name it): a backlog thought a pause has taken is
+ * dated behind the captures since, as below, so while they come faster than
+ * extraction takes them it is not reached, and the join waits for it, as
+ * before. It joins as well once extraction holds nothing but
  * thoughts that SLEEP_STALLED_JOIN (3) or more long hard stops in a row took
  * with no window saved between, and none saved since (migration 093's
  * `stalled` and `gained`, SMD-2694; long: the thought held a minute,
@@ -283,8 +295,8 @@
  * named; read on the row once the scheduler is restarted after 101. A stalled
  * thought is tried in every period once consolidation's pool drains, and
  * finished by the first run between pauses long enough for it.
- * A brain before 093, or a role that cannot read it,
- * joins once extraction is drained alone, and the start says so; granted
+ * A brain before 093, or a role that cannot read it, joins once the backlog is
+ * extracted, never past a stalled thought, and the start says so; granted
  * later, the scheduler takes it up once restarted.
  * A failed row stays failed — the operator's --retry-failed.
  * Followers, not one-shot runs: a follower waits out a database restart or a
@@ -954,9 +966,12 @@ export const statementTimedOut = (e: unknown): boolean => (e as { errno?: unknow
  * restart — is no thought this one holds. `unlabelled`, re-embed's alone
  * (reembedBacklog's): of the unpooled, the vectors that carry no model.
  * `later`, the subject sweep's alone: its claims past the bound it is read
- * by, no work (subjectsPool).
+ * by, no work (subjectsPool). `backlogLeft`, extraction's alone, on a read
+ * asked for it and not claims-only: whether any thought backlogCut takes is
+ * pending or in flight, or any captured before the period is not yet pooled —
+ * what consolidation's join waits for (SMD-4468).
  */
-type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number; stalledPending: number; stalledRead: boolean; mine: number; stalledMine: number; unlabelled?: number; later?: number };
+type Pool = { pending: number; claimed: number; failed: number; unpooled: number; stalled: number; stalledPending: number; stalledRead: boolean; mine: number; stalledMine: number; unlabelled?: number; later?: number; backlogLeft?: boolean };
 /** Nothing for the pass to do: no row pending or in flight, and nothing to add. A failed row is the operator's. */
 const drained = (p: Pool): boolean => p.pending + p.claimed + p.unpooled === 0;
 /**
@@ -1059,12 +1074,41 @@ async function subjectsPool(sql: SQL, job: string, at: { bound?: string; mineSin
 }
 
 /**
+ * The thoughts consolidation's join waits for (SMD-4468, the maintainer's choices): captured before the period began
+ * (`since`, the database's clock) and not extracted. 029 pairs a thought only with thoughts captured on an earlier UTC
+ * date, so once these are extracted every neighbour of a thought captured since is, but across 00:00 UTC
+ * (consolidate.ts's exception) and a write dated an earlier day landing after the join, which no read waits for.
+ * A pooled thought that has an entity under extraction's key is extracted whatever its claim says: an edit pools it
+ * again (016), and it keeps its entities until its extraction replaces them — a neighbour meanwhile, board-sync's
+ * re-rendered tickets among them (review pass 3: the period's re-derive sweep runs orphans only, and clears none).
+ * Another key's entities count for nothing: after an extraction model's switch every thought carries the old key's
+ * until re-extracted, and consolidate.ts asks that such a backlog drain first (review pass 4: read by any entity, the
+ * join came at once and judged against the old model's for the whole re-extraction). One whose extraction found no
+ * entity counts. A write during the period dated today — board-sync's observation of the day, dated 00:00 UTC — is no
+ * neighbour of a thought captured since, and holds nothing back (review pass 2): pooled since the start and not dated
+ * ahead (a stopped thought set last, SMD-3008, stays backlog). That window also takes in today's thoughts that
+ * extraction's first pool, or stoppedLast's dating them now again, pools since the start: no one's neighbour either, so
+ * only the join's order beside them moves. One not yet pooled counts by its date alone: on a fresh brain or after a
+ * key's switch every thought is, and a per-row entity test across them cost 30 times main's read at 1M thoughts (review
+ * pass 3).
+ * Over `t`, a thoughts row, and `c`, its claim row under extraction's key.
+ */
+const backlogCut = (sql: SQL, since: string, job: string) =>
+  sql`t.created_at < ${since}::timestamptz AND NOT EXISTS (SELECT 1 FROM thought_entities te WHERE te.thought_id = t.id AND te.extraction_key = ${job})
+      AND NOT ((t.created_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date AND c.enqueued_at >= ${since}::timestamptz AND c.enqueued_at <= now())`;
+
+/**
  * A pass's pool, read as its own --status reads it: extraction's universe is
  * every thought (enqueue_thoughts adds those with no row under the key);
  * consolidation's is migration 029's consolidation_pool; the subject sweep's,
- * subjectsPool's.
+ * subjectsPool's. Extraction's with `backlogSince` (ISO text of the
+ * database's clock: a period's start), not claims only, carries
+ * `backlogLeft`: whether a thought captured before the period is still to
+ * extract, backlogCut's exceptions aside (SMD-4468): every neighbour of a
+ * thought captured since, and today's thoughts pooled before the period, so
+ * consolidation does not start beside a long thought of today's.
  */
-async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: string, unread?: (e: Error) => void, claimsOnly = false, mineSince?: Date): Promise<Pool> {
+async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: string, unread?: (e: Error) => void, claimsOnly = false, mineSince?: Date, backlogSince?: string): Promise<Pool> {
   if (pass === "subjects") return subjectsPool(sql, job, { mineSince });
   // Re-embed's is its own backlog read (reembed.ts): the rows pending or in
   // flight, and what a first pool would add — the thoughts not at the model,
@@ -1086,19 +1130,32 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
   // `claimsOnly` skips the thoughts not yet in the pool, a scan of every
   // thought for extraction: read every poll while consolidation waits on its
   // provider, where the capture trigger keeps it near nought (SMD-3008).
+  // The backlog (SMD-4468) in the same statement: its unpooled from the same
+  // scan, by date alone, and its claims an EXISTS over those pending or in
+  // flight, which stops at the first — the join reads only whether any is left
+  // (review pass 3: counted, a 10M backlog's read took seconds a poll). Not on a
+  // claims-only read, which no join reads, kept cheap (review pass 1).
+  const bounded = pass === "extract" && backlogSince !== undefined && !claimsOnly;
+  const before = bounded ? sql`t.created_at < ${backlogSince}::timestamptz` : sql`false`;
   const unpooled = claimsOnly
-    ? sql`SELECT 0`
+    ? sql`SELECT 0 AS n, 0 AS bn`
     : pass === "extract"
-    ? sql`SELECT count(*)::int FROM thoughts t WHERE NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${job})`
-    : sql`SELECT count(*)::int FROM consolidation_pool(${job})`;
+    ? sql`SELECT count(*)::int AS n, count(*) FILTER (WHERE ${before})::int AS bn FROM thoughts t WHERE NOT EXISTS (SELECT 1 FROM thought_work_claims c WHERE c.thought_id = t.id AND c.work_type = ${job})`
+    : sql`SELECT count(*)::int AS n, 0 AS bn FROM consolidation_pool(${job})`;
+  const backlogClaims = bounded
+    ? sql`SELECT EXISTS (SELECT 1 FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id
+                          WHERE c.work_type = ${job} AND c.status IN ('pending', 'claimed') AND ${backlogCut(sql, backlogSince, job)}) AS bl`
+    : sql`SELECT false AS bl`;
   const [by] = (await sql`
+    WITH u AS (${unpooled}), b AS (${backlogClaims})
     SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'claimed')::int AS claimed,
-           count(*) FILTER (WHERE status = 'failed')::int AS failed, (${unpooled}) AS n,
-           count(*) FILTER (WHERE status = 'claimed' AND starts_with(worker_id, ${MINE}) AND claimed_at >= ${since})::int AS mine
-      FROM thought_work_claims WHERE work_type = ${job}`) as { pending: number; claimed: number; failed: number; n: number; mine: number }[];
+           count(*) FILTER (WHERE status = 'failed')::int AS failed, (SELECT n FROM u) AS n, (SELECT bn FROM u) AS bn,
+           count(*) FILTER (WHERE status = 'claimed' AND starts_with(worker_id, ${MINE}) AND claimed_at >= ${since})::int AS mine,
+           (SELECT bl FROM b) AS bl
+      FROM thought_work_claims WHERE work_type = ${job}`) as { pending: number; claimed: number; failed: number; n: number; bn: number; mine: number; bl: boolean }[];
   // Read only where the start found 093's table readable (stalledUnder, the
   // windowing). One gone or refused since reads none stalled, said by the
-  // caller, so the scheduler joins once extraction drains rather than ends
+  // caller, so the scheduler joins once the backlog is extracted rather than ends
   // (review pass 2: the read ran inside reading(), which rethrows it).
   let s = 0, sp = 0, sm = 0, read = false;
   if (pass === "extract" && stalledUnder !== undefined) {
@@ -1116,7 +1173,8 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
       unread?.(e as Error);
     }
   }
-  return { pending: Number(by.pending), claimed: Number(by.claimed), failed: Number(by.failed), unpooled: Number(by.n), stalled: Number(s), stalledPending: Number(sp), stalledRead: read, mine: Number(by.mine), stalledMine: Number(sm) };
+  const whole: Pool = { pending: Number(by.pending), claimed: Number(by.claimed), failed: Number(by.failed), unpooled: Number(by.n), stalled: Number(s), stalledPending: Number(sp), stalledRead: read, mine: Number(by.mine), stalledMine: Number(sm) };
+  return bounded ? { ...whole, backlogLeft: by.bl === true || Number(by.bn) > 0 } : whole;
 }
 
 /**
@@ -1625,7 +1683,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // past a thought extraction holds only when it can tell one, and the row
   // names the held thoughts only then. Read once, as the query log's state is;
   // a brain before 093, or a role without the extraction group's grant on it,
-  // joins once extraction is drained, as before, and is told so once.
+  // joins once the backlog (backlogCut) is extracted, never past a stalled
+  // thought, and is told so once.
   // With it, whether 101's `cuts` is there to read (SMD-3060) — probed as the
   // held read resolves the table, unqualified: another schema's first on the
   // path lacks it too (review pass 3; board-findings.ts's rule).
@@ -1639,7 +1698,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const CUTS = progressRead.cuts;
   /** The windowing extraction runs under, which a kept row must match to speak for the thought: set only when the rows are readable. */
   const SIG = progressState === "yes" ? JSON.stringify(windowingFor(cfg)) : undefined;
-  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 093 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once extraction is drained, and a thought its stops hold back goes unnamed; a running scheduler takes it up once restarted`);
+  if (progressState !== "yes") err(`  extraction_progress: ${progressState === "missing" ? "no such table (migration 093 not applied)" : "this role cannot read it (the extraction group's grant)"} — consolidation joins only once the thoughts captured before the period began are extracted, never past a stalled one, and a thought its stops hold back goes unnamed; a running scheduler takes it up once restarted`);
   // The re-derive sweep's function (063) and this role's EXECUTE on it, read
   // once as the rest are (SMD-2679): without either the periods sweep nothing,
   // said once.
@@ -2145,7 +2204,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   // No read here: the first idle stamp reads them, as does a period's first poll.
   let saidStalled = false;
   const stalledUnread = (e: Error): void => {
-    if (!saidStalled && !seen.migration) err(`  could not read the stalled thoughts (${e.message}) — consolidation joins only once extraction is drained while it stays unreadable; every poll reads it again`);
+    if (!saidStalled && !seen.migration) err(`  could not read the stalled thoughts (${e.message}) — consolidation joins only once the thoughts captured before the period began are extracted, never past a stalled one, while it stays unreadable; every poll reads it again`);
     saidStalled = true;
   };
   /** The row's end, the held thoughts read first: an operator's hand run since may have finished one. */
@@ -2979,7 +3038,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   /**
    * A work period from `since` (SMD-3379 PR 1c-4b): the re-derive sweep, then re-embed
    * alone while it has work, for its share at most, re-embed and the claim passes then taking turns (SMD-4384),
-   * extraction alone until its pool drains,
+   * extraction alone until the thoughts captured before the period began are extracted (SMD-4468),
    * then consolidation beside it and the subject sweep beside that (SMD-3306
    * PR 6b-2), a live write pausing them. Returns one of:
    * "woken" on a live write during the re-derive sweep; "done" once its pools drain, or
@@ -3079,6 +3138,8 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     /** Whether the stopped thoughts can be moved behind newer work: a restart for it is no use otherwise. */
     let reorders = await stoppedLast();
     let consolidating = false;
+    /** Consolidation joined on the backlog alone: the subject sweep waits for extraction's whole pool (SMD-4468 review pass 2). */
+    let sweepWaits = false;
     /**
      * When the claim passes' turn began, on re-embed's clock (a pause not counted), null before their first; and when
      * re-embed's pool may next be read for their turn's end (SMD-4384 review pass 1, the maintainer's choice:
@@ -3104,8 +3165,12 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     let behindPolls = 0;
     let restartedAt = 0;
     const restartEvery = opts.restartEveryMs ?? RESTART_EVERY_MS;
-    /** Extraction's pool as this period reads it: 093's stalled read, this run's claims, the claims alone when asked. */
-    const extractPool = (claimsOnly = false) => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, claimsOnly, startedAt);
+    /**
+     * Extraction's pool as this period reads it: 093's stalled read, this run's claims, the claims alone when asked;
+     * and its backlog when asked, which consolidation's join waits for (SMD-4468, backlogCut) — the join's read alone
+     * (review pass 2: the others read the whole pool).
+     */
+    const extractPool = (claimsOnly = false, withBacklog = false) => poolOf(sql, "extract", JOBS.extract, SIG, stalledUnread, claimsOnly, startedAt, withBacklog ? usText(since.us) : undefined);
     /**
      * Extraction let out of the set-aside while consolidation waits for its
      * provider — at its start, or mid-pass (providerWait) — for the
@@ -3394,9 +3459,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
      * 113's into the named subject pool, so under an inflow one is always pending between their followers' polls, and
      * caught up only by an empty pool they never were — a vector waited out the whole turn. Of the passes running only
      * (review pass 3, cold read): consolidation's rows while it has not joined, or the subject sweep's before it
-     * starts, are no turn's work — under an inflow consolidation never joins — and another process's lease is not
-     * theirs. A thought dated ahead — a stopped thought set last, a sweep's set-back — is none either: it waits for
-     * the newer work by design. The subject sweep's by the period's bound, as claimsBusy reads it.
+     * starts, are no turn's work — under an inflow consolidation joins only once the backlog is extracted (SMD-4468) —
+     * and another process's lease is not theirs. A thought dated ahead — a stopped thought set last, a sweep's set-back
+     * — is none either: it waits for the newer work by design. The subject sweep's by the period's bound, as claimsBusy
+     * reads it.
      */
     const claimsBehind = async (): Promise<boolean> => {
       for (const pass of ["extract", "consolidate", "subjects"] as const) {
@@ -3796,7 +3862,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // The pools decide when consolidation joins, when extraction resumes
       // after it, and when one period is done — so a --follow consolidating
       // with extraction running reads none: the extraction pool's count is a
-      // scan of every thought.
+      // scan of every thought. (The subject sweep's wait after a join on the
+      // backlog reads extraction's claims a poll, below, and the pool whole only
+      // once they are empty: SMD-4468.)
       if (parked) {
         // A consolidation a statement held while extraction was parked drains
         // nothing: extraction resumes at once (N9; review pass 1 of PR 1c-4b).
@@ -3884,9 +3952,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
         else start("consolidate");
         consolidating = true;
       } else if (!consolidating) {
-        const pools = await reading(async () => ({ extract: await extractPool() }));
+        const pools = await reading(async () => ({ extract: await extractPool(false, true) }));
         if (pools === null) return stopped();
         behindPolls = queuesBehind(pools.extract) ? behindPolls + 1 : 0;
+        // What the join waits for (SMD-4468, the maintainer's choices): the thoughts captured before the period began
+        // not yet extracted, a write since dated today and an edit of a thought already extracted aside — backlogCut,
+        // which says why that is every neighbour of a thought captured since, and where it is not. Main's rule waited
+        // for the whole pool, which 016's trigger refills between polls; under an inflow it seldom drained, so
+        // consolidation joined mostly once the inflow stopped.
         if (drained(pools.extract) && statementHeld.has("consolidate") && !subjectsRuns()) {
           out("  the pools drained, consolidation held until a restart — the period ends");
           await stopPasses(false);
@@ -3896,6 +3969,14 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           out(statementHeld.has("consolidate") ? "  extraction drained, consolidation held until a restart — the subject sweep's turn" : "  extraction drained — consolidating beside it");
           start("consolidate");
           consolidating = true;
+        } else if (pools.extract.backlogLeft === false && !statementHeld.has("consolidate")) {
+          // The backlog done, today's thoughts still coming: consolidation joins; the subject sweep waits for the
+          // whole pool, as before (review pass 2, the maintainer's choice: its judge calls beside consolidation's
+          // slowed extraction on a model server of one slot while captures came).
+          out("  extraction has done the thoughts captured before the period began — consolidating beside it while it extracts the writes since");
+          start("consolidate");
+          consolidating = true;
+          sweepWaits = true;
         } else if (joinsPast(pools.extract) && !statementHeld.has("consolidate") && !running.some((r) => r.name === "extract" && r.settled)) {
           // (An extraction that ended by itself during the reads is the next
           // poll's to report, not the join's to swallow: review pass 6.)
@@ -3964,8 +4045,26 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           }
         }
       }
-      // The subject sweep beside consolidation once it has joined, started once a period (SMD-3306 PR 6b-2).
-      if (consolidating) startSweep();
+      // The subject sweep beside consolidation once it has joined, started once a period (SMD-3306 PR 6b-2) — once
+      // extraction's whole pool has drained, or a statement holds it, where consolidation joined on the backlog alone
+      // (SMD-4468 review pass 2, the maintainer's choice).
+      // Its claims read first each poll while extraction works (about 50 ms at 1M claims, review pass 4); the pool
+      // whole only once they are empty (review pass 3). A join past is read off the claims alone, since the trigger
+      // leaves none unpooled; otherwise it starts at the drain.
+      if (consolidating && sweepWaits && subjectsRuns() && sweepJob === null) {
+        if (statementHeld.has("extract")) sweepWaits = false;
+        else {
+          const claims = await reading(() => extractPool(true));
+          if (claims === null) return stopped();
+          if (joinsPast(claims)) sweepWaits = false;
+          else if (claims.pending + claims.claimed === 0) {
+            const ex = await reading(() => extractPool());
+            if (ex === null) return stopped();
+            if (drained(ex)) sweepWaits = false;
+          }
+        }
+      }
+      if (consolidating && !sweepWaits) startSweep();
       await sleepUnless(POLL * 1000, wake);
     }
   };
