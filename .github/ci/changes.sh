@@ -495,8 +495,9 @@ answer() {
 
 self_check() {
   local dir fails=0 expect event got v
-  # The caller's, under which a case that expects no lists would fetch main's, or read another's.
-  unset GH_TOKEN READS_MAP_DIR
+  # The caller's, under which a case that expects no lists would fetch main's, or read another's, and
+  # every case's answer would go on the run's own summary page (79 lines of them, on repo-consistency's).
+  unset GH_TOKEN READS_MAP_DIR GITHUB_STEP_SUMMARY
   # git exports GIT_DIR and its like to whatever it runs, a hook above all, and
   # under them the scratch repository's commits would land on the caller's
   # branch (reads.sh's self-check has a case for its own; SMD-2435 PR 3b-1).
