@@ -86,6 +86,10 @@
       "scope": "read"
     },
     {
+      "name": "validity",
+      "scope": "read"
+    },
+    {
       "name": "agenda",
       "scope": "read"
     },

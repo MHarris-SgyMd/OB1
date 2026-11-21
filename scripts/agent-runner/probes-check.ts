@@ -374,6 +374,8 @@ const res = { type: "user", message: { content: [{ type: "tool_result", tool_use
 if (scenario === "turn-first") {
   out(use);
   await Bun.sleep(30000);
+} else if (scenario === "result-first") {
+  out({ type: "result", subtype: "error_during_execution", is_error: true, num_turns: 0, result: "not a report", startup_failure_reason: "sandbox_required_unavailable", errors: ["Sandbox required but unavailable: the settings failed validation"] });
 } else if (scenario === "bad-init") {
   out({ ...init, permissionMode: "default" });
   await Bun.sleep(30000);
@@ -384,6 +386,9 @@ if (scenario === "turn-first") {
     appendFileSync(record + "/guard-worker.log", JSON.stringify({ id: "t1", decision: "pass" }) + "\\n");
     out(res);
     out({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0.01, permission_denials: [] });
+  } else if (scenario === "api-error") {
+    // The result measured on 2.1.329 when the API answered 401 to the session's key (SMD-4490).
+    out({ type: "result", subtype: "success", is_error: true, num_turns: 1, total_cost_usd: 0, permission_denials: [], terminal_reason: "api_error", api_error_status: 401, result: "Invalid API key" });
   } else if (scenario === "unlogged") {
     out(use);
     out(res);
@@ -443,6 +448,17 @@ if (scenario === "turn-first") {
         clean();
         const turnFirst = await runSession(spec(), deps);
         await ok(() => turnFirst.ended === "init" && turnFirst.why.includes("before the init"), "a turn before the init ends the session");
+        // Claude Code 2.1.329 refuses a profile that fails validation with one error result and no init event (SMD-4489).
+        scenario("result-first");
+        clean();
+        const resultFirst = await runSession(spec(), deps);
+        await ok(() => resultFirst.ended === "init" && resultFirst.why.includes("before its init event") && resultFirst.why.includes("sandbox_required_unavailable") && resultFirst.why.includes("failed validation"), "a result before the init is a session that never started: it ends as init, with the startup failure's reason and first error");
+        await ok(() => resultFirst.report === "" && resultFirst.calls.length === 0 && resultFirst.results.length === 0, "and its text is not taken as a report");
+        // An API error ends the session with a result after a normal init (SMD-4490). session.ts keeps what run.ts reads to tell it from a session that finished.
+        scenario("api-error");
+        clean();
+        const apiError = await runSession(spec(), deps);
+        await ok(() => apiError.ended === "result" && apiError.result?.subtype === "success" && apiError.result?.isError === true && apiError.result?.terminalReason === "api_error" && apiError.result?.apiErrorStatus === 401, "a result that is an API error keeps its error flag, its terminal reason and the API's status");
         scenario("unlogged");
         clean();
         const unlogged = await runSession(spec(), deps);

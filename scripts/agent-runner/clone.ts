@@ -13,6 +13,7 @@
  */
 
 import { GitRun } from "./gate.ts";
+import { oneLine } from "./text.ts";
 
 export type CloneInput = {
   /** The runner's bare repository to clone from. */
@@ -31,19 +32,13 @@ export type CloneInput = {
 
 export type CloneResult = { ok: boolean; problem: string | null };
 
-/** Trim and shorten git's stderr for a problem message. */
-const detail = (stderr: string): string => {
-  const s = stderr.replace(/\s+/g, " ").trim();
-  return s.length > 200 ? `${s.slice(0, 199)}…` : s;
-};
-
 /**
  * Clones the bare repository into `dest`, copies the objects (no hard links), puts the clone at `base` on `branch`, and
  * sets the bot identity with signing off. Returns the first step that failed, or ok. It writes nothing but through git.
  */
 export function prepareClone(input: CloneInput): CloneResult {
   const { bareRepo, base, branch, dest, bot, git } = input;
-  const fail = (what: string, stderr: string): CloneResult => ({ ok: false, problem: `${what} failed: ${detail(stderr)}` });
+  const fail = (what: string, stderr: string): CloneResult => ({ ok: false, problem: `${what} failed: ${oneLine(stderr)}` });
 
   const clone = git(["clone", "--no-hardlinks", "--quiet", bareRepo, dest]);
   if (clone.code !== 0) return fail("git clone", clone.stderr);

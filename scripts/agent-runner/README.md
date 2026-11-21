@@ -100,7 +100,7 @@ The runner acts as itself, never as the maintainer: its own agent-kind brain key
 bun scripts/agent-runner/setup.ts dirs                      # make the directory (0700), idempotent
 bun scripts/agent-runner/setup.ts install linear            # copy the key first; this reads it from the clipboard (pbpaste)
 bun scripts/agent-runner/setup.ts install brain --stdin     # or read the key from stdin
-bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork)
+bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork); the probe stamp's binary and install
 bun scripts/agent-runner/setup.ts check-github <bot-login>  # the fork exists and the bot cannot push here (needs gh)
 ```
 
@@ -181,10 +181,15 @@ Each runner session, the worker's and the review's, runs inside the five layers 
   * a tool result answers a call the guard never logged;
   * the time limit runs out.
 * **`probes.ts`:** the probes. **`mock-api.ts`** is their stand-in for the Messages API. **`probes-check.ts`** is the offline self-check.
+* **Helpers the whole runner shares (SMD-4325).** Each has one definition, and the rest of the runner imports it.
+  * In files hashed into the probe stamp, so an edit to one voids it: **`guard.ts`** has `isObject` (an array is not one, in a claim reply too), `codePointName`, `printable` and `shownText`; **`session.ts`** has the no-follow file read and write.
+  * Outside the stamp: **`text.ts`** has the one-line cut and `maskTokens`, the one mask for a claim token (`wc_…` and the markdown-escaped `wc\_…`); **`facts.ts`** has `jsonOf` and `NOT_JSON`; **`fixture-git.ts`** has the git the self-checks build fixtures with.
 
 ```bash
-shasum -a 256 ~/.local/share/claude/versions/2.1.319                                  # the version to pin's checksum (cut 2b runs a copy in the install)
-bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.319
+bun scripts/agent-runner/setup.ts claude ~/.local/share/claude/versions/2.1.329       # the runner's own copy; prints --claude --sha256 --version
+bun scripts/agent-runner/setup.ts checkout                                            # the runner's own checkout, at the main checkout's origin/main
+cd ~/.local/share/open-brain/agent-runner/install                                     # the probes and a run start from the install
+bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.329 --main-checkout ~/Projects/OB1
 bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts … --state <dir> --only init,keychain --main-checkout ~/Projects/OB1
 bun scripts/agent-runner/probes.ts --self-check                                       # offline, no Claude Code; CI runs it
 ```
@@ -217,7 +222,22 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 * **Grep and Glob don't follow a link out of the clone.**
 * **Claude Code sets two credentials for a command itself.** One is the token of its messaging socket, which the sandbox blocks. The other is its sandbox proxy's login, and the proxy refuses every host. Neither is the runner's.
 
-One probe waits for cut 2c: a session given the brief gets past CLAUDE.md step 1. It needs the brief (2b) and a model (2c).
+**What they found on 2.1.329** (2026-11-20, SMD-4489). The pin moved here: Claude Code's updater had pruned 2.1.319 from `~/.local/share/claude/versions`, and the stamp names the binary's path. So the pinned binary is now a copy in the runner's own directory, `~/.local/share/open-brain/agent-runner/claude/2.1.329`, and `--claude` is given that path, for the probes and for a run. All 35 pass, after one change:
+
+* **Claude Code refuses to start on a profile that fails validation.** Given `sandbox.enabled: "yes"`, 2.1.319 started and the init check ended the session. 2.1.329 emits no init event, only one error result (`error_during_execution`, `startup_failure_reason: sandbox_required_unavailable`), and exits. `session.ts` took that for a session that ended with its result. A result before any init now ends the session as `init`, with the result's subtype, its startup failure reason and its first error as the reason, and its text is not taken as a report.
+* The other 34 probes passed unchanged. Their notes on 2.1.329: a call asking for `dangerouslyDisableSandbox` runs sandboxed; Claude Code sets `ANTHROPIC_BASE_URL`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLOUDSDK_PROXY_USERNAME` and `CLOUDSDK_PROXY_PASSWORD` itself; an Edit of `CLAUDE.md` goes through with the guard off. The 2.1.319 sweep's records kept each probe's pass, not its notes, so the notes are not compared.
+
+**The brief probe passes on 2.1.329** (2026-11-20): the worker got past CLAUDE.md step 1 and edited the clone, in 17 turns for $0.21. The guard refused three of its sixteen calls, each for the command's shape (an `&`, a `git bundle` form other than `create`, an `ls`), none for a tool input it didn't know. A first try that day reached no model: the API answered 401 to the runner's Anthropic key, which the maintainer then replaced.
+
+**The stamp names two paths, and `setup.ts` makes both** (SMD-4491). A run starts only under a stamp whose Claude Code and whose checkout are still there and still as probed. Both were lost once: the binary to Claude Code's updater, the checkout to a worktree's removal.
+
+* **`setup.ts claude <path>`** copies that binary to `~/.local/share/open-brain/agent-runner/claude/<version>` (0500, in a 0700 directory), asking the binary its own version. It prints the three flags the probes and a run take. The same bytes again are left alone; other bytes under a version already there are refused, since a stamp may name the copy.
+* **`setup.ts checkout [--commit <sha>]`** makes `~/.local/share/open-brain/agent-runner/install`: a clone of the runner's bare repository on a detached HEAD, at the main checkout's `origin/main` unless a commit is given. Only a commit of main is taken: the bare repository also holds the branches sessions wrote, and the install is the code that holds a session. No task works in it. Run again, it moves the install to the newer commit, names each probed file the move changed, and prints what the stamp makes of the install as it now is, read from the files: when that says a file differs, the probe sweep runs again from the install. A checkout with changes of its own is refused.
+* **`setup.ts verify`** and **`live-run.ts --plan`** say what the stamp makes of both, before a run is tried: a binary gone or changed, an install gone, each probed file that differs, a run started from another checkout, a new Bun, git or macOS build.
+
+**From the install, give the sweep `--main-checkout`.** It defaults to the checkout the probes run from, which was the maintainer's own tree while they ran from a worktree of it. From the install that default is the install, and the probe that a session can't read the maintainer's checkout would test the wrong directory.
+
+Until the install is made and probed, the stamp names the checkout the last sweep ran from, and a run starts from there.
 
 ## The live run (`live-run.ts`)
 
@@ -236,6 +256,20 @@ On a run that passed the gate, the runner publishes as the bot (cut 3a is the lo
 * **`publish`** runs the sequence over an injected GitHub client: step 8's renew with the day lease to confirm the claim — published only on a clean renewal, else the publish is left owed (a retryable refusal) or the ticket handed to a person (it closed, or another claim took the work) — then the push to the bot's fork, the draft PR, the record of its number, the PR-link comment on the ticket (a Linear outage leaves the comment owed), and the claim's lease set to a week now the PR is open. It never throws.
 
 The real GitHub client (the push, the REST call that opens the PR), `publish` wired into the live run, and step 0's reconcile are cut 3b; the launchd schedule is 3c. Both need SMD-4089's GitHub identity, and the schedule needs SMD-3606.
+
+## How a run reads a session's ending (`run.ts`, SMD-4490)
+
+Claude Code ends a session it could not finish with a result too, so a result alone is not a session that finished. A session finished only if its result is a plain success: subtype `success` with `is_error` false. `sessionEnding` reads anything else by kind, and the run acts on it:
+
+| The session's ending | Worker | Review | Resumed worker |
+| --- | --- | --- | --- |
+| The API did not answer, before any tool call: no status, 401, 403, 408, 429, 500 and up | environment failure, the label kept | no findings, no resume | the pre-resume branch kept |
+| The API refused the request, before any tool call: any other status | work failure | no findings, no resume | the pre-resume branch kept |
+| An API error after a tool call | work failure | no findings, no resume | the pre-resume branch kept |
+| The turn or budget limit | work failure | no findings, no resume | the pre-resume branch kept |
+| Any other result that is not a plain success | work failure | no findings, no resume | the pre-resume branch kept |
+
+A worker's bundle is imported only when it finished. A review that did not finish does not stop the run: the note says so, and the PR body says the branch was not reviewed. The run's record names the kind (`api-error`, `limit`, `error-result`) as the session's ending. A note carries the runner's words, the result's subtype and the API's status, never the result's text.
 
 ## Cuts still to come
 

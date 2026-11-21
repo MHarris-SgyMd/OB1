@@ -33,11 +33,11 @@ type FetchScenario = {
 };
 
 /** A stubbed fetch for claims.ts that records every request, so a test asserts the order and that a step didn't run. */
-function stubFetch(s: FetchScenario, seq: string[] = []): { fetch: Fetch; calls: { url: string; method: string }[] } {
-  const calls: { url: string; method: string }[] = [];
+function stubFetch(s: FetchScenario, seq: string[] = []): { fetch: Fetch; calls: { url: string; method: string; body: string }[] } {
+  const calls: { url: string; method: string; body: string }[] = [];
   const fetch: Fetch = async (url, init) => {
     const method = (init?.method as string | undefined) ?? "GET";
-    calls.push({ url, method });
+    calls.push({ url, method, body: typeof init?.body === "string" ? init.body : "" });
     seq.push(url.endsWith("/v1/brain") ? "brain" : url.includes("/release") ? "release" : url.endsWith("/v1/claims") ? "claim" : "fetch?");
     const resp = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
     if (url.endsWith("/v1/brain")) {
@@ -265,6 +265,14 @@ export async function selfCheck(): Promise<number> {
       ok(r.ran && r.outcome === "work-failure", "a run() throw is handled as a work failure");
       ok(r.handedBack && r.released === "released", "the ticket is handed back and the claim released");
       ok(!existsSync(tokenPath(dir)), "the token is deleted — the claim is not orphaned");
+      // The error's words go into the release's reason: a token in them is masked, its markdown-escaped form too (SMD-4325).
+      const leaky = stubFetch({ brain: "stable", claim: "claimed", release: "released" });
+      const leak = async (): Promise<RunResult> => {
+        throw new Error(`could not write wc_${"e".repeat(64)} nor wc\\_${"f".repeat(64)}`);
+      };
+      await liveRun({ leaseSeconds: 86400, claimLabel: "runner", runInput, cfg: CFG, deps: { ...deps, fetch: leaky.fetch, runnerDir: join(root, "throw-leak"), run: leak } });
+      const reason = leaky.calls.find((c) => c.url.includes("/release"))?.body ?? "";
+      ok(reason.includes("errored before finishing") && !reason.includes("e".repeat(10)) && !reason.includes("f".repeat(10)), "a claim token in the error's words, plain or markdown-escaped, is masked in the release's reason");
     });
 
     await section("the hand-back comment is computed and carries no token", () => {
@@ -272,6 +280,9 @@ export async function selfCheck(): Promise<number> {
       ok(body.includes("passed the gate") && body.includes("agent/smd-9-x") && body.includes("not pushed"), "the pass comment names the outcome, branch and no-push");
       const worky = handbackComment(fakeResult("work-failure"));
       ok(worky.includes("work failure") && worky.includes("branch"), "the work-failure comment names the failed gate check");
+      const tokened = fakeResult(null);
+      tokened.record.branch = `agent/wc\\_${"e".repeat(64)}`;
+      ok(!handbackComment(tokened).includes("e".repeat(10)), "a claim token in its markdown-escaped form, wc\\_…, is masked in the comment too");
       return Promise.resolve();
     });
   } finally {

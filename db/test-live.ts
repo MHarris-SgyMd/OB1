@@ -66,7 +66,9 @@ import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT
 import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PART_RULE, RECORD_RULE } from "../server-portable/consolidate-decide.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe } from "../server-portable/lineage.ts";
-import { metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
+import { METADATA_PROMPT_VERSION, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
+import { run as runRetag, type RetagOptions } from "./retag.ts";
+import { parseRetagKey, retagKey } from "./config.mjs";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { identityHash, readForgottenIdentities } from "./ingest-structure.ts";
@@ -180,7 +182,7 @@ if (!URL_) {
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["5d", "10g", "26", "37b", "38"],
+  sleep: ["5d", "10g", "26", "37b", "38", "38c"],
   long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
   sweep: ["38s", "50", "51", "38p"],
@@ -23737,252 +23739,349 @@ if (want("27")) {
 }
 
 if (want("29")) {
-  console.log("\n[29] recipes/thought-enrichment's enrich-thoughts on the SQL shim: the enrichment writes a stub model's answer as metadata objects and checkpoints, a refused write ends a run on its first row, a role granted the README's privileges writes, and no URL or a Supabase URL is one line naming no value (SMD-2139; the type and sensitivity backfills are db/backfill-metadata.ts, [51], SMD-3318)");
-  // The enrichment script SMD-2126 sent to compat/supabase-sql — the class's
-  // first writers, its two backfills since db/backfill-metadata.ts ([51],
-  // SMD-3318 PR 3a) — driven as deployed: `bun <file>` in a directory
-  // of their own, SUPABASE_URL the one variable beyond PATH and HOME, against
-  // this database carrying enhanced-thoughts ([18] left the columns;
-  // the file is idempotent). The planted table is the truth every printed
-  // count is held to, and a snapshot of every row's content, fingerprint and
-  // model label is what the writes are held away from. The enrichment's model
-  // is a Bun.serve stub on the loopback that answers one classification for
-  // every request and counts them — OPENROUTER_BASE_URL is the port's own
-  // seam — so the apply path runs without a key and without a byte leaving
-  // the machine. The scripts read `.env.local` from THEIR OWN directory (the
-  // recipe's, not the cwd — `--no-env-file` stops Bun's loader, not theirs),
-  // so on a machine where a developer keeps one there the no-URL refusals,
-  // which that file would defeat, are skipped by name; every other run puts its
-  // URL in the environment, which the scripts prefer. CI has no such file. The
-  // enrichment's checkpoint goes under ENRICH_STATE_DIR in the scratch, never
-  // the recipe's own data/ (an operator's checkpoint there is left as found —
-  // held by its mtime; review pass 1, cold read).
-  const sql = new SQL({ url: URL_, max: 2 });
-  const catalog27 = async () => ({
-    tables: new Set(((await sql`SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
-    views: new Set(((await sql`SELECT viewname AS n FROM pg_views WHERE schemaname = 'public'`) as { n: string }[]).map((r) => r.n)),
-    fns: new Set(((await sql`SELECT p.oid::regprocedure::text AS n FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace`) as { n: string }[]).map((r) => r.n)),
-  });
-  const before27 = await catalog27();
-  const RECIPE = join(CONTRIB_DIR, "recipes", "thought-enrichment");
-  const scratch = join(tmpdir(), `ob1-live-2139-${process.pid}`);
-  mkdirSync(scratch, { recursive: true });
-  const env = (extra: Record<string, string>) => ({ PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", ...extra });
-  const script = (file: string, extra: Record<string, string>, ...flags: string[]) => runScript(["bun", join(RECIPE, file), ...flags], { cwd: scratch, env: env(extra) });
-  const firstLine = (s: string) => s.trim().split("\n")[0] ?? "";
-  const errorLine = (s: string) => s.split("\n").find((l) => l.startsWith("ERROR:")) ?? firstLine(s);
-  /** Exactly one ERROR line on stderr and no stack frame: the shape every refusal is held to (a second ERROR line, or a retry ladder's lines, fail it). */
-  const errorLines = (s: string) => (s.match(/^ERROR:/gm) ?? []).length;
-  const oneLine = (r: { code: number; out: string }, re: RegExp) => r.code === 1 && re.test(r.out) && !/\n\s+at /.test(r.out) && errorLines(r.out) === 1;
-  const recipeEnvFile = existsSync(join(RECIPE, ".env.local")) ? "recipes/thought-enrichment/.env.local" : null;
-  // The model: a fixed answer, the requests counted, the last body kept for the prompt's shape.
-  let stubCalls = 0;
-  let stubBody = "";
-  const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
-    stubCalls++;
-    stubBody = await req.text();
-    const content = JSON.stringify({ type: "task", summary: "stub summary", topics: ["stub"], tags: ["t"], people: ["Ada"], action_items: ["do it"], confidence: 0.9, importance: 4, detected_source_type: "generic_import" });
-    return Response.json({ choices: [{ message: { content } }] });
-  } });
-  const stateEnv = { ENRICH_STATE_DIR: join(scratch, "state") };
-  const statePath = join(scratch, "state", "enrichment-state.json");
-  const model = { OPENROUTER_API_KEY: "stub", OPENROUTER_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, ...stateEnv };
-  const recipeState = join(RECIPE, "data", "enrichment-state.json");
-  const recipeStateBefore = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
-  /** The blank row's id: the lowest uuid, so the enrichment meets it first on every run (review pass 1, cold read — a random id made the dry run's call count a coin toss). */
-  const BLANK_ID = "00000000-0000-0000-0000-000000000001";
-  const ENRICH_FLAGS = ["--provider", "openrouter", "--model", "stub-model", "--max-calls", "10000"];
-  try {
-    await sql`DELETE FROM thoughts`;
-    await sql.unsafe(readFileSync(join(SCHEMAS_DIR, "enhanced-thoughts/schema.sql"), "utf8"));
-    // Thirteen rows, every type 'reference': one of whitespace alone, the
-    // enrichment's no-model path, at the lowest id so it is the first row every
-    // enrichment run meets. Fingerprint and model label set
-    // so the writes can be held away from them (a raw insert leaves both NULL
-    // otherwise).
-    await sql.unsafe(`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model)
-      SELECT COALESCE(i::uuid, gen_random_uuid()), c, m::jsonb, 'reference', t, content_fingerprint_of(c), 'planted-model' FROM (VALUES
-        ('00000000-0000-0000-0000-000000000002', 'a decision was made about the venue', '{"type":"decision","source":"notes"}', 'standard'),
-        ('ffffffff-ffff-ffff-ffff-fffffffffff1', 'a lesson learned about batching', '{"type":"lesson"}', NULL),
-        ('ffffffff-ffff-ffff-ffff-fffffffffff2', 'the standup, three of us', '{"type":"meeting"}', ''),
-        ('ffffffff-ffff-ffff-ffff-fffffffffff3', 'tonight I wrote about the week', '{"type":"journal"}', 'standard'),
-        (NULL, 'bogus type row', '{"type":"bogus"}', ''),
-        (NULL, 'no type key here', '{}', 'standard'),
-        (NULL, 'already reference', '{"type":"reference"}', 'standard'),
-        (NULL, 'SSN 123-45-6789 appears in this text', '{}', 'standard'),
-        (NULL, 'SSN 987-65-4321 on the form, took 50 mg after', '{}', 'standard'),
-        (NULL, 'took metoprolol 50 mg today', '{}', NULL),
-        (NULL, 'blood pressure 120 over 80 this morning', '{}', ''),
-        (NULL, 'already personal, glucose 110 this morning', '{}', 'personal')
-      ) v(i, c, m, t)`);
-    await sql`INSERT INTO thoughts (id, content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES (${BLANK_ID}::uuid, '   ', '{}', 'reference', 'standard', content_fingerprint_of('   '), 'planted-model')`;
-    const N = 13;
-    type Snap = { id: string; content: string; fp: string | null; em: string | null; metadata: Record<string, unknown> };
-    const snapshot = async () => (await sql`SELECT id::text AS id, content, content_fingerprint AS fp, embedding_model AS em, metadata FROM thoughts ORDER BY id`) as Snap[];
-    const planted = await snapshot();
-    const [truth] = (await sql`SELECT count(*)::int AS total, count(*) FILTER (WHERE type = 'reference')::int AS refs,
-      count(*) FILTER (WHERE content_fingerprint IS NULL OR embedding_model IS NULL)::int AS bare FROM thoughts`) as { total: number; refs: number; bare: number }[];
-    assert(truth.total === N && truth.refs === N && truth.bare === 0 && planted.length === N,
-      `the planted table: ${N} rows of type 'reference', every row with a fingerprint and a model label (${JSON.stringify(truth)})`);
-
-
-    // A refused write ends the run on its first row: a LOGIN role with SELECT on thoughts alone reads the page and is
-    // refused the update — 42501, exit 1, no row changed — where the REST form counted a 403 and went on (the type
-    // script threw; the sensitivity script counted). [18]'s two guards: skipped where the connection cannot create a
-    // role or carries no credentials to swap.
-    const PROBE_ROLE = "ob1_live_enrich_probe";
-    const probeUrl = URL_.replace(/\/\/[^@]*@/, `//${PROBE_ROLE}:ob1probe@`);
-    const [{ mayCreate: mayCreateProbe }] = (await sql`SELECT (rolsuper OR rolcreaterole) AS "mayCreate" FROM pg_roles WHERE rolname = current_user`) as { mayCreate: boolean }[];
-    /** The probe role, gone: before each guarded block and in its finally (used twice — the denied cases here, the grant ladder at the end). */
-    const dropProbe = () => sql.unsafe(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${PROBE_ROLE}') THEN EXECUTE 'DROP OWNED BY ${PROBE_ROLE}'; EXECUTE 'DROP ROLE ${PROBE_ROLE}'; END IF; END $$`);
-    if (probeUrl === URL_ || !mayCreateProbe) {
-      skip("…a role with SELECT alone: the enrichment refused on its first write", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
-    } else {
-      await dropProbe();
-      try {
-        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT ON thoughts TO ${PROBE_ROLE}`);
-        // The enrichment, past the blank row (--skip 1, the .range() path), one row is classified — one paid call
-        // — and its write is refused, which ends the run: exit 1, one ERROR line, no summary, no row enriched, and a
-        // checkpoint that records nothing (written before the refusal ends the run, so the rows a chunk handled before
-        // it are not lost). Under Promise.allSettled it was a FAIL line per row while every later row still paid its
-        // call and the run exited 0 (review pass 1, both readers). Its own state directory, so the dry run below still
-        // meets none.
-        const mark = stubCalls;
-        const deniedEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...model, ENRICH_STATE_DIR: join(scratch, "state-denied") }, "--apply", "--skip", "1", "--limit", "2", "--concurrency", "1", ...ENRICH_FLAGS);
-        const [{ enrichedDenied }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedDenied" FROM thoughts`) as { enrichedDenied: number }[];
-        const deniedStatePath = join(scratch, "state-denied", "enrichment-state.json");
-        const deniedState = existsSync(deniedStatePath) ? JSON.parse(readFileSync(deniedStatePath, "utf8")) as { totalProcessed: number; failedIds: string[]; lastProcessedId: string | null } : null;
-        assert(oneLine(deniedEnrich, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thoughts$/m) && !/=== ENRICHMENT|FAIL #/.test(deniedEnrich.out) && stubCalls - mark === 1 && enrichedDenied === 0 && deniedState?.totalProcessed === 0 && deniedState.failedIds.length === 0 && deniedState.lastProcessedId === null,
-          `…and the enrichment ends on its first refused write after one model call: exit 1, one ERROR line, no FAIL lines, no summary, no row enriched, a checkpoint recording nothing (${deniedEnrich.code}: ${errorLine(deniedEnrich.out)}; ${stubCalls - mark} call(s), ${enrichedDenied} enriched, state ${JSON.stringify(deniedState)})`);
-      } finally {
-        await dropProbe();
+  console.log("\n[29] db/retag.ts on a real Postgres against a stub chat endpoint: the backlog (a tags row marked by rebuild_derived or by hand, one at other text, tags with no row, a capture that fell back) pooled and re-tagged through update_thought with the extractor's recipe, the row re-recorded at the text and its mark cleared, a re-tag that came out the same settling a pre-061 row with no event (148); --status and --dry-run write nothing; another recorded key refused without --switch-key; --limit; the egress policy refusing one thought fails it naming the rule and sends nothing of it; an edit mid-call requeued; --retry-failed and a re-tagged thought due again (SMD-2298, SMD-3318 PR 3b)");
+  // Its own function body: test-live's module body is at TypeScript's control-flow limit (TS2563).
+  await (async () => {
+    const sql = new SQL({ url: URL_, max: 3 });
+    // The model: one tag set for every request, each request's body kept; a request naming the race thought edits it
+    // first, once, so the worker's write meets STALE_READ.
+    const ANSWER = { people: ["Ada"], action_items: [], dates_mentioned: [], topics: ["ledger"], type: "task" };
+    const bodies: string[] = [];
+    /** Thoughts answered otherwise, by a marker in their text (review pass 1): a status, or prose; a 408 answers once. */
+    const SPECIAL = new Map<string, number | "prose" | "slow" | "partial">();
+    let raced = false;
+    let raceId = "";
+    /** A thought whose text a session moves and rebuilds while its call is out (SMD-2298 PR 2, review pass 1). */
+    let rebuiltId = "";
+    let rebuiltDone = false;
+    const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
+      const body = await req.text();
+      bodies.push(body);
+      if (!rebuiltDone && rebuiltId && body.includes("[29] rebuilt")) {
+        rebuiltDone = true;
+        const edited = "[29] rebuilt, its text moved while the call was out";
+        await sql`UPDATE thoughts SET content = ${edited}, content_fingerprint = content_fingerprint_of(${edited}) WHERE id = ${rebuiltId}::uuid`;
+        await sql`SELECT rebuild_derived(${rebuiltId}::uuid, 'live: rebuilt while its call was out')`;
       }
-    }
-
-
-
-    // enrich-thoughts: the two exact counts of --status are head queries; the dry run calls the model and writes
-    // neither a row nor the checkpoint.
-    const status0 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
-    const markDry = stubCalls;
-    const dryEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "2", ...ENRICH_FLAGS);
-    const [{ enrichedAfterDry }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDry" FROM thoughts`) as { enrichedAfterDry: number }[];
-    assert(status0.code === 0 && status0.out.includes(`Total thoughts:     ${N}`) && status0.out.includes("Enriched:           0 (0.0%)") && status0.out.includes(`Remaining:          ${N}`) && dryEnrich.code === 0 && (dryEnrich.out.match(/^  \[DRY\] #[0-9a-f-]{36}: \{"type":"task"/gm) ?? []).length === 1 && stubCalls - markDry === 1 && enrichedAfterDry === 0 && !existsSync(statePath),
-      `enrich-thoughts.mjs --status counts ${N} thoughts, none enriched; --dry-run --limit 2 meets the blank row and one more — one [DRY] line, one call — and writes no row and no checkpoint (${status0.code}/${dryEnrich.code}: ${stubCalls - markDry} call(s), ${enrichedAfterDry} enriched)`);
-
-    // --apply --limit 5: five rows in id order — the model's answer as the enhanced columns and a metadata OBJECT
-    // that keeps the row's own keys, the whitespace row marked enriched without a call — and the checkpoint written
-    // under the run's directory, not the recipe's.
-    const markApply = stubCalls;
-    const applyEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--limit", "5", "--concurrency", "2", ...ENRICH_FLAGS);
-    type Enriched = { id: string; content: string; type: string; importance: number; source_type: string | null; mt: string; metadata: Record<string, unknown> };
-    const enrichedRows = (await sql`SELECT id::text AS id, content, type, importance, source_type, jsonb_typeof(metadata) AS mt, metadata FROM thoughts WHERE enriched ORDER BY id`) as Enriched[];
-    const blank = enrichedRows[0];
-    const classified = enrichedRows.slice(1);
-    const keepsOwnKeys = (r: Enriched) => Object.entries(planted.find((p) => p.id === r.id)?.metadata ?? {}).every(([k, v]) => k === "type" || JSON.stringify(r.metadata[k]) === JSON.stringify(v));
-    const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; lastProcessedId: string | null; failedIds: string[] } : null;
-    const recipeStateAfter = existsSync(recipeState) ? statSync(recipeState).mtimeMs : null;
-    assert(applyEnrich.code === 0 && applyEnrich.out.includes("Enriched:       5") && applyEnrich.out.includes("LLM calls made: 4 / 10000") && stubCalls - markApply === 4 && enrichedRows.length === 5 && blank?.id === BLANK_ID && blank.type === "reference" && JSON.stringify(blank.metadata) === "{}" && enrichedRows.every((r) => r.mt === "object") && classified.every((r) => r.type === "task" && r.importance === 4 && r.source_type === "generic_import" && r.metadata.summary === "stub summary" && JSON.stringify(r.metadata.topics) === '["stub"]' && r.metadata.enriched_provider === "openrouter" && r.metadata.enriched_model === "stub-model" && r.metadata.type === "task" && keepsOwnKeys(r)) && /<thought_content>\\n[^]*<\/thought_content>/.test(stubBody) && state?.totalProcessed === 5 && state.lastProcessedId === enrichedRows[4].id && state.failedIds.length === 0 && recipeStateAfter === recipeStateBefore,
-      `…--apply --limit 5 --concurrency 2: the blank row and four more enriched in id order — four calls, the blank row marked with its type and metadata untouched — each classified row carrying the stub's type, importance, source and a metadata object with its own keys kept, the prompt delimited, the checkpoint at the last id under ENRICH_STATE_DIR and the recipe's own left as found (exit ${applyEnrich.code}: ${enrichedRows.length} rows, ${stubCalls - markApply} calls, state ${JSON.stringify(state)})`);
-
-    // --max-calls 1 at concurrency 2 over two rows is one call and the ABORTED banner: the chunk is cut to the calls left
-    // (a chunk of the full concurrency made three calls on a budget of one — review pass 1, run-it; unheld until pass 4).
-    const markBudget = stubCalls;
-    const budget = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model, ENRICH_STATE_DIR: join(scratch, "state-budget") }, "--dry-run", "--skip", "1", "--limit", "2", "--max-calls", "1", "--concurrency", "2", "--provider", "openrouter", "--model", "stub-model");
-    const budgetCalls = stubCalls - markBudget;
-    // --status reads the new split; --retry-failed reads its ids back through one .in() query, enriches them and drops
-    // them from the checkpoint's failedIds.
-    const status1 = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--status");
-    const [{ retryId }] = (await sql`SELECT id::text AS "retryId" FROM thoughts WHERE NOT enriched AND btrim(content) <> '' ORDER BY id LIMIT 1`) as { retryId: string }[];
-    writeFileSync(statePath, JSON.stringify({ ...state, failedIds: [retryId], totalFailed: 1 }));
-    const retry = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--apply", "--retry-failed", ...ENRICH_FLAGS);
-    const [{ retried }] = (await sql`SELECT (enriched AND type = 'task' AND metadata->>'summary' = 'stub summary') AS retried FROM thoughts WHERE id = ${retryId}::uuid`) as { retried: boolean }[];
-    const stateAfterRetry = JSON.parse(readFileSync(statePath, "utf8")) as { totalProcessed: number; failedIds: string[] };
-    assert(budget.code === 0 && budgetCalls === 1 && /=== ENRICHMENT ABORTED \(--max-calls reached\) ===/.test(budget.out) && status1.code === 0 && status1.out.includes("Enriched:           5 (38.5%)") && status1.out.includes(`Remaining:          ${N - 5}`) && retry.code === 0 && retry.out.includes(`  OK retry #${retryId} -> task`) && retry.out.includes("Processed: 1, Fixed: 1, Still failing: 0") && retried === true && stateAfterRetry.failedIds.length === 0 && stateAfterRetry.totalProcessed === 6,
-      `…--max-calls 1 at concurrency 2 makes one call and aborts; --status reads 5 of ${N}; --apply --retry-failed fetches the checkpoint's failed id by .in(), enriches it and drops it from failedIds (${budget.code}: ${budgetCalls} call(s); ${status1.code}/${retry.code}: ${errorLine(retry.out)}; state ${JSON.stringify(stateAfterRetry)})`);
-
-    // A model at a closed port is a per-row failure, not a refusal: one FAIL line, exit 1 with the summary, the id in the
-    // checkpoint's failedIds for --retry-failed, no ERROR line, no row written. Bun's fetch gives that error a code
-    // (ConnectionRefused), and pass 1's rule — "a rejection with a code ends the run" — ended the run on it (review
-    // pass 2, both readers). A fresh state directory, so no resume point applies.
-    const dead = { ...model, OPENROUTER_BASE_URL: "http://127.0.0.1:1/v1", ENRICH_STATE_DIR: join(scratch, "state-dead") };
-    const [{ enrichedBeforeDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedBeforeDead" FROM thoughts`) as { enrichedBeforeDead: number }[];
-    const deadRun = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...dead }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
-    const [{ enrichedAfterDead }] = (await sql`SELECT count(*) FILTER (WHERE enriched)::int AS "enrichedAfterDead" FROM thoughts`) as { enrichedAfterDead: number }[];
-    const deadStatePath = join(scratch, "state-dead", "enrichment-state.json");
-    const deadState = existsSync(deadStatePath) ? JSON.parse(readFileSync(deadStatePath, "utf8")) as { failedIds: string[]; totalFailed: number } : null;
-    const failedLine = /^  FAIL #([0-9a-f-]{36}): /m.exec(deadRun.out);
-    assert(deadRun.code === 1 && failedLine !== null && !/^ERROR:/m.test(deadRun.out) && deadRun.out.includes("Failed:         1") && enrichedAfterDead === enrichedBeforeDead && deadState?.totalFailed === 1 && deadState.failedIds.length === 1 && deadState.failedIds[0] === failedLine?.[1],
-      `…a model at a closed port: the row fails with a FAIL line, the run ends with its summary and exit 1, no ERROR line, no row written, the id in the checkpoint's failedIds (${deadRun.code}: ${firstLine(deadRun.out.split("\n").filter((l) => /FAIL|ERROR/.test(l)).join(" | ") || deadRun.out).slice(0, 160)}; state ${JSON.stringify(deadState)})`);
-
-    // What no script may touch: every row's content, fingerprint and model label are the planted ones, the vector
-    // still absent, every metadata an object.
-    const after = await snapshot();
-    const [{ vectors }] = (await sql`SELECT count(*) FILTER (WHERE embedding IS NOT NULL)::int AS vectors FROM thoughts`) as { vectors: number }[];
-    const untouched = after.length === N && after.every((r, i) => r.id === planted[i].id && r.content === planted[i].content && r.fp === planted[i].fp && r.em === planted[i].em && typeof r.metadata === "object" && r.metadata !== null);
-    assert(untouched && vectors === 0,
-      `after every write: all ${N} rows keep their content, fingerprint and model label, no vector appeared, every metadata is an object (${after.filter((r, i) => r.content !== planted[i].content || r.fp !== planted[i].fp || r.em !== planted[i].em).length} rows differ, ${vectors} vectors)`);
-
-    // Refused before any query, one line each, no stack.
-    if (recipeEnvFile) {
-      skip("…no URL: the enrichment ends in one line naming the variable", `${recipeEnvFile} exists on this machine and the scripts read it`);
-    } else {
-      const noUrl = [await script("enrich-thoughts.mjs", {}, "--status")];
-      const named = /^ERROR: SUPABASE_URL must be set — the brain's postgres:\/\/ connection string, in the environment or in \.env\.local beside the scripts\.$/m;
-      assert(noUrl.every((r) => oneLine(r, named) && r.out.trim().split("\n").length === 1),
-        `…no URL: the enrichment ends in one line naming the variable, exit 1 (${noUrl.map((r) => `${r.code}: ${firstLine(r.out).slice(0, 60)}`).join("; ")})`);
-    }
-    // A value that is not postgres:// is refused by the recipe's own line, which names the scheme and never the value:
-    // the shim's refusal quotes the first forty characters, which since this port carry the password (review pass 1,
-    // run-it). The mistyped scheme below carries a token that must appear nowhere in the output.
-    const mistyped = await script("enrich-thoughts.mjs", { SUPABASE_URL: "mysql://brain:pw-not-real@127.0.0.1:5432/x", ...stateEnv }, "--status");
-    const httpsEnrich = await script("enrich-thoughts.mjs", { SUPABASE_URL: "https://example.supabase.co", ...stateEnv }, "--status");
-    const zero = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...stateEnv }, "--dry-run", "--limit", "0");
-    // The = form and a trailing value flag passed the refusal and were then ignored — `--limit=2` ran the whole table
-    // (review pass 2, both readers).
-    const eqForm = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit=1", ...ENRICH_FLAGS);
-    const trailing = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit");
-    const fraction = await script("enrich-thoughts.mjs", { SUPABASE_URL: URL_, ...model }, "--dry-run", "--limit", "1.5");
-    const scheme = /^ERROR: SUPABASE_URL must be a postgres:\/\/ connection string; the value's scheme is "(https|mysql):"/m;
-    assert(oneLine(mistyped, scheme) && !/pw-not-real|127\.0\.0\.1/.test(mistyped.out) && oneLine(httpsEnrich, scheme) && !/Enrichment Status/.test(httpsEnrich.out) && oneLine(fraction, /^ERROR: --limit must be an integer of at least 1; got "1\.5"$/m) && oneLine(zero, /^ERROR: --limit must be an integer of at least 1; got "0"$/m) && oneLine(eqForm, /^ERROR: --limit takes its value as the next argument, not after "="$/m) && !/\[DRY\]/.test(eqForm.out) && oneLine(trailing, /^ERROR: --limit needs a value$/m) && !/\[DRY\]/.test(trailing.out),
-      `…a Supabase URL and a mistyped scheme are refused before any query by a line naming the scheme and not the value (the password token appears nowhere); --limit 0 and --limit 1.5, --limit=1 and a trailing --limit (both ran unbounded) are one line each (${mistyped.code}; ${httpsEnrich.code}; ${zero.code}; ${fraction.code}; ${eqForm.code}; ${trailing.code})`);
-
-    // The README's grants, proved: a metadata change fires 008/055's audit trigger, which needs SELECT and INSERT on thought_audit — the message
-    // names that table, the README's entry for it, and the grant cures it (review pass 1, cold read: the README had
-    // promised SELECT, UPDATE on thoughts alone; probed, then held here). A fourteenth row, planted after the snapshot
-    // above. The same two guards as the denied block.
-    if (probeUrl === URL_ || !mayCreateProbe) {
-      skip("…a role with the README's grants is refused metadata until thought_audit is granted", probeUrl === URL_ ? "DATABASE_URL carries no credentials to swap for the role's" : "the connection's role cannot CREATE ROLE");
-    } else {
-      await dropProbe();
-      try {
-        await sql.unsafe(`CREATE ROLE ${PROBE_ROLE} LOGIN PASSWORD 'ob1probe'; GRANT USAGE ON SCHEMA public TO ${PROBE_ROLE}; GRANT SELECT, UPDATE ON thoughts TO ${PROBE_ROLE}`);
-        await sql`INSERT INTO thoughts (content, metadata, type, sensitivity_tier, content_fingerprint, embedding_model) VALUES ('granted row: a decision', '{"type":"decision"}', 'reference', 'standard', content_fingerprint_of('granted row: a decision'), 'planted-model')`;
-        const enrichedCount = async () => ((await sql`SELECT count(*) FILTER (WHERE enriched)::int AS n FROM thoughts`) as { n: number }[])[0].n;
-        const state2 = { ...model, ENRICH_STATE_DIR: join(scratch, "state2") };
-        const markAudit = stubCalls;
-        const before = await enrichedCount();
-        const auditDenied = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
-        const mid = await enrichedCount();
-        await sql.unsafe(`GRANT SELECT, INSERT ON thought_audit TO ${PROBE_ROLE}`);
-        const auditOk = await script("enrich-thoughts.mjs", { SUPABASE_URL: probeUrl, ...state2 }, "--apply", "--limit", "1", "--concurrency", "1", ...ENRICH_FLAGS);
-        const after = await enrichedCount();
-        assert(oneLine(auditDenied, /^ERROR: update thought [0-9a-f-]{36} → 42501 permission denied for table thought_audit$/m) && mid === before && stubCalls - markAudit === 2 && auditOk.code === 0 && auditOk.out.includes("Enriched:       1") && after === before + 1,
-          `…a role with SELECT, UPDATE on thoughts: its first metadata write is refused with 42501 on thought_audit (the audit trigger's table), exit 1; with SELECT, INSERT on thought_audit the same run enriches the row (${auditDenied.code}: ${errorLine(auditDenied.out).slice(0, 110)}; ${auditOk.code}: ${before} → ${mid} → ${after})`);
-      } finally {
-        await dropProbe();
+      if (!raced && raceId && body.includes("[29] race")) {
+        raced = true;
+        const edited = `[29] race, edited meanwhile ${raceId.slice(0, 8)}`;
+        await sql`UPDATE thoughts SET content = ${edited}, content_fingerprint = content_fingerprint_of(${edited}) WHERE id = ${raceId}::uuid`;
       }
+      const special = [...SPECIAL.entries()].find(([marker]) => body.includes(marker));
+      if (special) {
+        const [marker, answer] = special;
+        if (answer === 408) SPECIAL.delete(marker);
+        if (typeof answer === "number") return new Response("stub: not this time", { status: answer });
+        if (answer === "partial") return Response.json({ choices: [{ message: { content: JSON.stringify({ topics: ["p"], type: "idea" }) } }] });
+        if (answer === "slow") {
+          await Bun.sleep(1500);
+          return Response.json({ choices: [{ message: { content: JSON.stringify(ANSWER) } }] });
+        }
+        return Response.json({ choices: [{ message: { content: "Here are the tags you asked for, in prose." } }] });
+      }
+      return Response.json({ choices: [{ message: { content: JSON.stringify(ANSWER) } }] });
+    } });
+    const base: Record<string, string | undefined> = { ...process.env, DATABASE_URL: URL_, OB1_LLM_BASE_URL: `http://127.0.0.1:${stub.port}/v1`, OB1_LLM_LOCAL: "1", OB1_METADATA_MODEL: "stub-meta" };
+    for (const k of ["OB1_CHAT_BASE_URL", "OB1_CHAT_LOCAL", "OB1_EGRESS_POLICY", "OB1_EGRESS_ALLOW", "OB1_EGRESS_DENY", "OB1_WORKER_KEY", "MCP_ACCESS_KEYS"]) delete base[k];
+    // The egress policy refusing one thought: the endpoint not declared local, allow mode, a deny term matching its text.
+    const gated = { ...base, OB1_LLM_LOCAL: "", OB1_EGRESS_POLICY: "allow", OB1_EGRESS_DENY: "marker:secret-29" };
+    const JOB = retagKey("stub-meta", METADATA_PROMPT_VERSION);
+    const recipe = metadataRecipe(resolveEmbedConfig(base as Record<string, string>), ANSWER);
+    const retag = async (opts: Omit<RetagOptions, "writer" | "url">, env = base) => {
+      const outs: string[] = [], errs: string[] = [];
+      const code = await runRetag({ url: URL_!, env, ...opts, writer: { out: (l) => outs.push(l), err: (l) => errs.push(l) } });
+      return { code, out: outs.join("\n"), err: errs.join("\n") };
+    };
+    const cli = (...flags: string[]) => runScript(["bun", join(HERE, "retag.ts"), "--url", URL_!, ...flags], { cwd: HERE, env: base as Record<string, string> });
+    const ids: string[] = [];
+    const plant = async (content: string, metadata: Record<string, unknown>) => {
+      const [{ id }] = (await sql`INSERT INTO thoughts (content, metadata, content_fingerprint) VALUES (${content}, ${metadata}::jsonb, content_fingerprint_of(${content})) RETURNING id::text AS id`) as { id: string }[];
+      ids.push(id);
+      return id;
+    };
+    /** A capture's tags with their row: the patch through update_thought under the extractor's recipe. */
+    const tagged = async (content: string) => {
+      const id = await plant(content, {});
+      await sql`SELECT update_thought(p_id := ${id}::uuid, p_metadata_patch := ${{ topics: ["old"], type: "observation", people: [] }}::jsonb, p_lineage := ${{ metadata: recipe }}::jsonb)`;
+      return id;
+    };
+    const move = (id: string, content: string) => sql`UPDATE thoughts SET content = ${content}, content_fingerprint = content_fingerprint_of(${content}) WHERE id = ${id}::uuid`;
+    type TagsRow = { fp_ok: boolean; marked: boolean; recipe: Record<string, unknown> } | undefined;
+    const tagsRow = async (id: string): Promise<TagsRow> => ((await sql`
+      SELECT d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) AS fp_ok, d.stale_since IS NOT NULL AS marked, d.recipe
+        FROM derivations d JOIN thoughts t ON t.id = d.artifact_id WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND d.artifact_id = ${id}::uuid`) as TagsRow[])[0];
+    /** An object's top-level keys in order, so a jsonb read back (its keys in jsonb's order) compares with the one sent. */
+    const canon = (o: Record<string, unknown> | undefined) => JSON.stringify(Object.entries(o ?? {}).sort(([a], [b]) => a.localeCompare(b)));
+    const settled = (r: TagsRow) => r !== undefined && r.fp_ok && !r.marked && canon(r.recipe) === canon(recipe);
+    const claims = async () => (await sql`SELECT thought_id::text AS id, status, last_error FROM thought_work_claims WHERE work_type = ${JOB}`) as { id: string; status: string; last_error: string | null }[];
+    const configured = async () => ((await sql`SELECT value FROM ob1_config WHERE key = 'retag_key'`) as { value: string }[])[0]?.value;
+    const meta = async (id: string) => ((await sql`SELECT metadata FROM thoughts WHERE id = ${id}::uuid`) as { metadata: Record<string, unknown> }[])[0].metadata;
+    const stampOf = async (id: string) => (await sql`SELECT updated_at, (SELECT count(*)::int FROM thought_audit WHERE thought_id = ${id}::uuid) AS events FROM thoughts WHERE id = ${id}::uuid`)[0] as { updated_at: Date; events: number };
+    const line = (s: string, has: string) => s.split("\n").find((l) => l.includes(has))?.trim();
+    try {
+      await sql`DELETE FROM thoughts`;
+      await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'retag:%'`;
+      await sql`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+      // The backlog, one of each kind: A captured with the recipe, its text moved raw and rebuild_derived marking the
+      // row (the Verify's path); M's row marked by hand at its own text; S's text moved with no rebuild (the row at
+      // other text); B tagged with the stub's own answer and no row (before 061); E a capture that fell back.
+      const A = await tagged("[29] A, the text the tags were made from");
+      await move(A, "[29] A, the text moved under its tags");
+      const [{ r: rebuilt }] = (await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move') AS r`) as { r: { ok: boolean; unqueued: number } }[];
+      const M = await tagged("[29] M, marked at its own text");
+      await sql`UPDATE derivations SET stale_since = now(), stale_reason = 'live: marked by hand' WHERE artifact_kind = 'metadata' AND artifact_id = ${M}::uuid`;
+      const S = await tagged("[29] S, the tags' text");
+      await move(S, "[29] S, moved with no rebuild");
+      const B = await plant("[29] B, tagged before 061", ANSWER);
+      const E = await plant("[29] E, a capture that fell back", { topics: ["uncategorized"], type: "observation", metadata_extraction_failed: "provider_timeout" });
+      // F, kept from the model at capture (the egress refusal's marker alone), is in the backlog too: nothing else re-tags it.
+      const F = await plant("[29] F, kept from the model at capture", metadataRefused());
+      // Not in the backlog: C current (tags and their row at its text), U no tags.
+      const C = await tagged("[29] C, current");
+      const U = await plant("[29] U, no tags at all", {});
+      const bBefore = await stampOf(B);
+      assert(rebuilt.ok && Number(rebuilt.unqueued) === 1 && (await tagsRow(A))?.marked === true && (await tagsRow(M))?.marked === true && (await tagsRow(S))?.fp_ok === false && (await tagsRow(B)) === undefined && settled(await tagsRow(C)),
+        `the planted backlog: A's row marked by rebuild_derived after a raw move (unqueued: nothing requeues the tags yet), M's marked by hand, S's at other text, B with no row, C settled (${JSON.stringify(rebuilt)})`);
+
+      // --status and --dry-run write nothing: no key, no claim, no lineage moved, no call.
+      const lineage = async () => JSON.stringify(await sql`SELECT artifact_id::text, input_fingerprints, stale_since, recipe FROM derivations WHERE artifact_kind = 'metadata' ORDER BY artifact_id`);
+      const lineage0 = await lineage();
+      const status0 = await cli("--status");
+      const dry = await retag({ dryRun: true });
+      const backlog0 = "backlog: 6 thought(s) — 1 tagged with no tags row (before 061), 2 with the row marked stale, 1 with the row at other text, 2 whose capture fell back; 6 not yet in the pool, 0 re-tagged before and due again";
+      assert(status0.code === 0 && status0.out.includes(`job:    ${JOB}`) && status0.out.includes(backlog0) && status0.out.includes("status: 0 re-tagged, 0 failed, 0 in flight, 0 pending") && status0.out.includes("ob1_config.retag_key is not set")
+          && dry.code === 0 && dry.out.includes(`would: record ${JOB} in ob1_config.retag_key; add 6 thought(s) to the pool and put 0 back; send up to 6 thought(s) to stub-meta`) && dry.out.includes("Nothing was written.")
+          && (await configured()) === undefined && (await claims()).length === 0 && (await lineage()) === lineage0 && bodies.length === 0,
+        `bun db/retag.ts --status names the key and the backlog by kind, six, none pooled; --dry-run says what it would do; neither records the key, pools, moves a tags row or calls the model (${status0.code}/${dry.code}: ${line(status0.out, "backlog:")}; ${bodies.length} call(s))`);
+
+      // Another key recorded: refused without --switch-key, before anything is pooled or sent.
+      await sql`INSERT INTO ob1_config (key, value) VALUES ('retag_key', 'retag:other-model@p1')`;
+      const other = await retag({});
+      await sql`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+      assert(other.code === 2 && other.err.includes("Refusing to re-tag under a key other than the one ob1_config records without --switch-key") && (await claims()).length === 0 && bodies.length === 0,
+        `a run under ${JOB} with retag:other-model@p1 recorded is refused, exit 2, nothing pooled or sent (${other.code}: ${line(other.err, "Refusing")})`);
+
+      // --limit 1: the backlog pooled, one thought re-tagged, the rest left pending; the key recorded.
+      const one = await retag({ limit: 1 });
+      const afterOne = await claims();
+      // Which of the six --limit 1 took is a tie (one statement pooled them): B, answered with the stub's own tags, is
+      // the gated run's one "the same" only when it was still pending (review pass 2: asserted as fixed, it flaked).
+      const bTookFirst = afterOne.find((c) => c.id === B)?.status === "succeeded";
+      assert(one.code === 0 && one.out.includes("pool: 6 thought(s) added, 0 re-tagged before and put back") && bodies.length === 1 && afterOne.filter((c) => c.status === "succeeded").length === 1 && afterOne.filter((c) => c.status === "pending").length === 5 && (await configured()) === JOB,
+        `--limit 1 pools the six, re-tags one with one call, leaves five pending, exit 0, and records ${JOB} (${one.code}: ${bodies.length} call(s), ${afterOne.map((c) => c.status).join(",")})`);
+
+      // The rest under a policy refusing one thought's text, beside an edit landing while another's call is out.
+      const R = await plant("[29] R carries secret-29 and is tagged", { topics: ["t"], type: "idea" });
+      raceId = await plant("[29] race, tagged with no row", { topics: ["t"], type: "idea" });
+      const gatedRun = await retag({}, gated);
+      const byId = new Map((await claims()).map((c) => [c.id, c]));
+      const [aMeta, eMeta, bMeta, fMeta] = [await meta(A), await meta(E), await meta(B), await meta(F)];
+      const bAfter = await stampOf(B);
+      assert(gatedRun.code === 1 && gatedRun.out.includes("pool: 2 thought(s) added") && /\n {2}6 re-tagged \(/.test(gatedRun.out) && gatedRun.out.includes("1 failed (1 refused by the egress policy, nothing sent), 1 changed while re-tagged and re-queued") && new RegExp(`6 re-tagged \\(${bTookFirst ? 6 : 5} with the tags changed, ${bTookFirst ? 0 : 1} the same`).test(gatedRun.out)
+          && byId.get(R)?.status === "failed" && /^the egress policy refused it: OB1_EGRESS_DENY marker:secret-29 matches this retag/.test(byId.get(R)?.last_error ?? "") && !bodies.some((b) => b.includes("secret-29")) && (await tagsRow(R)) === undefined,
+        `under OB1_EGRESS_DENY=marker:secret-29 the run re-tags the rest and fails R naming the term, nothing of it sent, exit 1 (${gatedRun.code}: ${line(gatedRun.out, "re-tagged (")}; R ${byId.get(R)?.status}: ${byId.get(R)?.last_error?.slice(0, 90)})`);
+      assert(JSON.stringify(aMeta.topics) === '["ledger"]' && aMeta.type === "task" && JSON.stringify(aMeta.people) === '["Ada"]' && settled(await tagsRow(A)) && settled(await tagsRow(M)) && settled(await tagsRow(S)),
+        `A's tags rewritten from its moved text, and A's, M's and S's rows re-recorded at the text under the extractor's recipe, stale_since NULL (${JSON.stringify(await tagsRow(A))})`);
+      assert(settled(await tagsRow(B)) && canon(bMeta) === canon(ANSWER) && bAfter.events === bBefore.events && bAfter.updated_at.getTime() === bBefore.updated_at.getTime(),
+        `B, tagged before 061 with the stub's own answer, gets its row (148), its tags, updated_at and audit events as they were (${bBefore.events} → ${bAfter.events} event(s))`);
+      assert(eMeta.metadata_extraction_failed === null && JSON.stringify(eMeta.topics) === '["ledger"]' && settled(await tagsRow(E)),
+        `E, whose capture fell back, is re-tagged: its marker nulled (tagsOverExisting) and its row recorded (${JSON.stringify(eMeta)})`);
+      const raceRow = await tagsRow(raceId);
+      assert(raced && byId.get(raceId)?.status === "succeeded" && settled(raceRow) && bodies.filter((b) => b.includes("[29] race")).length === 2,
+        `the thought edited while its call was out met STALE_READ, went back to the pool, and was re-tagged from its new text in the same run: two calls, the row at the edited text (${JSON.stringify(raceRow)})`);
+      assert(fMeta.metadata_extraction_failed === null && JSON.stringify(fMeta.topics) === '["ledger"]' && settled(await tagsRow(F)) && byId.get(F)?.status === "succeeded",
+        `F, kept from the model at capture and allowed under this policy, is re-tagged: its marker nulled and its row recorded (${JSON.stringify(fMeta)})`);
+      assert(![C, U].some((id) => byId.has(id)) && !bodies.some((b) => /\[29\] (C|U),/.test(b)),
+        "a current thought and one with no tags are never pooled nor sent");
+
+      // --status after: R alone in the backlog, failed (its row listed). Then A moved again and rebuilt: under 150
+      // rebuild_derived requeues it under the recorded key (SMD-2298 PR 2, the pool's feed). And M moved raw with no
+      // rebuild: re-tagged before and due again, which the worker's own run puts back.
+      const status1 = await cli("--status");
+      await move(A, "[29] A, moved a second time");
+      const [{ r: fed }] = (await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move again') AS r`) as { r: { enqueued: number; unqueued: number; pools: string[] } }[];
+      const aFed = (await claims()).find((c) => c.id === A)?.status;
+      await move(M, "[29] M, moved with no rebuild");
+      const status2 = await cli("--status");
+      assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
+          && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && fed.enqueued === 1 && fed.unqueued === 0 && fed.pools.includes(JOB) && aFed === "pending" && drainer(JOB) === "bun db/retag.ts --url <url>"
+          && status2.out.includes("backlog: 3 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale, 1 with the row at other text") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again")
+          && status2.out.includes("status: 6 re-tagged, 1 failed, 0 in flight, 1 pending"),
+        `--status after: seven re-tagged, R failed and listed, R alone in the backlog; A moved and rebuilt is requeued under ${JOB} by rebuild_derived (150), pending; M moved raw reads as re-tagged before and due again (${JSON.stringify(fed)}; ${line(status1.out, "backlog:")} | ${line(status2.out, "backlog:")})`);
+
+      // --retry-failed with the policy lifted: R re-tagged; A, pooled by the rebuild, re-tagged; M put back by the run and re-tagged.
+      const mark = bodies.length;
+      const retry = await retag({ retryFailed: true });
+      assert(retry.code === 0 && retry.out.includes("--retry-failed: 1 failed row(s) returned to the pool") && retry.out.includes("pool: 0 thought(s) added, 1 re-tagged before and put back") && bodies.length - mark === 3 && bodies.slice(mark).some((b) => b.includes("secret-29"))
+          && settled(await tagsRow(R)) && settled(await tagsRow(A)) && settled(await tagsRow(M)) && (await claims()).every((c) => c.status === "succeeded"),
+        `--retry-failed returns R, re-tagged once the policy lets its text go; A, pooled by the rebuild, and M, put back by the run, settled at their newest texts; exit 0 (${retry.code}: ${bodies.length - mark} call(s))`);
+
+      // Review pass 1. The provider's answers: a 408 is paused for, then answered; a 413 and an answer in prose are the
+      // thought's, failed with nothing written. A thought whose metadata is SQL NULL is failed before any call. Old tags
+      // the answer leaves out are cleared. A pooled thought no longer due is released with no call.
+      const P408 = await plant("[29] P408 tagged, its first call answered 408", { topics: ["t"], type: "idea" });
+      const P413 = await plant("[29] P413 tagged, too large for the provider", { topics: ["t"], type: "idea" });
+      const PJSON = await plant("[29] PJSON tagged, answered in prose", { topics: ["t"], type: "idea" });
+      const O = await plant("[29] O, tagged long ago", { people: ["OldPerson"], type: "meeting", type_raw: "meeting notes", topics: ["old"] });
+      const N = await tagged("[29] N, a raw writer nulled its metadata");
+      await sql`UPDATE derivations SET stale_since = now(), stale_reason = 'live: marked' WHERE artifact_kind = 'metadata' AND artifact_id = ${N}::uuid`;
+      await sql`UPDATE thoughts SET metadata = NULL WHERE id = ${N}::uuid`;
+      const P400 = await plant("[29] P400 tagged, refused by its content", { topics: ["t"], type: "idea" });
+      const TONLY = await plant("[29] TONLY, a type and no topics", { type: "idea" });
+      const PONLY = await plant("[29] PONLY, topics and no type", { topics: ["x"] });
+      const O2 = await plant("[29] O2, tagged in full long ago", { people: ["Zed"], action_items: ["file it"], dates_mentioned: ["2026-01-01"], topics: ["old"], type: "meeting" });
+      const FN = await plant("[29] FN, its tags nulled by a fallback", { people: null, action_items: null, dates_mentioned: null, topics: ["uncategorized"], type: "observation", type_raw: null, metadata_extraction_failed: "provider_500" });
+      const C2 = await tagged("[29] C2, current but pooled by hand");
+      await sql`SELECT enqueue_thoughts(${JOB}, ARRAY[${C2}::uuid])`;
+      for (const [marker, answer] of [["[29] P408", 408], ["[29] P413", 413], ["[29] PJSON", "prose"], ["[29] P400", 400], ["[29] O2", "partial"]] as const) SPECIAL.set(marker, answer);
+      const before1 = new Map([P413, PJSON].map((id) => [id, ""]));
+      for (const id of before1.keys()) before1.set(id, JSON.stringify(await meta(id)));
+      const mark1 = bodies.length;
+      const answers = await retag({ pausesMs: [10] });
+      const st = new Map((await claims()).map((c) => [c.id, c]));
+      const sent1 = bodies.slice(mark1);
+      const oMeta = await meta(O);
+      assert(answers.code === 1 && st.get(P408)?.status === "succeeded" && settled(await tagsRow(P408)) && sent1.filter((b) => b.includes("[29] P408")).length === 2
+          && st.get(P413)?.status === "failed" && /provider_413/.test(st.get(P413)?.last_error ?? "") && st.get(PJSON)?.status === "failed" && /no tags/.test(st.get(PJSON)?.last_error ?? "")
+          && JSON.stringify(await meta(P413)) === before1.get(P413) && JSON.stringify(await meta(PJSON)) === before1.get(PJSON) && (await tagsRow(P413)) === undefined && (await tagsRow(PJSON)) === undefined,
+        `a 408 is paused for and the thought re-tagged; a 413 and an answer in prose fail their thought, nothing written, exit 1 (${answers.code}: P408 ${st.get(P408)?.status} in ${sent1.filter((b) => b.includes("[29] P408")).length} call(s); P413 ${st.get(P413)?.last_error?.slice(0, 60)}; PJSON ${st.get(PJSON)?.last_error?.slice(0, 60)})`);
+      assert(st.get(N)?.status === "failed" && /its metadata is null/.test(st.get(N)?.last_error ?? "") && !sent1.some((b) => b.includes("[29] N,")) && (await tagsRow(N))?.marked === true
+          && oMeta.people !== undefined && JSON.stringify(oMeta.people) === '["Ada"]' && oMeta.type === "task" && oMeta.type_raw === null && JSON.stringify(oMeta.topics) === '["ledger"]' && settled(await tagsRow(O))
+          && st.get(C2)?.status === "succeeded" && !sent1.some((b) => b.includes("[29] C2")) && /, 1 already current,/.test(answers.out)
+          && st.get(P400)?.status === "failed" && /provider_400/.test(st.get(P400)?.last_error ?? "") && (await tagsRow(P400)) === undefined
+          && settled(await tagsRow(TONLY)) && settled(await tagsRow(PONLY))
+          && ((m) => JSON.stringify([m.people, m.action_items, m.dates_mentioned, m.topics, m.type]) === '[[],[],[],["p"],"idea"]')(await meta(O2))
+          && ((m) => JSON.stringify([m.people, m.action_items, m.dates_mentioned, m.type_raw, m.metadata_extraction_failed]) === '[["Ada"],[],[],null,null]')(await meta(FN)),
+        `a thought whose metadata is null is failed with no call, its row still marked; old tags the answer leaves out (type_raw) are cleared; a pooled thought no longer due is released with no call; a 400 fails its thought, nothing written; a type alone or topics alone with no row is in the backlog; a partial answer clears the list keys it leaves out to []; a full answer's [] lands over a fallback's JSON null (N ${st.get(N)?.last_error?.slice(0, 50)}; O ${JSON.stringify(oMeta)}; ${line(answers.out, "already current")})`);
+
+      // The edit's audit event names the worker: the actor `retag` (no worker key here), the door db/retag.ts.
+      const [oEvent] = (await sql`SELECT actor_name, origin FROM thought_audit WHERE thought_id = ${O}::uuid ORDER BY seq DESC LIMIT 1`) as { actor_name: string | null; origin: string | null }[];
+      assert(oEvent?.actor_name === "retag" && oEvent.origin === "db/retag.ts", `a re-tag that moved the tags is one audit event naming the worker (${JSON.stringify(oEvent)})`);
+
+      // The egress gate reads the thought's metadata, not its text alone: a deny term on a topic keeps the thought's text home.
+      const H = await plant("[29] H, a thought on a held subject", { topics: ["hush"], type: "idea" });
+      const hushFrom = bodies.length;
+      const hushRun = await retag({ pausesMs: [10] }, { ...gated, OB1_EGRESS_DENY: "topic:hush" });
+      const hClaim = (await claims()).find((c) => c.id === H);
+      assert(hushRun.code === 1 && hClaim?.status === "failed" && /topic:hush/.test(hClaim.last_error ?? "") && !bodies.slice(hushFrom).some((b) => b.includes("[29] H,")),
+        `under OB1_EGRESS_DENY=topic:hush a thought with that topic fails naming the term, nothing of it sent (${hushRun.code}: ${hClaim?.last_error?.slice(0, 80)})`);
+
+      // A call past --timeout is the thought's: failed, the run going on, exit 1.
+      const PS = await plant("[29] PSLOW tagged, the model slow", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] PSLOW", "slow");
+      const slowRun = await retag({ timeout: 1, pausesMs: [10] });
+      SPECIAL.delete("[29] PSLOW");
+      const psClaim = (await claims()).find((c) => c.id === PS);
+      assert(slowRun.code === 1 && psClaim?.status === "failed" && /timed out after 1 s/.test(psClaim.last_error ?? "") && (await tagsRow(PS)) === undefined,
+        `a call past --timeout 1 fails its thought, nothing written (${slowRun.code}: ${psClaim?.last_error?.slice(0, 80)})`);
+
+      // The CLI's --dry-run writes nothing (the door, not run() alone).
+      const claimsBefore = JSON.stringify(await claims());
+      const keyBefore = await configured();
+      const cliDry = await cli("--dry-run");
+      assert(cliDry.code === 0 && cliDry.out.includes("Nothing was written.") && JSON.stringify(await claims()) === claimsBefore && (await configured()) === keyBefore,
+        `bun db/retag.ts --dry-run writes nothing: no claim moved, the key as it was (${cliDry.code})`);
+
+      // Review pass 2. A STALE_READ under --limit 1 counts again: the thought re-tagged from its new text in the same run.
+      const RL = await plant("[29] race RL, tagged with no row", { topics: ["t"], type: "idea" });
+      raceId = RL;
+      raced = false;
+      const rlFrom = bodies.length;
+      await retag({ limit: 1, pausesMs: [10] });
+      const rlRow = await tagsRow(RL);
+      assert(raced && settled(rlRow) && bodies.slice(rlFrom).filter((b) => b.includes("[29] race")).length === 2 && (await claims()).find((c) => c.id === RL)?.status === "succeeded",
+        `under --limit 1 a thought edited while its call is out is re-tagged from its new text in the same run, two calls (${JSON.stringify(rlRow)})`);
+
+      // A 400 or 422 to three thoughts in a row, none answered between, is the request's shape: the run stops, exit 2.
+      const S422 = await Promise.all(["a", "b", "c"].map((k) => plant(`[29] S422 ${k}, tagged`, { topics: ["t"], type: "idea" })));
+      SPECIAL.set("[29] S422", 422);
+      const shapeRun = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] S422");
+      const sClaims = (await claims()).filter((c) => S422.includes(c.id));
+      assert(shapeRun.code === 2 && /answered 422 to 3 thoughts in a row/.test(shapeRun.err) && /re-run with --retry-failed/.test(shapeRun.err) && sClaims.length === 3 && sClaims.every((c) => c.status === "failed"),
+        `a 422 to three thoughts in a row stops the run, exit 2, naming the request's shape; the three failed for --retry-failed (${shapeRun.code}: ${sClaims.map((c) => c.status).join(",")})`);
+
+      // The streak is "in a row": a 413 is never the request's, and an answer between resets it. The pool's order pinned
+      // (claims go oldest first): two 413s, then 400, ok, 400, ok, 400 — no three in a row, so the run goes on.
+      const order = [
+        await plant("[29] I413 a, too large", { topics: ["t"], type: "idea" }), await plant("[29] I413 b, too large", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 a, refused", { topics: ["t"], type: "idea" }), await plant("[29] IOK a, answered", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 b, refused", { topics: ["t"], type: "idea" }), await plant("[29] IOK b, answered", { topics: ["t"], type: "idea" }),
+        await plant("[29] I400 c, refused", { topics: ["t"], type: "idea" }),
+      ];
+      await sql`SELECT enqueue_thoughts(${JOB}, ${sql.array(order, "TEXT")}::uuid[])`;
+      for (const [i, id] of order.entries()) await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(mins => ${60 - i}) WHERE work_type = ${JOB} AND thought_id = ${id}::uuid`;
+      SPECIAL.set("[29] I413", 413);
+      SPECIAL.set("[29] I400", 400);
+      const interleaved = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] I413");
+      SPECIAL.delete("[29] I400");
+      const iClaims = new Map((await claims()).filter((c) => order.includes(c.id)).map((c) => [c.id, c.status]));
+      assert(interleaved.code === 1 && !/in a row/.test(interleaved.err) && order.every((id, i) => iClaims.get(id) === (i === 3 || i === 5 ? "succeeded" : "failed")),
+        `two 413s, then a 400 between answers three times: no three in a row, so the run goes on, exit 1, the answered two re-tagged (${interleaved.code}: ${order.map((id) => iClaims.get(id)).join(",")})`);
+
+      // Review pass 3: an answered call that is no tags (prose) took the request's shape, so it resets the streak too.
+      const order2 = [
+        await plant("[29] J400 a, refused", { topics: ["t"], type: "idea" }), await plant("[29] JPROSE a, in prose", { topics: ["t"], type: "idea" }),
+        await plant("[29] J400 b, refused", { topics: ["t"], type: "idea" }), await plant("[29] JPROSE b, in prose", { topics: ["t"], type: "idea" }),
+        await plant("[29] J400 c, refused", { topics: ["t"], type: "idea" }),
+      ];
+      await sql`SELECT enqueue_thoughts(${JOB}, ${sql.array(order2, "TEXT")}::uuid[])`;
+      for (const [i, id] of order2.entries()) await sql`UPDATE thought_work_claims SET enqueued_at = now() - make_interval(mins => ${60 - i}) WHERE work_type = ${JOB} AND thought_id = ${id}::uuid`;
+      SPECIAL.set("[29] J400", 400);
+      SPECIAL.set("[29] JPROSE", "prose");
+      const proseBetween = await retag({ pausesMs: [10] });
+      SPECIAL.delete("[29] J400");
+      SPECIAL.delete("[29] JPROSE");
+      const jClaims = (await claims()).filter((c) => order2.includes(c.id));
+      assert(proseBetween.code === 1 && !/in a row/.test(proseBetween.err) && jClaims.length === 5 && jClaims.every((c) => c.status === "failed"),
+        `a 400, then an answer in prose, three times: the prose was an answer, so no three in a row; the run goes on, every one failed as its own, exit 1 (${proseBetween.code}: ${jClaims.map((c) => c.status).join(",")})`);
+
+      // SMD-2298 PR 2 review pass 1: a session moves a thought's text and rebuilds it while the worker's call is out —
+      // 150 requeues it, revoking the worker's lease. The worker's write meets STALE_READ, it finds the claim pending
+      // (a rebuild's requeue, not another run's lease), and re-tags it from the new text in the same run, under --limit 1.
+      const RB = await tagged("[29] rebuilt, the text the tags were made from");
+      await move(RB, "[29] rebuilt, moved before the run");
+      rebuiltId = RB;
+      const rbFrom = bodies.length;
+      const rbRun = await retag({ limit: 1, pausesMs: [10] });
+      assert(rebuiltDone && settled(await tagsRow(RB)) && bodies.slice(rbFrom).filter((b) => b.includes("[29] rebuilt")).length === 2
+          && (await claims()).find((c) => c.id === RB)?.status === "succeeded" && /1 changed while re-tagged/.test(rbRun.out) && !/no longer this worker's/.test(rbRun.out + rbRun.err),
+        `a text moved and rebuilt while the call is out: requeued by 150, the worker re-tags it from the new text in the same run, counted changed, not lost (${line(rbRun.out, "re-tagged (")})`);
+
+      // A 401 is the request's: the run stops, exit 2, nothing marked failed, the thought pending for the next run.
+      const P401 = await plant("[29] P401 tagged, the key refused", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] P401", 401);
+      const refusedRun = await retag({ pausesMs: [10] });
+      const p401 = (await claims()).find((c) => c.id === P401);
+      SPECIAL.delete("[29] P401");
+      assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
+        `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
+
+      // --switch-key: a run under another key goes ahead and records it.
+      const OTHER = retagKey("stub-meta", METADATA_PROMPT_VERSION + 1);
+      const switched = await retag({ job: OTHER, switchKey: true, pausesMs: [10] });
+      const statusOther = await retag({ status: true });
+      const badJob = await retag({ dryRun: true, job: "extract:x@p1" });
+      const shownJob = await retag({ status: true, job: "retag:x@p7" });
+      assert(switched.code !== 2 && (await configured()) === OTHER && switched.out.includes(`ob1_config.retag_key = ${OTHER}`)
+          && statusOther.code === 0 && statusOther.out.includes(`ob1_config.retag_key is ${OTHER}; this run uses ${JOB}`)
+          && badJob.code === 2 && /--job names a re-tag pool/.test(badJob.err) && shownJob.code === 0 && shownJob.out.includes("job:    retag:x@p7")
+          && retagKey("qwen3:8b", 1) === "retag:qwen3:8b@p1" && JSON.stringify(parseRetagKey("retag:qwen3:8b@p1")) === '{"model":"qwen3:8b","promptVersion":1}'
+          && parseRetagKey("retag:m@p01") === null && parseRetagKey("extract:m@p1") === null,
+        `--switch-key: a run under another key goes ahead and records it; --status under another recorded key says so, exit 0; --job of another shape refused, exit 2, and one of this shape used; the key builds and parses back, p01 and another prefix refused (${switched.code}: ${await configured()}; ${statusOther.code}; ${badJob.code})`);
+    } finally {
+      stub.stop(true);
+      await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'retag:%'`;
+      await sql`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+      if (ids.length) {
+        await sql`DELETE FROM derivations WHERE artifact_id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+        await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(ids, "TEXT")}::uuid[])`;
+      }
+      await sql.close();
     }
-  } finally {
-    stub.stop(true);
-    rmSync(scratch, { recursive: true, force: true });
-    await sql`DELETE FROM thoughts`;
-    const after27 = await catalog27();
-    for (const v of after27.views) if (!before27.views.has(v)) await sql.unsafe(`DROP VIEW IF EXISTS ${v} CASCADE`);
-    for (const tb of after27.tables) if (!before27.tables.has(tb)) await sql.unsafe(`DROP TABLE IF EXISTS ${tb} CASCADE`);
-    for (const f of after27.fns) if (!before27.fns.has(f)) await sql.unsafe(`DROP FUNCTION IF EXISTS ${f} CASCADE`);
-    await sql.close();
-  }
+  })();
 }
 
 if (want("30")) {
@@ -30091,6 +30190,192 @@ if (want("38p")) await (async () => {
   }
 })();
 
+// Consolidation under a steady inflow (SMD-4468): extraction's pool, which 016's trigger fills as each capture is
+// written, never drains while captures keep coming faster than extraction takes them, and consolidation joined only
+// once it did — never while the inflow lasted (SMD-4384's review measured a judgement 158 s late at the median, 306 s
+// at most, at the shipped settings). It now joins once the thoughts captured before the period began are extracted,
+// a write since dated today aside: a thought captured since is judged against neighbours captured on an earlier UTC
+// date (029). Its body a function's, as [38p]'s: the module body is at TS2563's limit for control-flow analysis.
+if (want("38c")) await (async () => {
+  console.log("\n[38c] db/sleep.ts: consolidation under a steady inflow of writes that pause nothing (SMD-4468) — extraction's pool never drains while they come faster than it takes them, and consolidation joins once the thoughts captured before the period began are extracted, judging the inflow's notes while it goes on, none claimed before that backlog is extracted, the subject sweep waiting for the whole pool; writes since dated today and edits of thoughts already extracted hold nothing back (board-sync's); a backlog thought a pause has taken holds the join while the writes outpace extraction, a limit named, and no join past comes meanwhile; after an extraction model's switch, thoughts carrying only the old key's entities hold it too");
+  const sql = new SQL({ url: URL_, max: 4 });
+  const { EX, CO, sw, env, capture, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
+  const unpoolSubjects = async () => {
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'subjects:%'`;
+  };
+  /** Of `ids`, those consolidation has judged: their claims under its key finished. */
+  const judgedOf = async (ids: string[]) => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${CO} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...ids], "TEXT")}::uuid[])`)[0].c);
+  /** Extraction's claim on `id`: its status, undefined when it has none. */
+  const exStatus = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
+  const JOINED = /^ {2}extraction has done the thoughts captured before the period began — consolidating beside it while it extracts the writes since$/;
+  const DRAINED = /^ {2}extraction drained — consolidating beside it$/;
+  const ANY_JOIN = /consolidating beside it|consolidating first/;
+  const SWEEP = /^ {2}the subject sweep starts beside consolidation/;
+  /**
+   * One --follow run (poll 250 ms, one extraction worker at 400 ms a call) under a capture every 300 ms on `axis`, each
+   * passed to `stamp` once written. The inflow begins before the run, its first two notes written, so no poll finds the
+   * pool drained and joins on it; `during` runs while the inflow goes on, then it stops, every note is waited to be
+   * judged (60 s) and `after` runs before the run is stopped.
+   */
+  const underInflow = async (label: string, axis: number, during: (inflow: string[]) => Promise<void>, o: { subjects?: boolean; stamp?: (id: string) => Promise<void>; after?: () => Promise<void> } = {}) => {
+    sw.slowExtract = 400;
+    lines.length = 0;
+    const inflow: string[] = [];
+    let flowing = true;
+    const flow = (async () => {
+      for (let i = 0; flowing; i++) {
+        const id = await capture(`An inflow note on the ${label}, number ${i}.`, "sync-sleep", 0, axis);
+        await o.stamp?.(id);
+        inflow.push(id);
+        await Bun.sleep(300);
+      }
+    })();
+    await pollUntil(async () => inflow.length >= 2, 10_000);
+    const ac = new AbortController();
+    const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, workers: 1, signal: ac.signal, ...(o.subjects ? { subjects: true } : {}) });
+    let allJudged = false, code = -9;
+    try {
+      try {
+        await during(inflow);
+      } finally {
+        flowing = false;
+        await flow;
+      }
+      allJudged = await pollUntil(async () => (await judgedOf(inflow)) === inflow.length, 60_000);
+      await o.after?.();
+    } finally {
+      sw.slowExtract = 0;
+      ac.abort();
+      code = await bounded(run, ac);
+    }
+    return { inflow, allJudged, code };
+  };
+  const lastLines = () => `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`;
+  try {
+    // The backlog: six older notes on one axis, two to seven days old, each a neighbour a capture today is judged
+    // against (one entity, the stub's, and one vector), written by the sync key, which pauses nothing; the subject
+    // sweep on, its pool unnamed, as at a first period.
+    await unpoolSubjects();
+    const backlog: string[] = [];
+    for (let i = 0; i < 6; i++) backlog.push(await capture(`An older note on the ledger, number ${i}.`, "sync-sleep", 2 + i, 63));
+    const startedAt = new Date((await sql`SELECT now() AS now`)[0].now as string);
+    let joined = false, judgedInFlow = 0, pendingAtJudge = 0, drainedInFlow = true, sweptInFlow = true, sweptAfter = false;
+    const a = await underInflow("ledger", 63, async (inflow) => {
+      joined = await pollUntil(async () => lines.some((l) => JOINED.test(l)), 30_000);
+      if (joined && await pollUntil(async () => (judgedInFlow = await judgedOf(inflow)) > 0, 30_000)) {
+        // Extraction's pool still not drained as the note is judged: the old rule would not have joined yet.
+        pendingAtJudge = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EX} AND status IN ('pending', 'claimed')`)[0].c);
+      }
+      drainedInFlow = lines.some((l) => DRAINED.test(l));
+      sweptInFlow = lines.some((l) => SWEEP.test(l));
+    }, { subjects: true, after: async () => { sweptAfter = await pollUntil(async () => lines.some((l) => SWEEP.test(l)), 30_000); } });
+    // None judged before its neighbours were extracted: consolidation's first claim of the run after the backlog's last
+    // extraction finished.
+    const [order] = (await sql`
+      SELECT (SELECT max(finished_at) FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ANY(${sql.array(backlog, "TEXT")}::uuid[])) AS extracted,
+             (SELECT min(claimed_at) FROM thought_work_claims WHERE work_type = ${CO} AND claimed_at >= ${startedAt}::timestamptz) AS judged,
+             (SELECT count(*)::int FROM thought_work_claims WHERE work_type = ${EX} AND status = 'succeeded' AND thought_id = ANY(${sql.array(backlog, "TEXT")}::uuid[])) AS done`) as { extracted: Date | null; judged: Date | null; done: number }[];
+    const inOrder = order.extracted !== null && order.judged !== null && order.done === backlog.length && new Date(order.judged) >= new Date(order.extracted);
+    assert(joined && judgedInFlow > 0 && pendingAtJudge > 0 && !drainedInFlow && inOrder && a.allJudged && a.code === 0,
+      `a capture every 300 ms, extraction's pool never drained while it lasted: consolidation joins once the thoughts captured before the period began are extracted, said so, and judges an inflow note while the inflow goes on — its first claim after the backlog's last extraction (joined ${joined}; ${judgedInFlow} inflow note(s) judged during it, ${pendingAtJudge} pending or in hand for extraction then; drained during it ${drainedInFlow}; backlog ${order.done} of ${backlog.length} extracted, the last at ${order.extracted ? new Date(order.extracted).toISOString() : "never"}, the first judgement claimed at ${order.judged ? new Date(order.judged).toISOString() : "never"}; ${a.inflow.length} captured, all judged once it ended ${a.allJudged}; exit ${a.code}${joined && judgedInFlow > 0 ? "" : lastLines()})`);
+    assert(!sweptInFlow && sweptAfter,
+      `…and the subject sweep waits for extraction's whole pool, not the backlog's join, starting here once the inflow has ended (review pass 2, the maintainer's choice) (started during it ${sweptInFlow}; after ${sweptAfter}${sweptAfter ? "" : lastLines()})`);
+    await unpoolSubjects();
+
+    // A limit the maintainer chose to name (review passes 1 and 2): a backlog thought a pause has taken — one stalled
+    // by three long stops with no window gained, and one a single pause stopped — is dated behind the captures since,
+    // so while they come faster than extraction takes them it is not reached, and the join waits for it, as before.
+    // No join past meanwhile: past a stalled backlog thought it cut the capture in hand and set the inflow aside for
+    // consolidation's whole drain (review pass 2, run-it: 215 s). Once the inflow ends, consolidation joins.
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+    const { resolveEmbedConfig: resolveC } = await import("../server-portable/embed.ts");
+    const { windowingFor: windowingC } = await import("../server-portable/entities.ts");
+    const sigC = JSON.stringify(windowingC(resolveC(env as Record<string, string>)));
+    const older: string[] = [];
+    for (let i = 0; i < 4; i++) older.push(await capture(`An older note on the journal, number ${i}.`, "sync-sleep", 2 + i, 62));
+    const held: string[] = [];
+    for (const [text, stops, stalled] of [["A held note on the journal, one window the model never finishes between stops.", 3, 3], ["A stopped note on the journal, one pause took it once.", 1, 0]] as const) {
+      const id = await capture(text, "sync-sleep", 9, 62);
+      const [{ fp }] = await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`;
+      await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${id}::uuid, ${EX}, ${fp}, ${sigC}, ${stops}, ${stalled})`;
+      held.push(id);
+    }
+    let begun = false, joinedInFlowB = true, heldAtEnd: (string | undefined)[] = [];
+    const b = await underInflow("journal", 62, async () => {
+      begun = await pollUntil(async () => lines.some((l) => /^ {2}working:/.test(l)), 20_000);
+      await Bun.sleep(8000);
+      joinedInFlowB = lines.some((l) => ANY_JOIN.test(l));
+      heldAtEnd = await Promise.all(held.map((id) => exStatus(id)));
+    });
+    assert(begun && !joinedInFlowB && heldAtEnd.every((st) => st === "pending") && b.allJudged && b.code === 0,
+      `…and backlog thoughts a pause has taken, one stalled and one stopped once, dated behind the captures since, hold the join while they come faster than extraction takes them — no join past meanwhile — and consolidation judges every note once the inflow ends (joined during it ${joinedInFlowB}; held thoughts ${heldAtEnd.join(",")} at its end; ${b.inflow.length} captured, all judged after ${b.allJudged}; exit ${b.code}${!joinedInFlowB && b.allJudged ? "" : lastLines()})`);
+
+    // Board-sync's writes (review pass 2): it dates an observation at 00:00 UTC of its day, and re-renders a ticket in
+    // place, which 016 pools again. Both were backlog, and held the join as before: now a write during the period
+    // dated today is none, and a thought already extracted that an edit pools again during the period keeps
+    // its entities, no backlog either. The journal's notes, all extracted above, are this case's older thoughts;
+    // once the period has begun one is edited every 2 s under the sync key, which pauses nothing (review pass 3: a
+    // raw UPDATE, no actor, read as a live write and paused the period), while the inflow goes on, each edit pooling
+    // it again behind the captures; four older notes not yet extracted are the backlog the join waits for meanwhile.
+    // The held thoughts out, which would hold this join as above.
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(held, "TEXT")}::uuid[])`;
+    for (let i = 0; i < 4; i++) await capture(`An older note on the register, number ${i}.`, "sync-sleep", 2 + i, 62);
+    const edited = older[0];
+    let editing = true, edits = 0, joinedD = false, judgedD = 0, editsAtJoin = 0, heldBack = "", editedAtJoin: string | undefined;
+    const startedD = new Date((await sql`SELECT now() AS now`)[0].now as string);
+    let editor: Promise<void> = Promise.resolve();
+    const d = await underInflow("register", 62, async (inflow) => {
+      try {
+        await pollUntil(async () => lines.some((l) => /^ {2}working:/.test(l)), 20_000);
+        editor = (async () => {
+          while (editing) {
+            await sql`SELECT update_thought(p_id := ${edited}::uuid, p_content := ${`An older note on the journal, number 0, re-rendered ${edits}.`}, p_embedding := ${unit(62)}::vector, p_embedding_model := 'stub-embed', p_actor := ${{ name: "sync-sleep", via: "test-live" }}::jsonb)`;
+            edits++;
+            await Bun.sleep(2000);
+          }
+        })();
+        joinedD = await pollUntil(async () => lines.some((l) => JOINED.test(l)), 30_000);
+        editsAtJoin = edits;
+        editedAtJoin = await exStatus(edited);
+        if (!joinedD) heldBack = ((await sql`SELECT t.content, c.status, (SELECT count(*)::int FROM thought_entities te WHERE te.thought_id = t.id) AS ents, t.created_at FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE c.work_type = ${EX} AND c.status IN ('pending', 'claimed') AND t.created_at < ${startedD}::timestamptz`) as { content: string; status: string; ents: number; created_at: Date }[]).map((r) => `${r.content.slice(0, 40)} ${r.status} ${r.ents} ${new Date(r.created_at).toISOString()}`).join(" / ");
+        if (joinedD) await pollUntil(async () => (judgedD = await judgedOf(inflow)) > 0, 30_000);
+      } finally {
+        editing = false;
+        await editor;
+      }
+    }, { stamp: async (id) => { await sql`UPDATE thoughts SET created_at = date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' WHERE id = ${id}::uuid`; } });
+    assert(joinedD && judgedD > 0 && editsAtJoin > 0 && editedAtJoin !== "succeeded" && d.allJudged && d.code === 0,
+      `…and writes dated 00:00 UTC today, as board-sync's observations, beside an older thought already extracted that an edit pools again every 2 s, as a re-rendered ticket: neither holds the join, and an inflow note is judged while the writes go on (joined ${joinedD}; ${judgedD} judged during it; ${editsAtJoin} edit(s) before the join, ${edits} in all, the edited thought ${editedAtJoin ?? "unclaimed"} at it; older ones pending or in hand then: ${heldBack || "none"}; its joins: ${lines.filter((l) => ANY_JOIN.test(l)).map((l) => l.trim().slice(0, 120)).join(" | ") || "none"}; ${d.inflow.length} captured, all judged after ${d.allJudged}; exit ${d.code}${joinedD ? "" : lastLines()})`);
+
+    // An extraction model's switch (review pass 4): every thought keeps the old key's entities until re-extracted,
+    // which consolidate.ts asks to drain before consolidating. Sixteen older notes carry only a retired key's entity;
+    // once the period has begun they are pooled again, as a switch's first pool leaves them, and dated a day ahead so
+    // that extraction leaves them while the inflow lasts. They hold the join meanwhile: read by any entity, they were
+    // extracted already, and the join came at once, judging inflow notes against the old model's.
+    const archive: string[] = [];
+    for (let i = 0; i < 16; i++) archive.push(await capture(`An older note on the archive, number ${i}.`, "sync-sleep", 2 + (i % 5), 62));
+    const [{ entity }] = (await sql`SELECT entity_id::text AS entity FROM thought_entities LIMIT 1`) as { entity: string }[];
+    for (const id of archive) await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES (${id}::uuid, ${entity}::uuid, 0.9, 'extract:retired-model@p1')`;
+    let begunE = false, joinedInFlowE = true, leftE = -1;
+    const e = await underInflow("archive", 62, async () => {
+      begunE = await pollUntil(async () => lines.some((l) => /^ {2}working:/.test(l)), 20_000);
+      for (const id of archive) await sql`SELECT requeue_thought_work(${EX}, ${id}::uuid)`;
+      await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '1 day' WHERE work_type = ${EX} AND thought_id = ANY(${sql.array(archive, "TEXT")}::uuid[])`;
+      await Bun.sleep(8000);
+      joinedInFlowE = lines.some((l) => ANY_JOIN.test(l));
+      leftE = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EX} AND status <> 'succeeded' AND thought_id = ANY(${sql.array(archive, "TEXT")}::uuid[])`)[0].c);
+    });
+    const retiredE = Number((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE extraction_key = 'extract:retired-model@p1'`)[0].c);
+    assert(begunE && !joinedInFlowE && leftE === archive.length && retiredE === 0 && e.allJudged && e.code === 0,
+      `…and after an extraction model's switch, thoughts carrying only the old key's entities are backlog: sixteen pooled again behind the inflow hold the join through 8 s of it, all sixteen still to extract, and once it ends they are extracted under the current key and every note is judged (joined during it ${joinedInFlowE}; ${leftE} of ${archive.length} still to extract at its end; ${retiredE} retired row(s) left; ${e.inflow.length} captured, all judged after ${e.allJudged}; exit ${e.code}${!joinedInFlowE && e.allJudged ? "" : lastLines()})`);
+  } finally {
+    await unpoolSubjects().catch(() => {});
+    await done();
+  }
+})();
+
 if (want("38b")) {
   console.log("\n[38b] db/sleep.ts: a thought longer than every run between pauses, the brain live 2.45 s into each working period, pausing it (SMD-3379 PR 1c-3b) — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every run between pauses is joined past after three stalled stops and named on the row (SMD-2694); a capture made during a period goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same period; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the pauses' aborts and order the held word (SMD-3060)");
   const sql = new SQL({ url: URL_, max: 4 });
@@ -30978,8 +31263,8 @@ if (want("38b")) {
     lines.length = 0;
     const dry = await runSleep({ url: URL_!, subjects: false, env, capture: 1, poll: 1, dryRun: true, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
       .finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
-    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 093 not applied\) — consolidation joins only once extraction is drained/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
-      `without the table the start says consolidation joins only once extraction drains, and the dry run reads the pools (exit ${dry})`);
+    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 093 not applied\) — consolidation joins only once the thoughts captured before the period began are extracted, never past a stalled one/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
+      `without the table the start says consolidation joins only once the period's backlog is extracted, and the dry run reads the pools (exit ${dry})`);
     // With it, the dry run beside the scheduler named the held thought and the pool it joins past.
     assert(dryHeld === 0 && dryLines.some((l) => new RegExp(`held back across stops \\(1 of 1\\): ${stuck}, no window kept over \\d+ stop\\(s\\), the last \\d+ with none gained`).test(l)) && dryLines.some((l) => /only 1 stalled thought\(s\), which consolidation would join past/.test(l)),
       `the dry run names the held thought and says consolidation would join past it (${dryLines.filter((l) => /held|stalled/.test(l)).join(" | ").trim()})`);
@@ -34910,7 +35195,7 @@ if (want("51")) {
       await sql`SELECT set_agent_kind('imp-3318', 'ingested')`;
       const hadColumns = (await columns()).length > 0;
       if (hadColumns) {
-        skip("…the first phase, a brain without the enhanced-thoughts columns", "an earlier section of this run added them (only an unsharded run reaches [51] after [29])");
+        skip("…the first phase, a brain without the enhanced-thoughts columns", "an earlier section of this run added them (only an unsharded run reaches [51] after [18], which leaves them)");
       } else {
         const ids = {
           caseOnly: await plant("[51] plain words one", { type: "Task" }),

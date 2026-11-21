@@ -58,6 +58,7 @@
  * transcript_path, cwd, hook_event_name — so one script serves both; the
  * transcript's first line says which wrote it.
  *
+ *   bun session-capture.mjs --version                    # prints "session-capture <version>" (SMD-4378)
  *   bun session-capture.mjs --print-hook claude-code     # the settings.json to paste (SessionEnd + PreCompact); installs nothing
  *   bun session-capture.mjs --print-hook codex           # the hooks.json to paste (SessionEnd: Codex has no compaction hook)
  *   bun session-capture.mjs --print-hook claude-code --event Stop --min-interval 20   # the coarser checkpoint: a turn, at most every 20 min
@@ -89,6 +90,20 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 // ── Configuration ────────────────────────────────────────────────────────────
+
+/**
+ * The hook's version, the one source of it (SMD-4378). It is a constant, not a
+ * read of `metadata.json`, because the installed hook is a copy of this file
+ * alone. The suite fails if it differs from `metadata.json`'s. `--version`
+ * prints it, `--check` and `--dry-run` name it first, and each summary carries
+ * it as `metadata.hook_version`: the hook that prepared the payload, whose
+ * rules wrote its derived text and header. A model's summary is written when
+ * the payload is sent, which a later hook may do; its stamp names the hook
+ * that prepared the model's input.
+ */
+export const HOOK_VERSION = "1.11.0";
+/** A version's shape, three numbers: the only stamp `postCapture` sends. The suite holds HOOK_VERSION to it. */
+export const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
 const SELF = fileURLToPath(import.meta.url);
 const HOME = homedir();
@@ -800,6 +815,33 @@ export function ticketsIn(text, teams) {
   return out;
 }
 /**
+ * The tickets an ask names, read with its secrets blanked (SMD-4292): a ticket-shaped value a secret holds
+ * (`password=ABC-1234`) is no ticket. Read off the raw ask, it headed the summary while the ask that held it was
+ * blanked, the brain keyed it as a subject, it began an episode ("begun with ABC-1234") and it decided where the
+ * session split. Both readers of an ask's tickets, `named` and the segmenter's boundaries, go through here.
+ * In both modes: under `refuse`, read raw, the secret split off an episode of its own, and the clean episode before it
+ * was sent saying "ended when ABC-1234 was taken up" (review pass 1: limiting this rule to `redact` kept sending that
+ * line). Read blanked, it splits nothing, and its episode is refused whole, as one holding `password=hunter2` always
+ * was. A real ticket the scan takes for a secret (`Password: SMD-12 (reset flow)`) is dropped too: its ask is blanked
+ * in the text as well.
+ * The ask is blanked on one line, as `redactEpisode` blanks each prompt: blanked as written, a quoted secret whose
+ * closing quote is on the next line (`password = "hunter22⏎QQZ-9876"`) was cut at its first space, and its
+ * ticket-shaped part headed the summary while the prompt showed it blanked (review pass 1, secrets adversary).
+ * Only tickets the raw ask names, read with the same teams, are kept: blanking can join a word to its marker into a
+ * ticket shape (`XY-12` before a Slack webhook's URL; review pass 1, cold read), and a lower-case mention of that key
+ * before any team is known is no ticket (review pass 3, mutant).
+ * The cost: the scan runs once per ask, cached per event (the segmenter and the episode both read it), and only for an
+ * ask whose raw text names a ticket: about 20 ms per MB of such asks, nothing for an ask naming none.
+ */
+const blankedAsks = new WeakMap();
+const askTickets = (ev, teams) => {
+  const raw = ticketsIn(ev.text, teams);
+  if (!raw.length) return [];
+  let text = blankedAsks.get(ev);
+  if (text === undefined) { text = redactSecrets(oneLine(ev.text)).text; blankedAsks.set(ev, text); }
+  return ticketsIn(text, teams).filter((id) => raw.includes(id));
+};
+/**
  * A place's own tickets (SMD-4291): the first ticket-shaped word of `text` is the place's ticket, and the other keys of
  * its team are tickets beside it (`smd-610-and-smd-611`); a word of another team is the place's description, no ticket
  * and no team (`node-22` of `smd-610-bump-node-22`). Before, every ticket-shaped word of a branch or a directory was a
@@ -843,7 +885,7 @@ function apply(x, ev, teams) {
     case "time": if (!x.first) x.first = ev.at; x.last = ev.at; break;
     case "cwd": x.cwd = ev.v; x.roots.add(ev.v); break;
     case "branch": x.branch = ev.v; break;
-    case "prompt": x.prompts.push(ev.text); for (const id of ticketsIn(ev.text, teams)) x.named.add(id); break;
+    case "prompt": x.prompts.push(ev.text); for (const id of askTickets(ev, teams)) x.named.add(id); break;
     case "outcome": x.outcome = ev.text; x.assistant.push(ev.text); if (x.assistant.length > LIMITS.modelMsgs) x.assistant.shift(); break; // `outcome` is the last, for the derived text; `assistant` keeps the recent window for the model (SMD-2014)
     case "file": x.files.add(ev.path); break;
     case "commit": x.commits++; break;
@@ -1023,7 +1065,7 @@ export function segment(events, s = emptySummary()) {
       continue;
     }
     if (ev.t === "prompt") {
-      const named = ticketsIn(ev.text, teams);
+      const named = askTickets(ev, teams);
       if (cur.prompts.length) {
         const known = knownTickets(cur), fresh = named.filter((id) => !known.has(id));
         const moved = away();
@@ -1579,7 +1621,9 @@ export function redactEpisode(ep) {
   };
   // The DISTINCT prompts, as the summary lists them: a retried prompt is one
   // line in the text and one redaction in the count.
-  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(ep.title, "the title") };
+  // The title as the summary shows it, on one line, as the prompts are (SMD-4292 review pass 2, secrets adversary: blanked
+  // as written, a quoted value whose closing quote is on the next line was cut there, and the rest shown).
+  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(typeof ep.title === "string" ? oneLine(ep.title) : ep.title, "the title") };
   const text = take(renderSummary(redacted), "the text");
   return { ep: redacted, text, redactions, blocks };
 }
@@ -1788,11 +1832,19 @@ export async function postCapture(cfg, payload) {
   // from, the asks or the place (SMD-3306 PR 7a-3b-2), for the brain's subject
   // rule, which the text alone leaves to guess — not with a model's summary,
   // whose prose has no header for the word to describe (review pass 4: a model
-  // echoing the header it was shown would have its tickets keyed).
+  // echoing the header it was shown would have its tickets keyed); and the
+  // version of the hook that prepared it (SMD-4378), so the brain can later
+  // tell which rules wrote a header. A payload queued by a hook before 1.11.0 has
+  // none, and is sent without it: no hook can say which wrote it. A hook
+  // before 1.11.0 sending a payload a later one queued (a rollback) drops it.
+  // A stamp not in a version's shape (a hand edit, a corrupt file) is not sent:
+  // a long one the server refused cost the summary all its metadata, the
+  // redaction count among it (review pass 2).
   const meta = {};
   if (payload.summary_model) meta.summary_model = payload.summary_model;
   if (payload.redactions?.length) meta.redactions = payload.redactions.length;
   if (payload.tickets_from && !payload.summary_model) meta.tickets_from = payload.tickets_from;
+  if (typeof payload.hook_version === "string" && VERSION_RE.test(payload.hook_version)) meta.hook_version = payload.hook_version;
   if (Object.keys(meta).length) args.metadata = meta;
   const call = () => rpc(cfg, "tools/call", { name: "capture_thought", arguments: args });
   let result = await call();
@@ -1982,6 +2034,7 @@ export function prepare(hook, opts = {}) {
       prompts: distinctPrompts(cleaned.ep.prompts).length, prepared_at: new Date().toISOString(), attempts: 0, // as the text counts them: two asks that differed in a secret alone are one line once blanked (first review pass)
       ...(redactions.length ? { redactions } : {}), // what was blanked, where — the log's and the message's; absent when nothing was
       ...(ticketsFrom ? { tickets_from: ticketsFrom } : {}), // where the header's tickets came from (SMD-3306 PR 7a-3b-2)
+      hook_version: HOOK_VERSION, // the hook that prepared the payload (its derived text, or the model's input), whichever later hook drains the queue (SMD-4378)
     };
     // The model's input rides the payload only when the option is on AND the
     // payload is a durable one the model will actually write — not a running
@@ -3928,8 +3981,25 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+/** Whether stdin is a pipe or a socket, as a harness hands a hook its JSON: not a terminal, not /dev/null (SMD-4378 review pass 2). */
+function stdinIsPiped() {
+  try { const st = fstatSync(0); return st.isFIFO() || st.isSocket(); } catch { return false; }
+}
+
 export async function main(argv) {
   const args = argv.slice(2);
+  // First, whatever else is given and whether or not stdin is piped: an
+  // operator confirming an upgrade needs no config, no brain and no
+  // transcript (SMD-4378). A piped stdin may be a hook command's, which then
+  // does nothing at every run: the log says so, as it does for a flag no hook
+  // takes (review pass 1: it was silent). On a terminal or /dev/null, as an
+  // interactive shell or Claude Code's Bash tool runs it, nothing is logged
+  // and no state dir is made (review pass 2).
+  if (has(args, "--version")) {
+    if (stdinIsPiped()) log(`--version: printed session-capture ${HOOK_VERSION}; stdin unread, nothing captured, renewed or copied (if this is a hook command, it stops every run: remove --version)`);
+    console.log(`session-capture ${HOOK_VERSION}`);
+    return 0;
+  }
   const harness = flag(args, "--harness");
   // Exit 1, not 2: on a Stop hook 2 would block the assistant's turn over a typo in the command line (seventh review pass).
   if (harness !== undefined && !HARNESSES.includes(harness)) { console.error(`--harness takes ${HARNESSES.join(" or ")}, not "${harness}" (omit it: the transcript's first line says which)`); return 1; }
@@ -3983,6 +4053,7 @@ export async function main(argv) {
     return 0;
   }
   if (has(args, "--check")) {
+    console.log(`session-capture ${HOOK_VERSION}`); // the copy being checked, before the mode and config checks (SMD-4378); a bad --harness is refused before it
     if (modeError) { console.error(`session-capture: ${modeError}`); return 1; } // before the config: a missing config must not hide the typo (first review pass)
     let brains;
     try { brains = loadBrains(); } catch (e) { console.error(`session-capture: ${e.message}`); return 2; }
@@ -4146,6 +4217,7 @@ export async function main(argv) {
     if (triggerError) { console.error(triggerError); return 2; }
     if (has(args, "--min-interval")) { console.error("--min-interval is --print-hook's, for a Stop hook; a dry run has no interval"); return 2; }
     if (modeError) { console.error(modeError); return 2; }
+    console.log(`--- session-capture ${HOOK_VERSION}: what it would send; nothing is sent\n`); // which hook's rules the texts below follow (SMD-4378)
     // With the model summary on, say so and that a dry run does NOT call it: the
     // texts below are the DERIVED summaries — what the model is given, and what
     // is sent if the call is refused, slow or unconfigured (SMD-2014). Tolerant
@@ -4177,7 +4249,7 @@ export async function main(argv) {
       if (several) console.log(`\n=== episode ${ep.n} ===`);
       console.log(text);
       const from = headerTickets(cleaned.ep).from;
-      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}${from ? `, metadata.tickets_from=${from}` : ""}`);
+      console.log(`\n--- would send${several ? ` (episode ${ep.n})` : ""}: source=${s.harness}, derived_from=${ids.length} id(s)${ids.length ? ` [${ids.slice(0, 5).join(", ")}${ids.length > 5 ? ", …" : ""}]` : ""}${from ? `, metadata.tickets_from=${from}` : ""}, metadata.hook_version=${HOOK_VERSION}`);
       if (where.length) { console.log(`--- would REFUSE${several ? ` episode ${ep.n}` : ""}: ${where.join(", ")}${redactions.length ? ` after ${countRedactions(redactions.length)}` : ""}`); code = 1; }
       else if (redactions.length) console.log(`--- secret scan: ${countRedactions(redactions.length)} — ${describeRedactions(redactions)}; the text above is what would be sent`);
       else console.log("--- secret scan: clean");
@@ -4208,7 +4280,7 @@ export async function main(argv) {
 
   // The hook itself: JSON on stdin. A terminal is not a hook — say so instead
   // of waiting on it for ever (ninth review pass).
-  if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload> [--post <payload>…], --copy-forget <id>."); return 2; }
+  if (process.stdin.isTTY) { console.error("session-capture: expected the hook's JSON on stdin (a harness pipes it). By hand: --version, --print-hook [claude-code|codex], --check, --dry-run <transcript>, --post <payload> [--post <payload>…], --copy-forget <id>."); return 2; }
   let hook;
   try { hook = JSON.parse(await readStdin()); } catch (e) { console.error(`session-capture: stdin is not the hook's JSON (${e.message})`); return 1; }
   // A hook takes two flags. Any other — `--event` or `--trigger`, which are

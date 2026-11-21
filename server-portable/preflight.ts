@@ -489,7 +489,7 @@ const FORGOTTEN_TIMEOUT_MS = 10_000;
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "validity", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
@@ -591,29 +591,30 @@ const THEN_055 = " Then apply db/migrations/055_capture_event_payload.sql and db
  */
 const THEN_060 = " Then apply db/migrations/060_append_then_project.sql — it last defines the audit trigger 055 also holds, so 055 alone puts its 055 body back (bun migrate.ts --reapply runs every file in order).";
 /**
- * 060 and 061 also hold the write functions, which 099 (update_thought, on
- * 088's body and so 073's) and 080 (upsert_thought) last define (SMD-1724,
- * SMD-2539, SMD-2744, SMD-3045): either applied by hand alone puts its bodies
+ * 060 and 061 also hold the write functions, which 148 (update_thought, on
+ * 099's and 088's body and so 073's) and 080 (upsert_thought) last define (SMD-1724,
+ * SMD-2539, SMD-2744, SMD-3045, SMD-2298): either applied by hand alone puts its bodies
  * back, which stamp no declared trust on the row — so every remedy that names
- * 060 or 061 names 073, 080 and 099 after it.
+ * 060 or 061 names 073, 080 and 148 after it.
  */
-const THEN_073 = " Then apply db/migrations/073_thought_trust_on_the_row.sql, db/migrations/080_recapture_keep.sql and db/migrations/099_unlink_takes_review_lock.sql — 099 last defines update_thought (on 088's body, and so 073's) and 080 upsert_thought, which 060 and 061 also hold, so one of them applied alone puts its bodies back, which stamp no declared trust (bun migrate.ts --reapply runs every file in order).";
+const THEN_073 = " Then apply db/migrations/073_thought_trust_on_the_row.sql, db/migrations/080_recapture_keep.sql and db/migrations/148_update_thought_settles_tags.sql — 148 last defines update_thought (on 099's and 088's body, and so 073's) and 080 upsert_thought, which 060 and 061 also hold, so one of them applied alone puts its bodies back, which stamp no declared trust (bun migrate.ts --reapply runs every file in order).";
 /**
  * 073 also holds upsert_thought, which 080 last defines (SMD-2539), and
- * update_thought, which 099 last defines (SMD-2744, SMD-3045): 073 applied by hand
+ * update_thought, which 148 last defines (SMD-2744, SMD-3045, SMD-2298): 073 applied by hand
  * alone puts its bodies back — upsert_thought's merge a capture-only key's
  * re-capture into the row it lands on, update_thought's answers no stamp, so
- * the reply to a patch naming trust says "merged" again, and its unlink takes
- * no review lock — so every remedy that names 073 names 080 and 099 after it.
+ * the reply to a patch naming trust says "merged" again, its unlink takes
+ * no review lock and a re-tag that came out the same settles no tags row — so
+ * every remedy that names 073 names 080 and 148 after it.
  */
-const THEN_080 = " Then apply db/migrations/080_recapture_keep.sql and db/migrations/099_unlink_takes_review_lock.sql — they last define upsert_thought and update_thought, which 073 also holds, so 073 alone puts its 073 bodies back, which merge a capture-only key's re-capture into the row it lands on, answer an edit with no stamp and take no review lock for an unlink (bun migrate.ts --reapply runs every file in order).";
+const THEN_080 = " Then apply db/migrations/080_recapture_keep.sql and db/migrations/148_update_thought_settles_tags.sql — they last define upsert_thought and update_thought, which 073 also holds, so 073 alone puts its 073 bodies back, which merge a capture-only key's re-capture into the row it lands on, answer an edit with no stamp, take no review lock for an unlink and settle no re-tag's tags row (bun migrate.ts --reapply runs every file in order).";
 const APPLY_046 = "Apply db/migrations/046_thought_audit_event_shape.sql.";
 const APPLY_055 = "Apply db/migrations/055_capture_event_payload.sql.";
 const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
-const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
+const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/150_rebuild_requeues_tags.sql — 150 last defines rebuild_derived (on 067's body), so 067 alone puts back a body that requeues no stale tags row.";
 const APPLY_110 = "Apply db/migrations/110_listing_pages.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
 const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
@@ -1847,7 +1848,7 @@ if (configFailed) {
          */
         const writersRemedy = (apply073: string, reapplied = ""): string =>
           ledgerRead && !ledger.has("061")
-            ? ledgerRemedy("061", `${APPLY_061} The migrator applies the files after it, 073, 080 and 099 — the write functions' last definers, and the body 099 carries — among them.`)
+            ? ledgerRemedy("061", `${APPLY_061} The migrator applies the files after it, 073, 080 and 148 — the write functions' last definers, and the bodies 148 carries — among them.`)
             : ledgerRemedy("073", apply073, reapplied);
         /**
          * upsert_thought's remedy: 080, its last definer — except where 080's
@@ -1860,7 +1861,7 @@ if (configFailed) {
           ledgerRead && !ledger.has("073")
             ? writersRemedy(`${APPLY_073} The migrator applies the files after it, 080 — upsert_thought's last definer — among them.`)
             : ledgerRemedy("080", pre073 && !ledgerRead
-              ? `Apply db/migrations/073_thought_trust_on_the_row.sql, then db/migrations/080_recapture_keep.sql and db/migrations/099_unlink_takes_review_lock.sql${why}`
+              ? `Apply db/migrations/073_thought_trust_on_the_row.sql, then db/migrations/080_recapture_keep.sql and db/migrations/148_update_thought_settles_tags.sql${why}`
               : `Apply db/migrations/080_recapture_keep.sql${why}`);
         // By signature, not arity: a vendored bootstrap's upsert_thought(text,
         // vector, jsonb) is a third 3-argument form, and reading whichever the
@@ -2826,7 +2827,7 @@ if (configFailed) {
               + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the key each edge is named under above>'." : "")
               // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
               + (Number(c.subjects) ? " An own subject's row is written with it by 130's record_thought_subjects (111's record_thought_subject its set of one): close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -3374,6 +3375,44 @@ if (configFailed) {
         }
 
         /**
+         * Migration 149's validity read (SMD-3887 PR 2b): thought_validity under 149's signature, which the validity
+         * tool calls, and which of the tables it reads the server's role may SELECT. A table it may not leaves the axes
+         * resting on it unknown, named in each answer's `unread`; thoughts itself faults the tool. Before 149 a skip;
+         * the function missing where the ledger records 149, a failure, and where the role cannot read the ledger, a warning.
+         */
+        {
+          const VALIDITY_TABLES = ["thoughts", "ob1_superseded_by", "supersession_proposals", "deliverable_events", "thought_facets", "derivations",
+            "thought_chunks", "thought_entities", "ob1_entity_edges", "thought_audit", "thought_forgotten"];
+          const vRows = await sql.unsafe(`
+            SELECT to_regprocedure('public.thought_validity(uuid[])') IS NOT NULL AS has_fn,
+                   -- CASE, not OR: the text form raises for a table not there.
+                   ARRAY(SELECT t FROM unnest(ARRAY[${VALIDITY_TABLES.map((t) => `'${t}'`).join(", ")}]) t
+                          WHERE CASE WHEN to_regclass('public.' || t) IS NULL THEN false ELSE NOT has_table_privilege('public.' || t, 'SELECT') END) AS unreadable`)
+            .then((r) => r as { has_fn: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const vl = Array.isArray(vRows) ? vRows[0] : null;
+          if (!vl) {
+            add("validity", "warn", `could not verify: ${(vRows as Error).message}`, "The check reads thought_validity and the tables it reads in public; the message says why it failed.");
+          } else if (!vl.has_fn && ledger.has("149")) {
+            // Recorded and not there (a --baseline adoption, a dropped function): the tool faults on every call (review pass 1).
+            add("validity", "fail", "migration 149's thought_validity(uuid[]) missing though the ledger records 149; the validity tool faults on every call",
+                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+          } else if (!vl.has_fn && ledgerPresent && !ledgerRead) {
+            // Missing, and this role cannot read whether the ledger records 149: a warning, the remedy naming both.
+            add("validity", "warn", `thought_validity(uuid[]) missing, and ${whyUnread}, so whether migration 149 is recorded is unknown; the validity tool faults until it is there`,
+                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+          } else if (!vl.has_fn) {
+            add("validity", "skip", "not checked — thought_validity does not exist (migration 149 not applied); the validity tool faults until it is");
+          } else if (vl.unreadable.includes("thoughts")) {
+            add("validity", "warn", "the server's role cannot SELECT thoughts: the validity tool faults", "Grant the server its read group (db/README.md, Grants).");
+          } else if (vl.unreadable.length) {
+            add("validity", "warn", `the server's role cannot SELECT ${vl.unreadable.join(", ")}: the validity read answers the axes resting on them unknown, naming them in unread`,
+                "Grant the server's role SELECT on them, if the read should see those records (db/README.md, Grants).");
+          } else {
+            add("validity", "ok", "thought_validity present; the server's role reads every table it reads");
+          }
+        }
+
+        /**
          * Forgetting (SMD-1723 PR 2). `forget definer`: 144 made forget_thought a SECURITY DEFINER wrapper over 139's
          * body, its search_path pinned, and revoked it from PUBLIC; a re-applied 139 (CREATE OR REPLACE) puts the body
          * back under that name, running as its caller — the server's role meeting every store's privilege, or none. And whether
@@ -3691,7 +3730,7 @@ if (configFailed) {
                 `${current[0].sig}: the form the servers and reembed.ts call since migration 061, alone, but its body is from before migration 073 (061 re-applied by hand?): the trust an edit declares never reaches the row, and a patch's metadata.trust above the key is dropped without being filed (SMD-1724)`,
                 writersRemedy(APPLY_073));
           } else if (current.length && extra.length === 0) {
-            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 073's body (which 088 and 099 carry) — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061), the declared trust stamped on a new text (073)`);
+            add("edit signature", "ok", `${current[0].sig}: the form the servers and reembed.ts call since migration 061 (${UPDATE_THOUGHT_SIGNATURE}), alone, with 073's body (which 088, 099 and 148 carry) — the edit appended as an event first, the row projected from it (060), the windows' and the tags' lineage recorded with it (061), the declared trust stamped on a new text (073)`);
           } else if (current.length) {
             add("edit signature", "fail",
                 `beside the form the servers call there ${extra.length === 1 ? "is an earlier one" : `are ${extra.length} earlier ones`}: ${extra.join(", ")} — an earlier migration re-applied by hand over 061 — so every call that sends fewer than eleven arguments to update_thought, which is every PostgREST caller by name, every hand-written SELECT and db/reembed.ts's positional call, fails with "function is not unique"`,

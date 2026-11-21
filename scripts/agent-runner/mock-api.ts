@@ -8,6 +8,7 @@
  * a skill) and what each call returned. A request without the probe's stand-in key is counted and refused, never
  * answered, and no header is ever recorded.
  */
+import { isObject } from "./guard.ts";
 
 /** One step of a script: a tool call with its input, or text that ends the turn. */
 export type Step = { tool: string; input: Record<string, unknown> } | { text: string };
@@ -19,8 +20,6 @@ export type Mock = { url: string; requests: Recorded[]; wrongKey: () => number; 
 
 /** The id the mock gives the call it makes as step `n` of its script. */
 export const callId = (n: number): string => `toolu_probe_${n}`;
-
-const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** A system prompt, as the API takes it (a string or text blocks), as text. */
 export function systemText(system: unknown): string {

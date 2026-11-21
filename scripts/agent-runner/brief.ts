@@ -18,6 +18,7 @@
  * not for the ones it mentions (docs, cut 2b note). Fetching a named ticket's body needs the Linear key and is cut 2c.
  */
 
+import { codePointName } from "./guard.ts";
 import { HIDDEN_TEXT, TICKET_ID } from "./select.ts";
 
 /** The ticket the brief is for: its id, its title, description and Verify items, and the ids it names (parsed by the runner). */
@@ -47,7 +48,7 @@ export type BriefInput = {
 function hiddenIn(text: string): string | null {
   for (const ch of text) {
     if (ch === "\t" || ch === "\n" || ch === "\r") continue;
-    if (HIDDEN_TEXT.test(ch)) return `<U+${(ch.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>`;
+    if (HIDDEN_TEXT.test(ch)) return codePointName(ch);
   }
   return null;
 }
