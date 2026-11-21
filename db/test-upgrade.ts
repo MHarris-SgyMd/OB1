@@ -796,12 +796,13 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // update_thought on its own body, refusing by name without 073 or 063's
   // derivations.stale_since ([20ck]); 149 adds thought_validity, a read of a
   // thought's state on three axes, refusing by name without 016, 029, 042,
-  // 046, 050, 061, 063, 068, 114, 134 or 139 ([20cl]) — all recorded by the
-  // planted ledger with their
-  // prerequisites present, so none becomes the plain-run failure point
-  // above).
+  // 046, 050, 061, 063, 068, 114, 134 or 139 ([20cl]); 150 redefines 067's
+  // rebuild_derived on its own body, refusing by name without 063, 067 or
+  // 016's requeue_thought_work ([20cm]) — all recorded by the planted ledger
+  // with their prerequisites present, so none becomes the plain-run failure
+  // point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 120, `030 is among the last one hundred and twenty migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 121, `030 is among the last one hundred and twenty-one migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7247,6 +7248,54 @@ console.log("\n[20cl] Migration 149: onto a populated brain at the file before i
   await applyMigrations(URL_, { ...OPTS, only: (f) => f === the149 });
   const again = await states();
   assert(again === first, `a re-apply is a no-op: the same answers (${again})`);
+
+  await sql.close();
+}
+
+console.log("\n[20cm] Migration 150: onto a populated brain at the file before it — a stale tags row there is marked alone though a retag key is recorded; refused by name without 016's requeue_thought_work, rebuild_derived left as it was; then applied: the stale tags row is requeued under the recorded key; a re-apply a no-op (SMD-2298)");
+{
+  const the150 = MIGRATIONS.find((f) => /^\d{3}_rebuild_requeues_tags\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the150 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const KEY = "retag:up-m1@p1";
+  await sql`INSERT INTO ob1_config (key, value) VALUES ('retag_key', ${KEY})`;
+  const LINEAGE = JSON.stringify({ metadata: { deterministic: false, model: "up-m1", prompt_version: 1, prompt_hash: "h1", temperature: 0 } });
+  const tagged = async (text: string) => {
+    const id = String((await sql`SELECT (upsert_thought(${text}, ${JSON.stringify({ metadata: { type: "note", topics: ["alpha"] } })}::text::jsonb))->>'id' AS id`)[0].id);
+    await sql`SELECT update_thought(${id}::uuid, p_metadata_patch => ${JSON.stringify({ type: "note", topics: ["alpha"] })}::text::jsonb, p_lineage => ${LINEAGE}::text::jsonb)`;
+    return id;
+  };
+  const move = (id: string, text: string) => sql`UPDATE thoughts SET content = ${text}, content_fingerprint = content_fingerprint_of(${text}) WHERE id = ${id}::uuid`;
+  const rebuild = async (id: string) => (await sql`SELECT rebuild_derived(${id}::uuid, 'upgrade: moved') AS r`)[0].r as { enqueued: number; unqueued: number; marked: number };
+  const pooled = async (id: string) => (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${id}::uuid`)[0]?.status as string | undefined;
+  const requeues = async () => Boolean((await sql`SELECT bool_or(prosrc LIKE '%ob1:tags-requeued-under-retag-key%') AS s FROM pg_proc WHERE proname = 'rebuild_derived'`)[0].s);
+
+  // At the file before: the stale tags row marked alone, though a key is recorded.
+  const a = await tagged("[20cm] a note before its move");
+  await move(a, "[20cm] a note after its move");
+  const before = await rebuild(a);
+  // Without 016's requeue_thought_work (the arm calls it): refused by name, rebuild_derived left as it was.
+  await sql`ALTER FUNCTION requeue_thought_work(text, uuid) RENAME TO requeue_thought_work_away`;
+  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the150 }).then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION requeue_thought_work_away(text, uuid) RENAME TO requeue_thought_work`;
+  assert(before.marked >= 1 && before.unqueued >= 1 && before.enqueued === 0 && (await pooled(a)) === undefined
+      && /^migration 150 needs 063 and 067 \(rebuild_derived, the mark's columns\) and 016 \(requeue_thought_work\); this schema lacks one/.test(without) && !(await requeues()),
+    `at the file before, a stale tags row is marked alone though ${KEY} is recorded; without 016's requeue_thought_work the file is refused by name, rebuild_derived left as it was (${without.slice(0, 90)})`);
+
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the150 });
+  const b = await tagged("[20cm] another note before its move");
+  await move(b, "[20cm] another note after its move");
+  const after = await rebuild(b);
+  assert(after.enqueued >= 1 && (await pooled(b)) === "pending" && (await requeues()),
+    `applied: the stale tags row is requeued under the recorded key (${JSON.stringify(after)}, ${await pooled(b)})`);
+
+  // A re-apply is a no-op: one rebuild_derived, still requeueing.
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the150 });
+  await move(a, "[20cm] a note moved again");
+  const again = await rebuild(a);
+  const forms = Number((await sql`SELECT count(*)::int AS n FROM pg_proc WHERE proname = 'rebuild_derived'`)[0].n);
+  assert(forms === 1 && again.enqueued >= 1 && (await pooled(a)) === "pending", `a re-apply is a no-op: one rebuild_derived (${forms}), a stale tags row requeued`);
 
   await sql.close();
 }

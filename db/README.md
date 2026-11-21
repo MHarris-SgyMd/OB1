@@ -331,7 +331,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and forty-nine (149) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and fifty (150) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -372,7 +372,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -783,9 +783,9 @@ pending, when the pass finds the conflict again; a pair the pass no longer
 finds in conflict is the pass's to settle since 067, below; a reviewer may
 decide a stale row sooner, accepting it with `p_force` or rejecting it —
 `consolidate.ts --list stale`); the
-tags are marked and not queued (`unqueued`): nothing requeues them under
-the re-tag key yet, and `db/retag.ts` pools a marked row at its next run
-(SMD-2298; its PR 2 gives this function the arm that requeues). With
+tags are marked and, since 150, requeued under the re-tag key
+`db/retag.ts` recorded (`ob1_config.retag_key`; with none recorded, marked
+alone, `unqueued`, and the worker pools the row at its first run). With
 `p_input_gone` —
 SMD-1723's forget, called BEFORE the row delete, in one transaction — the
 windows, the input's mentions and edges (the entities locked first, then the
@@ -938,7 +938,7 @@ as a person's decision, which would leave a pair the pass once found clear
 unproposable when its texts later conflict, and over a fifth status); a
 person's rejected or accepted row is kept, as before; and 064's `section`
 kind — a generated page section, which 063's body sent to the kept arm — is
-marked with no pool, as the tags are (its generator's next
+marked with no pool, as the tags were before 150 (its generator's next
 `write_page_section` clears the mark). `consolidate.ts` does
 the rest (its section below): every run re-pools each stale row's newer
 thought under its own key, judges a stale pair the top-k left out when it
@@ -2510,6 +2510,22 @@ batch. Running it again is how board-sync's thoughts, written through `db/` and 
 the core's capture, gain their items, and how a capture whose items were not proposed
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
+
+Migration 150 has `rebuild_derived` hand a stale tags row to the re-tag pool
+(SMD-2298 PR 2). 063's metadata arm marked the row and counted it unqueued: the
+tags had no pool. `db/retag.ts` records its key in `ob1_config.retag_key` on its
+first writing run; under 150 the arm marks the row and, when that key is set,
+requeues the thought under it, as the extraction arm requeues under
+`entity_extraction_key` — counted `enqueued`, the key in `pools`, and a live
+claim revoked as every arm's requeue does: its holder's write meets
+`STALE_READ` when the text moved under it, and the worker re-tags the thought
+from the new text in the same run; with the text as the worker read it
+(`--force`, or a raw move read before the rebuild) the write settles the row and
+the release finds the claim gone; the thought's next claim finds the row current,
+calls no model and settles the claim. With no key recorded the row is marked
+alone, as before. The worker still pools at each run what no rebuild marks: a
+thought tagged before 061, a capture that fell back, a text moved raw with no
+rebuild.
 
 Migration 148 has a re-tag that came out the same settle the tags' row (SMD-2298
 PR 1a). 061's `update_thought` recorded the tags' lineage only when the event moved
@@ -6229,9 +6245,10 @@ call; a tag key the row holds and the answer leaves out is cleared (a list to
 `[]`, the type keys to null); a provider error is read by `claim-loop.ts`'s rule; an
 edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
 key other than the recorded one needs `--switch-key`; `--status` and
-`--dry-run` write nothing. Not yet: `rebuild_derived`'s requeue (PR 2),
-preflight's rows and the prompt version's `--switch` (PR 3), a sleep pass and
-`--follow` (PR 4). test-live [29] drives it against a stub chat endpoint.
+`--dry-run` write nothing. `rebuild_derived` requeues a tags row it marks
+under the recorded key since migration 150 (PR 2). Not yet: preflight's
+rows and the prompt version's `--switch` (PR 3), a sleep pass and `--follow`
+(PR 4). test-live [29] drives it against a stub chat endpoint.
 
 ## Extensions
 

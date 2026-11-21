@@ -23750,9 +23750,18 @@ if (want("29")) {
     const SPECIAL = new Map<string, number | "prose" | "slow" | "partial">();
     let raced = false;
     let raceId = "";
+    /** A thought whose text a session moves and rebuilds while its call is out (SMD-2298 PR 2, review pass 1). */
+    let rebuiltId = "";
+    let rebuiltDone = false;
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
       const body = await req.text();
       bodies.push(body);
+      if (!rebuiltDone && rebuiltId && body.includes("[29] rebuilt")) {
+        rebuiltDone = true;
+        const edited = "[29] rebuilt, its text moved while the call was out";
+        await sql`UPDATE thoughts SET content = ${edited}, content_fingerprint = content_fingerprint_of(${edited}) WHERE id = ${rebuiltId}::uuid`;
+        await sql`SELECT rebuild_derived(${rebuiltId}::uuid, 'live: rebuilt while its call was out')`;
+      }
       if (!raced && raceId && body.includes("[29] race")) {
         raced = true;
         const edited = `[29] race, edited meanwhile ${raceId.slice(0, 8)}`;
@@ -23885,21 +23894,27 @@ if (want("29")) {
       assert(![C, U].some((id) => byId.has(id)) && !bodies.some((b) => /\[29\] (C|U),/.test(b)),
         "a current thought and one with no tags are never pooled nor sent");
 
-      // --status after: R alone in the backlog, failed (its row listed); then A moved again and marked, due again.
+      // --status after: R alone in the backlog, failed (its row listed). Then A moved again and rebuilt: under 150
+      // rebuild_derived requeues it under the recorded key (SMD-2298 PR 2, the pool's feed). And M moved raw with no
+      // rebuild: re-tagged before and due again, which the worker's own run puts back.
       const status1 = await cli("--status");
       await move(A, "[29] A, moved a second time");
-      await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move again')`;
+      const [{ r: fed }] = (await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move again') AS r`) as { r: { enqueued: number; unqueued: number; pools: string[] } }[];
+      const aFed = (await claims()).find((c) => c.id === A)?.status;
+      await move(M, "[29] M, moved with no rebuild");
       const status2 = await cli("--status");
       assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
-          && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && status2.out.includes("backlog: 2 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again"),
-        `--status after: seven re-tagged, R failed and listed, R alone in the backlog; A moved and marked again reads as re-tagged before and due again (${line(status1.out, "backlog:")} | ${line(status2.out, "backlog:")})`);
+          && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && fed.enqueued === 1 && fed.unqueued === 0 && fed.pools.includes(JOB) && aFed === "pending" && drainer(JOB) === "bun db/retag.ts --url <url>"
+          && status2.out.includes("backlog: 3 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale, 1 with the row at other text") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again")
+          && status2.out.includes("status: 6 re-tagged, 1 failed, 0 in flight, 1 pending"),
+        `--status after: seven re-tagged, R failed and listed, R alone in the backlog; A moved and rebuilt is requeued under ${JOB} by rebuild_derived (150), pending; M moved raw reads as re-tagged before and due again (${JSON.stringify(fed)}; ${line(status1.out, "backlog:")} | ${line(status2.out, "backlog:")})`);
 
-      // --retry-failed with the policy lifted: R re-tagged, and A put back in the pool and re-tagged at its newest text.
+      // --retry-failed with the policy lifted: R re-tagged; A, pooled by the rebuild, re-tagged; M put back by the run and re-tagged.
       const mark = bodies.length;
       const retry = await retag({ retryFailed: true });
-      assert(retry.code === 0 && retry.out.includes("--retry-failed: 1 failed row(s) returned to the pool") && retry.out.includes("pool: 0 thought(s) added, 1 re-tagged before and put back") && bodies.length - mark === 2 && bodies.slice(mark).some((b) => b.includes("secret-29"))
-          && settled(await tagsRow(R)) && settled(await tagsRow(A)) && (await claims()).every((c) => c.status === "succeeded"),
-        `--retry-failed returns R, re-tagged once the policy lets its text go; A, re-tagged before and marked again, is put back and settled at its newest text; exit 0 (${retry.code}: ${bodies.length - mark} call(s))`);
+      assert(retry.code === 0 && retry.out.includes("--retry-failed: 1 failed row(s) returned to the pool") && retry.out.includes("pool: 0 thought(s) added, 1 re-tagged before and put back") && bodies.length - mark === 3 && bodies.slice(mark).some((b) => b.includes("secret-29"))
+          && settled(await tagsRow(R)) && settled(await tagsRow(A)) && settled(await tagsRow(M)) && (await claims()).every((c) => c.status === "succeeded"),
+        `--retry-failed returns R, re-tagged once the policy lets its text go; A, pooled by the rebuild, and M, put back by the run, settled at their newest texts; exit 0 (${retry.code}: ${bodies.length - mark} call(s))`);
 
       // Review pass 1. The provider's answers: a 408 is paused for, then answered; a 413 and an answer in prose are the
       // thought's, failed with nothing written. A thought whose metadata is SQL NULL is failed before any call. Old tags
@@ -24021,6 +24036,18 @@ if (want("29")) {
       const jClaims = (await claims()).filter((c) => order2.includes(c.id));
       assert(proseBetween.code === 1 && !/in a row/.test(proseBetween.err) && jClaims.length === 5 && jClaims.every((c) => c.status === "failed"),
         `a 400, then an answer in prose, three times: the prose was an answer, so no three in a row; the run goes on, every one failed as its own, exit 1 (${proseBetween.code}: ${jClaims.map((c) => c.status).join(",")})`);
+
+      // SMD-2298 PR 2 review pass 1: a session moves a thought's text and rebuilds it while the worker's call is out —
+      // 150 requeues it, revoking the worker's lease. The worker's write meets STALE_READ, it finds the claim pending
+      // (a rebuild's requeue, not another run's lease), and re-tags it from the new text in the same run, under --limit 1.
+      const RB = await tagged("[29] rebuilt, the text the tags were made from");
+      await move(RB, "[29] rebuilt, moved before the run");
+      rebuiltId = RB;
+      const rbFrom = bodies.length;
+      const rbRun = await retag({ limit: 1, pausesMs: [10] });
+      assert(rebuiltDone && settled(await tagsRow(RB)) && bodies.slice(rbFrom).filter((b) => b.includes("[29] rebuilt")).length === 2
+          && (await claims()).find((c) => c.id === RB)?.status === "succeeded" && /1 changed while re-tagged/.test(rbRun.out) && !/no longer this worker's/.test(rbRun.out + rbRun.err),
+        `a text moved and rebuilt while the call is out: requeued by 150, the worker re-tags it from the new text in the same run, counted changed, not lost (${line(rbRun.out, "re-tagged (")})`);
 
       // A 401 is the request's: the run stops, exit 2, nothing marked failed, the thought pending for the next run.
       const P401 = await plant("[29] P401 tagged, the key refused", { topics: ["t"], type: "idea" });
