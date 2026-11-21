@@ -5066,10 +5066,10 @@ what a person reads in the texts, on a sample of the canary drawn before it is r
 ```bash
 bun eval-claim-validity.ts --self-check                 # the rules, the registration and the fixture's shape; no database
 D=~/.cache/smd-3887/2c/<run>   # private files live outside any repo; every step refuses one in a git work tree
-bun eval-claim-validity.ts --print-sql --pilot > $D/draw.sql     # or --salt <the announcing comment's uuid>, once pinned
+bun eval-claim-validity.ts --print-sql --pilot 1 > $D/draw.sql     # or --salt <the announcing comment's uuid>, once pinned
 podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA -f - < $D/draw.sql > $D/draw.jsonl
-bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot   # parts A and B, each with a reply file; the maintainer's apart
-bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <a-2> <b-1> <b-2> --pilot   # two raters' κ per axis, each disagreement
+bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot 1   # parts A and B, each with a reply file; the maintainer's apart
+bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <a-2> <b-1> <b-2> --pilot 1   # two raters' κ per axis, each disagreement
 bun eval-claim-validity.ts --splits $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out $D/splits.txt
 bun eval-claim-validity.ts --freeze $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [$D/splits.txt] --salt <uuid> --note "…"
 bun eval-claim-validity.ts --adjudicate $D/adjudication.txt   # each miss's cause, into the fixture
@@ -5096,8 +5096,12 @@ The maintainer's choices, 2026-11-21, before any draw:
   * if the maintainer's 20 agree with the agents' gold on under 0.8 of items on any axis, the maintainer labels
     every item, and those labels are the gold.
 * **The sample:** 120 thoughts, 40 from each stratum: in a supersedes pointer, in a proposal, in neither. The draw
-  key uses the id of the SMD-3887 comment that announces the draw, posted after the pin. The pilot is drawn first by
-  a fixed salt and kept out of the main draw. Agreement is weighted back to each stratum's population.
+  key uses the id of the SMD-3887 comment that announces the draw, posted after the pin. Two pilots come first, each
+  by a fixed salt, and both are kept out of the main draw:
+  * the first, 10 items from the whole population (`--pilot 1`);
+  * the second, 3 items from each stratum, chosen once the first had drawn 7 of its 10 from neither (`--pilot 2`).
+
+  Agreement is weighted back to each stratum's population.
 * **The bar is every miss explained.** A miss is one of:
   * **a label error;**
   * **a read bug,** fixed before 2c merges;

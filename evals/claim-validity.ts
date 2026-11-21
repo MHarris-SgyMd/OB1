@@ -77,11 +77,16 @@ export const STRATA = ["pointer", "proposal", "neither"] as const;
 export type Stratum = (typeof STRATA)[number];
 
 /**
- * The draw. PILOT items come first, by their own fixed salt, from the whole population; the main draw takes PER_STRATUM
- * of each stratum from the rest, by the salt the draw is announced with (the id of the SMD-3887 comment that announces
- * it, posted after this registration is pinned). SUBSET of the main draw go to the maintainer, by a second key.
+ * The draw. The first pilot's PILOT items come first, by their own fixed salt, from the whole population; the second
+ * pilot's PILOT2 of each stratum next, from the rest, by theirs (the maintainer, 2026-11-21: the first held 7 of 10
+ * from neither). The main draw takes PER_STRATUM of each stratum from what is left, by the salt the draw is announced
+ * with (the id of the SMD-3887 comment that announces it, posted after this registration is pinned). SUBSET of the
+ * main draw go to the maintainer, by a second key.
  */
-export const DRAW = { perStratum: 40, subset: 20, pilot: 10, pilotSalt: "smd-3887-pr2c-pilot" } as const;
+export const DRAW = { perStratum: 40, subset: 20, pilot: 10, pilotSalt: "smd-3887-pr2c-pilot", pilot2: 3, pilot2Salt: "smd-3887-pr2c-pilot-2" } as const;
+
+/** Which draw a step runs: one of the two pilots (drawn before the pin), or the main draw by its announced salt. */
+export type Mode = { pilot: 1 | 2 } | { salt: string };
 
 /** The maintainer's check on the agents: below this share on any axis, the agents' labels are not the gold. */
 export const MAINTAINER_AGREEMENT_MIN = 0.8;
@@ -91,10 +96,11 @@ export const SHOW = { itemChars: 6_000, otherChars: 1_200, linkedMax: 8, near: 5
 
 /**
  * The population, its strata and the draw, in one read-only snapshot, with every drawn item's material and the read's
- * answer for it, one JSON line each (`kind`: population, item, read). `salt` names the main draw; `pilot` draws the
- * pilot alone. The keys are the ones drawKey computes, so the runner re-draws from the population lines and checks it.
+ * answer for it, one JSON line each (`kind`: population, item, read), for the mode's draw. The keys are the ones
+ * drawKey computes, so the runner re-draws from the population lines and checks it.
  */
-export function drawSql(salt: string, pilot: boolean): string {
+export function drawSql(mode: Mode): string {
+  const salt = "salt" in mode ? mode.salt : DRAW.pilotSalt;
   if (!/^[A-Za-z0-9-]{8,64}$/.test(salt)) throw new Error(`the salt "${salt}" is not 8 to 64 letters, digits or dashes`);
   const key = (s: string) => `('x' || substr(encode(sha256(convert_to('${s}:' || p.id::text, 'UTF8')), 'hex'), 1, 12))::bit(48)::bigint`;
   return `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
@@ -106,13 +112,18 @@ WITH pop AS (
     FROM thoughts t
 ), pilot AS (
   SELECT p.id FROM pop p ORDER BY ${key(DRAW.pilotSalt)}, p.id LIMIT ${DRAW.pilot}
+), pilot2 AS (
+  SELECT id, stratum FROM (
+    SELECT p.id, p.stratum, row_number() OVER (PARTITION BY p.stratum ORDER BY ${key(DRAW.pilot2Salt)}, p.id) AS rn
+      FROM pop p WHERE p.id NOT IN (SELECT id FROM pilot)) s
+   WHERE rn <= ${DRAW.pilot2}
 ), main AS (
   SELECT id, stratum FROM (
     SELECT p.id, p.stratum, row_number() OVER (PARTITION BY p.stratum ORDER BY ${key(salt)}, p.id) AS rn
-      FROM pop p WHERE p.id NOT IN (SELECT id FROM pilot)) s
+      FROM pop p WHERE p.id NOT IN (SELECT id FROM pilot) AND p.id NOT IN (SELECT id FROM pilot2)) s
    WHERE rn <= ${DRAW.perStratum}
 ), drawn AS (
-  ${pilot ? "SELECT p.id, p.stratum FROM pop p WHERE p.id IN (SELECT id FROM pilot)" : "SELECT id, stratum FROM main"}
+  ${"salt" in mode ? "SELECT id, stratum FROM main" : mode.pilot === 1 ? "SELECT p.id, p.stratum FROM pop p WHERE p.id IN (SELECT id FROM pilot)" : "SELECT id, stratum FROM pilot2"}
 ), linked AS (
   SELECT d.id, l.other, min(l.rank) AS rank
     FROM drawn d
@@ -147,7 +158,7 @@ SELECT json_build_object(
     'metadata', json_build_object('type', t.metadata->'type', 'topics', t.metadata->'topics', 'people', t.metadata->'people', 'action_items', t.metadata->'action_items'),
     'subject', (SELECT coalesce(json_agg(f.payload->>'key' ORDER BY f.payload->>'key'), '[]') FROM thought_facets f
                  WHERE f.thought_id = d.id AND f.kind = 'subject' AND f.superseded_by IS NULL AND f.valid_until IS NULL)),
-  'others', (SELECT coalesce(json_agg(json_build_object('id', o.id, 'at', o.created_at, 'writer', coalesce(o.metadata->>'source', 'unknown'),
+  'others', (SELECT coalesce(json_agg(json_build_object('id', o.id, 'at', o.created_at, 'updated', o.updated_at, 'writer', coalesce(o.metadata->>'source', 'unknown'),
                                                         'chars', length(o.content), 'text', left(o.content, ${SHOW.otherChars})) ORDER BY o.id), '[]')
                FROM shown s JOIN thoughts o ON o.id = s.other WHERE s.id = d.id),
   'questions', (SELECT coalesce(json_agg(json_build_object('other', CASE WHEN q.older_id = d.id THEN q.newer_id ELSE q.older_id END,
@@ -170,15 +181,18 @@ const byKey = <T extends { id: string }>(xs: readonly T[], salt: string): T[] =>
   [...xs].sort((a, b) => drawKey(a.id, salt) - drawKey(b.id, salt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
 /**
- * The draw over the population: the pilot, the main draw (PER_STRATUM of each stratum outside the pilot; a stratum
- * smaller is taken whole, and said), the maintainer's subset of it, and the sheet's order (by a third key, so a rater
- * meets the strata mixed).
+ * The draw over the population: the first pilot, the second (PILOT2 of each stratum outside the first, in its sheet's
+ * order), the main draw (PER_STRATUM of each stratum outside both pilots; a stratum smaller is taken whole, and said),
+ * the maintainer's subset of it, and the main sheet's order (by a third key, so a rater meets the strata mixed).
  */
-export function drawSample(pop: readonly { id: string; stratum: Stratum }[], salt: string, draw: { perStratum: number; subset: number; pilot: number; pilotSalt: string } = DRAW): {
-  pilot: string[]; main: { id: string; stratum: Stratum }[]; subset: string[]; short: string[];
+export function drawSample(pop: readonly { id: string; stratum: Stratum }[], salt: string, draw: typeof DRAW = DRAW): {
+  pilot: string[]; pilot2: string[]; main: { id: string; stratum: Stratum }[]; subset: string[]; short: string[];
 } {
   const pilot = byKey(pop, draw.pilotSalt).slice(0, draw.pilot).map((p) => p.id);
   const inPilot = new Set(pilot), short: string[] = [];
+  const pilot2: { id: string }[] = [];
+  for (const s of STRATA) pilot2.push(...byKey(pop.filter((p) => p.stratum === s && !inPilot.has(p.id)), draw.pilot2Salt).slice(0, draw.pilot2));
+  for (const p of pilot2) inPilot.add(p.id);
   const main: { id: string; stratum: Stratum }[] = [];
   for (const s of STRATA) {
     const of = byKey(pop.filter((p) => p.stratum === s && !inPilot.has(p.id)), salt);
@@ -186,7 +200,7 @@ export function drawSample(pop: readonly { id: string; stratum: Stratum }[], sal
     main.push(...of.slice(0, draw.perStratum).map((p) => ({ id: p.id, stratum: s })));
   }
   const subset = byKey(main, `${salt}:subset`).slice(0, draw.subset).map((p) => p.id);
-  return { pilot, main: byKey(main, `${salt}:sheet`), subset, short };
+  return { pilot, pilot2: byKey(pilot2, `${draw.pilot2Salt}:sheet`).map((p) => p.id), main: byKey(main, `${salt}:sheet`), subset, short };
 }
 
 /**
@@ -196,13 +210,14 @@ export function drawSample(pop: readonly { id: string; stratum: Stratum }[], sal
  */
 export const CONVENTIONS: readonly string[] = [
   "Judge from the texts shown alone, as of the newest text on the item's page. The outside world counts only as the texts state it.",
-  "The other texts on a page are shown in a fixed order that says nothing about how, or whether, they relate to the item.",
-  "VALIDITY is superseded when a later text shown replaces what the item states: a later version of the same note, a summary that replaces a checkpoint, a status, count or next step the later text gives anew. Replacing a minor part while the item's main claim stands is not superseded.",
+  "The other texts on a page are shown in a fixed order that says nothing about how, or whether, they relate to the item. A text is later than another by its last edit where one is shown (a ticket's text is edited in place, so its status line is as of its last edit), else by when it was written.",
+  "The item's main claim is what it asserts in its own scope: a session's summary claims what that session did and found, not the state of every ticket it names.",
+  "VALIDITY is superseded when a later text shown replaces the item's main claim: a later version of the same note, a summary that replaces a checkpoint, or a status, standing, count or next step that a later text gives anew. Replacing a minor part while the main claim stands is not superseded.",
   "VALIDITY is contested when a text shown disputes the item's main claim (states otherwise on the same question) and no later text settles it. Adding, narrowing or following up without contradicting is not a dispute.",
-  "VALIDITY is holds when nothing shown replaces or disputes the item's main claim. A record of what happened at a time (a decision taken, a measurement, an event) holds unless a later text corrects it; a later change of course does not undo that it happened.",
-  "A ticket's text is a claim about that ticket's work: a later text that changes its plan or reports it done replaces the parts it changes (judge the main claim by the rule above).",
-  "FRESHNESS asks whether each view shown (entities, metadata, subjects) still describes the item's text as it now reads: stale when a view names or states something the text does not (or no longer does), current when every view is borne out by the text, none when the page shows no view. A view that leaves something out is not stale for that.",
-  "REVIEW (part B only) asks whether a question about whether the item still holds is open: open when a question shown (a judge's) or a dispute in the texts has no answer yet, decided when it was answered (a review recorded, or a later text settles it), none when no question was raised.",
+  "VALIDITY is holds when nothing shown replaces or disputes the item's main claim. A record of what was done or found at a time (a decision taken, a change merged, a measurement) holds unless a later text corrects it; a later change of course does not undo that it happened. A text whose main claim is a status or next step is not such a record: the rule above applies.",
+  "FRESHNESS asks whether each view shown (entities, metadata, subjects) still describes the item's text: stale when an entry is contradicted by the text, or names a subject the text does not discuss at all; current when every entry is borne out; none when the page shows no view. Borne out includes a name in another spelling or casing (eslint, ESLint), and what the text plainly implies (its author, a tool it plainly uses). A view that leaves something out is not stale for that.",
+  "On an item whose text is cut, an entry not found in the shown part does not count against its view; judge the entries the shown part can bear out or contradict.",
+  "REVIEW (part B only) asks whether a question about whether the item still holds is open: open when a judge's question shown, or a dispute in the texts, has no answer yet; decided when it was answered (a review recorded, or a later text settles it); none when no question was raised. A later text that replaces the item with no question raised is none.",
   "unclear on any axis means the texts shown do not let you decide. Use it only then, and say why in the note column.",
   "If you find yourself applying a rule of your own to decide an item, write it in the note column, every time you apply it.",
 ];

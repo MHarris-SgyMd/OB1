@@ -10,18 +10,18 @@
  *       Every rule against hand-known answers, the registration against its hash, and the committed fixture, when
  *       there is one, against its shape. No database.
  *
- *   bun eval-claim-validity.ts --print-sql (--salt <comment uuid> | --pilot)
+ *   bun eval-claim-validity.ts --print-sql (--salt <comment uuid> | --pilot 1|2)
  *       The snapshot's SQL: the population and its strata, the draw, each drawn item's material and the read's
  *       answer, one JSON line each, in one read-only transaction, for a brain whose database only a container reaches:
  *         podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -tA -f - < sql > ~/.cache/<dir>/draw.jsonl
  *       It holds texts, so it lives outside any repo: every step refuses a private file in a git work tree.
  *
- *   bun eval-claim-validity.ts --sheets <draw.jsonl> --out <dir> (--salt <comment uuid> | --pilot)
+ *   bun eval-claim-validity.ts --sheets <draw.jsonl> --out <dir> (--salt <comment uuid> | --pilot 1|2)
  *       The draw checked against the population lines (re-drawn here, so the SQL and the rules agree), the
  *       population by stratum and writer, then part A's sheet (validity and freshness) and part B's (review), each
  *       with its reply file, and the maintainer's (the subset's) apart. Never the read's answer.
  *
- *   bun eval-claim-validity.ts --kappa <draw.jsonl> <a-1> <a-2> <b-1> <b-2> (--salt <comment uuid> | --pilot)
+ *   bun eval-claim-validity.ts --kappa <draw.jsonl> <a-1> <a-2> <b-1> <b-2> (--salt <comment uuid> | --pilot 1|2)
  *       Two raters' filled reply files (part A, then part B, of each): κ per axis and each disagreement with both
  *       notes. The pilot's check, before the registration is pinned; it never prints the read.
  *
@@ -50,7 +50,7 @@ import { createAssert } from "../db/test-support.ts";
 import {
   AGREES, AXES, CAUSES, CONVENTIONS, DRAW, MAINTAINER_AGREEMENT_MIN, READ_STATES, READABLE_KINDS, SHOW, STRATA, TRUTH,
   agrees, drawKey, drawSample, drawSql, goldOf, kappa, maintainerCheck, noClaim, readableFreshness, registeredSection, registrationDigits,
-  registrationHash, score, verdict, type Adjudication, type Axis, type AxisScore, type Cause, type Labels, type Scored, type Stratum,
+  registrationHash, score, verdict, type Adjudication, type Axis, type AxisScore, type Cause, type Labels, type Mode, type Scored, type Stratum,
 } from "./claim-validity.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -72,7 +72,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** A population line. */
 export type PopLine = { kind: "population"; id: string; stratum: Stratum; writer: string };
 /** Another text shown on an item's page. */
-export type Other = { id: string; at: string; writer: string; chars: number; text: string };
+export type Other = { id: string; at: string; updated: string; writer: string; chars: number; text: string };
 /** A question a judge raised on the item (a supersession proposal), shown in part B. */
 export type Question = { other: string; this_is: "older" | "newer"; verdict: string; reason: string | null; judged_at: string | null; status: string; reviewed_at: string | null; reviewed_by_kind: string | null };
 /** An item line: what its pages show. */
@@ -105,9 +105,9 @@ export function splitLines(lines: readonly Line[]): { pop: PopLine[]; items: Ite
 }
 
 /** The draw's ids for a mode, re-drawn from the population: the pilot's, or the main draw's in sheet order. */
-export function drawnIds(pop: readonly PopLine[], salt: string | null): string[] {
-  const d = drawSample(pop, salt ?? DRAW.pilotSalt);
-  return salt === null ? d.pilot : d.main.map((m) => m.id);
+export function drawnIds(pop: readonly PopLine[], mode: Mode): string[] {
+  const d = drawSample(pop, "salt" in mode ? mode.salt : DRAW.pilotSalt);
+  return "salt" in mode ? d.main.map((m) => m.id) : mode.pilot === 1 ? d.pilot : d.pilot2;
 }
 
 /** Whether the SQL's items are the rules' draw: the same ids, every one. */
@@ -138,15 +138,17 @@ const n = (x: number) => x.toLocaleString("en-US");
 /** A text as a sheet shows it: CRLF as LF, a line that reads as an item's head indented, so it is not one. */
 const body = (t: string) => t.replace(/\r\n/g, "\n").split("\n").map((l) => (ITEM_HEAD.test(l) ? ` ${l}` : l)).join("\n");
 const list = (x: unknown): string => (Array.isArray(x) ? (x.length ? x.map(String).join("; ") : "-") : x === null || x === undefined || x === "" ? "-" : String(x));
+/** A text's last edit as a sheet shows it, when it falls in another minute than its writing: a ticket's text is edited in place. */
+const edited = (at: string, updated: string | undefined) => (updated && day(updated) !== day(at) ? `, last edited ${day(updated)}` : "");
 const shownOf = (chars: number, cap: number) => (chars > cap ? `${n(chars)} characters, the first ${n(cap)} shown` : `${n(chars)} characters`);
 
 /** Part A's page for an item: its text, its views and the other texts, numbered; never a record's verdict nor the read. */
 export function pageA(it: ItemLine, num: number): string {
   const m = it.views.metadata;
-  const others = it.others.map((o, k) => [`[${k + 1}] written ${day(o.at)} by ${o.writer} (${shownOf(o.chars, SHOW.otherChars)})`, body(o.text), ""].join("\n"));
+  const others = it.others.map((o, k) => [`[${k + 1}] written ${day(o.at)}${edited(o.at, o.updated)} by ${o.writer} (${shownOf(o.chars, SHOW.otherChars)})`, body(o.text), ""].join("\n"));
   return [
     `=== item ${String(num).padStart(3, "0")} · ${it.id} ===`,
-    `written ${day(it.at)} by ${it.writer}${it.updated !== it.at ? `, last edited ${day(it.updated)}` : ""} (${shownOf(it.chars, SHOW.itemChars)})`,
+    `written ${day(it.at)}${edited(it.at, it.updated)} by ${it.writer} (${shownOf(it.chars, SHOW.itemChars)})`,
     "--- the item's text ---",
     body(it.text),
     "--- its views ---",
@@ -413,12 +415,21 @@ export function outsideRepo(path: string, what: string): string {
 
 const readJsonl = <T>(path: string): T[] => readFileSync(path, "utf8").split("\n").filter((l) => l.trim().startsWith("{")).map((l) => JSON.parse(l) as T);
 
-/** The salt a step runs with: the announcing comment's uuid, or null for the pilot. Refuses neither and both. */
-export function saltOf(given: string | undefined, pilot: boolean): string | null {
-  if (pilot && given !== undefined) throw new Error("give --salt or --pilot, not both");
-  if (pilot) return null;
-  if (given === undefined || !UUID.test(given)) throw new Error("give --salt <the announcing comment's uuid> or --pilot");
-  return given;
+/** The draw a step runs: the main draw by the announcing comment's uuid, or pilot 1 or 2. Refuses neither and both. */
+export function modeOf(salt: string | undefined, pilot: string | undefined): Mode {
+  if (pilot !== undefined && salt !== undefined) throw new Error("give --salt or --pilot, not both");
+  if (pilot !== undefined) {
+    if (pilot !== "1" && pilot !== "2") throw new Error(`--pilot ${pilot}: write 1 or 2`);
+    return { pilot: pilot === "1" ? 1 : 2 };
+  }
+  if (salt === undefined || !UUID.test(salt)) throw new Error("give --salt <the announcing comment's uuid> or --pilot 1|2");
+  return { salt };
+}
+
+/** The main draw's salt, refusing a pilot: a step only the main draw has (the splits, the freeze). */
+export function mainSalt(mode: Mode): string {
+  if (!("salt" in mode)) throw new Error("this step is the main draw's: give --salt, not --pilot");
+  return mode.salt;
 }
 
 /** Refuse a step that reads the registration once it is not the pinned one (the main draw, the freeze). The pilot runs before the pin. */
@@ -428,9 +439,9 @@ function refuseUnpinned(step: string): void {
 }
 
 /** The snapshot read and checked: its lines, and the draw's ids in sheet order, refused on any problem. */
-function snapshot(path: string, salt: string | null): { pop: PopLine[]; items: ItemLine[]; reads: Map<string, ReadLine>; ids: string[] } {
+function snapshot(path: string, mode: Mode): { pop: PopLine[]; items: ItemLine[]; reads: Map<string, ReadLine>; ids: string[] } {
   const { pop, items, reads, problems } = splitLines(readJsonl<Line>(outsideRepo(path, "the snapshot")));
-  const ids = drawnIds(pop, salt);
+  const ids = drawnIds(pop, mode);
   problems.push(...checkDraw(items, ids));
   if (problems.length) throw new Error(problems.join("\n"));
   const byId = new Map(items.map((i) => [i.id, i]));
@@ -446,11 +457,11 @@ export function makeupLines(pop: readonly PopLine[]): string[] {
   });
 }
 
-function sheets(path: string, out: string, salt: string | null): void {
-  if (salt !== null) refuseUnpinned("the main sheets are drawn");
+function sheets(path: string, out: string, mode: Mode): void {
+  if ("salt" in mode) refuseUnpinned("the main sheets are drawn");
   const dir = dirname(outsideRepo(join(out, "sheet-a.md"), "the sheets' directory"));
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const { pop, items } = snapshot(path, salt);
+  const { pop, items } = snapshot(path, mode);
   console.log(`population ${pop.length}, by stratum and writer:`);
   for (const l of makeupLines(pop)) console.log(l);
   const write = (name: string, text: string) => writeFileSync(join(dir, name), text, { mode: 0o600 });
@@ -459,8 +470,8 @@ function sheets(path: string, out: string, salt: string | null): void {
     write(`sheet-${part.toLowerCase()}.md`, r.sheet);
     write(`replies-${part.toLowerCase()}.txt`, r.replies);
   }
-  if (salt !== null) {
-    const sub = new Set(drawSample(pop, salt).subset), mine = items.filter((i) => sub.has(i.id));
+  if ("salt" in mode) {
+    const sub = new Set(drawSample(pop, mode.salt).subset), mine = items.filter((i) => sub.has(i.id));
     for (const part of ["A", "B"] as const) {
       const r = renderPart(part, mine);
       write(`maintainer-sheet-${part.toLowerCase()}.md`, r.sheet);
@@ -510,7 +521,7 @@ export function openSplits(ids: readonly string[], a1: Map<string, Labels>, a2: 
 
 function freeze(path: string, salt: string, files: string[], splitsPath: string | undefined, note: string): void {
   refuseUnpinned("labels are frozen");
-  const { pop, reads, ids } = snapshot(path, salt);
+  const { pop, reads, ids } = snapshot(path, { salt });
   const d = drawSample(pop, salt), subset = new Set(d.subset);
   const [a1, a2] = [rater(files[0], files[1], ids), rater(files[2], files[3], ids)];
   const m = rater(files[4], files[5], d.subset, true);
@@ -571,8 +582,9 @@ function selfCheck(): void {
   // The registration.
   const src = readFileSync(join(HERE, "claim-validity.ts"), "utf8");
   assert(REGISTERED === null || registrationHash() === REGISTERED, `the registered section is the pinned one (${registrationHash()} = ${REGISTERED}); a change is a new registration, made before any sheet is drawn`);
-  assert(DRAW.perStratum === 40 && DRAW.subset === 20 && DRAW.pilot === 10 && MAINTAINER_AGREEMENT_MIN === 0.8,
-    "the draw and the maintainer's check are the maintainer's (40 a stratum, a subset of 20, a pilot of 10, 0.8): changing them is a decision recorded on SMD-3887");
+  assert(DRAW.perStratum === 40 && DRAW.subset === 20 && DRAW.pilot === 10 && DRAW.pilot2 === 3 && MAINTAINER_AGREEMENT_MIN === 0.8,
+    "the draw and the maintainer's check are the maintainer's (40 a stratum, a subset of 20, pilots of 10 and 3 a stratum, 0.8): changing them is a decision recorded on SMD-3887");
+  assert(CONVENTIONS.some((c) => /contradicted by the text/.test(c) && /plainly implies/.test(c)), "freshness counts as stale only what the text contradicts or does not discuss (the maintainer, 2026-11-21)");
   assert(registrationHash(src.replace("perStratum: 40", "perStratum: 30")) !== registrationHash(src), "a moved draw moves the registration");
   assert(registrationHash(src.replace('unchallenged: ["holds"]', 'unchallenged: ["holds", "contested"]')) !== registrationHash(src), "a moved mapping moves the registration");
   assert(registrationHash(src.replace("function kappa", "function kappa ")) === registrationHash(src), "κ is outside the registration");
@@ -610,7 +622,11 @@ function selfCheck(): void {
   assert(d1.pilot.length === 10 && d1.main.length === 120 && d1.subset.length === 20 && d1.short.length === 0, "the draw takes a pilot of 10, 40 a stratum and a subset of 20");
   assert(JSON.stringify(d1) === JSON.stringify(d2), "the draw does not depend on the population's order");
   assert(strata.every((s) => d1.main.filter((m) => m.stratum === s).length === 40), "40 of each stratum");
-  assert(d1.main.every((m) => !d1.pilot.includes(m.id)), "no pilot item is in the main draw");
+  assert(d1.main.every((m) => !d1.pilot.includes(m.id) && !d1.pilot2.includes(m.id)), "no pilot item, of either pilot, is in the main draw");
+  assert(d1.pilot2.length === 9 && strata.every((s) => d1.pilot2.filter((p) => pop.find((x) => x.id === p)!.stratum === s).length === 3) && d1.pilot2.every((p) => !d1.pilot.includes(p)),
+    "the second pilot takes 3 of each stratum, none of the first's");
+  const lowest3 = (s: Stratum) => pop.filter((p) => p.stratum === s && !d1.pilot.includes(p.id)).sort((x, y) => drawKey(x.id, DRAW.pilot2Salt) - drawKey(y.id, DRAW.pilot2Salt)).slice(0, 3).map((p) => p.id);
+  assert(strata.every((s) => lowest3(s).every((p) => d1.pilot2.includes(p))), "the second pilot is each stratum's lowest 3 by its own salt");
   assert(new Set(d1.main.map((m) => m.id)).size === 120 && d1.subset.every((s) => d1.main.some((m) => m.id === s)), "no item twice; the subset is of the main draw");
   assert(d1.subset.join() !== d1.main.slice(0, 20).map((m) => m.id).join() && JSON.stringify(d1.subset) === JSON.stringify([...d1.main].sort((x, y) => drawKey(x.id, `${salt}:subset`) - drawKey(y.id, `${salt}:subset`)).slice(0, 20).map((m) => m.id)),
     "the subset is drawn by its own key, not the sheet's first 20");
@@ -621,16 +637,22 @@ function selfCheck(): void {
   const few = drawSample(pop.slice(0, 60), salt);
   assert(few.short.length === 3 && few.short[0].startsWith("pointer: "), "a short stratum is taken whole, and said");
   assert(drawKey(id(1), salt) === parseInt(new Bun.CryptoHasher("sha256").update(`${salt}:${id(1)}`).digest("hex").slice(0, 12), 16), "the key is sha256(salt:id)'s first 12 hex digits, as the SQL reads it");
-  const sql = drawSql(salt, false);
+  const sql = drawSql({ salt });
   assert(sql.startsWith("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;") && sql.trimEnd().endsWith("ROLLBACK;"), "the snapshot is one read-only, repeatable-read transaction, rolled back");
   assert(sql.includes(`'${salt}:' || p.id::text`) && sql.includes(`'${DRAW.pilotSalt}:' || p.id::text`) && sql.includes("substr(encode(sha256(convert_to(") && sql.includes("'hex'), 1, 12))::bit(48)::bigint"),
     "the SQL keys the draw as drawKey does, by both salts, on the hash's first 12 hex digits (the run's re-draw checks the rest on real data)");
-  assert(sql.includes("FROM pop p WHERE p.id NOT IN (SELECT id FROM pilot)) s"), "the SQL's main draw leaves the pilot out, as the rules' does");
+  assert(sql.includes("FROM pop p WHERE p.id NOT IN (SELECT id FROM pilot) AND p.id NOT IN (SELECT id FROM pilot2)) s") && sql.includes(`'${DRAW.pilot2Salt}:' || p.id::text`) && sql.includes(`rn <= ${DRAW.pilot2}`),
+    "the SQL's main draw leaves both pilots out, and draws the second by its own salt, as the rules do");
+  assert(drawSql({ pilot: 2 }).includes("SELECT id, stratum FROM pilot2\n), linked") && drawSql({ pilot: 1 }).includes("WHERE p.id IN (SELECT id FROM pilot)\n), linked"), "each pilot's SQL draws its own items");
   assert(/PARTITION BY p\.stratum ORDER BY .*, p\.id\) AS rn/.test(sql) && sql.includes(`rn <= ${DRAW.perStratum}`) && sql.includes(`LIMIT ${DRAW.pilot}`), "the SQL takes 40 a stratum and a pilot of 10, ties by id");
-  assert(sql.includes("FROM main") && !drawSql(salt, true).includes("SELECT id, stratum FROM main\n), linked"), "the main draw and the pilot draw differ");
+  assert(sql.includes("FROM main") && !drawSql({ pilot: 1 }).includes("SELECT id, stratum FROM main\n), linked"), "the main draw and the pilot draw differ");
   assert(sql.includes("thought_validity(ARRAY[d.id])") && !/\b(INSERT|UPDATE|DELETE|CREATE|DROP|TRUNCATE)\b/.test(sql), "the SQL reads the read per item and writes nothing");
-  assert(throws(() => drawSql("x'; DROP TABLE thoughts; --", false)), "a salt that is not letters, digits and dashes is refused");
-  assert(saltOf(undefined, true) === null && saltOf(salt, false) === salt && throws(() => saltOf(salt, true)) && throws(() => saltOf(undefined, false)) && throws(() => saltOf("short", false)), "a step takes a uuid salt or the pilot, one of them");
+  assert(throws(() => drawSql({ salt: "x'; DROP TABLE thoughts; --" })), "a salt that is not letters, digits and dashes is refused");
+  assert(JSON.stringify(modeOf(undefined, "2")) === '{"pilot":2}' && JSON.stringify(modeOf(salt, undefined)) === JSON.stringify({ salt }) && throws(() => modeOf(salt, "1")) && throws(() => modeOf(undefined, undefined)) && throws(() => modeOf("short", undefined)) && throws(() => modeOf(undefined, "3")),
+    "a step takes a uuid salt or pilot 1 or 2, one of them");
+  assert(mainSalt({ salt }) === salt && throws(() => mainSalt({ pilot: 1 })), "the splits and the freeze are the main draw's alone");
+  const pops = pop.map((p) => ({ ...p }));
+  assert(JSON.stringify(drawnIds(pops, { pilot: 1 })) === JSON.stringify(d1.pilot) && JSON.stringify(drawnIds(pops, { pilot: 2 })) === JSON.stringify(d1.pilot2) && JSON.stringify(drawnIds(pops, { salt })) === JSON.stringify(d1.main.map((m) => m.id)), "each mode re-draws its own ids");
 
   // The snapshot's lines.
   const item = (k: number, over: Partial<ItemLine> = {}): ItemLine => ({
@@ -651,13 +673,15 @@ function selfCheck(): void {
   // The sheets: never the read, never a verdict on part A.
   const rich = item(1, {
     text: "line one\n=== item 009 · " + id(9) + " ===\nlast line", chars: 7000, updated: "2026-11-02T10:00:00.000Z",
-    others: [{ id: id(7), at: "2026-11-03T11:00:00.000Z", writer: "linear", chars: 2000, text: "a later text" }],
+    others: [{ id: id(7), at: "2026-11-03T11:00:00.000Z", updated: "2026-11-06T09:30:00.000Z", writer: "linear", chars: 2000, text: "a later text" },
+             { id: id(6), at: "2026-11-03T12:00:00.000Z", updated: "2026-11-03T12:00:00.400Z", writer: "mcp", chars: 5, text: "other" }],
     questions: [{ other: id(7), this_is: "older", verdict: "newer_supersedes_older", reason: "it says the same, newer", judged_at: "2026-11-04T00:00:00.000Z", status: "pending", reviewed_at: null, reviewed_by_kind: null },
                 { other: id(8), this_is: "newer", verdict: "newer_supersedes_older", reason: null, judged_at: null, status: "accepted", reviewed_at: "2026-11-05T00:00:00.000Z", reviewed_by_kind: "operator" }],
   });
   const a = pageA(rich, 1), b = pageB(rich, 1);
   assert(a.includes("7,000 characters, the first 6,000 shown") && a.includes("2,000 characters, the first 1,200 shown") && a.includes("last edited 2026-11-02 10:00 UTC"), "part A says what it cut, and when the item was edited");
-  assert(a.includes("entities: Bun") && a.includes("topics a; b") && a.includes("people -") && a.includes("subjects: ticket:SMD-1") && a.includes("[1] written 2026-11-03 11:00 UTC by linear"), "part A shows the views and numbers the other texts");
+  assert(a.includes("entities: Bun") && a.includes("topics a; b") && a.includes("people -") && a.includes("subjects: ticket:SMD-1") && a.includes("[1] written 2026-11-03 11:00 UTC, last edited 2026-11-06 09:30 UTC by linear"), "part A shows the views and numbers the other texts, with an edit time");
+  assert(a.includes("[2] written 2026-11-03 12:00 UTC by mcp") && pageA(item(3, { updated: "2026-11-01T10:00:00.900Z" }), 3).includes("written 2026-11-01 10:00 UTC by claude-code"), "an edit within the writing's minute is not shown as an edit");
   assert(a.split("\n").filter((l) => /^=== item \d{3} · /.test(l)).length === 1, "a text quoting an item's head is indented, so a page has one head");
   assert(!/pending|accepted|superseded|contested|unchallenged|judge|proposal/i.test(a), "part A names no record, verdict or state");
   assert(b.includes("text [1] on part A") && b.includes(`thought ${id(8)} (not shown on part A)`) && b.includes("Status: pending.") && b.includes("reviewed 2026-11-05 00:00 UTC (reviewer: operator)") && b.includes("Its reason: -."), "part B names each question's other side, status and review");
@@ -781,27 +805,27 @@ function selfCheck(): void {
 
 async function main(): Promise<void> {
   if (args.includes("--self-check")) return selfCheck();
-  const pilot = args.includes("--pilot");
+  const mode = () => modeOf(flag("salt"), flag("pilot"));
   if (args.includes("--print-sql")) {
-    const salt = saltOf(flag("salt"), pilot);
-    if (salt !== null) refuseUnpinned("the main draw's SQL is printed");
-    console.log(drawSql(salt ?? DRAW.pilotSalt, salt === null));
+    const m = mode();
+    if ("salt" in m) refuseUnpinned("the main draw's SQL is printed");
+    console.log(drawSql(m));
     return;
   }
   const sheetsPath = flag("sheets");
-  if (sheetsPath) return sheets(sheetsPath, flag("out") ?? (() => { throw new Error("give --out <dir>"); })(), saltOf(flag("salt"), pilot));
+  if (sheetsPath) return sheets(sheetsPath, flag("out") ?? (() => { throw new Error("give --out <dir>"); })(), mode());
   if (args.includes("--kappa")) {
     const [path, a1, a2, b1, b2] = after("kappa");
     if (!b2) throw new Error("give --kappa <draw.jsonl> <a-1> <a-2> <b-1> <b-2>");
-    const { ids } = snapshot(path, saltOf(flag("salt"), pilot));
+    const { ids } = snapshot(path, mode());
     for (const l of kappaLines(ids, rater(a1, b1, ids), rater(a2, b2, ids))) console.log(l);
     return;
   }
   if (args.includes("--splits")) {
     const [path, ...files] = after("splits");
     if (files.length !== 6) throw new Error("give --splits <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b>");
-    const salt = saltOf(flag("salt"), false)!;
-    const { pop, ids } = snapshot(path, salt);
+    const salt = mainSalt(mode());
+    const { pop, ids } = snapshot(path, { salt });
     const sub = drawSample(pop, salt).subset;
     const open = openSplits(ids, rater(files[0], files[1], ids).labels, rater(files[2], files[3], ids).labels, rater(files[4], files[5], sub).labels);
     const out = outsideRepo(flag("out") ?? (() => { throw new Error("give --out <file>"); })(), "the splits file");
@@ -814,7 +838,7 @@ async function main(): Promise<void> {
     if (rest.length < 6 || rest.length > 7) throw new Error("give --freeze <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [<splits>]");
     const note = flag("note");
     if (!note) throw new Error('give --note "<who labelled, when>"');
-    return freeze(path, saltOf(flag("salt"), false)!, rest.slice(0, 6), rest[6], note);
+    return freeze(path, mainSalt(mode()), rest.slice(0, 6), rest[6], note);
   }
   const adjPath = flag("adjudicate");
   if (adjPath) {
