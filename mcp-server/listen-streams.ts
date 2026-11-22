@@ -50,8 +50,9 @@ export interface ListenStreams {
    */
   stopped: () => void;
   /**
-   * How many streams are held whose end is not yet said: the app's. It is `count` until the stop's word and 0 after
-   * it, and a suite holds it there, so that a stream whose end was said is not kept (SMD-4459, review pass 2).
+   * How many streams are held whose end is not yet said: the app's. At rest it is `count` until the stop's word and
+   * 0 after it (a listen being opened has its place before it is held), and a suite holds it there, so that a stream
+   * whose end was said is not kept (SMD-4459, review pass 2).
    */
   unsaid: () => number;
 }

@@ -959,7 +959,7 @@ function checkedEnd(r: ListenEndRecord) {
   return {
     door: "mcp" as const,
     event: "listen_end" as const,
-    // A name that is no string is `?`, as any value that fails its rule is.
+    // A name that is no string is `?`.
     agent: r.agent === undefined ? undefined : typeof r.agent === "string" ? labelPart(r.agent) : "?",
     end: known(r.end, LISTEN_ENDS) as ListenEnd | "?",
     held_ms: count(r.heldMs) ?? 0,
@@ -981,8 +981,8 @@ export function listenEndLine(r: ListenEndRecord, now: Date = new Date()): strin
  * goes on the request-duration histogram, which the dashboard's percentiles and the failure alert read; and there is
  * no span, the stream's request having ended its own when the stream opened. Nothing is held open for it either: a
  * stream has no record between its opening's and this one.
- * It throws nothing: it is called from a stream's end and from the stop, and a sink or an SDK that throws loses the
- * record and nothing else. A name that is no string is `?`, as an `end` it does not know is; a time held that is
+ * It throws nothing: it is called from a stream's end and from the stop, and a sink or an SDK that throws loses what
+ * it was writing and nothing else. A name that is no string is `?`, as an `end` it does not know is; a time held that is
  * no count is 0, and a trace id that fails its rule is left out. A record that is null or undefined is left unsaid;
  * any other value is read as a record, which the route's are.
  */

@@ -1639,17 +1639,17 @@ after a person, so the log stays free of names and addresses.
 # `has("outcome")` keeps to requests: a listen stream's end is a line with none
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(has("outcome") and .outcome != "ok")'
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(has("outcome") and .outcome != "ok")'
-# the listen streams that ended, on a server that holds them; the same,
-# counted by caller and by how they ended, with when the first and the last
-# were and the shortest, the median and the longest hold; every
-# `subscriptions/listen` request: the openings, and beside them the listens
-# that opened nothing (one refused at a bound is `refused`, with its code;
-# one the SDK refused inside a 200 reads `ok`, like an opening); and the
-# server's starts and stops in order, which the filters above drop: a start
-# with no stop since the start before it is a life that ended without one
+# the listen streams that ended, on a server that holds them
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.event == "listen_end")'
+# the same, counted by caller and by how they ended, with when the first and
+# the last were and the shortest, the median and the longest hold
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -sc 'map(select(.event == "listen_end")) | group_by([.agent, .end])[] | {agent: .[0].agent, end: .[0].end, ends: length, first: .[0].ts, last: .[-1].ts, shortest_ms: (map(.held_ms) | min), median_ms: (map(.held_ms) | sort | .[length / 2 | floor]), longest_ms: (map(.held_ms) | max)}'
+# every `subscriptions/listen` request: the openings, and beside them the
+# listens that opened nothing (one refused at a bound is `refused`, with its
+# code; one the SDK refused inside a 200 reads `ok`, like an opening)
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.rpc == "subscriptions/listen")'
+# the server's starts and stops in order, which the filters above drop: a
+# start with no stop since the start before it is a life that ended without one
 docker logs open-brain-mcp-1 2>/dev/null | grep -E '^(Started server:|SIG(TERM|INT): )'
 ```
 
@@ -1986,8 +1986,8 @@ asks again 6, 8 and 12 seconds on and then stops asking (measured, SMD-4347),
 its documentation says five reopens in an hour make it wait about six hours,
 and no other client has been measured.
 
-A listen stream's end writes a line of its own (SMD-4459), where the request
-lines go, on a server that holds them:
+On a server that holds listen streams, a stream's end writes a line of its own
+(SMD-4459), where the request lines go:
 
 ```
 {"ts":"2026-11-21T09:12:44.118Z","door":"mcp","event":"listen_end","agent":"laptop","end":"client","held_ms":8043117,"trace":"5b8aa5a2d2c872e8321cf37308d69df2"}
@@ -2005,16 +2005,17 @@ line under its `agent` whose `ts` is the end's `ts` less `held_ms`, to a few
 milliseconds (2 at the most, in each run measured). So it is ambiguous only
 between streams one name opened in the same few milliseconds, as a key's
 sessions do when they ask again after a restart. `held_ms` is the milliseconds
-from the stream's opening to its end. `end` says how it ended. None of the
-three says a failure by itself, and none is in the failure alert: a `client`
-end is a client done and a connection dropped alike, and what follows it tells
-which (below).
+from the stream's opening to its end. `end` says how it ended.
 
 | `end` | What ended the stream |
 | -- | -- |
-| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one word here. That was measured with the client at the server; behind the proxy the server's peer is the proxy, and what it passes on of a client's leaving, and how soon, was not measured. Nor was the proxy's access log, which writes a line for a request at `/mcp`: what that line holds for a stream held open, and of how it ended |
+| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one kind here. That was measured with the client at the server; behind the proxy the server's peer is the proxy, and what it passes on of a client's leaving, and how soon, was not measured. Nor was the proxy's access log, which writes a line for a request at `/mcp`: what that line holds for a stream held open, and of how it ended |
 | `stop` | The server's stop closed it, or was about to: a stream still open as the stop's drain ends is the stop's, though its client may leave in the moment before it is closed. The line is written as the stop's drain ends, before its flush, so that a collector has it; the stream itself is closed after that flush where the drain finished. So `held_ms` is short of the real close by the flush: milliseconds as a rule, and up to 5 s where a collector is slow to answer |
 | `server` | The server ended it itself: a listen that asks for nothing this server sends is acknowledged and closed at once |
+
+None of the three says a failure by itself, and none is in the alert for
+failed requests ("Alerts" below): a `client` end is a client done and a
+connection dropped alike, and what follows it tells which.
 
 A stream that keeps dropping (a tunnel that cuts streams, a proxy's timeout, a
 client that reopens in a loop) is `client` ends under one name, each a short
@@ -2023,19 +2024,11 @@ drop reaches the server (not measured through the proxy, above); a healthy
 stream is held until its client goes or the server restarts. Sessions that
 come and go on one key are `client` ends under one name too, and a line has no
 session to tell them by. What marks a cut on a timer is `held_ms` near one
-value, the counter's `shortest_ms`, `median_ms` and `longest_ms` close
+value, the counting filter's `shortest_ms`, `median_ms` and `longest_ms` close
 together, with an `ok` line the client's wait after each end: a stream cut
 every 1.5 s read 1471, 1499 and 1504 where two sessions opening and closing
 by hand read 517, 3959 and 7078. A drop that keeps no rhythm cannot be told
 from sessions ending.
-
-What a client does when its stream ends is its own (above). One that has
-stopped asking leaves a `client` end with no `subscriptions/listen` line after
-it under its name, where its key has one session; another session of that key
-asks under the same name. A client that closed its stream and left reads the
-same, and its other requests tell the two apart: one that gave up and works on
-still writes lines under its name (`tools/list`, `tools/call`) with no listen
-among them, and one that left writes none.
 
 A connection that goes silent, with no close and no reset, may end late: a
 client frozen for 2 s, and one for 20, had no end until it was killed
@@ -2049,6 +2042,14 @@ dropped the client's side and kept the server's; whether the stack's proxy
 does so is the thing not measured, and it decides which of the two pictures
 an operator sees.
 
+A client that has stopped asking (above) leaves a `client` end with no
+`subscriptions/listen` line after it under its name, where its key has one
+session; another session of that key asks under the same name. A client that
+closed its stream and left reads the same, and its other requests tell the
+two apart: one that gave up and works on still writes lines under its name
+(`tools/list`, `tools/call`) with no listen among them, and one that left
+writes none.
+
 A stop writes a `stop` line for each stream that was open, in the log of the
 container that stopped; its own two lines count them too, as it began ("N
 streams held open, not waited on") and as it ended ("N held streams closed").
@@ -2056,7 +2057,7 @@ streams held open, not waited on") and as it ended ("N held streams closed").
 recreates the container, and the old one's log goes with it, so after an
 upgrade those lines are a collector's or no one's.
 
-A server that is killed, or dies some other way, writes none for the streams
+A server that is killed, or dies some other way, writes no line for the streams
 it drops, and no `SIGTERM:` line. That is its sign, in the log read whole: a
 `Started server:` line with no `SIGTERM: …` or `SIGINT: …` line since the one
 before it (the last filter above). The streams it dropped are that life's
@@ -2065,25 +2066,26 @@ before it (the last filter above). The streams it dropped are that life's
 `Started server:`. Their count is a ceiling: a listen the SDK refuses inside
 a 200 for its filter reads the same and never has an end. Other `ok` listens
 open nothing and are told apart: one sent as a notification is a 202; one on
-an older revision, or naming none, has its `rev`, and `bytes`; and on a server that holds no
-streams, as every server is today, every listen has `bytes` and none has an
-end. The last life in the log is the running one, with no stop yet. A log that
-has lost its beginning to its bound shows ends with no opening, and hides
-what a kill before that dropped.
+an older revision, or naming none, has its `rev`, and `bytes`; and on a server
+that holds no streams, as every server is today, every listen has `bytes` and
+none has an end. The last life in the log is the running one, with no stop
+yet. A log that has lost its beginning to its bound shows ends with no
+opening, and hides what a kill before that dropped.
 
 Where the server sends telemetry, an end is also a log record named
 `ob1.listen_end`, at `INFO`, its body the line's fields, under no span (the
 stream's request ended its span when the stream opened); and one point on
 `ob1.mcp.listen_stream.duration`, a histogram of the seconds held, from one
 second to a day, labelled `ob1.end` and nothing else. Its count is the ends,
-by how they ended. An end adds nothing to `http.server.request.duration`, which
-has the stream's request once, at its opening, and nothing the failure alert
-counts. The stop's ends are sent by its flush; where that flush does not get
-out, stdout has them alone. A kill sends nothing: the points of every end
-since the last export (the export interval, 60 s unless set otherwise) and
-the records of its last second or so are on stdout alone (seen: of two ends
-4.9 s and 0.17 s before a kill, the collector had the first's record, not the
-second's, and neither's point). No panel of the dashboard reads either yet.
+by how they ended. An end adds nothing that alert counts, and nothing to
+`http.server.request.duration`, which has the stream's request once, at its
+opening. The stop's ends are sent by its flush; where that flush
+does not get out, stdout has them alone. A kill sends nothing: the points of
+every end since the last export (the export interval, 60 s unless set
+otherwise) and the records of its last second or so are on stdout alone (seen:
+of two ends 4.9 s and 0.17 s before a kill, the collector had the first's
+record, not the second's, and neither's point). No panel of the dashboard
+reads either yet.
 
 `bun preflight.ts --deep` makes each provider probe a span and a point under
 the same names, marked `ob1.probe` (`preflight`) so a backend tells them from

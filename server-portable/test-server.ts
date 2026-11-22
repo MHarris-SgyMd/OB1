@@ -5884,7 +5884,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     // own, and a log record of its own name. Each field is held to its rule, as a request's are, and nothing of it is
     // a request's: no `outcome`, and no point on the request-duration histogram.
     const TRACE = "ab".repeat(16);
-    const requestPointsNow = () => (measured.getMetrics().at(-1)?.scopeMetrics.flatMap((sm) => sm.metrics) ?? []).filter((m) => m.descriptor.name === "http.server.request.duration").flatMap((m) => m.dataPoints as { value: { count: number } }[]).reduce((n, pt) => n + pt.value.count, 0);
+    const requestPointsNow = () => durationPoints(measured).reduce((n, pt) => n + pt.value.count, 0);
     const requestRecordsNow = () => logged.getFinishedLogRecords().filter((r) => r.eventName === "ob1.request").length;
     await flushTelemetry();
     const [requestPointsBefore, requestRecordsBefore] = [requestPointsNow(), requestRecordsNow()];
@@ -5914,8 +5914,9 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
     }
     const endsTo = performance.timeOrigin + performance.now();
     const endsSaid = endLines.map((l) => JSON.parse(l) as Record<string, unknown>);
+    const endsWithoutTs = endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; });
     assert(endsSaid.length === 5 && endsSaid.every((e) => typeof e.ts === "string" && Object.keys(e)[0] === "ts")
-      && endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return JSON.stringify(rest); }).join(" ") === [
+      && endsWithoutTs.map((e) => JSON.stringify(e)).join(" ") === [
         JSON.stringify({ door: "mcp", event: "listen_end", agent: "desk", end: "client", held_ms: 4250, trace: TRACE }),
         JSON.stringify({ door: "mcp", event: "listen_end", agent: "a?b", end: "?", held_ms: 0 }),
         JSON.stringify({ door: "mcp", event: "listen_end", end: "stop", held_ms: 90000 }),
@@ -5923,7 +5924,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
         JSON.stringify({ door: "mcp", event: "listen_end", agent: "?", end: "stop", held_ms: 2 }),
       ].join(" ")
       && listenEndLine({ agent: "desk", end: "stop", heldMs: 1 }, new Date(0)) === JSON.stringify({ ts: "1970-01-01T00:00:00.000Z", door: "mcp", event: "listen_end", agent: "desk", end: "stop", held_ms: 1 }),
-      `a listen stream's end, on its line: its door, \`listen_end\`, the caller's name, how it ended, the milliseconds held and its opening's trace id, each held to its rule (a name that is no string \`?\`, a number's or a null's), and no outcome, method or status; a record that is null has no line (${JSON.stringify(endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; }))})`);
+      `a listen stream's end, on its line: its door, \`listen_end\`, the caller's name, how it ended, the milliseconds held and its opening's trace id, each held to its rule (a name that is no string \`?\`, a number's or a null's), and no outcome, method or status; a record that is null has no line (${JSON.stringify(endsWithoutTs)})`);
     await flushTelemetry();
     const metricsNow = measured.getMetrics().at(-1)?.scopeMetrics.flatMap((s) => s.metrics) ?? [];
     const heldHistograms = metricsNow.filter((m) => m.descriptor.name === "ob1.mcp.listen_stream.duration");
@@ -5935,7 +5936,7 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       `…and each end one point on ob1.mcp.listen_stream.duration, in seconds from one to a day, labelled with how it ended and nothing else, none for a record that is null; none on the request-duration histogram, which counts the requests it did (${JSON.stringify(heldPoints.map((p) => [p.attributes, p.value.count, p.value.sum]))}; ${requestPointsBefore} request point(s) before, ${requestPointsNow()} after)`);
     const endRecords = logged.getFinishedLogRecords().filter((r) => r.eventName === "ob1.listen_end");
     assert(endThrew === "" && endRecords.length === 6 && endRecords.every((r) => r.severityText === "INFO" && !traceApi.isSpanContextValid(r.spanContext ?? { traceId: "", spanId: "", traceFlags: 0 }) && msOf(r.hrTime) >= endsFrom - 1 && msOf(r.hrTime) <= endsTo + 1)
-      && JSON.stringify(endRecords.slice(0, 5).map((r) => r.body)) === JSON.stringify(endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; })) && (endRecords[5].body as Record<string, unknown>).end === "server"
+      && JSON.stringify(endRecords.slice(0, 5).map((r) => r.body)) === JSON.stringify(endsWithoutTs) && (endRecords[5].body as Record<string, unknown>).end === "server"
       && requestRecordsBefore > 0 && requestRecordsNow() === requestRecordsBefore,
       `…and one log record, ob1.listen_end at INFO, its time inside the calls that made it, the one whose line was lost too, its body the line's fields, under no span, and no request's record more; a sink that throws loses its line alone, a record that is null has none, and nothing is thrown (threw ${JSON.stringify(endThrew)}; ${JSON.stringify(endRecords.map((r) => [r.eventName, r.severityText, r.body, Math.round((msOf(r.hrTime) - endsFrom) * 100) / 100]))} ms into ${Math.round((endsTo - endsFrom) * 100) / 100})`);
 
