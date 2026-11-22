@@ -131,6 +131,12 @@ export const SECRET_PATTERNS = [
   ["64-hex token (a raw key, or a digest out of its context)", /(?<![0-9a-f])(?<!:(?:read|write|capture|forward):)(?<!sha-?256\s*[:=]\s*)(?<!--sha-?256\s+)(?<![A-Za-z0-9_-])(?:0x)?[0-9a-f]{64}(?![0-9a-f])(?!(?<=(?:^|\n)[ \t]*(?:0x)?[0-9a-f]{64})\s{2}\S)/i],
 ];
 
+/** The patterns that read the URL-blanked text: shapes, not prefixes. */
+const URL_BLIND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
+/** Each pattern once more with the `g` flag, for matchAll — the table's own objects stay stateless for exec. */
+const GLOBAL = new Map();
+const globalOf = (re) => { let g = GLOBAL.get(re); if (!g) { g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`); GLOBAL.set(re, g); } return g; };
+
 /**
  * Scan a text. Returns [] when clean, else one entry per finding: the pattern's
  * name and where — `at`, a 0-based character offset, to `end` — never the
@@ -145,12 +151,6 @@ export const SECRET_PATTERNS = [
  * measures 5 and up; an identifier 4.4 (first review pass: six realistic
  * false positives, each of which would have refused a whole session).
  */
-/** The patterns that read the URL-blanked text: shapes, not prefixes. */
-const URL_BLIND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
-/** Each pattern once more with the `g` flag, for matchAll — the table's own objects stay stateless for exec. */
-const GLOBAL = new Map();
-const globalOf = (re) => { let g = GLOBAL.get(re); if (!g) { g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`); GLOBAL.set(re, g); } return g; };
-
 export function scanForSecrets(text, { every = false } = {}) {
   const findings = [];
   // URLs and base64 payloads blanked in place (offsets kept) for the shape

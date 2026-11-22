@@ -126,6 +126,7 @@ export async function postCapture(cfg, payload) {
 /** How many payloads a run posts beside its own — the queue's five (SMD-1298); the run's own, one per episode, all post (SMD-2013's second review pass: the oldest of more than five waited for a run that might never come). */
 export const RUN_MAX = 5;
 
+let payloadSeq = 0;
 /**
  * The foreground: read the transcript, decide, summarise, scan, hand off.
  * Returns { code, message, payloadPaths, payloadPath?, payload? } — the caller
@@ -135,7 +136,6 @@ export const RUN_MAX = 5;
  * whose summary carries a secret has it blanked (`opts.onSecret` `redact`, the
  * default) or is refused alone (`refuse`) — the others still post (SMD-2127).
  */
-let payloadSeq = 0;
 export function prepare(hook, opts = {}) {
   const event = String(hook.hook_event_name ?? "");
   // An event this hook is not for — a command pasted under SubagentStop or
