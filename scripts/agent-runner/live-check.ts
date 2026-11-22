@@ -91,7 +91,7 @@ function stubGql(s: GqlScenario, seq: string[] = []): { gql: Gql; calls: { query
 /**
  * A RunResult the stub run() returns for a given outcome, with the record fields the hand-back comment reads. `dir`
  * is the run's directory: one from `runDirWith` holds what a run that imported its branch keeps, and the default
- * holds nothing, as after a run that ended before its import.
+ * holds nothing, as after a run that kept no bundle.
  */
 function fakeResult(outcome: Outcome | null, dir = "/obr-no-such-run-dir"): RunResult {
   const record: RunRecord = {
@@ -312,22 +312,23 @@ export async function selfCheck(): Promise<number> {
       env.record.step = "work";
       env.record.sessions = [{ role: "worker", turns: 1, costUsd: 0, ended: "api-error" }];
       const envBody = handbackComment(env);
-      ok(envBody.includes("an environment failure") && envBody.includes("Nothing was imported") && !names(envBody), "an environment failure at the work step names no branch, bundle or diff");
+      ok(envBody.includes("an environment failure") && envBody.includes("The run kept nothing to publish from") && !names(envBody), "an environment failure at the work step names no branch, bundle or diff");
+      ok(!/import|session/i.test(envBody.replace(/^Sessions: .*$/m, "")), "and claims neither that nothing was imported nor that a session left anything: a failed copy after the import, and a run with no session, are told truly");
       ok(envBody.includes("worker 1 turns $0.00 (ended api-error)"), "and still says how the worker session ended");
       const noBundle = handbackComment(fakeResult("work-failure", runDirWith(root, "left-diff-alone", { bundle: false, diff: true })));
-      ok(noBundle.includes("Nothing was imported") && !noBundle.includes("is in the runner's bare repository"), "the kept bundle is the sign: a directory without one is a run that imported nothing");
+      ok(noBundle.includes("The run kept nothing to publish from") && !noBundle.includes("is in the runner's bare repository"), "the kept bundle is the sign: a directory without one names no branch");
 
       // The release's reason says the same of the branch.
       const seen = { claimId: undefined as string | null | undefined };
       const none = makeInput(mkdtempSync(join(root, "rel-none-")), {}, {}, "env-failure", seen);
       await liveRun(none.input);
       const noneReason = none.fetchCalls.find((c) => c.url.includes("/release"))?.body ?? "";
-      ok(noneReason.includes("no branch imported") && !noneReason.includes("agent/smd-9-x"), "the release's reason for a run that imported nothing names no branch");
+      ok(noneReason.includes("nothing kept to publish from") && !noneReason.includes("agent/smd-9-x") && !noneReason.includes("import"), "the release's reason for a run that kept no bundle names no branch");
       const some = makeInput(mkdtempSync(join(root, "rel-kept-")), {}, {}, null, seen);
       some.input.deps.run = async () => fakeResult(null, kept);
       await liveRun(some.input);
       const someReason = some.fetchCalls.find((c) => c.url.includes("/release"))?.body ?? "";
-      ok(someReason.includes("branch agent/smd-9-x in the bare repository, not pushed"), "the release's reason for a run that imported its branch names it");
+      ok(someReason.includes("branch agent/smd-9-x in the bare repository, not pushed"), "the release's reason for a run that kept its bundle names the branch");
     });
 
     await section("the hand-back comment says when the branch was not reviewed (SMD-4516)", () => {
