@@ -743,6 +743,23 @@ export function partWriteFault(e: unknown): { refused: string } | { sqlstate: st
 }
 
 /**
+ * What a record_settled_part call answered, as this pass knows the store's four answers (migration 151): recorded or
+ * stands, each with `ok` true, and NOT_FOUND or EDITED_SINCE, each with `ok` false. Anything else is `unknown`, with
+ * the word the store gave cut to its letters, digits and underscores and to forty characters ("no word" where it gave
+ * none): an action or an error a later store might give, an answer that is no object, or none at all. Read in one
+ * place, so every answer the pass does not know ends the same way, as the part's refusal (review pass 3: pass 2 had
+ * mended an unknown error word alone, and an unknown action was still counted recorded, a NULL answer thrown bare).
+ */
+export function partAnswer(r: unknown): { known: "recorded" | "stands" | "NOT_FOUND" | "EDITED_SINCE" } | { unknown: string } {
+  // Read with `?.`: null and undefined have no key, and a string or a number answers none of these.
+  const o = r as { ok?: unknown; action?: unknown; error?: unknown } | null | undefined;
+  if (o?.ok === true && (o.action === "recorded" || o.action === "stands")) return { known: o.action };
+  if (o?.ok === false && (o.error === "NOT_FOUND" || o.error === "EDITED_SINCE")) return { known: o.error };
+  const word = [o?.error, o?.action].find((w): w is string => typeof w === "string" && w !== "");
+  return { unknown: (word ?? "").replace(/[^A-Za-z0-9_]/g, "").slice(0, 40) || "no word" };
+}
+
+/**
  * The error the pass throws in place of a data error from a part's write (partWriteFault's `sqlstate`): its SQLSTATE
  * and no word of the database's message. It keeps the first error's name and carries the code as `errno`, which is
  * how a follower tells a database's refusal of one thought's data from a provider's fault (worker-bootstrap.ts's

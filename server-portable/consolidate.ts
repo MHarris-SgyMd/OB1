@@ -506,8 +506,9 @@ const OWN_MAX = 2000;
 const LINK_TAIL = /^\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")?\s{0,16}\)/;
 
 /**
- * The thought's own characters for a quote evidenceIn finds in it (SMD-4446): the shortest run of `content`, between
- * word boundaries, that reads as the quote does once both are folded as evidenceIn folds them. A model quoting a
+ * The thought's own characters for a quote evidenceIn finds in it (SMD-4446): the shortest run of `content`, from
+ * the start of a word to the end of one as the text's own characters show them, that reads as the quote does once
+ * both are folded as evidenceIn folds them. A model quoting a
  * thought retypes it: straight quotes for curly ones, a hyphen for a dash, no markdown, its own capitals and line
  * breaks. A settled part's statement is kept as its thought wrote it, so the same statement named again in another
  * typing is the same row: migration 151 reads a statement's characters, folding case and white space and no more.
@@ -517,13 +518,14 @@ const LINK_TAIL = /^\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")
  * bracket, a closing per cent sign, the pluses of "C++") must be found beside the run, leftwards and then rightwards:
  * a place that holds the quote's words without its marks is another statement, and is passed over (review pass 1:
  * "coverage is 80%" came back as a shorter "Coverage is 80" elsewhere in the thought). Emphasis marks at either edge
- * are taken in with the run, and a link whose text opens or ends it is taken with its bracket and target.
+ * are taken in with the run (OWN_EMPHASIS), paired or not. A link is taken with its bracket where the quote's first
+ * letter or digit stands directly after it, and with its target where the quote ends on the link's text.
  *
  * The two words are looked for as the fold reads them, and that search is the same for every typing of a statement,
  * so each finds the same run. Where it finds none, they are looked for as the quote typed them as well. The fold
  * reads a text with every asterisk, backtick and bracket dropped and in small letters, so `10**6` reads "106" and a
- * capital dotted I reads an i and a mark: the text writes no such word, and a quote that copies the thought's own
- * word is the one way to find its place (review pass 2: with no place found, a row held "grew to 106"). A place is a
+ * capital dotted I reads an i and a mark: the text writes no such word, and only a quote that copies the thought's
+ * own word gives a place to look at (review pass 2: with no place found, a row held "grew to 106"). A place is a
  * candidate and no more: the run is still the shortest that reads as the whole quote. (A search for the whole quote
  * as typed, tried in review pass 2, gave another run for one statement where the typing closed on a full stop or the
  * thought wrote the statement twice: 25 of 26,828 spans of generated texts.)
@@ -531,9 +533,22 @@ const LINK_TAIL = /^\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")
  * Null when no run is found. Among the causes: markup inside the quote's first or last word in the text, where the
  * quote does not type that word as the thought does; more markup inside the run than OWN_MARKUP; more than
  * OWN_EMPHASIS emphasis marks between a word and the quote's own mark; the search given up at its bound; a run
- * longer than OWN_MAX. The part is then not recorded. No other form of the quote stands in for the thought's
- * characters: the typing can hold a link's target or struck words of the writer's own, which the check folds away
- * (review pass 1: a row held one), and the quote as the check read it can hold a word the thought never wrote.
+ * longer than OWN_MAX. And at a link (review pass 3). Three for a copy of the thought as for a plain typing: the
+ * quote opens on a link whose text begins with a mark or markup (`[#857](…)`, a code-span link, `[**bold**](…)`);
+ * its own closing mark stands after a link's target (`…[the patch](…)?`); or it ends on an image's text. And one for
+ * a plain typing: it starts inside a link's text after the link's first word, where no run of the text reads as the
+ * quote alone. The part is then not recorded. No other form of the quote stands in for the thought's characters: the
+ * typing can hold a link's target or struck words of the writer's own, which the check folds away (review pass 1: a
+ * row held one), and the quote as the check read it can hold a word the thought never wrote.
+ *
+ * Where it is not the place the thought says the quote (review pass 3). A run is the shortest place whose own
+ * characters read as the quote, and the check reads the whole text: markup inside a word, a link's target or struck
+ * words can hold such a place ("locked door stays" came back as `**locked** door stays`, from
+ * `un**locked** door stays`, a run that stands against a letter). The row still reads as the quote. And in a list
+ * whose lines open and close on the same words the folds are spent on the lines before: of 200 lines of 27
+ * characters, the statements from line 184 on get no run. SMD-4529 replaces the search with one fold of the text that
+ * keeps where each character came from: a prototype of it read back every copy this search loses at a link, with no
+ * window and no count of folds, and still gave no run for a start inside a link's text.
  *
  * Bounded three ways. A candidate run, from the quote's first word to its last, is at most the quote's length and
  * OWN_MARKUP characters; its marks, emphasis and a link's target (OWN_MARKUP more at most) are added to that. Every
@@ -545,7 +560,9 @@ const LINK_TAIL = /^\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")
  * What it does not make one row (review pass 1 measured both). Two typings that differ by a mark the fold keeps at
  * an edge of the quote (brackets, a question mark, a per cent sign) are two runs, since the run is the quote's own
  * extent. And a thought edited so that the statement's own quote marks, dashes or markup change gives another run
- * for the same words, so a statement decided at the earlier text can be named again at the later one.
+ * for the same words, so a statement decided at the earlier text can be named again at the later one. So does an
+ * edit elsewhere that adds a place the search finds first: a copy of a place only its own typing finds is then given
+ * the other place's run (review pass 3).
  */
 export function ownWords(quote: string, content: string): string | null {
   const fold = (t: string) => forQuote(withoutMarkdown(t));

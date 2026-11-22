@@ -182,7 +182,7 @@ import { appendFileSync } from "node:fs";
 import { ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { consolidatePassKey, decidePair, movedWords, partJudged, PARTS_MAX, partWriteError, partWriteFault, PutBacks, refusedWords, type DecideNote } from "../server-portable/consolidate-decide.ts";
+import { consolidatePassKey, decidePair, movedWords, partAnswer, partJudged, PARTS_MAX, partWriteError, partWriteFault, PutBacks, refusedWords, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { DecisionRefused, resolveDecideTier, type DecideTier, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, ProbeRefused, probeRefusal, probeTier, ProviderDown, ProviderOutage, JUDGE_REQUEST_FIELDS, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
@@ -1990,7 +1990,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         const judged = judgedRecipe(j, scored.source);
         for (const [n, part] of j.parts.entries()) {
           const rest = j.parts.slice(n);
-          let r: { ok: boolean; error?: string; action?: string; id?: string; status?: string; replaced?: string | null; older_edited?: boolean; newer_edited?: boolean; newer_gone?: boolean };
+          let r: { id?: string; status?: string; replaced?: string | null; older_edited?: boolean; newer_edited?: boolean; newer_gone?: boolean } | null;
           try {
             [{ r }] = (await sql`
               SELECT record_settled_part(${c.older_id}::uuid, ${row.id}::uuid, ${part.holder}::text, ${part.statement}::text, ${part.shown_by}::text,
@@ -2016,34 +2016,37 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             // Anything else is the worker's to classify, as any write's.
             throw e;
           }
-          if (r.ok) {
-            if (r.action === "stands") {
-              totals.partsStood++;
-              // A statement a reviewer rejected, named again, stands as rejected: counted, so the summary says so.
-              if (r.status === "rejected") totals.partsStoodRejected++;
-              partResults.set(part.index, { result: "stands", id: r.id, status: r.status });
-            } else {
-              totals.partsRecorded++;
-              if (r.replaced) totals.partsReplaced++;
-              partResults.set(part.index, { result: r.replaced ? "replaced" : "recorded", id: r.id, status: r.status });
-            }
+          // One of the store's four answers, or one this pass does not know, as a later store might give: an error
+          // word, an action, an answer that is no object, or none (partAnswer). An unknown one is the part's refusal,
+          // in the pass's own words, with the word the store gave. Not a throw (review pass 2): a bare error here was
+          // the provider's to a follower, as a data error's was, and left the summary's line short of its sum.
+          const told = partAnswer(r);
+          if ("unknown" in told) {
+            totals.partsRefused++;
+            partResults.set(part.index, { result: "refused" });
+            refusals.push(`record_settled_part answered ${told.unknown}, which this pass does not know`);
+            continue;
+          }
+          // A known answer is an object: its other keys are read from it.
+          const said = r as NonNullable<typeof r>;
+          if (told.known === "stands") {
+            totals.partsStood++;
+            // A statement a reviewer rejected, named again, stands as rejected: counted, so the summary says so.
+            if (said.status === "rejected") totals.partsStoodRejected++;
+            partResults.set(part.index, { result: "stands", id: said.id, status: said.status });
+            continue;
+          }
+          if (told.known === "recorded") {
+            totals.partsRecorded++;
+            if (said.replaced) totals.partsReplaced++;
+            partResults.set(part.index, { result: said.replaced ? "replaced" : "recorded", id: said.id, status: said.status });
             continue;
           }
           // A thought of the pair is gone, or a text moved while the pair was judged: every part of the pair still to
           // write would be answered the same, so none is sent.
-          if (r.error === "NOT_FOUND") { totals.partsGone += rest.length; pairGone = true; newerGone = r.newer_gone === true; }
-          else if (r.error === "EDITED_SINCE") { totals.partsMoved += rest.length; textMoved = { older: r.older_edited === true, newer: r.newer_edited === true }; }
-          else {
-            // An answer this pass does not know, as a later store might give: the part's refusal, in the pass's own
-            // words, with the word the store gave cut to letters, digits and underscores. Not a throw (review pass 2):
-            // a bare error here was the provider's to a follower, as a data error's was, and left the summary's line
-            // short of its sum.
-            totals.partsRefused++;
-            partResults.set(part.index, { result: "refused" });
-            refusals.push(`record_settled_part answered ${String(r.error).replace(/[^A-Za-z0-9_]/g, "").slice(0, 40)}, which this pass does not know`);
-            continue;
-          }
-          for (const p of rest) partResults.set(p.index, { result: r.error === "NOT_FOUND" ? "gone" : "moved" });
+          if (told.known === "NOT_FOUND") { totals.partsGone += rest.length; pairGone = true; newerGone = said.newer_gone === true; }
+          else { totals.partsMoved += rest.length; textMoved = { older: said.older_edited === true, newer: said.newer_edited === true }; }
+          for (const p of rest) partResults.set(p.index, { result: told.known === "NOT_FOUND" ? "gone" : "moved" });
           break;
         }
       }

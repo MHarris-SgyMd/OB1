@@ -4946,13 +4946,34 @@ tier gives each pair's verdict, not the judge:
       - more than three emphasis marks stand between a word and the quote's
         own mark beside it;
       - the search is given up at its bound: every fold of a run is counted,
-        4,000 a quote at most;
-      - the run would pass the 2,000 characters the store keeps.
+        4,000 a quote at most. In a list whose lines open and close on the
+        same words they are spent on the lines before: of 200 lines of 27
+        characters, the statements from line 184 on get no run;
+      - the run would pass the 2,000 characters the store keeps;
+      - at a link, for a copy of the thought as for a plain typing: the quote
+        opens on a link whose text begins with a mark or markup (`[#857](…)`,
+        a code-span link, `[**bold**](…)`), its own closing mark stands after
+        a link's target (`…[the patch](…)?`), or it ends on an image's text;
+      - a plain typing starts inside a link's text, after the link's first
+        word ("PR 857 is open" of `[OB1 PR 857](…) is open`): no run of the
+        thought reads as that quote alone.
     - **Two typings that differ by a mark at an edge of the quote** (brackets,
       a question mark, a per cent sign) are two statements.
     - **A thought edited so that the statement's own quote marks, dashes or
       markup change** gives another run for the same words. A statement
       decided at the earlier text can then be named again at the later one.
+      So does an edit elsewhere that adds a place the search finds first.
+    - **A run is a place whose own characters read as the quote,** which is
+      not always where the thought says it. The check reads the whole text,
+      and markup inside a word, a link's target or struck words can hold
+      such a place: "locked door stays" is read back as
+      `**locked** door stays`, from `un**locked** door stays`. The row still
+      reads as the quote.
+    - **The search is to be replaced** by one fold of the text that keeps
+      where each character came from (SMD-4529). A prototype read back every
+      copy the search loses at a link, and has neither the window nor the
+      count of folds. A start inside a link's text is still without a run
+      there.
   - **The parts are written first,** before the pair's proposal, its stale
     proposal's settle and its relation. A part's write is the one that reads
     both texts, so it is where the pass learns that a text moved while the
@@ -4992,8 +5013,9 @@ tier gives each pair's verdict, not the judge:
     store's words, which echo no text of a thought. The pair's other parts
     are still sent, and nothing else of the judgement is recorded, so the
     pair is still a candidate once the cause is mended. An answer of the
-    store that the pass does not know is such a refusal, said with the word
-    it gave. A data error that is not the store's own goes on as its SQLSTATE
+    store that the pass does not know is such a refusal: an error word or an
+    action other than the four above, said with that word, or no answer at
+    all. A data error that is not the store's own goes on as its SQLSTATE
     alone, since Postgres's cast can quote the value it was given; a follower
     reads it as the thought's, as it would the database's own error. Anything
     else is the thought's error, as for any write of the pass.

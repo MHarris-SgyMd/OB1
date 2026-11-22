@@ -20112,7 +20112,8 @@ if (want("16")) {
         } else if (/paddock/.test(both)) {
           answer = { parts: [partOf("paddock trough leaks", "paddock trough was sealed", "resolves", "the trough was sealed"), partOf("paddock rail is loose", "paddock rail was fixed", "resolves", "the rail was fixed")], a_falls: "no", b_falls: "no" };
         } else if (/quarry/.test(both)) {
-          answer = { parts: [partOf("road is closed", "road reopened on Tuesday", "resolves", "the road reopened"), partOf("crane is idle", "crane runs again", "resolves", "the crane runs")], a_falls: "no", b_falls: "no" };
+          answer = { parts: [partOf("road is closed", "road reopened on Tuesday", "resolves", "the road reopened"), partOf("crane is idle", "crane runs again", "resolves", "the crane runs"),
+            partOf("gate is rusted", "gate was painted", "resolves", "the gate was painted")], a_falls: "no", b_falls: "no" };
         } else if (/lagoon/.test(both)) {
           // The thought in hand is deleted while its first pair is judged: the part's write finds it gone, and nothing
           // more of the thought is asked of either model. Its second pair's text holds the word too, so a call about
@@ -20683,8 +20684,8 @@ if (want("16")) {
           // A brain without 151's store: a run that would judge refuses at its start, naming the migration, and asks
           // neither model, with a pair waiting; --status and a dry run go on. The function is moved aside and put back,
           // not dropped.
-          const quarryOld = await seed("[16d] The quarry road is closed. The quarry crane is idle.", 73, 3, ["quarry"]);
-          const quarryNew = await seed("[16d] The quarry road reopened on Tuesday. The quarry crane runs again.", 73, 0, ["quarry"]);
+          const quarryOld = await seed("[16d] The quarry road is closed. The quarry crane is idle. The quarry gate is rusted.", 73, 3, ["quarry"]);
+          const quarryNew = await seed("[16d] The quarry road reopened on Tuesday. The quarry crane runs again. The quarry gate was painted.", 73, 0, ["quarry"]);
           const SIG = "record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)";
           const callsBefore = { tier: tierCalls, writer: writerCalls, link: linkCalls };
           await sql.unsafe(`ALTER FUNCTION ${SIG} RENAME TO record_settled_part_set_aside`);
@@ -20696,12 +20697,18 @@ if (want("16")) {
             noStoreStatus = await decide(denv, "--status");
             noStoreDry = await decide(denv, "--dry-run");
             callsAfter = { tier: tierCalls, writer: writerCalls, link: linkCalls };
-            // …and a store that answers a word this pass does not know, as a later one might (review pass 2). A stand-in
-            // under the function's name, while the real one is aside: the answer is the part's refusal, said on the
-            // claim with the word, and counted so, with no error thrown for a follower to take for its provider's. The
-            // pair names two parts, so the second is seen to be sent after the first's refusal; and the word holds a
-            // space, quote marks and 55 characters, so it is seen cut to its letters, digits and underscores and to 40.
-            await sql.unsafe(`CREATE FUNCTION ${SIG} RETURNS jsonb LANGUAGE sql AS $later$ SELECT jsonb_build_object('ok', false, 'error', 'LATER_WORD "x" ' || repeat('y', 40)) $later$`);
+            // …and a store that answers what this pass does not know, as a later one might (review pass 2). A stand-in
+            // under the function's name, while the real one is aside: each such answer is its part's refusal, the
+            // first said on the claim with its word, all counted so, with no error thrown for a follower to take for
+            // its provider's. The pair names three parts, each answered another way (review pass 3: only the first was
+            // a refusal, the second being counted recorded and the third thrown bare):
+            //   the road's, an error word, which holds a space, quote marks and 55 characters, so it is seen cut to its
+            //     letters, digits and underscores and to 40;
+            //   the crane's, `ok` true with an action the pass does not know;
+            //   the gate's, no answer at all (SQL NULL).
+            await sql.unsafe(`CREATE FUNCTION ${SIG} RETURNS jsonb LANGUAGE sql AS $later$
+              SELECT CASE WHEN $4 LIKE '%road%' THEN jsonb_build_object('ok', false, 'error', 'LATER_WORD "x" ' || repeat('y', 40))
+                          WHEN $4 LIKE '%crane%' THEN jsonb_build_object('ok', true, 'action', 'deferred', 'id', gen_random_uuid(), 'status', 'pending') END $later$`);
             standIn = true;
             laterRun = await decide(denv);
           } finally {
@@ -20714,10 +20721,10 @@ if (want("16")) {
             `decide mode on a brain without the parts' store is refused at start, naming migration 151, before either model is asked and with a pair waiting; --status and a dry run are not (exit ${noStore.code}, ${noStoreStatus.code} and ${noStoreDry.code}: ${last(noStore.out)})`);
           const quarryClaim = await claim6(quarryNew);
           assert(laterRun.code === 1 && quarryClaim?.status === "failed"
-              && quarryClaim.last_error === `1 of 1 pair(s) not judged or with a settled part unrecorded: pair with ${quarryOld}: 2 settled parts were refused — record_settled_part answered LATER_WORDx${"y".repeat(29)}, which this pass does not know`
+              && quarryClaim.last_error === `1 of 1 pair(s) not judged or with a settled part unrecorded: pair with ${quarryOld}: 3 settled parts were refused — record_settled_part answered LATER_WORDx${"y".repeat(29)}, which this pass does not know`
               && writerCalls === callsAfter.writer + 1 && (await partRowsOf(quarryNew)) === 0 && (await proposalsOf(quarryNew)).length === 0
-              && /decide: 2 settled part\(s\) read — 0 recorded for review, 0 already held, 0 with a quote that did not check out, 2 refused by the store$/m.test(laterRun.out),
-            `a store that answers a word the pass does not know: each part is refused and the pair's other part still sent, the claim says the word cut to its letters, digits and underscores and to forty characters, and the summary counts both (exit ${laterRun.code}: claim ${JSON.stringify(quarryClaim ?? null)}; ${said(laterRun.out)})`);
+              && /decide: 3 settled part\(s\) read — 0 recorded for review, 0 already held, 0 with a quote that did not check out, 3 refused by the store$/m.test(laterRun.out),
+            `a store that answers what the pass does not know, an error word, an action and nothing at all: each part is refused and the pair's others still sent, the claim says the first's word cut to its letters, digits and underscores and to forty characters, and the summary counts all three (exit ${laterRun.code}: claim ${JSON.stringify(quarryClaim ?? null)}; ${said(laterRun.out)})`);
         } finally {
           try { unlinkSync(pdump); } catch { /* already gone */ }
           try { unlinkSync(pdump2); } catch { /* already gone */ }
