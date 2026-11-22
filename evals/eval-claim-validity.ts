@@ -82,8 +82,10 @@ export const READ_ROWS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11];
  * runner holds the stricter rule outside the hash, which this run meets (20 items on every axis).
  */
 export function checkWithEvidence(items: readonly { a: Labels; b: Labels; m: Labels | null }[]): ReturnType<typeof maintainerCheck> {
-  const c = maintainerCheck(items);
-  return { ...c, agentsAreGold: c.agentsAreGold && AXES.every((x) => c[x].n > 0) };
+  // Each axis on the items whose maintainer label holds that axis: a label left out is no disagreement (review pass 7).
+  const per = Object.fromEntries(AXES.map((x) => [x, maintainerCheck(items.filter((i) => i.m !== null && i.m[x] !== null))[x]])) as { [A in Axis]: { n: number; hit: number; share: number | null } };
+  const agentsAreGold = AXES.every((x) => per[x].n > 0 && per[x].share! >= MAINTAINER_AGREEMENT_MIN);
+  return { ...per, agentsAreGold };
 }
 
 /** The UUID shape the salt (the announcing comment's id) and every thought id take. */
@@ -171,7 +173,7 @@ export const day = (at: string) => {
 };
 const n = (x: number) => x.toLocaleString("en-US");
 /** A line a sheet prints as its own structure: an item head, a section rule, a view line, another text's head. */
-const MARKER = /^(=== item \d{3} · |--- |\[\d+\] written |entities: |metadata: type |subjects: )/;
+const MARKER = /^(=== item \d{3} · |--- |\[\d+\] written |written \d{4}-|# SMD-3887|entities: |metadata: type |subjects: )/;
 /** A text as a sheet shows it: CRLF as LF, any line that reads as the page's own structure indented, so it is not (review pass 6). */
 export const body = (t: string) => t.replace(/\r\n/g, "\n").split("\n").map((l) => (MARKER.test(l) ? ` ${l}` : l)).join("\n");
 /** A view's value as a rater reads it: a string as it is, anything else as JSON, never "[object Object]" (review pass 4). */
@@ -334,6 +336,10 @@ export type FrozenItem = { id: string; stratum: Stratum; read: { [A in Axis]: st
 /** The items of a fixture, and what is wrong with it: an id in two strata or none, an index off its list, a subset id outside the draw. */
 export function fromFixture(f: Fixture): { items: FrozenItem[]; adjudicated: Map<string, Partial<Record<Axis, Adjudication>>>; problems: string[] } {
   const problems: string[] = [], items: FrozenItem[] = [];
+  // A fixture missing a top-level list is named, not thrown on (review pass 7).
+  const lists = { items: f.items && typeof f.items === "object", strata: f.strata && typeof f.strata === "object", subset: Array.isArray(f.subset), registration: Array.isArray(f.registration) };
+  const missing = Object.entries(lists).filter(([, ok]) => !ok).map(([k]) => k);
+  if (missing.length) return { items, adjudicated: new Map(), problems: [`the fixture lacks ${missing.join(", ")}`] };
   const stratumOf = new Map<string, Stratum>();
   for (const s of STRATA) for (const id of f.strata[s] ?? []) {
     if (stratumOf.has(id)) problems.push(`${id} is in two strata`);
@@ -346,11 +352,13 @@ export function fromFixture(f: Fixture): { items: FrozenItem[]; adjudicated: Map
     const truthLists = AXES.map((x) => TRUTH[x]), readLists = AXES.map((x) => READ_STATES[x]);
     if (!Array.isArray(it.read) || !Array.isArray(it.a1) || !Array.isArray(it.a2)) { problems.push(`${id}: a read or an agent's labels missing`); continue; }
     if (bad(it.read, readLists) || it.read.includes(-1)) { problems.push(`${id}: a read state off its list`); continue; }
-    if ([it.a1, it.a2, it.m, it.s].some((l) => bad(l, truthLists))) { problems.push(`${id}: a truth off its list`); continue; }
+    // An item without the maintainer's or the splits' key holds neither (review pass 7).
+    const m = it.m ?? null, s = it.s ?? null;
+    if ([it.a1, it.a2, m, s].some((l) => bad(l, truthLists))) { problems.push(`${id}: a truth off its list`); continue; }
     items.push({
       id, stratum,
       read: { validity: READ_STATES.validity[it.read[0]], review: READ_STATES.review[it.read[1]], freshness: READ_STATES.freshness[it.read[2]] },
-      a1: labelsFrom(it.a1)!, a2: labelsFrom(it.a2)!, m: labelsFrom(it.m), s: labelsFrom(it.s),
+      a1: labelsFrom(it.a1)!, a2: labelsFrom(it.a2)!, m: labelsFrom(m), s: labelsFrom(s),
     });
   }
   for (const id of stratumOf.keys()) if (!(id in f.items)) problems.push(`${id} is in a stratum with no item`);
@@ -409,7 +417,11 @@ export function reportLines(f: Fixture, current: string = registrationHash(), pi
     const has = STRATA.filter((st) => scored.some((i) => i.stratum === st && i.gold[x] !== null && i.gold[x] !== "unclear" && !(commitOnly && noClaim(x, i.read[x]))));
     return has.length === STRATA.length ? "" : `, over ${has.join(" and ") || "no stratum"} only`;
   };
-  const v = verdict(s, adjudicated, { splits, unlabelled });
+  const byRules = verdict(s, adjudicated, { splits, unlabelled });
+  // The runner's stricter rule on the fixture as committed, not only at --adjudicate: a rule divergence naming a row the
+  // read does not follow explains nothing (review pass 7). None in this run.
+  const offRows = [...adjudicated].flatMap(([id, per]) => AXES.flatMap((x) => (per[x]?.cause === "rule" && !READ_ROWS.includes(per[x]!.row ?? 0) && s[x].misses.includes(id) ? [`${x} ${id.slice(0, 8)}: rule row ${per[x]!.row}, which the read does not follow`] : [])));
+  const v = offRows.length ? { state: "fails" as const, reasons: [...offRows, ...byRules.reasons] } : byRules;
   const k = (x: Axis) => {
     const both = items.filter((i) => i.a1[x] !== null && i.a2[x] !== null);
     return both.length ? kappa(both.map((i) => i.a1[x]!), both.map((i) => i.a2[x]!)) : null;
@@ -456,10 +468,16 @@ const after = (name: string): string[] => {
  */
 export function outsideRepo(path: string, what: string): string {
   const abs = resolve(path);
-  // The real path of the nearest directory that exists, so a symlink into a work tree is seen as one (review pass 6).
-  let near = dirname(abs);
-  while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
-  for (let d = realpathSync(near); ; d = dirname(d)) {
+  // Where the file really sits: its own real path when it exists, so a symlinked file into a work tree is seen as one
+  // (review pass 7); else the real path of the nearest directory that exists, so a symlinked directory is (review pass 6).
+  let start: string;
+  if (existsSync(abs)) start = dirname(realpathSync(abs));
+  else {
+    let near = dirname(abs);
+    while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
+    start = realpathSync(near);
+  }
+  for (let d = start; ; d = dirname(d)) {
     if (existsSync(join(d, ".git"))) throw new Error(`${what} (${path}) is inside the git work tree at ${d}: it holds thought text, so it lives outside any repo`);
     if (dirname(d) === d) return abs;
   }
@@ -836,6 +854,8 @@ function selfCheck(): void {
   const mimic = pageA(item(6, { text: "line\n--- its views ---\nentities: -\n[1] written 2026-01-01 00:00 UTC by linear (9 characters)\nsubjects: -" }), 6);
   assert(["--- its views ---", "--- other texts (", "entities: ", "subjects: ", "metadata: type "].every((m) => mimic.split("\n").filter((l) => l.startsWith(m)).length === 1) && !/^\[1\] written 2026-01-01/m.test(mimic),
     "a text that copies the page's own lines is indented, so each marker stands once a page (review pass 6)");
+  const mimicHead = pageA(item(7, { text: "written 2026-01-01 00:00 UTC by linear (9 characters)\n# SMD-3887 PR 2c, part A" }), 7);
+  assert(mimicHead.split("\n").filter((l) => /^written \d{4}-/.test(l)).length === 1 && !/^# SMD-3887/m.test(mimicHead), "a text copying the item's written line or the sheet's head is indented too (review pass 7)");
   assert(a.includes("[2] written 2026-11-03 12:00 UTC by mcp") && pageA(item(3, { updated: "2026-11-01T10:00:00.900Z" }), 3).includes("written 2026-11-01 10:00 UTC by claude-code"), "an edit within the writing's minute is not shown as an edit");
   assert(a.split("\n").filter((l) => /^=== item \d{3} · /.test(l)).length === 1, "a text quoting an item's head is indented, so a page has one head");
   assert(!/pending|accepted|superseded|contested|unchallenged|judge|proposal/i.test(a), "part A names no record, verdict or state");
@@ -874,6 +894,9 @@ function selfCheck(): void {
   const splitAll = ten(10).map((i) => ({ ...i, b: { ...i.b, freshness: "stale" } }));
   assert(maintainerCheck(splitAll).agentsAreGold && splitAll.length === 10 && maintainerCheck(splitAll).freshness.n === 0 && !checkWithEvidence(splitAll).agentsAreGold && checkWithEvidence(ten(8)).agentsAreGold,
     "an axis the check measured on no item fails it in the runner, though the registered check passes it (review pass 6)");
+  const partial = ten(10).map((i, k) => ({ ...i, m: { ...i.m!, review: k < 3 ? null : i.m!.review } }));
+  assert(maintainerCheck(partial).review.hit === 7 && maintainerCheck(partial).review.n === 10 && checkWithEvidence(partial).review.n === 7 && checkWithEvidence(partial).review.hit === 7 && checkWithEvidence(partial).agentsAreGold,
+    "a maintainer label left out on an axis is no disagreement: the check counts that axis on the labelled items (review pass 7)");
   assert(maintainerCheck([{ a: L("holds", "none", "current"), b: L("superseded", "none", "current"), m: L("holds", "none", "current") }]).validity.n === 0, "the check counts only the items the agents agree on");
 
   // The score and the verdict, at their edges.
@@ -940,6 +963,15 @@ function selfCheck(): void {
   let nullProblems: string[] | null = null;
   try { nullProblems = fromFixture(nullA2).problems; } catch { nullProblems = null; }
   assert(nullProblems !== null && nullProblems.some((p) => /labels missing/.test(p)), "a missing read or agent label is a problem named, not a thrown TypeError (review pass 5)");
+  const noKeys = structuredClone(fx);
+  delete (noKeys.items[id(4)] as Partial<Fixture["items"][string]>).m;
+  delete (noKeys.items[id(4)] as Partial<Fixture["items"][string]>).s;
+  const noSubset = structuredClone(fx) as Partial<Fixture>;
+  delete noSubset.subset;
+  let keyProblems: string[] | null = null, subsetProblems: string[] | null = null;
+  try { keyProblems = fromFixture(noKeys).problems; subsetProblems = fromFixture(noSubset as Fixture).problems; } catch { keyProblems = null; }
+  assert(keyProblems !== null && keyProblems.length === 0 && subsetProblems !== null && subsetProblems.some((p) => /lacks subset/.test(p)),
+    "an item without its m or s key holds neither, and a fixture without its subset is named, not thrown on (review pass 7)");
   const lines = reportLines(fx, registrationHash(), registrationHash());
   assert(lines.some((l) => /^validity  agrees on 4 of 5 scored \(weighted 0\.950\); 1 misses: rule \(row 2\) 1; unclear 1; no claim 1\n {10}on the reads that commit to a state: 3 of 4 \(weighted 0\.950\)$/.test(l)), `the report prints each axis's agreement, its misses by cause, and the agreement on the reads that commit (${lines[1]})`);
   assert(lines.at(-1) === "verdict: PASSES", `an explained miss passes (${lines.at(-1)})`);
@@ -983,6 +1015,9 @@ function selfCheck(): void {
     && applyAdjudications(fx, new Map([[id(2), { validity: { cause: "rule", row: 2 } as Adjudication }]])).problems.length === 0, "with --replace it is, and the same cause again is no change");
   const rows = (row: number) => applyAdjudications(fx, new Map([[id(2), { validity: { cause: "rule", row } as Adjudication }]]), true).problems;
   assert([8, 12, 13].every((r) => rows(r).some((p) => /not one the read follows/.test(p))) && [1, 6, 11].every((r) => rows(r).length === 0), "a rule divergence may name only a row the read follows (review pass 6)");
+  const row8 = structuredClone(fx);
+  row8.adjudication[id(2)] = { validity: adjTo({ cause: "rule", row: 8 }) };
+  assert(reportLines(row8, registrationHash(), registrationHash()).at(-1)!.startsWith("verdict: FAILS — validity 10000000: rule row 8"), "a committed fixture's rule row the read does not follow fails the report, not only --adjudicate (review pass 7)");
   const noProposal = structuredClone(fx);
   for (const k of [id(5), id(6)]) { noProposal.items[k].a1[0] = 3; noProposal.items[k].a2[0] = 3; }
   const covered = reportLines(noProposal, registrationHash(), registrationHash());
@@ -992,7 +1027,15 @@ function selfCheck(): void {
   assert(/no population line/.test(emptySnapshot(0, 5).join()) && /no item/.test(emptySnapshot(4000, 0).join()) && emptySnapshot(4000, 120).length === 0, "a snapshot with no population, or a draw of nothing, is refused (review pass 3)");
 
   // Private files.
-  assert(throws(() => outsideRepo("draw.jsonl", "the snapshot")) && throws(() => outsideRepo(join(REPO, "x.jsonl"), "the snapshot")), "a private file inside the repo is refused");
+  // The "inside a repo" case is built on a temp directory with a planted .git, as the self-check runs in CI from any
+  // copy, a git archive or an image without .git among them (review pass 7).
+  const planted = mkdtempSync(join(tmpdir(), "ob1-3887-repo-"));
+  try {
+    mkdirSync(join(planted, ".git"));
+    assert(throws(() => outsideRepo(join(planted, "draw.jsonl"), "the snapshot")) && throws(() => outsideRepo(join(planted, "a", "b", "x.jsonl"), "the snapshot")), "a private file inside a work tree, at its root or deeper, is refused");
+  } finally {
+    rmSync(planted, { recursive: true, force: true });
+  }
   const otherRepo = mkdtempSync(join(tmpdir(), "ob1-3887-other-repo-"));
   try {
     mkdirSync(join(otherRepo, ".git"));
@@ -1009,6 +1052,9 @@ function selfCheck(): void {
     symlinkSync(join(linkRoot, "repo", "scratch"), join(linkRoot, "outside"));
     assert(throws(() => outsideRepo(join(linkRoot, "outside", "sheet-a.md"), "the sheet")) && throws(() => outsideRepo(join(linkRoot, "outside", "new", "deeper.md"), "the sheet")),
       "a path through a symlink into a work tree is refused, the file existing or not (review pass 6)");
+    writeFileSync(join(linkRoot, "repo", "scratch", "real.md"), "x");
+    symlinkSync(join(linkRoot, "repo", "scratch", "real.md"), join(linkRoot, "linked.md"));
+    assert(throws(() => outsideRepo(join(linkRoot, "linked.md"), "the sheet")), "a file that is itself a symlink into a work tree is refused (review pass 7)");
     const p = join(linkRoot, "replies.txt");
     writePrivate(p, "first", false);
     assert(throws(() => writePrivate(p, "second", false)) && readFileSync(p, "utf8") === "first", "a filled reply file is not written over without --replace (review pass 6)");
@@ -1060,6 +1106,7 @@ async function main(): Promise<void> {
   }
   if (args.includes("--splits")) {
     const [path, ...files] = after("splits");
+    refuseUnpinned("the splits are listed");
     if (files.length !== 6) throw new Error("give --splits <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b>");
     const salt = mainSalt(mode());
     const { pop, ids } = snapshot(path, { salt });

@@ -5231,6 +5231,16 @@ The rule divergences:
   - **The weighted figure:** when a stratum has nothing scored, the report says which strata the figure covers. Every stratum has scored items in this run.
 
   The loose relation-target cast stays in the pinned SQL, as the snapshot's own text. It goes to SMD-4524 with the other limits, which a new registration fixes.
+- **Found by review pass 7, measured on this run:** the sheet shows a subject facet only when it is neither superseded nor closed, while the read counts any facet not closed. A facet superseded but still open would be scored by the read and never shown.
+  - **In this run:** no subject facet on the canary is superseded but open: 0 of 9,710.
+- **What review pass 7 fixed in the runner:**
+  - the private-file guard resolves a file that is itself a symlink, not only the folder it sits in;
+  - the report fails a committed rule divergence that names a row the read does not follow, not only `--adjudicate`;
+  - the maintainer's check counts an axis on the items whose maintainer label holds it, so a label left out is no disagreement;
+  - the item's own written line and the sheet's head join the indented page lines;
+  - a fixture item without its `m` or `s` key holds neither, and a fixture without a top-level list is named, not thrown on;
+  - `--splits` refuses to run off the pin;
+  - the self-check's "inside a repo" case runs on a temp directory, so it passes in a copy without `.git`.
 
 **The follow-ups:**
 - **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.
