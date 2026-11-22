@@ -5069,7 +5069,7 @@ D=~/.cache/smd-3887/2c/<run>   # private files live outside any repo; every step
 bun eval-claim-validity.ts --print-sql --pilot 1 > $D/draw.sql     # or --salt <the announcing comment's uuid>, once pinned
 podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA -f - < $D/draw.sql > $D/draw.jsonl
 bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot 1   # parts A and B, each with a reply file; the maintainer's apart
-bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <a-2> <b-1> <b-2> --pilot 1   # two raters' κ per axis, each disagreement
+bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> --pilot 1   # two raters' κ per axis, each disagreement
 bun eval-claim-validity.ts --splits $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out $D/splits.txt
 bun eval-claim-validity.ts --freeze $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [$D/splits.txt] --salt <uuid> --note "…"
 bun eval-claim-validity.ts --adjudicate $D/adjudication.txt   # each miss's cause, into the fixture
@@ -5133,11 +5133,15 @@ It holds texts and the read's answers, so it lives outside any repo. The fixture
 - **The draw:** the canary held 4,143 thoughts (pointer 1,123, proposal 683, neither 2,337), and the read was taken in the same snapshot.
 - **The raters:** two blind agents labelled all 120 items (Opus 5.5 and Sonnet 5.5, 4 shards of 30 each), and the maintainer labelled 20 blind.
 
-| Axis | Read agrees | Weighted | Misses | Record gap | Rule divergence | Read bug | No claim |
-|---|---|---|---|---|---|---|---|
-| validity | 88 of 120 | 0.789 | 32 | 28 | 4 (row 2) | 0 | 2 |
-| review | 119 of 120 | 0.996 | 1 | 1 | 0 | 0 | 0 |
-| freshness | 105 of 120 | 0.882 | 15 | 14 | 1 (row 6) | 0 | 29 |
+| Axis | Read agrees | Weighted | On the reads that commit | Weighted | Misses | Record gap | Rule divergence | Read bug | No claim |
+|---|---|---|---|---|---|---|---|---|---|
+| validity | 88 of 120 | 0.789 | 86 of 118 | 0.786 | 32 | 28 | 4 (row 2) | 0 | 2 |
+| review | 119 of 120 | 0.996 | 119 of 120 | 0.996 | 1 | 1 | 0 | 0 | 0 |
+| freshness | 105 of 120 | 0.882 | 76 of 91 | 0.857 | 15 | 14 | 1 (row 6) | 0 | 29 |
+
+**The registered score counts a read that makes no single claim as agreeing.** That is `unresolved` on validity and `legacy` on freshness, and the score counts them as hits whatever the gold says. Review pass 1 caught this after the freeze.
+- **The fix:** the report also gives agreement on the reads that commit to a state, shown in the table. The registered score stays as pinned.
+- **The verdict cannot move:** a read with no single claim is never a miss.
 
 **The raters:**
 - **κ between the agents:** validity 0.793, review 0.984, freshness 0.656.
@@ -5166,6 +5170,11 @@ The rule divergences:
   - The Opus rater of items 31–60 read two part B pages together. Neither had a question.
 - **The maintainer's files were reshaped before the freeze, not relabelled.** They came tab-separated with short ids, and the splits as one truth a line. Each was converted to the reply format, and the conversion was refused if a short id did not match its item or a truth did not fit its axis.
 - **Who adjudicated:** I adjudicated each miss by its pattern, and the maintainer confirmed the causes.
+- **Limits of the pinned rules, found by review pass 1 after the freeze.** None moves this run, so the rules stay as pinned, and a new registration would fix them for a later run:
+  - **The SQL's relation-target guard is loose.** It would abort the snapshot on a malformed target, and skip an uppercase one. No target on the canary is either: 0 of 29,860.
+  - **The nearest later texts are chosen by when they were written, while raters judge "later" by the last edit.** A ticket written before the item but edited after it is never offered as a nearest text. That can only hide a record gap, never a read bug: texts a record links are always shown, whatever their dates.
+  - **A rule divergence may name any row from 1 to 13,** though the read follows only rows 1 to 7 and 9 to 11. This run's divergences name rows 2 and 6.
+  - **The maintainer's check passes an axis with no agent-agreed item in the subset.** This run's check had all 20 items on every axis.
 
 ## The query-log replay loop — measuring against real use (SMD-1295)
 

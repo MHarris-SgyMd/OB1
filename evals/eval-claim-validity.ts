@@ -21,8 +21,8 @@
  *       population by stratum and writer, then part A's sheet (validity and freshness) and part B's (review), each
  *       with its reply file, and the maintainer's (the subset's) apart. Never the read's answer.
  *
- *   bun eval-claim-validity.ts --kappa <draw.jsonl> <a-1> <a-2> <b-1> <b-2> (--salt <comment uuid> | --pilot 1|2)
- *       Two raters' filled reply files (part A, then part B, of each): κ per axis and each disagreement with both
+ *   bun eval-claim-validity.ts --kappa <draw.jsonl> <a-1> <b-1> <a-2> <b-2> (--salt <comment uuid> | --pilot 1|2)
+ *       Two raters' filled reply files (each rater's part A, then its part B): κ per axis and each disagreement with both
  *       notes. The pilot's check, before the registration is pinned; it never prints the read.
  *
  *   bun eval-claim-validity.ts --splits <draw.jsonl> --salt <uuid> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --out <file>
@@ -126,7 +126,8 @@ export function readStates(r: ReadLine | undefined): { [A in Axis]: string } {
   return {
     validity: a.validity?.state ?? "unknown",
     review: a.review?.state ?? "unknown",
-    freshness: a.freshness ? readableFreshness(a.freshness.kinds ?? []) : "unknown",
+    // An axis the read could not read stays unknown: its kinds are empty then, which readableFreshness reads as none.
+    freshness: a.freshness && a.freshness.state !== "unknown" ? readableFreshness(a.freshness.kinds ?? []) : "unknown",
   };
 }
 
@@ -360,6 +361,9 @@ export function reportLines(f: Fixture, current: string = registrationHash(), pi
   if (problems.length) return ["the fixture is not sound:", ...problems.map((p) => `  ${p}`)];
   const { scored, agentsAreGold, check, splits, unlabelled } = goldFor(items, new Set(f.subset));
   const s: Record<Axis, AxisScore> = score(scored, f.population);
+  // The registered score counts a read that makes no single claim (unresolved, legacy) as agreeing; this is the same
+  // score over the reads that commit to a state alone (review pass 1). It moves no verdict: a no-claim read is no miss.
+  const committed = (x: Axis) => score(scored.map((i) => (noClaim(x, i.read[x]) ? { ...i, gold: { ...i.gold, [x]: null } } : i)), f.population)[x];
   const v = verdict(s, adjudicated, { splits, unlabelled });
   const k = (x: Axis) => {
     const both = items.filter((i) => i.a1[x] !== null && i.a2[x] !== null);
@@ -378,7 +382,7 @@ export function reportLines(f: Fixture, current: string = registrationHash(), pi
   const pop = STRATA.map((st) => `${st} ${f.population[st]}`).join(", ");
   return [
     `population ${STRATA.reduce((a, st) => a + f.population[st], 0)} (${pop}); sample ${items.length}; salt ${f.salt}`,
-    ...AXES.map((x) => `${x.padEnd(9)} agrees on ${s[x].agree} of ${s[x].scored} scored (weighted ${f3(s[x].weighted)}); ${s[x].misses.length} misses: ${causes(x)}; unclear ${s[x].unclear}; no claim ${s[x].noClaim}`),
+    ...AXES.map((x) => `${x.padEnd(9)} agrees on ${s[x].agree} of ${s[x].scored} scored (weighted ${f3(s[x].weighted)}); ${s[x].misses.length} misses: ${causes(x)}; unclear ${s[x].unclear}; no claim ${s[x].noClaim}\n${" ".repeat(10)}on the reads that commit to a state: ${committed(x).agree} of ${committed(x).scored} (weighted ${f3(committed(x).weighted)})`),
     `κ between the agents: ${AXES.map((x) => `${x} ${f3(k(x))}`).join(", ")}`,
     `the maintainer's check (subset ${f.subset.length}, bar ${MAINTAINER_AGREEMENT_MIN}): ${AXES.map((x) => `${x} ${check[x].hit} of ${check[x].n}`).join(", ")}: ${agentsAreGold ? "the agents are the gold" : "the maintainer's labels are the gold"}`,
     !atPin
@@ -570,6 +574,25 @@ export function parseAdjudications(text: string): { per: Map<string, Partial<Rec
   return { per, problems };
 }
 
+/**
+ * Adjudications merged into a fixture, axis by axis: an earlier file's cause on another axis of the same item stays.
+ * Refuses, naming each, an id that is no item and an axis the read does not miss on that item.
+ */
+export function applyAdjudications(f: Fixture, per: ReadonlyMap<string, Partial<Record<Axis, Adjudication>>>): { fixture: Fixture; problems: string[] } {
+  const problems: string[] = [];
+  const { items } = fromFixture(f);
+  const s = score(goldFor(items, new Set(f.subset)).scored, f.population);
+  const out: Fixture = structuredClone(f);
+  for (const [id, axes] of per) {
+    if (!(id in f.items)) { problems.push(`${id.slice(0, 8)} is not an item`); continue; }
+    for (const [x, a] of Object.entries(axes) as [Axis, Adjudication][]) {
+      if (!s[x].misses.includes(id)) { problems.push(`${id.slice(0, 8)} ${x}: not a miss`); continue; }
+      out.adjudication[id] = { ...out.adjudication[id], [x]: adjTo(a) };
+    }
+  }
+  return { fixture: out, problems };
+}
+
 // ── --self-check ──────────────────────────────────────────────────────────────
 
 function selfCheck(): void {
@@ -669,6 +692,8 @@ function selfCheck(): void {
   assert(checkDraw([item(1)], [id(1)]).length === 0 && checkDraw([item(1)], [id(2)]).length === 2, "the snapshot's items must be the rules' draw, both ways");
   assert(JSON.stringify(readStates(read(0, "superseded", "pending", [{ kind: "metadata", state: "stale" }]))) === JSON.stringify({ validity: "superseded", review: "pending", freshness: "stale" }), "the read's states, freshness over the readable kinds");
   assert(JSON.stringify(readStates(undefined)) === JSON.stringify({ validity: "unknown", review: "unknown", freshness: "unknown" }) && readStates({ ...read(0, "superseded", "pending"), answer: { ...read(0, "superseded", "pending").answer!, found: false } }).validity === "unknown", "no answer, or not found, reads unknown");
+  const unread: ReadLine = { kind: "read", id: id(0), answer: { id: id(0), found: true, validity: { state: "unchallenged" }, review: { state: "none" }, freshness: { state: "unknown", kinds: [] } } };
+  assert(readStates(unread).freshness === "unknown" && readStates(unread).validity === "unchallenged", "a found thought whose freshness the read could not read stays unknown, not none (review pass 1)");
 
   // The sheets: never the read, never a verdict on part A.
   const rich = item(1, {
@@ -767,7 +792,7 @@ function selfCheck(): void {
   const offRead = structuredClone(fx); offRead.items[id(1)].read = [-1, 0, 0];
   assert(fromFixture(offRead).problems.some((p) => /read state off/.test(p)), "a read state off its list, or none, is refused");
   const lines = reportLines(fx, registrationHash(), registrationHash());
-  assert(lines.some((l) => /^validity  agrees on 4 of 5 scored \(weighted 0\.950\); 1 misses: rule \(row 2\) 1; unclear 1; no claim 1$/.test(l)), `the report prints each axis's agreement and its misses by cause (${lines[1]})`);
+  assert(lines.some((l) => /^validity  agrees on 4 of 5 scored \(weighted 0\.950\); 1 misses: rule \(row 2\) 1; unclear 1; no claim 1\n {10}on the reads that commit to a state: 3 of 4 \(weighted 0\.950\)$/.test(l)), `the report prints each axis's agreement, its misses by cause, and the agreement on the reads that commit (${lines[1]})`);
   assert(lines.at(-1) === "verdict: PASSES", `an explained miss passes (${lines.at(-1)})`);
   assert(reportLines({ ...fx, adjudication: {} }, registrationHash(), registrationHash()).at(-1)!.startsWith("verdict: WAITING"), "an unexplained miss waits");
   assert(reportLines(fx, registrationHash(), null).at(-1)!.includes("not yet set") && reportLines(fx, registrationHash(), "ffffffffffffffff").at(-1)!.startsWith("no verdict"), "before the pin, or at another registration, no verdict");
@@ -778,6 +803,14 @@ function selfCheck(): void {
   // Adjudication files.
   const adj = parseAdjudications(`${id(2)} validity rule 6\n${id(1)} review read fixed  # the fix\n${id(3)} freshness record\n${id(3)} freshness label\nnonsense`);
   assert(adj.per.get(id(2))!.validity!.row === 6 && adj.per.get(id(1))!.review!.fixed === true && adj.per.get(id(3))!.freshness!.cause === "record" && adj.problems.length === 2, "an adjudication file reads back; twice and an unreadable line are refused");
+  const twoMisses = structuredClone(fx);
+  twoMisses.items[id(2)].a1[2] = 1; twoMisses.items[id(2)].a2[2] = 1;
+  const second = applyAdjudications(twoMisses, new Map([[id(2), { freshness: { cause: "record" } as Adjudication }]]));
+  assert(second.problems.length === 0 && second.fixture.adjudication[id(2)].validity?.join() === adjTo({ cause: "rule", row: 2 }).join() && second.fixture.adjudication[id(2)].freshness?.join() === adjTo({ cause: "record" }).join(),
+    "a later adjudication of another axis keeps the earlier one (review pass 1)");
+  const notMiss = applyAdjudications(fx, new Map([[id(2), { review: { cause: "label" } as Adjudication }], [id(3), { validity: { cause: "record" } as Adjudication }], [id(9), { validity: { cause: "record" } as Adjudication }]]));
+  assert(notMiss.problems.length === 3 && notMiss.problems.some((p) => /review: not a miss/.test(p)) && notMiss.problems.some((p) => /is not an item/.test(p)) && fx.adjudication[id(2)].review === undefined,
+    "an adjudication of an axis that is no miss, or of no item, is refused, and the fixture given is left as it was");
 
   // Private files.
   assert(throws(() => outsideRepo("draw.jsonl", "the snapshot")) && throws(() => outsideRepo(join(REPO, "x.jsonl"), "the snapshot")), "a private file inside the repo is refused");
@@ -815,8 +848,8 @@ async function main(): Promise<void> {
   const sheetsPath = flag("sheets");
   if (sheetsPath) return sheets(sheetsPath, flag("out") ?? (() => { throw new Error("give --out <dir>"); })(), mode());
   if (args.includes("--kappa")) {
-    const [path, a1, a2, b1, b2] = after("kappa");
-    if (!b2) throw new Error("give --kappa <draw.jsonl> <a-1> <a-2> <b-1> <b-2>");
+    const [path, a1, b1, a2, b2] = after("kappa");
+    if (!b2) throw new Error("give --kappa <draw.jsonl> <a-1> <b-1> <a-2> <b-2>");
     const { ids } = snapshot(path, mode());
     for (const l of kappaLines(ids, rater(a1, b1, ids), rater(a2, b2, ids))) console.log(l);
     return;
@@ -842,12 +875,12 @@ async function main(): Promise<void> {
   }
   const adjPath = flag("adjudicate");
   if (adjPath) {
-    const f = JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture;
+    refuseUnpinned("misses are adjudicated");
     const { per, problems } = parseAdjudications(readFileSync(adjPath, "utf8"));
-    for (const id of per.keys()) if (!(id in f.items)) problems.push(`${id.slice(0, 8)} is not an item`);
     if (problems.length) throw new Error(problems.join("\n"));
-    for (const [id, axes] of per) f.adjudication[id] = Object.fromEntries(Object.entries(axes).map(([x, a]) => [x, adjTo(a!)]));
-    writeFileSync(FIXTURE, JSON.stringify(f, null, 2) + "\n");
+    const applied = applyAdjudications(JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture, per);
+    if (applied.problems.length) throw new Error(applied.problems.join("\n"));
+    writeFileSync(FIXTURE, JSON.stringify(applied.fixture, null, 2) + "\n");
     console.log(`adjudicated ${per.size} items → ${relative(REPO, FIXTURE)}`);
     return;
   }
