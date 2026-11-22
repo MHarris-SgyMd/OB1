@@ -5205,6 +5205,15 @@ The rule divergences:
   - **A decided split no longer stays open.** The maintainer's label is taken per axis: the blind one, else the splits file's. Before, a partial label could hide a decided split.
   - **A confirmed cause changes only with `--replace`,** and `--adjudicate` refuses a fixture frozen at another registration.
   - **A view's object is shown as JSON** on the sheet, never `[object Object]`.
+- **Found by review pass 5, disclosed:**
+  - **Part A's choice of texts can reveal a record link.** The nearest texts are always written after the item, and there are at most five. So an earlier text, or a sixth, can only be on the page because a pointer, a proposal or a relation links it. Convention 2 says the order tells nothing, but which texts appear does. Raters were blind to verdicts, not to links.
+  - **A stratum with nothing scored would drop out of the weighted figure,** leaving a mean over the rest. In this run, every stratum has scored items on every axis, on the reads that commit too: the fewest is 22, freshness in the proposal stratum.
+- **What review pass 5 fixed in the runner:**
+  - When the maintainer's check fails, `--splits` writes a line for every axis of every item outside the subset, not only the agents' splits.
+  - The self-check pins the committed fixture's published counts and verdict.
+  - A judge's reason on part B is kept on its own line.
+  - A fixture missing a read or an agent's labels is named, not thrown.
+  - A private file rewritten is set to 0600 again.
 
 **The follow-ups:**
 - **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.

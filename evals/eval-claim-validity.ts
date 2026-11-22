@@ -46,7 +46,7 @@
  *       raters' κ, the maintainer's check, and the verdict. No database.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -182,7 +182,7 @@ export function pageB(it: ItemLine, num: number): string {
     const other = numOf.has(q.other) ? `text [${numOf.get(q.other)}] on part A` : `thought ${q.other} (not shown on part A)`;
     const asked = q.verdict === "newer_supersedes_older" ? `whether the newer of the two replaces the older (this item is the ${q.this_is})` : `"${q.verdict}" (this item is the ${q.this_is})`;
     const review = q.reviewed_at ? `, reviewed ${day(q.reviewed_at)}${q.reviewed_by_kind ? ` (reviewer: ${q.reviewed_by_kind})` : ""}` : "";
-    return `- ${q.judged_at ? day(q.judged_at) : "undated"}: a judge asked, of this item and ${other}, ${asked}. Its reason: ${q.reason ?? "-"}. Status: ${q.status}${review}.`;
+    return `- ${q.judged_at ? day(q.judged_at) : "undated"}: a judge asked, of this item and ${other}, ${asked}. Its reason: ${q.reason ? body(q.reason).replace(/\n+/g, " ") : "-"}. Status: ${q.status}${review}.`;
   });
   return [`=== item ${String(num).padStart(3, "0")} · ${it.id} ===`, ...(qs.length ? qs : ["(no question was raised by a judge)"]), ""].join("\n");
 }
@@ -320,6 +320,7 @@ export function fromFixture(f: Fixture): { items: FrozenItem[]; adjudicated: Map
     if (!stratum) { problems.push(`${id} is in no stratum`); continue; }
     const bad = (xs: number[] | null, lists: readonly (readonly string[])[]) => xs !== null && (xs.length !== 3 || xs.some((v, k) => !Number.isInteger(v) || v < -1 || v >= lists[k].length));
     const truthLists = AXES.map((x) => TRUTH[x]), readLists = AXES.map((x) => READ_STATES[x]);
+    if (!Array.isArray(it.read) || !Array.isArray(it.a1) || !Array.isArray(it.a2)) { problems.push(`${id}: a read or an agent's labels missing`); continue; }
     if (bad(it.read, readLists) || it.read.includes(-1)) { problems.push(`${id}: a read state off its list`); continue; }
     if ([it.a1, it.a2, it.m, it.s].some((l) => bad(l, truthLists))) { problems.push(`${id}: a truth off its list`); continue; }
     items.push({
@@ -494,7 +495,7 @@ function sheets(path: string, out: string, mode: Mode): void {
   if ("salt" in mode && short.length) console.log(`short strata, taken whole: ${short.join("; ")}`);
   console.log(`population ${pop.length}, by stratum and writer:`);
   for (const l of makeupLines(pop)) console.log(l);
-  const write = (name: string, text: string) => writeFileSync(join(dir, name), text, { mode: 0o600 });
+  const write = (name: string, text: string) => { writeFileSync(join(dir, name), text, { mode: 0o600 }); chmodSync(join(dir, name), 0o600); };
   for (const part of ["A", "B"] as const) {
     const r = renderPart(part, items);
     write(`sheet-${part.toLowerCase()}.md`, r.sheet);
@@ -547,6 +548,22 @@ export function openSplits(ids: readonly string[], a1: Map<string, Labels>, a2: 
   const out: { id: string; axis: Axis }[] = [];
   for (const id of ids) for (const x of AXES) if (a1.get(id)?.[x] !== a2.get(id)?.[x] && !m.get(id)?.[x]) out.push({ id, axis: x });
   return out;
+}
+
+/**
+ * The splits file the maintainer fills: the agents' open splits while the check makes the agents the gold; else a line
+ * for every axis of every item outside the subset, since the maintainer's labels are then the gold (review pass 5).
+ */
+export function splitsTemplate(ids: readonly string[], subset: readonly string[], a1: Map<string, Labels>, a2: Map<string, Labels>, m: Map<string, Labels>): { lines: string[]; fallback: boolean } {
+  const fallback = !maintainerCheck(subset.map((id) => ({ a: a1.get(id)!, b: a2.get(id)!, m: m.get(id)! }))).agentsAreGold;
+  const sub = new Set(subset);
+  const cells = fallback
+    ? ids.filter((id) => !sub.has(id)).flatMap((id) => AXES.map((axis) => ({ id, axis })))
+    : openSplits(ids, a1, a2, m);
+  const head = fallback
+    ? "# SMD-3887 PR 2c: the maintainer's check fails, so the maintainer labels every item outside their blind 20: <id> | <axis> | <truth> | note."
+    : "# SMD-3887 PR 2c, the agents' splits: <id> | <axis> | <truth> | note. The item's number is its number on the sheets.";
+  return { lines: [head, ...cells.map((o) => `${o.id} | ${o.axis} |  | item ${String(ids.indexOf(o.id) + 1).padStart(3, "0")}`)], fallback };
 }
 
 /**
@@ -773,6 +790,8 @@ function selfCheck(): void {
   assert(!/pending|accepted|superseded|contested|unchallenged|judge|proposal/i.test(a), "part A names no record, verdict or state");
   assert(b.includes("text [1] on part A") && b.includes(`thought ${id(8)} (not shown on part A)`) && b.includes("Status: pending.") && b.includes("reviewed 2026-11-05 00:00 UTC (reviewer: operator)") && b.includes("Its reason: -."), "part B names each question's other side, status and review");
   assert(pageB(item(2), 2).includes("(no question was raised by a judge)"), "part B says when no question was raised");
+  const quoting = pageB(item(4, { questions: [{ ...rich.questions[0], reason: `first\r\n=== item 012 · ${id(12)} ===\nlast` }] }), 4);
+  assert(quoting.split("\n").filter((l) => /^=== item \d{3} · /.test(l)).length === 1 && quoting.includes("Its reason: first  === item 012"), "a judge's reason quoting an item's head stays on its own line, one head a page (review pass 5)");
   const partA = renderPart("A", [rich, item(2)]);
   assert(partA.sheet.includes(CONVENTIONS[0]) && partA.sheet.includes("before opening part B") && partA.replies.split("\n").filter((l) => /^\d{3} /.test(l)).length === 2, "a sheet carries the conventions, and its reply file a line an item");
 
@@ -825,6 +844,12 @@ function selfCheck(): void {
   const kl = kappaLines(drawn, r1, r2);
   assert(kl[0] === "validity: κ 0.000, the same on 1 of 2" && kl[1].includes(`002 ${id(2).slice(0, 8)}: superseded / holds  [x] [-]`), "κ lines name each disagreement with both notes");
   assert(JSON.stringify(openSplits(drawn, r1.labels, r2.labels, new Map())) === JSON.stringify([{ id: id(2), axis: "validity" }]) && openSplits(drawn, r1.labels, r2.labels, new Map([[id(2), L("holds", null, null)]])).length === 0, "a split the maintainer's label decides is not open");
+  const agreeing = new Map([[id(1), L("holds", "none", "current")]]);
+  const tGold = splitsTemplate(drawn, [id(1)], agreeing, agreeing, agreeing);
+  assert(!tGold.fallback && tGold.lines.length === 1 + openSplits(drawn, agreeing, agreeing, agreeing).length, "while the agents are the gold, the template lists their open splits alone");
+  const tFall = splitsTemplate(drawn, [id(1)], agreeing, agreeing, new Map([[id(1), L("superseded", "none", "current")]]));
+  assert(tFall.fallback && tFall.lines.length === 1 + 3 && tFall.lines.slice(1).every((l) => l.startsWith(id(2))) && /check fails/.test(tFall.lines[0]),
+    "when the maintainer's check fails, the template asks for every axis of every item outside the subset (review pass 5)");
   const open2 = openSplits(drawn, r1.labels, r2.labels, new Map());
   assert(strayDecisions(new Map([[id(2), { validity: "holds" }]]), open2).length === 0, "a decision on an open split is taken");
   assert(strayDecisions(new Map([[id(2), { review: "open" }], [id(1), { validity: "holds" }]]), open2).length === 2, "a decision where the agents agree is refused, not dropped silently (review pass 2)");
@@ -856,6 +881,11 @@ function selfCheck(): void {
   assert(fromFixture(off).problems.some((p) => /truth off its list/.test(p)), "a truth off its list is refused");
   const offRead = structuredClone(fx); offRead.items[id(1)].read = [-1, 0, 0];
   assert(fromFixture(offRead).problems.some((p) => /read state off/.test(p)), "a read state off its list, or none, is refused");
+  const nullA2 = structuredClone(fx);
+  (nullA2.items[id(1)] as { a2: unknown }).a2 = null;
+  let nullProblems: string[] | null = null;
+  try { nullProblems = fromFixture(nullA2).problems; } catch { nullProblems = null; }
+  assert(nullProblems !== null && nullProblems.some((p) => /labels missing/.test(p)), "a missing read or agent label is a problem named, not a thrown TypeError (review pass 5)");
   const lines = reportLines(fx, registrationHash(), registrationHash());
   assert(lines.some((l) => /^validity  agrees on 4 of 5 scored \(weighted 0\.950\); 1 misses: rule \(row 2\) 1; unclear 1; no claim 1\n {10}on the reads that commit to a state: 3 of 4 \(weighted 0\.950\)$/.test(l)), `the report prints each axis's agreement, its misses by cause, and the agreement on the reads that commit (${lines[1]})`);
   assert(lines.at(-1) === "verdict: PASSES", `an explained miss passes (${lines.at(-1)})`);
@@ -918,6 +948,16 @@ function selfCheck(): void {
     const f = JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture;
     assert(fromFixture(f).problems.length === 0, "the committed fixture is sound");
     assert(f.registration.map((d) => d.toString(16)).join("") === REGISTERED, "the committed fixture was frozen at the pinned registration");
+    // The figures evals/README.md and changes/smd-3887.md publish, pinned: code outside the hash that scores the fixture
+    // (readStates, goldFor, the committed line) cannot move them unseen (review pass 5).
+    const published = reportLines(f).join("\n");
+    assert(["validity  agrees on 88 of 120 scored (weighted 0.789); 32 misses: record 28, rule (row 2) 4",
+      "on the reads that commit to a state: 86 of 118 (weighted 0.786)",
+      "review    agrees on 119 of 120 scored (weighted 0.996); 1 misses: record 1",
+      "freshness agrees on 105 of 120 scored (weighted 0.882); 15 misses: record 14, rule (row 6) 1",
+      "on the reads that commit to a state: 76 of 91 (weighted 0.857)",
+      "validity 17 of 20, review 18 of 20, freshness 19 of 20: the agents are the gold",
+      "verdict: PASSES"].every((s) => published.includes(s)), "the committed fixture's report is the published one: its counts, the maintainer's check and PASSES");
   }
   report();
 }
@@ -948,10 +988,12 @@ async function main(): Promise<void> {
     const salt = mainSalt(mode());
     const { pop, ids } = snapshot(path, { salt });
     const sub = drawSample(pop, salt).subset;
-    const open = openSplits(ids, rater(files[0], files[1], ids).labels, rater(files[2], files[3], ids).labels, rater(files[4], files[5], sub).labels);
+    const [a1, a2, m] = [rater(files[0], files[1], ids).labels, rater(files[2], files[3], ids).labels, rater(files[4], files[5], sub).labels];
+    const { lines, fallback } = splitsTemplate(ids, sub, a1, a2, m);
     const out = outsideRepo(flag("out") ?? (() => { throw new Error("give --out <file>"); })(), "the splits file");
-    writeFileSync(out, ["# SMD-3887 PR 2c, the agents' splits: <id> | <axis> | <truth> | note. The item's number is its number on the sheets.", ...open.map((o) => `${o.id} | ${o.axis} |  | item ${String(ids.indexOf(o.id) + 1).padStart(3, "0")}`), ""].join("\n"), { mode: 0o600 });
-    console.log(`${open.length} splits → ${out}`);
+    writeFileSync(out, lines.join("\n") + "\n", { mode: 0o600 });
+    chmodSync(out, 0o600);
+    console.log(`${lines.length - 1} ${fallback ? "lines for every item outside the subset (the maintainer's check fails: their labels are the gold)" : "splits"} → ${out}`);
     return;
   }
   if (args.includes("--freeze")) {
