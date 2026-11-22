@@ -1572,6 +1572,27 @@ else {
   assert(reRecorded.action === "added" && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
          "…and following the remedy — the facet closed, the subject recorded again — the check is ok again");
   await ctx.unsafe(`SELECT delete_thought('${subA}'::uuid)`);
+  // 151's kind (SMD-4446): a settled part's lineage row is no stale row for the coverage to count. Once a rebuild has
+  // run its status is its mark, as a proposal's is, and a decided part keeps the fingerprints it was judged at for good. The older thought
+  // is the first input of the part's row: its text moved raw, the count grows by its own rows and not by the part's.
+  // It is given a row of its own to count, its tags' (a census that counted nothing would otherwise pass this row).
+  // The two thoughts are removed after, so the counts below are as they were.
+  const staleIn = (out: string) => Number(/(\d+) stale \(the input's text moved since/.exec(out)?.[1] ?? NaN);
+  const partO = ((await ctx.unsafe(`SELECT upsert_thought('preflight-151 older: the plan is to ship by Friday', '{"metadata": {"type": "note", "topics": ["preflight"]}}'::jsonb) AS r`))[0].r as { id: string }).id;
+  await ctx.unsafe(`SELECT ob1_record_derivation('metadata', '${partO}'::uuid, ARRAY['${partO}'::uuid], ARRAY[(SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partO}'::uuid)], 'metadata:preflight-part@p1', '{"deterministic": false}'::jsonb)`);
+  const partN = ((await ctx.unsafe(`SELECT upsert_thought('preflight-151 newer: it shipped on Thursday', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const part151 = (await ctx.unsafe(`SELECT record_settled_part('${partO}'::uuid, '${partN}'::uuid, 'older', 'ship by Friday', 'shipped on Thursday', 'implements', 'the later note reports it done', 'consolidate:t@p4',
+      (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partO}'::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partN}'::uuid), '{"deterministic": false}'::jsonb) AS r`))[0].r as { action: string; id: string };
+  await ctx.unsafe(`SELECT review_settled_part('${part151.id}'::uuid, 'accept', 'right')`);
+  const staleBefore151 = staleIn((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out);
+  await ctx.unsafe(`UPDATE thoughts SET content = 'preflight-151 older: the plan was to ship by Friday', content_fingerprint = content_fingerprint_of('preflight-151 older: the plan was to ship by Friday') WHERE id = '${partO}'::uuid`);
+  const rows151 = (await ctx.unsafe(`SELECT count(*) FILTER (WHERE artifact_kind = 'part')::int AS parts, count(*) FILTER (WHERE artifact_kind NOT IN ('part', 'proposal', 'relation', 'subject'))::int AS own
+                                       FROM derivations WHERE input_ids[1] = '${partO}'::uuid`))[0] as { parts: number; own: number };
+  const staleAfter151 = staleIn((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out);
+  assert(part151.action === "recorded" && rows151.parts === 1 && rows151.own >= 1 && staleAfter151 - staleBefore151 === rows151.own,
+         `a settled part's lineage row is not counted stale when its thought's text moves: the coverage's count grows by the thought's own rows, of which it has one, and not by the part's (${staleBefore151} before, ${staleAfter151} after; ${rows151.own} of its own, ${rows151.parts} part's)`);
+  await ctx.unsafe(`SELECT delete_thought('${partN}'::uuid)`);
+  await ctx.unsafe(`SELECT delete_thought('${partO}'::uuid)`);
   // 120's edge (SMD-3306): a work thread's standing edge without its lineage
   // row is refused the same way, counted apart from a judged relation, and the
   // remedy is the thread's own: close the edge and re-link its key, which
@@ -3079,10 +3100,34 @@ else {
   // 067's settle function stands and warns naming 067 — 063's own lesson
   // about 061 over 063, applied to the file after it.
   const pre067 = await run(SQL_ENV);
-  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql, then db\/migrations\/150_rebuild_requeues_tags\.sql — 150 last defines rebuild_derived/.test(fix(pre067.out, "lineage")),
-         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 then 150 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
-  // 150 after it: it last defines rebuild_derived, on 067's body (SMD-2298).
-  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") || f.startsWith("150_") });
+  // The remedy where the settled parts' table stands (SMD-4446, review pass 5): 067, then the parts' file, which last
+  // defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, all
+  // three put back by 063 re-applied by hand. It stands in 150's place in the remedy: it carries 150's body.
+  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql, then db\/migrations\/151_settled_parts\.sql — 151 last defines rebuild_derived \(on 150's body, and so 067's\), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused \(bun migrate\.ts --reapply runs every file in order\)\./.test(fix(pre067.out, "lineage")),
+         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 then the settled parts' file as the remedy, the last definer of the three bodies 063 put back (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)}; ${fix(pre067.out, "lineage").trim().slice(0, 240)})`);
+  // On a brain from before the parts' file, where the migrator applies it in its turn, the remedy is 067 then 150,
+  // which last defines rebuild_derived there (SMD-2298).
+  const parts067 = new SQL({ url: LIVE, max: 1 });
+  await parts067.unsafe(`ALTER TABLE settled_parts RENAME TO settled_parts_away`);
+  const pre067NoParts = await run(SQL_ENV);
+  await parts067.unsafe(`ALTER TABLE settled_parts_away RENAME TO settled_parts`);
+  assert(pre067NoParts.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067/.test(pre067NoParts.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql, then db\/migrations\/150_rebuild_requeues_tags\.sql — 150 last defines rebuild_derived/.test(fix(pre067NoParts.out, "lineage")) && !/settled_parts/.test(fix(pre067NoParts.out, "lineage")),
+         `…and 067 then 150 on a brain with no parts' table (${fix(pre067NoParts.out, "lineage").trim().slice(0, 240)})`);
+  // The remedy followed, a file at a time: 067 alone leaves rebuild_derived with no arm for a part and none that
+  // requeues a tags row, the walk with no part in its order and the lineage writer, 063's, refusing the kind; the
+  // parts' file after it puts all of them back, 150's arm with its own.
+  const knowsParts = async () => (await parts067.unsafe(`
+    SELECT (SELECT w.prosrc LIKE '%ob1:a-moved-text-stales-its-parts%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS arm,
+           (SELECT w.prosrc LIKE '%ob1:tags-requeued-under-retag-key%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS tags,
+           (SELECT w.prosrc LIKE '%''subject'', ''part'')%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS kind,
+           (SELECT w.prosrc LIKE '%''proposal'', ''part'', ''metadata''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.derivation_descendants(uuid, integer, integer)')) AS walk`))[0] as { arm: boolean; tags: boolean; kind: boolean; walk: boolean };
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
+  const alone067 = await knowsParts();
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => /^\d{3}_settled_parts\.sql$/.test(f) });
+  const after067 = await knowsParts();
+  await parts067.close();
+  assert(alone067.arm === false && alone067.tags === false && alone067.kind === false && alone067.walk === false && after067.arm === true && after067.tags === true && after067.kind === true && after067.walk === true,
+         `067 alone leaves the three bodies knowing no part and rebuild_derived requeueing no tags row; the settled parts' file after it puts them back, the tags' arm with the part's (${JSON.stringify(alone067)} then ${JSON.stringify(after067)})`);
   // 029 re-applied by hand over 110 (SMD-2313, SMD-3248, SMD-3249) — this
   // ladder's own state since the queue section re-applied 029 alone: 029's
   // two-argument listing stands BESIDE 110's seven-argument one, and a call

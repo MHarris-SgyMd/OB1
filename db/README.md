@@ -331,7 +331,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and fifty (150) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and fifty-one (151) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -372,7 +372,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298, 151 SMD-4446).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -3177,12 +3177,14 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
+| | `settled_parts` (151) | `SELECT, UPDATE` — a settled part (SMD-4446) is listed and decided as a proposal is, through 151's `review_settled_part`, which runs as the caller. An accept reads both thoughts' texts, which the capture group grants: with this group alone a reject is made and an accept is refused on `thoughts`. No server code reads the table yet: the surfaces that list and decide parts come later in SMD-4446. 151 carries this grant to every role holding `SELECT` and `UPDATE` on `supersession_proposals`, so such a role granted before 151 needs nothing more. One granted before SMD-3338 holds `SELECT` alone there, gains nothing from 151, and needs `--grant <role> --groups server` as it does for a proposal's decisions. Recording a part (`INSERT`, `DELETE`) stays the worker group's |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
 | | `forget_thought(uuid, jsonb, boolean)` (144) | `EXECUTE` — `forget_thought`, which runs as its owner since 144 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 144 carries a grant 139's function held to the wrapper; a role granted before 144 needs `--grant` again |
 | | `ob1_forget_leftovers()` (144) | `EXECUTE` — preflight's `forgotten` row, which reads every store `forget_thought` reaches as the function's owner; without it the row says it could not verify |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
+| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; the pass does not write them yet): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
 | | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks, and `sleep.ts` at its start and each poll for a migration (SMD-3379 PR 1c-1); without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -4983,6 +4985,197 @@ tier gives each pair's verdict, not the judge:
 the entities nothing has mentioned within the window, quietest first, each
 with its newest capture.
 `--stale` prints it; nobody acts on it.
+
+**Settled parts** (migration 151, SMD-4446): the store for a statement in one
+thought that the other thought of a pair shows is no longer true or no longer
+open, while both thoughts stand (`docs/subject-anchored-claims.md`, rows 8 to
+10). Nothing writes a part yet: the pass, the review surfaces and the pending
+proposals are the ticket's later cuts.
+
+- **`settled_parts`**, one row a part: the pair, which thought holds the
+  statement, the quote from each, the word and its group (`no_longer_holds`
+  or `done_or_settled`), the reason, the fingerprint of each text as judged,
+  the judge's key, a status and who decided it. A pair may hold several
+  parts, and one statement of one thought once; it may hold a whole-thought
+  proposal beside them, since the two tables do not read each other. The
+  statement is read as a thought's text is (`content_fingerprint_of`: case,
+  runs of white space and white space at either end folded), so the same
+  words in other capitals are the same part. The fold is that much and no
+  more, and what counts as a capital or as white space is the database's
+  own (its ctype). A quote that differs by
+  a word or a full stop is another part, and so is one that differs by a
+  character a reader does not see (a no-break space, a zero-width space, an
+  accent typed as two characters), or by the straight quotes and hyphens
+  the pass's own quote check takes for curly ones and dashes. One span is
+  one part only if the pass records the holder's own characters for it (the
+  ticket's next cut). The identity's index is built on
+  `content_fingerprint_of` and holds what that function read when each row
+  was written: a later migration that changes what it folds leaves the
+  index at the old fold and says nothing (a rejected statement was recorded
+  again beside its rejection, and a `REINDEX` then failed on the pair), so
+  such a file rebuilds this index in its own transaction, as it must 023's
+  on the same function. A fold for parts alone is a function of its own.
+- **A row is one judgement, and none is written over another.** No UPDATE
+  moves a part's pair, holder, quotes, word, reason, fingerprints or judge,
+  whatever its status (`settled_parts_keep_judgement`). When the pass judges
+  a statement again, the judgement is another row with another id, or is not
+  recorded (below). So, through the two functions and against any UPDATE, an
+  id names the words a reviewer read, or nothing. An undecided part's id
+  ends when a later judgement replaces it, so a table that refers to a part
+  refers to a decided one, or lets its reference go with the row: a foreign
+  key that refused the delete would refuse the write. The table does not
+  hold a raw write to those rules: a role holding `UPDATE` can move a status
+  by hand, as it can a proposal's, and one holding `DELETE` and `INSERT` can
+  remove a row and write another under its id.
+- **`record_settled_part`** is the pass's write:
+  `(p_older_id, p_newer_id, p_holder, p_statement, p_shown_by, p_word,
+  p_reason, p_judge_key, p_older_fingerprint, p_newer_fingerprint, p_recipe,
+  p_agent_id DEFAULT NULL)`, every argument but the last required. It
+  refuses a part of the wrong shape, without echoing an argument, and a
+  call above READ COMMITTED. Otherwise it answers one of four ways:
+  - `{ok, action: "recorded", id, status: "pending", replaced}`: a new row.
+    `replaced` is the id of the row it took the place of, or null. A row is
+    replaced when it holds the statement, is undecided, and is no longer a
+    judgement of the texts as they stand: stale, or pending at other
+    fingerprints than the two given. That row is deleted, its lineage row
+    with it.
+  - `{ok, action: "stands", id, status}`: a row already holds the
+    statement, pending at these texts or decided, whatever its texts have
+    done since. Nothing is written, the judgement given is not recorded, and
+    the row is locked until the write's transaction ends. (The status is
+    `stale` only where one was moved by hand under the write: write again.)
+  - `{ok: false, error: "EDITED_SINCE", older_edited, newer_edited}`: a
+    fingerprint given is not its text's. Nothing is written, and the caller
+    puts the thought back to be judged at its new text.
+  - `{ok: false, error: "NOT_FOUND", older_gone, newer_gone}`: a thought is
+    not there, deleted or forgotten while the judge was out. Nothing is
+    written, and it is said before a fingerprint is compared. (A thought
+    deleted by hand after the write has read it fails the foreign key
+    instead, whose error names the id alone.)
+
+  It does not check that the words are in the texts: that check is the
+  pass's (SMD-4442).
+- **The write's lock.** The write takes the supersession advisory lock,
+  which a decision on a proposal or a part, a rebuild, `delete_thought` and
+  `forget_thought` each take first, and holds it until its transaction
+  ends: each of those waits for it meanwhile, and so does another write, so
+  no rebuild at READ COMMITTED runs between its read of the two texts and
+  its commit. (`rebuild_derived` has no guard of its own. A forget refuses
+  above READ COMMITTED; `db/rebuild.ts` and the sleep scheduler's sweep run
+  at their session's level, which is READ COMMITTED unless the database or
+  the role defaults higher. Above it, a rebuild that waited on the lock
+  reads the store as its transaction first saw it, and misses the part.)
+  The write locks no thought's row
+  beyond its foreign keys' key share, so an edit does not wait for it, and
+  an edit that commits while it runs leaves the part pending at the old
+  text, as one that commits after it does. A caller makes the write as a
+  statement of its own, as `db/consolidate.ts` writes a proposal: with no
+  thought's or claim's row held when it is called, which is the house lock
+  order backwards and can deadlock with a call that holds the lock and
+  waits for that row; and with nothing awaited before it commits.
+- **An edit is not followed by a rebuild.** `rebuild_derived` runs from
+  `db/rebuild.ts`, from a forget, and from the sleep scheduler's sweep, which
+  deletes orphans and marks nothing; not after `update_thought`. Until one
+  runs for the thought, a part recorded before the edit stays pending at
+  the old text: an accept of it is refused unless forced, and the next
+  judgement of its statement replaces it. When a rebuild does run, of
+  either thought, it sets a pending part stale and queues its newer thought
+  again, as it does a proposal (`stale_parts` in its result; a leaving
+  thought's parts are `cascading.parts`). A part already stale is queued
+  again by each later rebuild while a text stays moved, and counted stale
+  once. A decided part stands. The walk (`derivation_descendants`)
+  orders a part beside the proposal, ahead of the kinds its order does not
+  name, which share what its cap of 2,000 rows leaves, and behind the
+  thought's own proposals: a thought with 2,000 of those leaves its parts
+  unwalked (SMD-4476).
+- **`review_settled_part`** is the reviewer's decision, accept or reject:
+  `(p_id, p_decision, p_note DEFAULT NULL, p_actor DEFAULT NULL, p_force
+  DEFAULT false, p_was DEFAULT NULL)`.
+  An accept is refused when either text has moved since it was judged
+  (`EDITED_SINCE`), unless forced. A decision that repeats the row's status
+  is refused, and a reviewer may reverse one: the row keeps the last
+  decision alone. A stale row may be decided as a stale proposal may:
+  rejected, or accepted, which a moved text refuses unless forced. A
+  decision asks no actor, as a proposal's asks none: made with no envelope,
+  in a transaction and a session that set none, it names no reviewer. A
+  caller that passes `p_was`, the status it read,
+  is refused `STALE_READ`, with the row's status, when that is another: a
+  second reviewer does not undo a first unseen, and a row a rebuild has set
+  stale is not decided as pending. A decision that passes none is made on
+  the row as it stands, and `p_was` is the status alone: decisions made in
+  between that leave the status as the caller read it are not seen. The id
+  of a part a later judgement has replaced is
+  `NOT_FOUND`. Each refusal is a value, `{ok: false, error, id}`,
+  `STALE_READ` with `status` and `EDITED_SINCE` with `older_edited` and
+  `newer_edited`; a decision made answers `{ok, id, status, was}`. A reject
+  reads no text. A forced accept is recorded as any accept is: the row says
+  neither that it was forced nor at which texts. It runs under READ
+  COMMITTED alone. An accepted part writes no thought: no `supersedes`
+  pointer is set and nothing is demoted.
+- **A deleted or forgotten thought** takes its parts, and their lineage rows,
+  with it. The planner keeps no statistics on a part's words
+  (`SET STATISTICS 0`), so `ANALYZE` copies none into `pg_statistic`.
+- **Unlike a proposal,** a part has no confidence and no similarity, and
+  its write asks a reason; its write refuses a judgement of a text that has
+  moved, where a proposal's records it (SMD-4480); an undecided part judged
+  again once stale, or at other texts, is replaced by another row, where a
+  stale proposal is rewritten in place, so a decision by a part's id cannot
+  land on another judgement (SMD-4477); and nothing settles a part the pass
+  no longer names yet. No index serves a listing of parts: the review
+  surface brings the one its listing needs. `judged_at` is when the write's
+  transaction began, not the order rows commit in.
+- **What an operator sees: nothing yet.** `db/rebuild.ts --status` prints
+  the stale proposals and no stale part, and preflight, `brain_info` and
+  the dashboard say nothing of parts. Both censuses of stale lineage rows
+  leave a part's row out, as they do a proposal's (a decided part keeps the
+  fingerprints it was judged at for good), so a pending part at a moved
+  text shows nowhere until a rebuild or the next judgement. The sweep
+  (`db/rebuild.ts --orphans`, the sleep scheduler) and preflight look for
+  four kinds' orphaned lineage rows, and neither a proposal's nor a part's:
+  a rebuild of one of its thoughts deletes one. Preflight's lineage
+  coverage reads no `settled_parts`. No part exists before the pass writes
+  one: these are for the ticket's next cuts to bring with it.
+- **Grants.** `rebuild_derived` reads the table once a thought's walk holds
+  a part's lineage row, and locks and updates a pending part whose text has
+  moved: a role that runs it (`db/rebuild.ts`, the sleep scheduler's sweep)
+  needs `SELECT` on `settled_parts` for the orphan rule, and `UPDATE` to
+  set a part stale. The worker and server groups hold both, and 151 gives
+  both to every role holding `SELECT` and `UPDATE` on
+  `supersession_proposals`. A role that ran it before and holds neither is
+  refused there (`permission denied for table settled_parts`), on a
+  thought that holds a part and on no other. The role that records parts
+  holds `DELETE` on the table beside `INSERT`, which a proposal's write
+  does not need, and which a part's asks for on every call that gets past
+  its refusals: 151 gives both to every role holding `INSERT` on
+  `supersession_proposals` beside `SELECT` and `UPDATE`. A role holding one
+  of the three alone there, which no group gives, gains nothing on a part.
+  A re-apply copies the grants again, so a privilege on parts taken back by
+  hand from a role that still holds the proposals' comes back with it. An
+  accept reads both thoughts' texts, so the
+  role that decides parts holds the capture group beside the server's, as
+  the servers' role does: with the server group alone a reject is made and
+  an accept is refused on `thoughts`.
+
+Needs 016, 029, 061, 063, 067, 111 and 114, and carries 150's
+`rebuild_derived`, which is 067's with the tags' requeue (SMD-2298), since it
+last defines that function after 150. A re-apply moves no row: the
+table, its indexes and its constraints stand, and the lineage kind's CHECK
+is dropped, added and validated again. The apply takes `thoughts` (the two
+foreign keys) and then `derivations` (the kind's CHECK) in one transaction,
+the order a capture and an edit take them. A forget, and a write of a
+generated page section, take them the other way: one in flight as the file
+applies can be chosen as a deadlock's victim, fail with `40P01` and need
+running again (14 and 12 of 20 applies with two forgets looping; the
+migrator applied every time). 064 and 084 took both tables in one file the
+same way.
+An earlier definer applied by hand over 151 puts its bodies back: 063's
+three know no part (its lineage writer refuses the kind, so a part's write
+fails), and neither its `rebuild_derived` nor 067's nor 150's has an arm for
+one. Where preflight finds `rebuild_derived` from before 067 and the parts'
+table standing, its remedy names 151 after 067, in place of 150, whose body
+151 carries. It does not see 067 or 150 alone re-applied over 151:
+`migrate.ts --reapply` runs every file in order.
+test-schema [136], test-upgrade [20cn].
 
 ### `consolidate.ts`
 
