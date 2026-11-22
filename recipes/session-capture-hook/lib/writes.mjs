@@ -11,9 +11,8 @@ import { join, basename } from "node:path";
 import { spawn } from "node:child_process";
 import { UUID, oneLine, shellWord, shownUrl } from "./util.mjs";
 import { CLAIM_MAX_AGE_MS, CONFIG_PATH, DEAD_MAX_AGE_MS, LOG_PATH, PENDING_MAX_AGE_MS, SELF, STATE_BASE, STATE_DIR, ensureDirs, isAlive, log, useStateRoot } from "./state.mjs";
-import { SDK_ERROR_RE, resultText, rpc, textOfResult } from "./rpc.mjs";
+import { SDK_ERROR_RE, providerMends, resultText, rpc, textOfResult, verdictOf } from "./rpc.mjs";
 import { BRAIN_NAME_RE } from "./config.mjs";
-import { providerMends, verdictOf } from "./post.mjs";
 
 // ── The write fan-out (SMD-3314) ─────────────────────────────────────────────
 //

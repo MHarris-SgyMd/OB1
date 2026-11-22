@@ -10,6 +10,7 @@
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, renameSync, rmdirSync, appendFileSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 /**
  * The entry file, which a detached child re-runs and the entry's own guard
@@ -17,9 +18,12 @@ import { homedir } from "node:os";
  * own `import.meta.url`, so a copy under another name names itself (SMD-4338
  * review pass 1: derived here as lib/'s parent's `session-capture.mjs`, such a
  * copy ran nothing and said nothing). One process, one entry: two entry files
- * loading this one module would share the last one's.
+ * loading this one module would share the last one's. Until the entry sets
+ * it, it is the recipe's own `session-capture.mjs` beside lib/, so a module
+ * imported without the entry (a suite of lib/'s own) prints and spawns a real
+ * file, never `bun ''` (SMD-4338 PR 3 review pass 2).
  */
-let SELF = "";
+let SELF = fileURLToPath(new URL("../session-capture.mjs", import.meta.url));
 function useSelf(path) { SELF = path; }
 const HOME = homedir();
 export const CONFIG_PATH = process.env.OB1_SESSION_CAPTURE_CONFIG

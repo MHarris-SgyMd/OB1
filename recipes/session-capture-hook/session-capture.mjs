@@ -91,14 +91,14 @@ import { fileURLToPath } from "node:url";
 import { shellWord, shownUrl } from "./lib/util.mjs";
 import { CONFIG_PATH, SELF, STATE_BASE, STATE_DIR, readState, useSelf, useStateRoot } from "./lib/state.mjs";
 import { SECRET_MODES, SECRET_PATTERNS, describeRedactions, redactSecrets, redactionMarker, scanForSecrets, secretMode } from "./lib/secrets.mjs";
-import { CaptureError, REFUSAL_RE, SDK_ERROR_RE, parseRpcBody, resultText, rpc } from "./lib/rpc.mjs";
+import { CaptureError, REFUSAL_RE, SDK_ERROR_RE, parseRpcBody, providerMends, resultText, rpc, verdictOf } from "./lib/rpc.mjs";
 import { endpointOf, loadBrains, loadConfig, splitUserinfo } from "./lib/config.mjs";
 import { CLAIMS_DIRNAME, claimFiles, renewClaim, renewClaims, renewEveryMs, worktreeRoot } from "./lib/claims.mjs";
 import { DEFAULT_EVENTS, EVENTS, HARNESS, HARNESSES, HOOK_EVENTS, HOOK_VERSION, INTERVAL_EVENTS, TRIGGERS, TRIGGER_EVENTS, VERSION_RE, checkpointOf, eventSpec } from "./lib/hook.mjs";
 import { LIMITS, NOT_TICKETS, assistantExcerpt, cleanEpisode, episodeChain, gateFindings, headerTickets, provenanceOf, redactEpisode, renderSummary, scanSummary, segment, stripInjected, ticketsIn } from "./lib/episode.mjs";
 import { parseClaudeCode, parseCodex, sniffHarness, summariseTranscript } from "./lib/transcript.mjs";
 import { egressRefusalForModel, modelStatusLine, modelSummary } from "./lib/model.mjs";
-import { RUN_MAX, aheadOf, landedAfter, landedBefore, newerInFlight, pointerFor, postCapture, postPending, prepare, providerMends, verdictOf } from "./lib/post.mjs";
+import { RUN_MAX, aheadOf, landedAfter, landedBefore, newerInFlight, pointerFor, postCapture, postPending, prepare } from "./lib/post.mjs";
 import { FANOUT_TOOLS, drainWrites, dropCopiesOf, enqueueWrite, fanOutPlan, lostForget, pendingWrites, postWrite, queueForget, resultIsError } from "./lib/writes.mjs";
 import { claimsHookJson, fanOutHookJson, hookJson, main } from "./lib/cli.mjs";
 // The exports that moved to lib/ (SMD-4338), re-exported so every name this file exported before is still its own: the suite,

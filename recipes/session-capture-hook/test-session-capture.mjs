@@ -46,7 +46,7 @@ const {
   loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
   loadBrains, useStateRoot, HOOK_VERSION, VERSION_RE,
 } = await import(SCRIPT);
-/** The version metadata.json gives the hook (SMD-4378): the script's own must equal it. */
+/** The version metadata.json gives the hook (SMD-4378): the hook's own (lib/hook.mjs, re-exported by the script) must equal it. */
 const META_VERSION = JSON.parse(readFileSync(join(HERE, "metadata.json"), "utf8")).version;
 /** The line --version prints and --check opens with; --dry-run opens with it after `--- `. */
 const VERSION_LINE = `session-capture ${META_VERSION}`;
@@ -960,7 +960,7 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     "ACTIONLINT_SHA256=" + "9f86".repeat(16), "--sha256 " + "9f86".repeat(16), "\n" + "9f86".repeat(16) + "  actionlint_1.7.7_linux_amd64.tar.gz", "\n" + "9f86".repeat(16) + "  a.tgz: OK\n" + "8e75".repeat(16) + "  b.tgz: OK", "sha256: " + "9f86".repeat(16), "SHA-256 = " + "9f86".repeat(16), "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>",
     "/Users/mharris/.claude/projects/-Users-mharris-Projects-OB1/memory/ob1-compose-loopback-1844.md",
     "/private/tmp/claude-501/-Users-mharris-Projects-OB1/8de5e1e1-c72c-4b7f-aa81-ccbce6558ef6/scratchpad/smd1298/patch1-server.py",
-    // A bracketed value is a placeholder — this script's own marker first of all: the second scan must not read it as a value (SMD-2127).
+    // A bracketed value is a placeholder — the hook's own marker first of all: the second scan must not read it as a value (SMD-2127).
     "password: [redacted:password assignment]", "psql --password [redacted:password flag] -h db", "tool --token [redacted:credential flag]", "MCP_ACCESS_KEY=[redacted:credential assignment, high-entropy token]",
     "postgres://u:[redacted:url with a password]@h/db", "Authorization: Bearer [redacted:bearer token]", "http://127.0.0.1:8010/?key=[redacted:access key in a URL]", "api_key = [YOUR_API_KEY_1]", "POSTGRES_PASSWORD=[set in the vault, rotated 2026]",
   ];
@@ -2546,7 +2546,7 @@ console.log("\n[8] Detached: the hook returns inside the SessionEnd budget and t
   assert(received.length === 1 && received[0].args.source === "claude-code", `the detached child posted (${received.length} capture(s), after ${Date.now() - t0} ms)`);
   while (!readState("s-detached") && Date.now() - t0 < 10_000) await sleep(50);
   assert(readState("s-detached")?.thought_id !== undefined, "…and recorded the id");
-  // The child writes its state, then logs the capture (session-capture.mjs's
+  // The child writes its state, then logs the capture (lib/post.mjs's
   // bookkeeping order), so the state alone does not say the line is there:
   // wait for the line too, as for the post and the state (SMD-2471, one
   // failure on main).
@@ -2597,8 +2597,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const printTypo = await spawnScript(["--print-hook", "claude-code"], { env: { OB1_CAPTURE_ON_SECRET: "x" } });
   assert(noCfgTypo.code === 1 && /not "x"/.test(noCfgTypo.err) && !/no endpoint or key/.test(noCfgTypo.err) && printTypo.code === 2 && /not "x"/.test(printTypo.err) && !printTypo.out.trim(),
     `a misspelt mode is named before a missing config, and --print-hook refuses it too, exit 2, printing no hook (first review pass: the one path that let it by; exits ${noCfgTypo.code}/${printTypo.code})`);
-  // The hook says its version (SMD-4378): one source, the script's constant, which metadata.json must give too.
-  assert(HOOK_VERSION === META_VERSION && VERSION_RE.test(HOOK_VERSION), `the script's version is metadata.json's (${HOOK_VERSION}, ${META_VERSION}): bump both; and in the shape postCapture sends, or no summary would be stamped (SMD-4378, review pass 3)`);
+  // The hook says its version (SMD-4378): one source, lib/hook.mjs's constant, which metadata.json must give too.
+  assert(HOOK_VERSION === META_VERSION && VERSION_RE.test(HOOK_VERSION), `lib/hook.mjs's version is metadata.json's (${HOOK_VERSION}, ${META_VERSION}): bump both; and in the shape postCapture sends, or no summary would be stamped (SMD-4378, review pass 3)`);
   const sentBefore = received.length;
   const ver = await spawnScript(["--version"]);
   const verPiped = await runHook({ session_id: "s-version", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--version"]);
@@ -2628,6 +2628,18 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const copyVer = await runCopy(["--version"]), copyHook = await runCopy(["--print-hook", "claude-code", "--claims"]);
   assert(copyVer.code === 0 && copyVer.out === `${VERSION_LINE}\n` && copyHook.code === 0 && copyHook.out.includes(realpathSync(renamed)) && !copyHook.out.includes(SCRIPT),
     `a renamed copy with its lib/ runs, and the hook it prints re-runs the copy, not the checkout (SMD-4338 review pass 1) (${copyVer.code} ${JSON.stringify(copyVer.out)} ${copyHook.code})`);
+  // lib/ imported without the script, in a process of its own (SMD-4338 PR 3 review pass 2): SELF is the recipe's
+  // session-capture.mjs until an entry sets it, so a printed hook (and a detached child) names a real file, not `bun ''`.
+  const libProbe = join(TMP, "lib-alone-probe.mjs");
+  writeFileSync(libProbe, `import { hookJson } from ${JSON.stringify(join(HERE, "lib", "cli.mjs"))};\nconsole.log(hookJson("claude-code", { runtime: "bun" }).hooks.SessionEnd[0].hooks[0].command);\n`);
+  const libAlone = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [libProbe], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.on("close", (code) => resolve({ code, out: out.trim() }));
+  });
+  assert(libAlone.code === 0 && libAlone.out === `bun ${realpathSync(SCRIPT)}`,
+    `lib/ imported alone prints a hook naming the recipe's session-capture.mjs, not an empty path (SMD-4338 PR 3 review pass 2) (${libAlone.code} ${JSON.stringify(libAlone.out)})`);
   assert([ver, verPiped, verWith].every((r) => r.code === 0 && r.out === `${VERSION_LINE}\n` && !r.err) && received.length === sentBefore,
     `--version prints "session-capture <version>" and exits 0, stdin piped or not, captures nothing, and is first: beside --check, a bad --harness, a misspelt mode and no config (SMD-4378) (${JSON.stringify([ver, verPiped, verWith].map((r) => [r.code, r.out, r.err.slice(0, 60)]))})`);
   assert(ok.out.split("\n")[0] === VERSION_LINE && noCfgTypo.out.split("\n")[0] === VERSION_LINE,
