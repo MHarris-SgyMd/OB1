@@ -2430,9 +2430,9 @@ else {
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${RT} AND thought_id = ${ids[0]}::uuid`;
   const rtStopped = await run(RENV);
   const rtOther = await run({ ...SQL_ENV, OB1_METADATA_MODEL: "another-tag-model" });
-  assert(rtStopped.code === 0 && new RegExp(`^\\s*!\\s+retag pass\\s+${rx(RT)}: 3 thoughts pooled or behind their tags — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — a re-tag run under this key stopped before it finished\\s*$`, "m").test(rtStopped.out)
+  assert(rtStopped.code === 0 && new RegExp(`^\\s*!\\s+retag pass\\s+${rx(RT)}: 3 thoughts pooled or behind their tags — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — 1 pending row\\(s\\) wait for a run under this key: one that stopped, or a text move's rebuild requeued them\\s*$`, "m").test(rtStopped.out)
       && /^\s*→ Finish it: cd db && bun retag\.ts --url \$DATABASE_URL; bun retag\.ts --url \$DATABASE_URL --status shows where it stands\.\s*$/.test(fix(rtStopped.out, "retag pass")),
-         `a run that stopped warns with its counts and the command that finishes it (${row(rtStopped.out, "retag pass")} | ${fix(rtStopped.out, "retag pass").trim()})`);
+         `pending rows warn with the counts, a stop or a rebuild's requeue named, and the command that finishes them (${row(rtStopped.out, "retag pass")} | ${fix(rtStopped.out, "retag pass").trim()})`);
   assert(/Finish it: cd db && OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL --status/.test(fix(rtOther.out, "retag pass")),
          `…under the key's own model where the server's knob names another, since a run under that one is refused (${fix(rtOther.out, "retag pass").trim()})`);
   // A live lease: a run going, ok, no remedy; expired: a worker that died, the reclaim before the finish.
@@ -2449,9 +2449,9 @@ else {
   // A failed row: the finish returns it first.
   await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL, ttl_expires_at = NULL, finished_at = now(), last_error = 'stub: 422' WHERE work_type = ${RT} AND status = 'claimed'`;
   const rtFailed = await run(RENV);
-  assert(/retag pass\s+\S+: .* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool — a re-tag run under this key stopped/.test(rtFailed.out)
-      && /Finish it: cd db && bun retag\.ts --url \$DATABASE_URL --retry-failed \(it returns the 1 failed row\(s\) to the pool first, once their cause is fixed\);/.test(fix(rtFailed.out, "retag pass")),
-         `…a failed row puts --retry-failed in the finish (${fix(rtFailed.out, "retag pass").trim()})`);
+  assert(/retag pass\s+\S+: .* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool — a run under this key left 1 failed row\(s\)\s*$/m.test(rtFailed.out)
+      && /^\s*→ Finish it: cd db && bun retag\.ts --url \$DATABASE_URL; bun retag\.ts --url \$DATABASE_URL --status shows where it stands\. Once their cause is fixed, --retry-failed returns the 1 failed row\(s\) to the pool first\.\s*$/.test(fix(rtFailed.out, "retag pass")),
+         `…a failed row: what the run left, and --retry-failed in a sentence of its own, so the command pastes as it is (review pass 1; ${fix(rtFailed.out, "retag pass").trim()})`);
   // A pool under a key other than the recorded one (a --switch-key left it): no worker runs it, ok, nothing to finish.
   const RT_OLD = retagKey("old-tag-model", METADATA_PROMPT_VERSION);
   await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);
@@ -2465,17 +2465,43 @@ else {
   const RT_NEXT = retagKey(TAG_MODEL, METADATA_PROMPT_VERSION + 1);
   await claims`UPDATE thought_work_claims SET work_type = ${RT_NEXT} WHERE work_type = ${RT}`;
   await claims`UPDATE ob1_config SET value = ${RT_NEXT} WHERE key = 'retag_key'`;
-  const rtVersion = await run(RENV);
-  assert(new RegExp(`^\\s*→ This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${rx(RT)}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it\\.\\s*$`).test(fix(rtVersion.out, "retag pass"))
-      && !/Finish it/.test(fix(rtVersion.out, "retag pass")),
-         `…a key at another prompt version is not this tree's to finish: the switch is named instead (${fix(rtVersion.out, "retag pass").trim()})`);
-  await claims`UPDATE thought_work_claims SET work_type = ${RT} WHERE work_type = ${RT_NEXT}`;
+  const rtNewer = await run(RENV);
+  const RT_PREV = retagKey(TAG_MODEL, METADATA_PROMPT_VERSION - 1);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_PREV} WHERE work_type = ${RT_NEXT}`;
+  await claims`UPDATE ob1_config SET value = ${RT_PREV} WHERE key = 'retag_key'`;
+  const rtOlder = await run(RENV);
+  // A key db/retag.ts never makes (hand-set: --job refuses the shape): no run is under it.
+  await claims`UPDATE thought_work_claims SET work_type = 'retag:hand-set' WHERE work_type = ${RT_PREV}`;
+  await claims`UPDATE ob1_config SET value = 'retag:hand-set' WHERE key = 'retag_key'`;
+  const rtHand = await run(RENV);
+  // A model a shell would split: quoted in the finish.
+  const RT_SPACE = retagKey("tag model", METADATA_PROMPT_VERSION);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_SPACE} WHERE work_type = 'retag:hand-set'`;
+  await claims`UPDATE ob1_config SET value = ${RT_SPACE} WHERE key = 'retag_key'`;
+  const rtSpace = await run(RENV);
+  assert(new RegExp(`^\\s*→ ${rx(RT_NEXT)} was recorded by a tree whose tag prompt is version ${METADATA_PROMPT_VERSION + 1}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag\\.ts from that tree\\. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}\\.\\s*$`).test(fix(rtNewer.out, "retag pass"))
+      && !/Finish it/.test(fix(rtNewer.out, "retag pass")),
+         `…a newer tree's key is that tree's to finish, and a switch here would take it back (review pass 1; ${fix(rtNewer.out, "retag pass").trim()})`);
+  assert(new RegExp(`^\\s*→ This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${rx(RT)}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it\\.\\s*$`).test(fix(rtOlder.out, "retag pass"))
+      && !/Finish it/.test(fix(rtOlder.out, "retag pass")),
+         `…an older version's key is not this tree's to finish: the switch is named instead (${fix(rtOlder.out, "retag pass").trim()})`);
+  assert(new RegExp(`^\\s*→ retag:hand-set is not a key db/retag\\.ts makes \\(retag:<model>@p<version>\\), so no run is under it: cd db && bun retag\\.ts --url \\$DATABASE_URL --switch-key records ${rx(RT)}, and the backlog is re-tagged under it\\.\\s*$`).test(fix(rtHand.out, "retag pass")),
+         `…a key no run makes names the switch, not a plain run it would refuse (review pass 1; ${fix(rtHand.out, "retag pass").trim()})`);
+  assert(/Finish it: cd db && OB1_METADATA_MODEL='tag model' bun retag\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL='tag model' bun retag\.ts/.test(fix(rtSpace.out, "retag pass")),
+         `…and a model a shell would split is quoted (review pass 1; ${fix(rtSpace.out, "retag pass").trim()})`);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT} WHERE work_type = ${RT_SPACE}`;
   await claims`UPDATE ob1_config SET value = ${RT} WHERE key = 'retag_key'`;
   // Every row succeeded: none unfinished, and the backlog still behind its tags said, with the recorded key's run.
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${RT}`;
   const rtDone = await run(RENV);
   assert(/^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDone.out),
          `a finished pool with thoughts behind their tags again is ok, the backlog said without "none has run here" (${row(rtDone.out, "retag pass")})`);
+  await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);
+  const rtDoneBeside = await run(RENV);
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT_OLD}`;
+  assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier model or prompt version's pool`).test(rtDoneBeside.out)
+      && /^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDoneBeside.out),
+         `…an earlier key's pool beside it is no worker's, and hides the backlog no longer (review pass 1: it counted as unfinished, for good)`);
   // Before 063's mark the backlog cannot be read: a skip saying why.
   await claims.unsafe("ALTER TABLE derivations RENAME COLUMN stale_since TO stale_since_away_rt");
   const rtPre063 = await run(RENV);

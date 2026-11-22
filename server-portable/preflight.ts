@@ -5186,9 +5186,13 @@ if (configFailed) {
          * pending, leased or failed. "Not yet in the pool" is the worker's own
          * backlog, db/config.mjs's RETAG_BACKLOG_SQL, one definition. No
          * follower or sleep pass runs it yet (SMD-2298 PR 4), so a live lease
-         * is a run in progress and anything else unfinished is a run that
-         * stopped. With nothing unfinished, a backlog waiting for a run is said
-         * beside "none unfinished": preflight's lineage row counts its kinds.
+         * is a run in progress, and pending rows wait for a run: one that
+         * stopped, or a text move's rebuild requeued them (150), which nothing
+         * here tells apart. An earlier key's pool is no worker's and counts as
+         * nothing unfinished. With nothing unfinished, a backlog waiting for a
+         * run is said beside "none unfinished": the lineage row counts its
+         * kinds (review pass 1: an earlier pool hid it for good, and every
+         * pending row read as a run that stopped).
          */
         try {
           const { RETAG_BACKLOG_SQL, RETAG_KEY_PREFIX, formatPassCounts, parseRetagKey, passUnfinished, retagKey } = await import("../db/config.mjs");
@@ -5227,25 +5231,33 @@ if (configFailed) {
             type RetagBacklog = { missing: number; marked: number; stale: number; fallback: number; unpooled: number; due: number };
             const backlogOf = async (key: string) => ((await sql.unsafe(RETAG_BACKLOG_SQL, [key])) as RetagBacklog[])[0];
             // How a run reaches a key from this tree: under the key's own model, which the server's knob may name
-            // otherwise; a key at another prompt version than this tree's is not this tree's to run — its extractor
-            // writes its own version, so a run here is another key's, refused without --switch-key.
-            const runUnder = (key: string): { prefix: string } | { switchWords: string } => {
+            // otherwise. A key at another prompt version is not this tree's to run, its extractor writing its own: an
+            // older one is left by --switch-key, a newer one is a newer tree's, which a switch here would take back. A
+            // key db/retag.ts never makes (hand-set: --job refuses its shape) no run is under (review pass 1: a plain
+            // run, refused, was named for it, and --switch-key for a newer tree's).
+            const runUnder = (key: string): { prefix: string } | { words: string } => {
               const parsed = parseRetagKey(key);
-              if (parsed && parsed.promptVersion !== METADATA_PROMPT_VERSION) {
-                return { switchWords: `This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${serverKey}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it.` };
+              if (parsed === null) {
+                return { words: `${key} is not a key db/retag.ts makes (retag:<model>@p<version>), so no run is under it: cd db && bun retag.ts --url $DATABASE_URL --switch-key records ${serverKey}, and the backlog is re-tagged under it.` };
               }
-              return { prefix: parsed && parsed.model !== metaModel ? `OB1_METADATA_MODEL=${parsed.model} ` : "" };
+              if (parsed.promptVersion > METADATA_PROMPT_VERSION) {
+                return { words: `${key} was recorded by a tree whose tag prompt is version ${parsed.promptVersion}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag.ts from that tree. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}.` };
+              }
+              if (parsed.promptVersion < METADATA_PROMPT_VERSION) {
+                return { words: `This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${serverKey}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it.` };
+              }
+              return { prefix: parsed.model !== metaModel ? `OB1_METADATA_MODEL=${shellWord(parsed.model)} ` : "" };
             };
             let unfinished = 0;
             for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
               if (!passUnfinished(c)) continue;
-              unfinished++;
               c.unpooled = Number((await backlogOf(key)).unpooled);
               // The universe: what the key pooled, and the backlog not pooled under it (a re-tag is no corpus-wide pass).
               c.thoughts = c.succeeded + c.failed + c.claimed + c.pending + c.unpooled;
               const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts pooled or behind their tags — ");
               const l = leases.get(key) ?? NO_LEASES;
               if (l.live > 0) {
+                unfinished++;
                 const r = runningRow(key, c, `${key}: ${counts} — ${runningWords(l, c)}`);
                 add("retag pass", r.status, r.detail, r.fix);
                 continue;
@@ -5257,13 +5269,16 @@ if (configFailed) {
                 add("retag pass", "ok", `${key}: ${counts} — an earlier model or prompt version's pool, which no worker runs any more: db/retag.ts and rebuild_derived re-tag under ${recorded} (ob1_config.retag_key), nothing here to finish or retry`);
                 continue;
               }
+              unfinished++;
               const how = runUnder(key);
-              const failedNote = c.failed ? ` --retry-failed (it returns the ${c.failed} failed row(s) to the pool first, once their cause is fixed)` : "";
-              const finish = "switchWords" in how ? how.switchWords
-                : `Finish it: cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL${failedNote}; ${how.prefix}bun retag.ts --url $DATABASE_URL --status shows where it stands.`;
-              add("retag pass", "warn",
-                  `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : "a re-tag run under this key stopped before it finished"}`,
-                  fixOf(l.expired > 0 ? reclaim(key) : "", finish));
+              // The flag in a sentence of its own, so the command pastes as it is (review pass 1).
+              const failedNote = c.failed ? ` Once their cause is fixed, --retry-failed returns the ${c.failed} failed row(s) to the pool first.` : "";
+              const finish = "words" in how ? how.words
+                : `Finish it: cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL; ${how.prefix}bun retag.ts --url $DATABASE_URL --status shows where it stands.${failedNote}`;
+              const waiting = c.pending > 0
+                ? `${c.pending} pending row(s) wait for a run under this key: one that stopped, or a text move's rebuild requeued them`
+                : `a run under this key left ${c.failed} failed row(s)`;
+              add("retag pass", "warn", `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : waiting}`, fixOf(l.expired > 0 ? reclaim(key) : "", finish));
             }
             if (unfinished === 0) {
               const b = await backlogOf(recorded ?? serverKey);
@@ -5271,7 +5286,7 @@ if (configFailed) {
               const how = runUnder(recorded ?? serverKey);
               const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? " (none has run here: ob1_config.retag_key is unset)" : ""}`;
               if (behind === 0) add("retag pass", "ok", "none unfinished");
-              else if ("switchWords" in how) add("retag pass", "ok", `${words} — ${how.switchWords}`);
+              else if ("words" in how) add("retag pass", "ok", `${words} — ${how.words}`);
               else add("retag pass", "ok", `${words} — cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL re-tags them`);
             }
           }
