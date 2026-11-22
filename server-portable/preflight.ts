@@ -491,7 +491,7 @@ const DIRECT_CHECKS = [
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
   "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "validity", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
-  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
+  "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "retag pass", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
 /**
  * 020 gave match_thoughts and search_thoughts_hybrid the forms the servers
@@ -614,10 +614,24 @@ const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
-const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
+const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/150_rebuild_requeues_tags.sql — 150 last defines rebuild_derived (on 067's body), so 067 alone puts back a body that requeues no stale tags row.";
 const APPLY_110 = "Apply db/migrations/110_listing_pages.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
 const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
+/**
+ * 063 also holds rebuild_derived, derivation_descendants and
+ * ob1_record_derivation, which the settled parts' file last defines
+ * (SMD-4446: rebuild_derived on 150's body, which is 067's with the tags'
+ * arm): 063 re-applied by hand puts all three back, and 067 applied alone
+ * after it leaves them knowing no part — a moved text sets no pending part
+ * stale, and the lineage writer refuses the kind, so a part's write fails —
+ * and requeueing no stale tags row. So where the parts' table stands, 067's
+ * remedy names that file after it, in place of 150, whose body it carries.
+ * On a brain from before the file the remedy is APPLY_067's, and the
+ * migrator applies the file in its turn: its guard would refuse a hand
+ * apply ahead of 114.
+ */
+const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused (bun migrate.ts --reapply runs every file in order).";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -2666,6 +2680,8 @@ if (configFailed) {
                      -- on a text move (its sentinel); 063 re-applied by hand over 067 puts the body back that keeps every rejected row.
                      to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_067,
                      (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
+                     -- The settled parts' table (SMD-4446), where its file is applied: that file last defines rebuild_derived, so 067's remedy names it there.
+                     to_regclass('public.settled_parts') IS NOT NULL AS has_parts,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
                      -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
@@ -2681,7 +2697,7 @@ if (configFailed) {
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
@@ -2748,7 +2764,10 @@ if (configFailed) {
                            -- (SMD-2726 adds its arm); a closed one's row stays as history (SMD-1873 PR 2 review pass 1).
                            -- 111: a subject off its text is the subject pass's to find again — its pool reads the fingerprint —
                            -- until rebuild_derived gains its arm (SMD-3306).
-                           WHERE d.artifact_kind NOT IN ('proposal', 'relation', 'subject')
+                           -- 151: a settled part's row is left out, as a proposal's is. Once a rebuild has run its status is
+                           -- its mark, and a decided part keeps the fingerprints it was judged at for good. (A pending part at
+                           -- a moved text with no rebuild since is so far counted nowhere: SMD-4446's later cuts.)
+                           WHERE d.artifact_kind NOT IN ('proposal', 'part', 'relation', 'subject')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d
                              WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
@@ -2808,7 +2827,7 @@ if (configFailed) {
               + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the key each edge is named under above>'." : "")
               // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
               + (Number(c.subjects) ? " An own subject's row is written with it by 130's record_thought_subjects (111's record_thought_subject its set of one): close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -2852,7 +2871,7 @@ if (configFailed) {
             } else if (reopenOlder) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but rebuild_derived is from before 067 (063 re-applied by hand over it): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again (SMD-2297). ${coverage}`,
-                  ledgerRemedy("067", APPLY_067));
+                  ledgerRemedy("067", bodies.has_parts ? APPLY_067_PARTS : APPLY_067));
             } else if (Number(c.lineage_pairs)) {
               // 070 (SMD-2313): a proposal standing on a lineage pair — judged
               // before 066, or recorded raw — is a reviewer's alone: a pending
@@ -5174,6 +5193,129 @@ if (configFailed) {
               : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
           }
+        }
+
+        /**
+         * An unfinished re-tag pass (SMD-2298 PR 3a). db/retag.ts is the claim
+         * table's fourth consumer, under keys with the retag: prefix (one per
+         * metadata model and prompt version); its first writing run records
+         * its key in ob1_config.retag_key, and rebuild_derived requeues a
+         * stale tags row under that key (150). The re-embed and consolidate
+         * rows' rule: a pass is unfinished while a row under its key is
+         * pending, leased or failed. "Not yet in the pool" is the worker's own
+         * backlog, db/config.mjs's RETAG_BACKLOG_SQL, one definition. No
+         * follower or sleep pass runs it yet (SMD-2298 PR 4), so a live lease
+         * is a run in progress, and pending rows wait for a run: one that
+         * stopped, or a text move's rebuild requeued them (150), which nothing
+         * here tells apart. An earlier key's pool is no worker's and counts as
+         * nothing unfinished. With nothing unfinished, a backlog waiting for a
+         * run is said beside "none unfinished": the lineage row counts its
+         * kinds (review pass 1: an earlier pool hid it for good, and every
+         * pending row read as a run that stopped).
+         */
+        try {
+          const { RETAG_BACKLOG_SQL, RETAG_KEY_PREFIX, formatPassCounts, parseRetagKey, passUnfinished, retagKey } = await import("../db/config.mjs");
+          const { METADATA_PROMPT_VERSION } = await import("./metadata.ts");
+          const [{ claimsPresent, marksPresent, configPresent }] = await sql`
+            SELECT to_regclass('thought_work_claims') IS NOT NULL AS "claimsPresent",
+                   EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('derivations') AND attname = 'stale_since' AND NOT attisdropped) AS "marksPresent",
+                   to_regclass('ob1_config') IS NOT NULL AS "configPresent"`;
+          if (!claimsPresent) {
+            add("retag pass", "skip", "not checked — thought_work_claims does not exist (migration 015 not applied)");
+          } else if (!marksPresent) {
+            add("retag pass", "skip", "not checked — derivations.stale_since does not exist (migration 063 not applied)");
+          } else {
+            const recorded: string | null = configPresent
+              ? ((await sql`SELECT NULLIF(value, '') AS key FROM ob1_config WHERE key = 'retag_key'`) as { key: string | null }[])[0]?.key ?? null
+              : null;
+            const serverKey = retagKey(metaModel, METADATA_PROMPT_VERSION);
+            const rows = (await sql`
+              SELECT work_type, status, count(*)::int AS c,
+                     count(*) FILTER (WHERE status = 'claimed' AND NOT (ttl_expires_at < now()))::int AS live,
+                     count(*) FILTER (WHERE status = 'claimed' AND ttl_expires_at < now())::int AS expired,
+                     to_char(max(ttl_expires_at) FILTER (WHERE status = 'claimed' AND NOT (ttl_expires_at < now())) AT TIME ZONE 'UTC', 'HH24:MI') AS live_until
+              FROM thought_work_claims WHERE work_type LIKE ${RETAG_KEY_PREFIX + "%"} GROUP BY work_type, status`) as
+              ({ work_type: string; status: string; c: number } & LeaseRow)[];
+            const leases = leasesByKey(rows);
+            const byKey = new Map<string, PassCounts>();
+            for (const r of rows) {
+              const c = byKey.get(r.work_type) ?? { thoughts: 0, succeeded: 0, fellBack: 0, accepted: 0, failed: 0, claimed: 0, pending: 0, unpooled: 0 };
+              const n = Number(r.c);
+              if (r.status === "succeeded") c.succeeded = n;
+              else if (r.status === "failed") c.failed = n;
+              else if (r.status === "claimed") c.claimed = n;
+              else if (r.status === "pending") c.pending = n;
+              byKey.set(r.work_type, c);
+            }
+            type RetagBacklog = { missing: number; marked: number; stale: number; fallback: number; unpooled: number; due: number };
+            const backlogOf = async (key: string) => ((await sql.unsafe(RETAG_BACKLOG_SQL, [key])) as RetagBacklog[])[0];
+            // How a run reaches a key from this tree: under the key's own model, which the server's knob may name
+            // otherwise. A key at another prompt version is not this tree's to run, its extractor writing its own: an
+            // older one is left by --switch-key, a newer one is a newer tree's, which a switch here would take back. A
+            // key db/retag.ts never makes (hand-set: --job refuses its shape) no run is under (review pass 1: a plain
+            // run, refused, was named for it, and --switch-key for a newer tree's). `reclaims`: whether a pass claims
+            // under the key again, so an expired lease's reclaim is true of it — the newer tree's does; no pass takes up
+            // an older version's or a hand-set key's (review pass 2).
+            const runUnder = (key: string): { prefix: string } | { words: string; reclaims: boolean } => {
+              const parsed = parseRetagKey(key);
+              if (parsed === null) {
+                return { reclaims: false, words: `${key} is not a key db/retag.ts makes (retag:<model>@p<version>), so no run is under it: cd db && bun retag.ts --url $DATABASE_URL --switch-key records ${serverKey}, and the backlog is re-tagged under it.` };
+              }
+              if (parsed.promptVersion > METADATA_PROMPT_VERSION) {
+                return { reclaims: true, words: `${key} was recorded by a tree whose tag prompt is version ${parsed.promptVersion}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag.ts from that tree. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}.` };
+              }
+              if (parsed.promptVersion < METADATA_PROMPT_VERSION) {
+                return { reclaims: false, words: `This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${serverKey}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it.` };
+              }
+              return { prefix: parsed.model !== metaModel ? `OB1_METADATA_MODEL=${shellWord(parsed.model)} ` : "" };
+            };
+            let unfinished = 0;
+            for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
+              if (!passUnfinished(c)) continue;
+              c.unpooled = Number((await backlogOf(key)).unpooled);
+              // The universe: what the key pooled, and the backlog not pooled under it (a re-tag is no corpus-wide pass).
+              c.thoughts = c.succeeded + c.failed + c.claimed + c.pending + c.unpooled;
+              const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts pooled or behind their tags — ");
+              const l = leases.get(key) ?? NO_LEASES;
+              if (l.live > 0) {
+                unfinished++;
+                const r = runningRow(key, c, `${key}: ${counts} — ${runningWords(l, c)}`);
+                add("retag pass", r.status, r.detail, r.fix);
+                continue;
+              }
+              // A key other than the recorded one: a pool a --switch-key left (PR 2's record names it). db/retag.ts runs
+              // the recorded key, refusing any other without --switch-key, and rebuild_derived feeds it: nothing finishes
+              // this one, so it is said, with no remedy that would switch back.
+              if (recorded !== null && key !== recorded) {
+                add("retag pass", "ok", `${key}: ${counts} — an earlier key's pool, which no worker runs any more: db/retag.ts and rebuild_derived re-tag under ${recorded} (ob1_config.retag_key), nothing here to finish or retry`);
+                continue;
+              }
+              unfinished++;
+              const how = runUnder(key);
+              // The flag in a sentence of its own, so the command pastes as it is (review pass 1).
+              const failedNote = c.failed ? ` Once their cause is fixed, --retry-failed returns the ${c.failed} failed row(s) to the pool first.` : "";
+              const finish = "words" in how ? how.words
+                : `Finish it: cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL; ${how.prefix}bun retag.ts --url $DATABASE_URL --status shows where it stands.${failedNote}`;
+              const waiting = c.pending > 0
+                ? `${c.pending} pending row(s) wait for a run under this key: one that stopped, or a text move's rebuild requeued them`
+                : `a run under this key left ${c.failed} failed row(s)`;
+              const reclaims = l.expired > 0 && ("prefix" in how || how.reclaims);
+              add("retag pass", "warn", `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : waiting}`, fixOf(reclaims ? reclaim(key) : "", finish));
+            }
+            if (unfinished === 0) {
+              const key = recorded ?? serverKey;
+              const b = await backlogOf(key);
+              const behind = Number(b.missing) + Number(b.marked) + Number(b.stale) + Number(b.fallback);
+              const how = runUnder(key);
+              const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? " (none has run here: ob1_config.retag_key is unset)" : ""}`;
+              if (behind === 0) add("retag pass", "ok", "none unfinished");
+              else if ("words" in how) add("retag pass", "ok", `${words} — ${how.words}`);
+              else add("retag pass", "ok", `${words} — cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL re-tags them`);
+            }
+          }
+        } catch (e) {
+          add("retag pass", "warn", `could not verify: ${(e as Error).message}`,
+              "The check reads thought_work_claims, derivations and ob1_config.retag_key.");
         }
 
         // The priority review's findings (SMD-3671 PR 2, migration 142): what

@@ -13,6 +13,9 @@
  * branch in the runner's bare repository and its record at step "gate" with the verdict and no outcome — publishing is
  * what's left. A run that fails records "work-failure" or "env-failure" as the design's hand-back says; the hand-back's
  * own claim and Linear writes are cut 2c, so cut 2b only records the outcome.
+ *
+ * A session finished only if its result is a plain success (`sessionEnding`, SMD-4490): Claude Code ends a session it
+ * could not finish with a result too, and that result's text is the API's or Claude Code's, never a report.
  */
 
 import { cpSync, rmSync } from "node:fs";
@@ -22,6 +25,7 @@ import { importBundle, refOf, verifyBundle } from "./bundle.ts";
 import { prepareClone } from "./clone.ts";
 import { gate, type Commitlint, type GitRun, type ScanSecrets } from "./gate.ts";
 import { branchFor, bundleFile, clonePath, diffFile, reviewCheckout, runDir, runId, startRecord, updateRecord, writeNoFollow, type GateSummary, type Outcome, type RunRecord, type Step } from "./record.ts";
+import { shownText } from "./guard.ts";
 import type { SessionOutcome } from "./session.ts";
 import { oneLine } from "./text.ts";
 
@@ -125,6 +129,44 @@ export function resumeDecision(findings: string[], firstRunCostUsd: number | nul
   return { resume: findings.length > 0 && leftover >= limits.resumeMinUsd, budgetUsd: leftover, leftover };
 }
 
+/**
+ * How a session ended, as the run acts on it (SMD-4490). Claude Code ends a session it could not finish with a result
+ * too, so a result alone is not a session that finished:
+ *   - "finished": a result of subtype `success` with `is_error` false. Its text alone is a report;
+ *   - "no-result": the session ended some other way (session.ts's `ended`);
+ *   - "api-error": the result's terminal reason is `api_error`. Its subtype is `success` and its text is the API's
+ *     error, which read as a report until now. `unanswered` says whether the API failed to answer (no status, a
+ *     refused key: 401 or 403, a timeout: 408, a rate limit: 429, or a server error: 500 and up) or answered and
+ *     refused this request (any other status, such as a 400 for a brief too large), which no later run mends;
+ *   - "limit": the turn or the budget limit stopped it (`error_max_turns`, `error_max_budget_usd`);
+ *   - "error-result": any other result that is not a plain success. Unknown shapes land here, never in "finished".
+ */
+export type Ending = { kind: "finished" | "no-result" | "limit" | "error-result"; why: string } | { kind: "api-error"; why: string; unanswered: boolean };
+
+const LIMIT_SUBTYPES = new Map([["error_max_turns", "turn"], ["error_max_budget_usd", "budget"]]);
+
+/** Whether an API error's status is the API not answering, which a later run may find mended: none at all, 401, 403, 408, 429, or 500 and up. A status that is not a whole number in HTTP's range is not one the runner knows, so it is not. */
+function apiUnanswered(status: unknown): boolean {
+  if (status === null || status === undefined) return true;
+  if (typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599) return false;
+  return status === 401 || status === 403 || status === 408 || status === 429 || status >= 500;
+}
+
+/** Reads a session's ending from its outcome. `why` is the runner's own words, the result's subtype and the API's status, never the result's text. */
+export function sessionEnding(out: SessionOutcome): Ending {
+  if (out.ended !== "result") return { kind: "no-result", why: `ended ${out.ended}: ${trunc(out.why)}` };
+  const r = out.result;
+  if (r === null) return { kind: "error-result", why: "ended with a result the runner kept nothing of" };
+  if (r.subtype === "success" && r.isError === false) return { kind: "finished", why: "" };
+  if (r.terminalReason === "api_error") {
+    const status = r.apiErrorStatus === null || r.apiErrorStatus === undefined ? "no status" : `status ${shownText(String(r.apiErrorStatus), 20)}`;
+    return { kind: "api-error", why: `ended on an API error (${status})`, unanswered: apiUnanswered(r.apiErrorStatus) };
+  }
+  const limit = typeof r.subtype === "string" ? LIMIT_SUBTYPES.get(r.subtype) : undefined;
+  if (limit !== undefined) return { kind: "limit", why: `was stopped by its ${limit} limit (${r.subtype})` };
+  return { kind: "error-result", why: `ended with an error result (subtype ${shownText(String(r.subtype), 80)}, is_error ${shownText(String(r.isError), 20)})` };
+}
+
 /** A reported figure as a number, or null: the result summary's fields are untyped (unknown) off the stream. */
 const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
 
@@ -138,11 +180,16 @@ function cleanup(dir: string): void {
 }
 
 /** Record a session's cost and turns. A resumed worker reports its cost cumulatively since its first run (docs, "Limits"), so `priorCostUsd` is subtracted to record only this session's own increment. */
-function recordSession(dir: string, role: "worker" | "review", out: SessionOutcome, priorCostUsd: number | null): void {
+function recordSession(dir: string, role: "worker" | "review", out: SessionOutcome, priorCostUsd: number | null): Ending {
   const raw = typeof out.result?.totalCostUsd === "number" ? out.result.totalCostUsd : null;
   const costUsd = raw === null ? null : priorCostUsd === null ? raw : Math.max(0, raw - priorCostUsd);
   const turns = typeof out.result?.numTurns === "number" ? out.result.numTurns : null;
-  updateRecord(dir, (r) => { r.sessions.push({ role, turns, costUsd, ended: out.ended }); });
+  const ending = sessionEnding(out);
+  // A result that is not a plain success is recorded by its kind, so the hand-back comment and the PR body, which
+  // name any ending but "result", name this one too.
+  const ended = ending.kind === "finished" || ending.kind === "no-result" ? out.ended : ending.kind;
+  updateRecord(dir, (r) => { r.sessions.push({ role, turns, costUsd, ended }); });
+  return ending;
 }
 
 /** Verify the bundle, import its one ref into the bare repository, and keep a copy beside the record (docs step 6/10). Returns the first failure, or ok. */
@@ -225,8 +272,15 @@ export async function run(input: RunInput): Promise<RunResult> {
   const claimForBrief = input.claimId ?? "(none yet — a local run; the claim is cut 2c)";
   const workerBrief = buildBrief({ ticket, clonePath: clone, branch, base, claimId: claimForBrief, bundlePath });
   const w = await deps.runWorker({ root: clone, prompt: workerBrief, maxBudgetUsd: limits.workerBudgetUsd, timeLimitMs: limits.workerMs });
-  recordSession(dir, "worker", w, null);
-  if (w.ended !== "result") return finish("work", "work-failure", `the worker session ended ${w.ended}: ${trunc(w.why)}`, false);
+  const wEnd = recordSession(dir, "worker", w, null);
+  // The API not answering before the worker made any tool call is the environment's: Anthropic did not answer before
+  // the work started (docs, "On a failure"), so the label is kept for a later run. An API error that refused this
+  // request (a 400, say) would be refused again each run, so it goes to a person. Once the worker has made a call, any
+  // ending but a plain success is a work failure, a limit included: the clone may hold part of the work.
+  if (wEnd.kind === "api-error" && wEnd.unanswered && w.calls.length === 0) return finish("work", "env-failure", `the worker session ${wEnd.why} before its first tool call`, false);
+  if (wEnd.kind === "api-error" && w.calls.length === 0) return finish("work", "work-failure", `the worker session ${wEnd.why} before its first tool call: the API refused the request, which a later run would send again`, false);
+  if (wEnd.kind === "api-error") return finish("work", "work-failure", `the worker session ${wEnd.why} after ${w.calls.length} tool call(s)`, false);
+  if (wEnd.kind !== "finished") return finish("work", "work-failure", `the worker session ${wEnd.why}`, false);
 
   // Step 6 — review: verify and import the worker's bundle, take the diff, run the review, then resume once if there is budget.
   updateRecord(dir, (r) => { r.step = "review"; });
@@ -252,9 +306,12 @@ export async function run(input: RunInput): Promise<RunResult> {
   if (!rc.ok) return finish("review", "work-failure", `the review checkout failed: ${rc.problem}`, false);
   const reviewBrief = buildReviewBrief({ ticket, diff: diff1.text, reviewCheckout: review });
   const rev = await deps.runReview({ root: review, prompt: reviewBrief, maxBudgetUsd: limits.reviewBudgetUsd, timeLimitMs: limits.reviewMs });
-  recordSession(dir, "review", rev, null);
-  const findings = rev.ended === "result" ? parseFindings(rev.report) : [];
-  if (rev.ended !== "result") updateRecord(dir, (r) => { r.notes.push(`the review session ended ${rev.ended}: ${trunc(rev.why)}; no findings taken`); });
+  const revEnd = recordSession(dir, "review", rev, null);
+  // Only a review that finished has findings. An error result's text is the API's or Claude Code's, not the review's
+  // (SMD-4490): parsed, "Invalid API key" would be one finding, the worker resumed to address it.
+  const reviewed = revEnd.kind === "finished";
+  const findings = reviewed ? parseFindings(rev.report) : [];
+  if (!reviewed) updateRecord(dir, (r) => { r.notes.push(`the review did not finish (the review session ${revEnd.why}); no findings taken, the worker is not resumed`); });
 
   // The one resume (docs step 6): with findings and at least resumeMinUsd of the worker's budget left, resume to address
   // them, and the findings count as fixed. Otherwise they are listed open — in the gate now, and the PR body in cut 3.
@@ -268,8 +325,8 @@ export async function run(input: RunInput): Promise<RunResult> {
     // out) then fails verify and falls back, instead of the stale bundle passing and the findings counting as fixed.
     rmSync(bundlePath, { force: true });
     const r2 = await deps.runWorker({ root: clone, prompt: resumeBrief, maxBudgetUsd: decision.budgetUsd, timeLimitMs: limits.resumeMs, resume: w.init.sessionId });
-    recordSession(dir, "worker", r2, num(w.result?.totalCostUsd));
-    if (r2.ended === "result") {
+    const r2End = recordSession(dir, "worker", r2, num(w.result?.totalCostUsd));
+    if (r2End.kind === "finished") {
       const re = verifyImportKeep(dir, bundlePath, bareRepo, branch, git);
       if (re.ok) {
         const diff2 = takeDiff(git, bareRepo, base, branch);
@@ -280,11 +337,11 @@ export async function run(input: RunInput): Promise<RunResult> {
         updateRecord(dir, (r) => { r.notes.push(`the resume's bundle was unusable (${trunc(re.problem ?? "")}); keeping the pre-resume branch, findings listed open`); });
       }
     } else {
-      updateRecord(dir, (r) => { r.notes.push(`the resumed worker ended ${r2.ended}: ${trunc(r2.why)}; keeping the pre-resume branch, findings listed open`); });
+      updateRecord(dir, (r) => { r.notes.push(`the resumed worker ${r2End.why}; keeping the pre-resume branch, findings listed open`); });
     }
   } else if (findings.length > 0) {
     updateRecord(dir, (r) => { r.notes.push(`review: ${findings.length} finding(s) listed open (no budget to resume: $${decision.leftover.toFixed(2)} left)`); });
-  } else {
+  } else if (reviewed) {
     updateRecord(dir, (r) => { r.notes.push("review: no findings"); });
   }
   const reviewFindings = findings.map((summary) => ({ summary, fixed: findingsFixed }));
