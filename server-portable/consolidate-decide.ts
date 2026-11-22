@@ -1,8 +1,8 @@
 /**
  * consolidate-decide.ts — the consolidation pass's decide mode (SMD-3115, measured by SMD-3114).
  *
- * The first three paragraphs below are the mode as versions 1 to 5 ran it, where the writer wrote a whole-thought
- * proposal; the fourth is what version 6, the pass's, asks the writer instead.
+ * The first two paragraphs below are the mode as versions 1 to 5 ran it, where the writer wrote a whole-thought
+ * proposal; the third is what version 6, the pass's, asks the writer instead.
  *
  * The judge (consolidate.ts's judgePair, prompt 4) settles a pair with one LLM call, and the judge the dogfood
  * brains run proposes almost no true supersession: on three sets of stable's pairs qwen2.5:7b proposed 2 of 62, 0 of
@@ -26,9 +26,10 @@
  * each statement in one thought that the other shows is no longer true or no longer open, with a quote from each, a
  * reason and one of eight words, and whether either thought falls whole, which its rules say is almost never. The
  * maintainer marked every proposal version 5 made on the canary: 2 of 41 right as a whole, 32 right about a part
- * (docs/subject-anchored-claims.md, rows 8 to 11). A part whose two quotes pass evidenceIn is the judgement's to
- * record as a proposal for review (migration 151), both thoughts standing; a whole-thought proposal is written only
- * when the writer says a thought falls whole and a part in it passed its quotes.
+ * (docs/subject-anchored-claims.md, rows 8 to 11). A part whose two quotes pass evidenceIn, and are read back in
+ * their thoughts' own characters (ownWords), is the judgement's to record as a proposal for review (migration 151),
+ * both thoughts standing; a whole-thought proposal is written only when the writer says a thought falls whole and
+ * such a part is in it.
  *
  * The answer is a Judgement whose verdict probabilities are H2O's distribution, so the pass records proposals and
  * relations as it records the judge's, under the same floors. Off unless OB1_CONSOLIDATE_DECIDER names the tier's
@@ -39,7 +40,7 @@
 import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
-import { asChecked, buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, outdatesConfidence, ownWords, REASON_MAX, VERDICTS, type Judgement, type PairSide, type PartToRecord, type Verdict } from "./consolidate.ts";
+import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, outdatesConfidence, ownWords, REASON_MAX, VERDICTS, type Judgement, type PairSide, type PartToRecord, type Verdict } from "./consolidate.ts";
 import { jevChoose, type JevConfig, type JevModelInfo, type JevOption } from "./jev.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
@@ -376,12 +377,18 @@ export function parseParts(raw: string): PartsAnswer {
  * its own thought and not the other; `shown_found`: the showing words are in the other thought and not this one
  * (evidenceIn both ways, the proposal's rule; SMD-4442 decides a rule for parts). `statement` and `shown` are each
  * thought's own characters for the quote (ownWords), null where they could not be read back or the quote failed.
- * `repeated`: the same statement of the same thought named earlier in this answer.
+ * `repeated`: the same statement of the same thought, by its own characters, named earlier in this answer by a part
+ * that was read back.
  */
 export type CheckedPart = NamedPart & { stale_found: boolean; shown_found: boolean; statement: string | null; shown: string | null; repeated: boolean };
 
-/** Whether a checked part is one the pass records: both quotes passed, and it is the first naming of its statement. */
-export const partStands = (c: CheckedPart): boolean => c.stale_found && c.shown_found && !c.repeated;
+/**
+ * Whether a checked part is one the pass records: both quotes passed, both were read back in their thoughts' own
+ * characters, and it is the first naming of its statement. A row holds a run of its thought or there is no row
+ * (review pass 2): the writer's typing can hold words of its own that the check folds away, and the quote as the
+ * check read it can hold a word the thought never wrote, its asterisks dropped (`10**6` as "106").
+ */
+export const partStands = (c: CheckedPart): boolean => c.stale_found && c.shown_found && c.statement !== null && c.shown !== null && !c.repeated;
 
 /** The writer's parts against the two texts (pure): each part's two quote checks, and both spans in their thoughts' own characters. */
 export function checkParts(answer: PartsAnswer, older: string, newer: string): CheckedPart[] {
@@ -391,23 +398,20 @@ export function checkParts(answer: PartsAnswer, older: string, newer: string): C
     const stale_found = evidenceIn(part.stale, own, other), shown_found = evidenceIn(part.shown_by, other, own);
     const statement = stale_found ? ownWords(part.stale, own) : null, shown = shown_found ? ownWords(part.shown_by, other) : null;
     // One statement of one thought once: as 151 reads a statement, its case and white space folded. The statement is
-    // what the row would hold: the thought's own run, else the quote as the check read it.
-    const key = `${part.holder}\n${(statement ?? asChecked(part.stale)).replace(/\s+/g, " ").trim().toLowerCase()}`;
-    const repeated = stale_found && shown_found && seen.has(key);
-    if (stale_found && shown_found) seen.add(key);
+    // what the row would hold, the thought's own run: a part that was not read back names none.
+    const key = statement !== null && shown !== null ? `${part.holder}\n${statement.replace(/\s+/g, " ").trim().toLowerCase()}` : null;
+    const repeated = key !== null && seen.has(key);
+    if (key !== null) seen.add(key);
     return { ...part, stale_found, shown_found, statement, shown, repeated };
   });
 }
 
 /**
- * The parts the pass records, from a checked answer: each standing part with its statement and showing words in their
- * thoughts' own characters. Where a span could not be read back, the quote goes as the check read it (asChecked:
- * plain, in small letters, without markdown), every word of which is in the thought. Never the typing as it came:
- * the check folds a link's target and struck words away, so a typing can hold words the thought does not (review
- * pass 1: a statement was recorded with a link target of the writer's own).
+ * The parts the pass records, from a checked answer: each standing part, its statement and its showing words each a
+ * run of its thought's own characters.
  */
 export function partsToRecord(checked: CheckedPart[]): PartToRecord[] {
-  return checked.flatMap((c, index) => (partStands(c) ? [{ holder: c.holder, statement: c.statement ?? asChecked(c.stale), shown_by: c.shown ?? asChecked(c.shown_by), word: c.word, reason: c.reason, index }] : []));
+  return checked.flatMap((c, index) => (partStands(c) && c.statement !== null && c.shown !== null ? [{ holder: c.holder, statement: c.statement, shown_by: c.shown, word: c.word, reason: c.reason, index }] : []));
 }
 
 // ── The writer's link step (decide version 4, SMD-3203) ──────────────────────
@@ -594,7 +598,7 @@ export type DecideNote = {
    * ("none" for neither, "unparsed" when the answer was not the JSON asked for); `parts`, every part it named, in its
    * order, with both quotes as it typed them, both checks, whether each span was read back in its thought's own
    * characters (`own`), and whether it repeats an earlier one; and `dropped`, the items of its list that were no
-   * part. When a thought falls whole and a part in it passed its quotes, the six keys `current` to `reason` are kept
+   * part. When a thought falls whole and a part in it stands (partStands), the six keys `current` to `reason` are kept
    * too, from that part: `current` the thought that stands, `evidence` its words that show it, `stale` the statement,
    * so a reader of an earlier version's proposal reads this one the same way.
    */
@@ -660,9 +664,9 @@ function proposesNothing(p: Record<Verdict, number>, writer: string, fold: boole
 }
 
 /**
- * The judgement H2O's distribution and the writer's parts answer come to (version 6, SMD-4446). The parts whose
- * quotes passed are the judgement's `parts`, for the pass to record, whatever the verdict. The verdict is an outdates
- * only when the writer says a thought falls whole AND a part in that thought passed its quotes: that part is the
+ * The judgement H2O's distribution and the writer's parts answer come to (version 6, SMD-4446). The parts that
+ * stand (partStands) are the judgement's `parts`, for the pass to record, whatever the verdict. The verdict is an
+ * outdates only when the writer says a thought falls whole AND a part in that thought stands: that part is the
  * proposal's evidence, its showing words the quote from the thought that stands, as a proposal's two quotes were
  * through version 5 (docs/subject-anchored-claims.md, row 10: the whole-thought supersession stays, as the reviewed
  * exception). A whole the writer says with no such part proposes nothing, as a proposal whose quotes failed did.
@@ -685,8 +689,9 @@ export function partsJudgement(p: Record<Verdict, number>, answer: PartsAnswer, 
     };
   }
   const writer = answer.malformed ? "the writer's answer was not JSON of the expected shape"
-    : answer.falls ? `the writer said the ${answer.falls} thought falls whole, and no part in it passed its quotes`
+    : answer.falls ? `the writer said the ${answer.falls} thought falls whole, and no part in it stands`
     : standing.length ? `the writer named ${standing.length} settled part${standing.length === 1 ? "" : "s"}, and neither thought falls whole`
+    : checked.some((c) => c.stale_found && c.shown_found) ? "no part the writer named was read back in its thought's own characters"
     : checked.length ? "the writer's quotes did not check out"
     : "the writer named no settled part";
   return { ...proposesNothing(p, writer, true), ...(parts.length ? { parts } : {}), ...unread };
@@ -746,7 +751,48 @@ export function partWriteFault(e: unknown): { refused: string } | { sqlstate: st
  */
 export function partWriteError(e: unknown, sqlstate: string): Error {
   const name = e instanceof Error ? e.name : "Error";
-  return Object.assign(new Error(`a settled part's write failed in the database (SQLSTATE ${sqlstate})`), { name, errno: sqlstate, code: (e as { code?: unknown } | null)?.code });
+  return Object.assign(new Error(`a settled part's write failed in the database (SQLSTATE ${sqlstate})`), { name, errno: sqlstate });
+}
+
+/**
+ * The count of put-backs running, by thought (decide version 6): how many attempts in a row ended with the thought put
+ * back because a text of one of its pairs moved while the pair was judged. One object for one run of the pass.
+ * `attempt` wraps a worker's whole handling of one claimed thought, and the count ends with every end of an attempt
+ * but a put-back: a judgement, a failure, a claim lost, a stop of the worker, a throw. So a follower that runs for days
+ * counts no edit of last week against one of today. The bookkeeping is in this one place whatever the attempt's
+ * returns: kept beside the returns, the count was left standing at one of them (review pass 1), and then across every
+ * stop of the worker, an outage among them (review pass 2).
+ */
+export class PutBacks {
+  private readonly running = new Map<string, number>();
+  /** `bound`: how many put-backs running a thought is given. */
+  constructor(readonly bound: number) {}
+  /** Whether the thought may be put back once more. */
+  may(id: string): boolean { return (this.running.get(id) ?? 0) < this.bound; }
+  /** A put-back of the thought, counted. */
+  putBack(id: string): void { this.running.set(id, (this.running.get(id) ?? 0) + 1); }
+  /** One attempt at the thought: its count ends unless the attempt put the thought back. */
+  async attempt<R>(id: string, run: () => Promise<R>): Promise<R> {
+    const before = this.running.get(id) ?? 0;
+    try { return await run(); }
+    finally { if ((this.running.get(id) ?? 0) === before) this.running.delete(id); }
+  }
+}
+
+/**
+ * Which text moved while a pair was judged, in the words of the two lines that say so (decide version 6): the line a
+ * worker prints as it puts the thought back, and the failed claim's error past the bound. `olderId` is the pair's
+ * older thought. The write's answer names the side; neither named reads as the thought's own.
+ */
+export function movedWords(moved: { older: boolean; newer: boolean }, olderId: string): { putBack: string; failed: string } {
+  if (moved.older && moved.newer) return { putBack: `its own text and that of ${olderId}, the older thought of one of its pairs,`, failed: "both texts" };
+  if (moved.older) return { putBack: `the text of ${olderId}, the older thought of one of its pairs,`, failed: "the older thought's text" };
+  return { putBack: `its own text (found at its pair with ${olderId})`, failed: "this thought's text" };
+}
+
+/** A pair's refused parts as one problem on its thought's claim (decide version 6): how many, and the store's own words for the first, which echo no argument. */
+export function refusedWords(olderId: string, refusals: string[]): string {
+  return `pair with ${olderId}: ${refusals.length === 1 ? "a settled part was" : `${refusals.length} settled parts were`} refused — ${refusals[0]}`;
 }
 
 /**

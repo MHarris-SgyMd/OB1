@@ -4911,31 +4911,48 @@ tier gives each pair's verdict, not the judge:
     eight) is dropped and counted. Once twelve parts are read, every further
     item is counted as past the cap and not read.
   - **A part is recorded when both its quotes check out** (above; SMD-4442
-    decides a rule for parts). It is one call of `record_settled_part` (below)
-    of its own, at the fingerprints of the texts the pass read: a proposal
-    for review, both thoughts standing. A statement named twice in one answer
-    is written once.
-  - **The row holds each thought's own characters,** not the writer's typing
-    of them. The writer types straight quotes for curly ones, a hyphen for a
-    dash, and no markdown; the store reads a statement's exact characters,
-    folding case and white space and no more. So the pass finds the run of
-    the thought that the quote matched and records that. A statement named
-    again in another typing of the same words is then the row it already is.
-    Three limits:
-    - Where no run can be read back, the row holds the quote as the check
-      read it: plain, in small letters, without markdown. Every word of that
-      is in the thought, which the typing does not promise, since the check
-      folds a link's target and struck words away. The summary counts such a
-      part. It happens when markup splits the quote's first or last word in
-      the text, or when the search is given up at its bound: every fold of a
-      run is counted, 4,000 a quote at most.
-    - A run must read as the whole quote, its own marks included: "80%" is
-      not the thought's "80" elsewhere, nor "C++" its "C". So two typings
-      that differ by a mark at an edge of the quote (brackets, a question
-      mark, a per cent sign) are two statements.
-    - A thought edited so that the statement's own quote marks, dashes or
-      markup change gives another run for the same words. A statement decided
-      at the earlier text can then be named again at the later one.
+    decides a rule for parts) **and both are read back in their thoughts' own
+    characters** (next). It is one call of `record_settled_part` (below) of
+    its own, at the fingerprints of the texts the pass read: a proposal for
+    review, both thoughts standing. A statement named twice in one answer is
+    written once.
+  - **A row holds its thoughts' own characters, or there is no row.** The
+    writer types straight quotes for curly ones, a hyphen for a dash, and no
+    markdown; the store reads a statement's exact characters, folding case
+    and white space and no more. So the pass finds the run of the thought
+    that the quote matched and records that. A statement named again in
+    another typing of the same words is then the row it already is.
+    - **No other form stands in.** A part whose statement or showing words
+      are not read back is not recorded. The summary counts it, and the dump
+      keeps it. The writer's typing can hold a link's target or struck words
+      of its own, which the quote check folds away. The quote as the check
+      read it can hold a word the thought never wrote: the check drops every
+      asterisk, so `10**6` reads "106".
+    - **How a run is found.** From the quote's first word to its last, each
+      at a word's edge in the text: the shortest run that reads as the whole
+      quote does, its own marks included. "80%" is not the thought's "80"
+      elsewhere, nor "C++" its "C".
+      - The two words are looked for as the check reads them. That search is
+        the same for every typing of a statement, so each finds the same run.
+      - Where it finds none, they are looked for as the quote typed them too.
+        The check reads `10**6` as "106" and a capital dotted I as an i and a
+        mark, words the text does not write: a quote that copies the
+        thought's own word is what finds its place.
+    - **When none is found.** Among the causes:
+      - markup stands inside the quote's first or last word in the text, and
+        the quote does not type that word as the thought does;
+      - between the quote's first word and its last the text holds more than
+        600 characters beyond the quote as the check reads it;
+      - more than three emphasis marks stand between a word and the quote's
+        own mark beside it;
+      - the search is given up at its bound: every fold of a run is counted,
+        4,000 a quote at most;
+      - the run would pass the 2,000 characters the store keeps.
+    - **Two typings that differ by a mark at an edge of the quote** (brackets,
+      a question mark, a per cent sign) are two statements.
+    - **A thought edited so that the statement's own quote marks, dashes or
+      markup change** gives another run for the same words. A statement
+      decided at the earlier text can then be named again at the later one.
   - **The parts are written first,** before the pair's proposal, its stale
     proposal's settle and its relation. A part's write is the one that reads
     both texts, so it is where the pass learns that a text moved while the
@@ -4948,34 +4965,47 @@ tier gives each pair's verdict, not the judge:
     - stands: the statement is already held, pending or decided, and nothing
       is written;
     - a thought gone: the pair's parts are skipped, and nothing else of the
-      pair is recorded;
+      pair is recorded. When it is the thought in hand that is gone, nothing
+      more of it is judged: its other pairs are asked of neither model;
     - a text moved while the pair was judged, which is since the pass read
       the row, before the tier, the link step and the writer were asked.
       The thought goes back to the pool, and each of its pairs is judged
-      again at the texts as they stand.
+      again at the texts as they stand. A part written before the write that
+      found the text moved stays, pending at the text as it was, until a
+      judgement that names its statement again takes its place.
   - **The put-back is bounded.** A thought the pass has put back twice
-    running is not put back a third time: its claim fails at once, naming the
-    pair and the text that moved, and none of its other pairs is asked. So a
-    fault that draws the answer every time ends there. `--retry-failed`
-    judges it again. The count is the run's own, and it ends when the thought
-    is judged through: a follower that meets the thought again later starts
-    from none.
+    running is not put back a third time: its claim fails, naming the pair
+    and the text that moved. So a fault that draws the answer every time
+    ends there. `--retry-failed` judges it again.
+    - When the text that moved that third time is the thought's own, the
+      claim fails at once. Its other pairs are not asked about a text known
+      to have moved, and the claim's count holds them as not asked.
+    - When it is only the older thought's, the thought's other pairs are
+      still judged in that attempt, and the claim fails after them.
+    - The count is the running process's. It ends with every end of an
+      attempt but a put-back: judged, failed, a claim lost, the worker
+      stopped. So a follower that meets the thought again later starts from
+      none. A thought put back here and judged through by another process
+      keeps this process's count, and is given that many fewer put-backs
+      when this one meets it again.
   - **A write that fails.** The store's own refusal fails the claim with the
     store's words, which echo no text of a thought. The pair's other parts
     are still sent, and nothing else of the judgement is recorded, so the
-    pair is still a candidate once the cause is mended. A data error that is
-    not the store's own goes on as its SQLSTATE alone, since Postgres's cast
-    can quote the value it was given; a follower reads it as the thought's,
-    as it would the database's own error. Anything else is the thought's
-    error, as for any write of the pass.
+    pair is still a candidate once the cause is mended. An answer of the
+    store that the pass does not know is such a refusal, said with the word
+    it gave. A data error that is not the store's own goes on as its SQLSTATE
+    alone, since Postgres's cast can quote the value it was given; a follower
+    reads it as the thought's, as it would the database's own error. Anything
+    else is the thought's error, as for any write of the pass.
   - **A whole-thought proposal** is written only when the writer says a
-    thought falls whole and a part in that thought passed its quotes. That
-    part is the proposal's evidence, as the two quotes were through version
-    5, and the proposal is recorded as before, at the tier's P(outdates). Its
-    reason is that part's, said to be one part's. The parts are recorded
-    beside it: a reviewer who rejects the whole can still accept them. A
-    whole said with no such part proposes nothing. A whole is still proposed
-    when its only such part is one a reviewer rejected before.
+    thought falls whole and a part in that thought stands: both its quotes
+    checked out and were read back. That part is the proposal's evidence, as
+    the two quotes were through version 5, and the proposal is recorded as
+    before, at the tier's P(outdates). Its reason is that part's, said to be
+    one part's. The parts are recorded beside it: a reviewer who rejects the
+    whole can still accept them. A whole said with no such part proposes
+    nothing. A whole is still proposed when its only such part is one a
+    reviewer rejected before.
   - **Otherwise** the pair takes the tier's best verdict that proposes
     nothing, as a declined proposal did, and its relation under the same
     floor.
@@ -4997,32 +5027,35 @@ tier gives each pair's verdict, not the judge:
     next cut (PR 2b).
   - **Reported:**
     - The summary has a line for the writer's calls: with a settled part,
-      with no part named, with quotes that did not check out, unparsed, and
-      the wholes it said. It counts judgements: a pair judged again after a
-      put-back is counted again.
+      with no part named, with parts named and none that stands, unparsed,
+      and the wholes it said. It counts judgements: a pair judged again after
+      a put-back is counted again.
     - A second line has the parts read, by what became of each: recorded
       (with those written in place of an earlier judgement, which leave one
-      row for two writes, and those kept as the check read them), already
-      held (with those a reviewer rejected), a quote that did not check out,
-      named twice, a thought gone, a text moved, refused, or a write that
-      failed. Those add up to the parts read. Items that were no part, and
-      items past the twelve, are counted apart.
+      row for two writes), already held (with those a reviewer rejected), a
+      quote that did not check out, not read back in the thought's own
+      characters, named twice, a thought gone, a text moved, refused, or a
+      write that failed. Those add up to the parts read. Items that were no
+      part, and items past the twelve, are counted apart.
     - A thought the pass put back is counted on the run's first line, apart
       from a claim another worker took.
     - The progress line counts the parts recorded beside the proposals.
     - A dump line carries every part read, kept or not, with both quotes as
-      typed, their checks, and the row its write made or met. It also carries
-      what was not read as a part (`unread`): the answer itself when it was
-      unparsed, else each item dropped or past the cap, cut short. A
-      judgement whose part's write threw leaves no dump line: its thought
-      failed, and `--retry-failed` judges it again.
-  - **Kept only in the dump:** a part whose quote failed, an item that was no
-    part and an unparsed answer are in no table. A pair the writer is asked
-    about usually holds no relation either, the tier's outdates leaving the
-    relation words under the floor, so its judgement is in the database only
-    through its recorded parts. Set `--dump`, or `OB1_SLEEP_DUMP_DIR` for the
-    sleep scheduler, before the upgrade to keep the rest: the fresh pass
-    judges each pair once.
+      typed, their checks, whether each was read back, and the row its write
+      made or met. It also carries what was not read as a part (`unread`):
+      the answer itself when it was unparsed, else the first twelve items
+      dropped or past the cap, each cut short. A judgement whose part's write
+      threw leaves no dump line: its thought failed, and `--retry-failed`
+      judges it again.
+  - **Kept only in the dump:** an item that was no part and an unparsed
+    answer are in no table. A part that was not recorded, its quote failed or
+    not read back, is in a table only where the pair's proposal or relation
+    is recorded: that row's recipe holds every part read. A pair the writer
+    is asked about usually holds no relation, the tier's outdates leaving the
+    relation words under the floor, so its judgement is then in the database
+    only through its recorded parts. Set `--dump`, or `OB1_SLEEP_DUMP_DIR`
+    for the sleep scheduler, before the upgrade to keep the rest: the fresh
+    pass judges each pair once.
   - **How long:** SMD-3340's test run asked the 27B for parts on 41 pairs in
     866 s, about 21 s a pair the writer is asked about, beside the link
     step's 14.3 s. It is asked only where the tier's top verdict is outdates

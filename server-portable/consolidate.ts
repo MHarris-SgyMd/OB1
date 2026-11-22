@@ -171,8 +171,8 @@ export type Judgement = {
 
 /**
  * One settled part as the pass records it (SMD-4446): which thought of the pair holds the outdated statement, the
- * statement and the other thought's words that show it, each in its thought's own characters where they could be
- * read back (ownWords) and else as the quote check read them (asChecked), the word and the reason. `index` is its place in the
+ * statement and the other thought's words that show it, each a run of its thought's own characters (ownWords), the
+ * word and the reason. A part whose words cannot be read back so is not recorded. `index` is its place in the
  * writer's answer, which the decide note keeps whole.
  */
 export type PartToRecord = { holder: "older" | "newer"; statement: string; shown_by: string; word: string; reason: string; index: number };
@@ -412,14 +412,27 @@ export function parseJudgement(raw: string): Judgement {
  */
 const plainText = (t: string) => oneLine(t).toLowerCase()
   .replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[–—]/g, "-").replace(/…/g, "...");
+/** What forQuote takes off a quote's start, and off its end: each one character's class. */
+const QUOTE_OPENS = /[\s"'`.]/, QUOTE_CLOSES = /[\s"'`.,;:]/;
 /**
  * A quote as evidenceIn looks for it: plain, its wrapping — quote marks, an
  * ellipsis either end, closing punctuation — taken off. Single character
  * classes, not alternatives: an alternation that can match a dot two ways
  * backtracks exponentially on a run of dots (review pass 2 measured 0.3 s a
- * call at 45).
+ * call at 45). Taken off by two scans from the ends, not by a pattern anchored
+ * at the end: that pattern is tried from each character of a run of dots or
+ * commas inside the text, and each try reads the run to its end, so a run of
+ * 5,100 dots cost 12.8 ms a call, and ownWords makes thousands (SMD-4446 PR 2a,
+ * review pass 2: one call took 50 s, and one part held the pass 108 s, a stop
+ * signal waiting 102 of them).
  */
-const forQuote = (t: string) => plainText(t).replace(/^[\s"'`.]+|[\s"'`.,;:]+$/g, "");
+const forQuote = (t: string) => {
+  const p = plainText(t);
+  let a = 0, b = p.length;
+  while (a < b && QUOTE_OPENS.test(p[a])) a++;
+  while (b > a && QUOTE_CLOSES.test(p[b - 1])) b--;
+  return p.slice(a, b);
+};
 
 /**
  * Text as a reader sees it, its markdown folded away (SMD-3151). A model quoting a thought copies the words it reads,
@@ -481,16 +494,16 @@ const OWN_MARKUP = 600;
 const OWN_FOLDS = 4000;
 /** The emphasis marks ownWords takes in at either edge of a span, so `**done**` is kept whole. */
 const EMPHASIS = /[*_~`]/;
+/** How many of them deep, at either edge: around the run, and between a word and the quote's own mark beside it (`(***measured***)`). */
+const OWN_EMPHASIS = 3;
+/**
+ * The longest run ownWords returns, in UTF-16 units: the store keeps a statement, and the words that show it, to 2,000
+ * characters each (migration 151) and refuses a longer one, which failed the part's thought for good (review pass 2:
+ * a quote mostly of ellipses, each read as three dots, came back as a run of 2,354). A longer run is not taken.
+ */
+const OWN_MAX = 2000;
 /** What follows a link's text, as withoutMarkdown reads a link: the bracket and the target, with its optional title. */
 const LINK_TAIL = /^\]\(\s{0,16}<?[^\s()<>]{0,1000}>?(?:\s{1,16}"[^"\n]{0,200}")?\s{0,16}\)/;
-
-/**
- * A quote as evidenceIn read it when it found it: plain, without its markdown (asChecked). Every word of it is in the
- * thought, which the raw typing does not promise: the fold drops a link's target and struck words, so a typing may
- * hold either and still be found (review pass 1: a row held a link target the thought never had). A settled part
- * whose span cannot be read back in its thought's own characters is recorded in this form, not as typed.
- */
-export const asChecked = (quote: string): string => forQuote(withoutMarkdown(quote));
 
 /**
  * The thought's own characters for a quote evidenceIn finds in it (SMD-4446): the shortest run of `content`, between
@@ -504,13 +517,30 @@ export const asChecked = (quote: string): string => forQuote(withoutMarkdown(quo
  * bracket, a closing per cent sign, the pluses of "C++") must be found beside the run, leftwards and then rightwards:
  * a place that holds the quote's words without its marks is another statement, and is passed over (review pass 1:
  * "coverage is 80%" came back as a shorter "Coverage is 80" elsewhere in the thought). Emphasis marks at either edge
- * are taken in with the run, and a link whose text opens or ends it is taken with its bracket and target. Null when
- * no run reads so: markup that splits the quote's first or last word in the text, or the search given up at its
- * bound. The caller then keeps the quote as the check read it (asChecked).
+ * are taken in with the run, and a link whose text opens or ends it is taken with its bracket and target.
  *
- * Bounded twice. A candidate run is at most the quote's length and OWN_MARKUP characters. And every fold is counted,
- * a candidate's and each widening's alike: OWN_FOLDS of them at most, the shortest run found by then being the
- * answer (review pass 1: only the candidates were counted, and one call on a text made for it took 480 s).
+ * The two words are looked for as the fold reads them, and that search is the same for every typing of a statement,
+ * so each finds the same run. Where it finds none, they are looked for as the quote typed them as well. The fold
+ * reads a text with every asterisk, backtick and bracket dropped and in small letters, so `10**6` reads "106" and a
+ * capital dotted I reads an i and a mark: the text writes no such word, and a quote that copies the thought's own
+ * word is the one way to find its place (review pass 2: with no place found, a row held "grew to 106"). A place is a
+ * candidate and no more: the run is still the shortest that reads as the whole quote. (A search for the whole quote
+ * as typed, tried in review pass 2, gave another run for one statement where the typing closed on a full stop or the
+ * thought wrote the statement twice: 25 of 26,828 spans of generated texts.)
+ *
+ * Null when no run is found. Among the causes: markup inside the quote's first or last word in the text, where the
+ * quote does not type that word as the thought does; more markup inside the run than OWN_MARKUP; more than
+ * OWN_EMPHASIS emphasis marks between a word and the quote's own mark; the search given up at its bound; a run
+ * longer than OWN_MAX. The part is then not recorded. No other form of the quote stands in for the thought's
+ * characters: the typing can hold a link's target or struck words of the writer's own, which the check folds away
+ * (review pass 1: a row held one), and the quote as the check read it can hold a word the thought never wrote.
+ *
+ * Bounded three ways. A candidate run, from the quote's first word to its last, is at most the quote's length and
+ * OWN_MARKUP characters; its marks, emphasis and a link's target (OWN_MARKUP more at most) are added to that. Every
+ * fold is counted, a candidate's and each widening's alike: OWN_FOLDS of them at most, the shortest run found by then
+ * being the answer (review pass 1: only the candidates were counted, and one call on a text made for it took 480 s).
+ * And a run longer than OWN_MAX, which the store would refuse, is not taken. A fold is linear in what it reads
+ * (forQuote).
  *
  * What it does not make one row (review pass 1 measured both). Two typings that differ by a mark the fold keeps at
  * an edge of the quote (brackets, a question mark, a per cent sign) are two runs, since the run is the quote's own
@@ -529,78 +559,110 @@ export function ownWords(quote: string, content: string): string | null {
   const letters = words.reduce((n, w) => n + w.length, 0);
   const word = /[\p{L}\p{N}]/u;
   const free = (i: number) => !word.test(text[i] ?? "");
-  const starts = [...text.matchAll(new RegExp(first, "giu"))].map((m) => m.index as number).filter((i) => free(i - 1));
-  const ends = [...text.matchAll(new RegExp(last, "giu"))].map((m) => (m.index as number) + m[0].length).filter((i) => free(i));
+  // The two words as the quote typed them: of its pieces between white space, each from its first letter or digit to
+  // its last, the first that reads as the quote's first word and the last that reads as its last word.
+  const typed = quote.trim().split(/\s+/).map((t) => /[\p{L}\p{N}](?:.*[\p{L}\p{N}])?/su.exec(t)?.[0] ?? "").filter((t) => t !== "");
+  const wordsOf = (t: string) => fold(t).match(/[\p{L}\p{N}]+/gu) ?? [];
+  const typedFirst = typed.find((t) => wordsOf(t)[0] === first);
+  const typedLast = [...typed].reverse().find((t) => wordsOf(t).pop() === last);
+  const literal = (t: string | undefined) => t?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  /** Where the pattern is found in the text, in any case: one edge of each place, those `at` admits, in order. */
+  const places = (pattern: string | undefined, edge: (m: RegExpMatchArray) => number, at: (i: number) => boolean) =>
+    (pattern ? [...text.matchAll(new RegExp(pattern, "giu"))].map(edge).filter(at) : []);
+  const startOf = (m: RegExpMatchArray) => m.index as number, endOf = (m: RegExpMatchArray) => (m.index as number) + m[0].length;
+  const readStarts = places(first, startOf, (i) => free(i - 1)), readEnds = places(last, endOf, free);
+  const typedStarts = places(literal(typedFirst), startOf, (i) => free(i - 1)), typedEnds = places(literal(typedLast), endOf, free);
   let found: string | null = null;
   let folds = 0;
   /** Whether `t` reads as `as`, the fold counted: null once OWN_FOLDS are spent. */
   const reads = (t: string, as: string): boolean | null => (++folds > OWN_FOLDS ? null : fold(t) === as);
-  for (const a0 of starts) {
-    candidate: for (const b0 of ends) {
-      if (b0 - a0 < letters || b0 - a0 > core.length + OWN_MARKUP) continue;
-      let a = a0, b = b0;
-      let is = reads(text.slice(a0, b0), core);
-      if (is === null) return found;
-      if (!is) {
-        // A run that opens on a link's text reads as the quote does only with the link's bracket before it:
-        // `[the form](https://…) is closed`, quoted as "the form is closed" (review pass 1).
-        if (text[a0 - 1] !== "[") continue;
-        is = reads(text.slice(a0 - 1, b0), core);
-        if (is === null) return found;
-        if (!is) continue;
-        a = a0 - 1;
-      }
-      // The quote's own marks before its first word: the fewest characters leftwards with which the run reads as the
-      // quote's start. None found: this place is not the quote's.
-      if (lead > 0) {
-        const start = q.slice(0, q.length - tail);
-        let x = a - 1;
-        for (; x >= Math.max(0, a - lead - 2); x--) {
-          if (!free(x - 1)) continue;
-          is = reads(text.slice(x, b0), start);
-          if (is === null) return found;
-          if (is) break;
+  /**
+   * The search over the places from `starts` to `ends`, those `skip` names passed over: the shortest run is kept in
+   * `found`. False once the folds are spent, wherever that is: the search is over, with the shortest run found by
+   * then.
+   */
+  const search = (starts: number[], ends: number[], skip: (a0: number, b0: number) => boolean): boolean => {
+    for (const a0 of starts) {
+      candidate: for (const b0 of ends) {
+        if (b0 - a0 < letters || b0 - a0 > core.length + OWN_MARKUP || skip(a0, b0)) continue;
+        let a = a0, b = b0;
+        let is = reads(text.slice(a0, b0), core);
+        if (is === null) return false;
+        if (!is) {
+          // A run that opens on a link's text reads as the quote does only with the link's bracket before it:
+          // `[the form](https://…) is closed`, quoted as "the form is closed" (review pass 1).
+          if (text[a0 - 1] !== "[") continue;
+          is = reads(text.slice(a0 - 1, b0), core);
+          if (is === null) return false;
+          if (!is) continue;
+          a = a0 - 1;
         }
-        if (x < Math.max(0, a - lead - 2)) continue candidate;
-        a = x;
-      }
-      // …and those after its last word, rightwards, with which it reads as the whole quote.
-      if (tail > 0) {
-        let y = b0 + 1;
-        for (; y <= Math.min(text.length, b0 + tail + 2); y++) {
-          if (!free(y)) continue;
-          is = reads(text.slice(a, y), q);
-          if (is === null) return found;
-          if (is) break;
+        // The quote's own marks before its first word: the fewest characters leftwards with which the run reads as
+        // the quote's start. None found: this place is not the quote's.
+        if (lead > 0) {
+          const start = q.slice(0, q.length - tail);
+          let x = a - 1;
+          for (; x >= Math.max(0, a - lead - OWN_EMPHASIS); x--) {
+            if (!free(x - 1)) continue;
+            is = reads(text.slice(x, b0), start);
+            if (is === null) return false;
+            if (is) break;
+          }
+          if (x < Math.max(0, a - lead - OWN_EMPHASIS)) continue candidate;
+          a = x;
         }
-        if (y > Math.min(text.length, b0 + tail + 2)) continue candidate;
-        b = y;
+        // …and those after its last word, rightwards, with which it reads as the whole quote.
+        if (tail > 0) {
+          let y = b0 + 1;
+          for (; y <= Math.min(text.length, b0 + tail + OWN_EMPHASIS); y++) {
+            if (!free(y)) continue;
+            is = reads(text.slice(a, y), q);
+            if (is === null) return false;
+            if (is) break;
+          }
+          if (y > Math.min(text.length, b0 + tail + OWN_EMPHASIS)) continue candidate;
+          b = y;
+        }
+        // Emphasis marks at either edge, while the run still reads as the whole quote.
+        while (a > 0 && a0 - a < OWN_EMPHASIS + lead && EMPHASIS.test(text[a - 1])) {
+          is = reads(text.slice(a - 1, b), q);
+          if (is === null) return false;
+          if (!is) break;
+          a--;
+        }
+        while (b < text.length && b - b0 < OWN_EMPHASIS + tail && EMPHASIS.test(text[b])) {
+          is = reads(text.slice(a, b + 1), q);
+          if (is === null) return false;
+          if (!is) break;
+          b++;
+        }
+        // A run that ends on a link's text takes the link's target with it, so its bracket is not left open. The
+        // target is looked for within OWN_MARKUP characters: a longer one is not taken, and the run ends at the
+        // link's text.
+        const target = LINK_TAIL.exec(text.slice(b, b + OWN_MARKUP));
+        if (target) {
+          is = reads(text.slice(a, b + target[0].length), q);
+          if (is === null) return false;
+          if (is) b += target[0].length;
+        }
+        const run = text.slice(a, b);
+        // A run the store would refuse is no run (OWN_MAX).
+        if (run.length > OWN_MAX) continue;
+        if (found === null || run.length < found.length) found = run;
       }
-      // Emphasis marks at either edge, while the run still reads as the whole quote.
-      while (a > 0 && a0 - a < 3 + lead && EMPHASIS.test(text[a - 1])) {
-        is = reads(text.slice(a - 1, b), q);
-        if (is === null) return found;
-        if (!is) break;
-        a--;
-      }
-      while (b < text.length && b - b0 < 3 + tail && EMPHASIS.test(text[b])) {
-        is = reads(text.slice(a, b + 1), q);
-        if (is === null) return found;
-        if (!is) break;
-        b++;
-      }
-      // A run that ends on a link's text takes the link's target with it, so its bracket is not left open. The
-      // target is looked for within OWN_MARKUP characters, so a run stays under the 2,000 characters the store
-      // keeps a statement to: a quote is REASON_MAX code points at most, its markup and its target OWN_MARKUP each.
-      const target = LINK_TAIL.exec(text.slice(b, b + OWN_MARKUP));
-      if (target) {
-        is = reads(text.slice(a, b + target[0].length), q);
-        if (is === null) return found;
-        if (is) b += target[0].length;
-      }
-      const run = text.slice(a, b);
-      if (found === null || run.length < found.length) found = run;
     }
+    return true;
+  };
+  // The words as the fold reads them first. Every typing of a statement makes that search, so each finds the same
+  // run. The words as typed are looked for only where it finds none and was not given up: at those places and the
+  // first search's, the pairs it tried passed over. So a copy finds its place where the fold reads a word the text
+  // does not write, and where the fold's words do find a run a copy is given that run and no other (the two places
+  // of a statement the thought writes twice were otherwise a run each).
+  if (search(readStarts, readEnds, () => false) && found === null) {
+    const union = (x: number[], y: number[]) => [...new Set([...x, ...y])].sort((i, j) => i - j);
+    const starts = union(readStarts, typedStarts), ends = union(readEnds, typedEnds);
+    const wasStart = new Set(readStarts), wasEnd = new Set(readEnds);
+    if (starts.length > readStarts.length || ends.length > readEnds.length) search(starts, ends, (a0, b0) => wasStart.has(a0) && wasEnd.has(b0));
   }
   return found;
 }

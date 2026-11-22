@@ -536,7 +536,7 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   // provider about a database's refusal.
   const partData = partWriteError(pg("22P02", "22P02"), "22P02");
   ok(followClassify(pg("22P02")) === "thought" && followClassify(partData) === "thought" && partData.message === "a settled part's write failed in the database (SQLSTATE 22P02)"
-      && !partData.message.includes("pg 22P02") && followClassify(new Error(partData.message)) === "probe-decides" && followClassify(partWriteError(new Error("not the database's"), "22P02")) === "probe-decides",
+      && followClassify(new Error(partData.message)) === "probe-decides" && followClassify(partWriteError(new Error("not the database's"), "22P02")) === "probe-decides",
     `a part's write refused for its data is the thought's, as the database's own error was: the pass's error keeps the name and the code, and none of the first message (${followClassify(partData)})`);
 
   // fault — what a follower does with a provider error (SMD-2636 PR 3a), on followClassify's split: paused for, an
