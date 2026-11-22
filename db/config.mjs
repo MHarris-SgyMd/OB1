@@ -1284,8 +1284,8 @@ export function parseRetagKey(key) {
  * one row by 061's unique key. RETAG_DUE_SQL is the backlog: the row marked
  * (063's stale_since), or at a fingerprint other than the thought's text;
  * tagged (`type` or `topics`) with no row and no failure marker, preflight's
- * "tagged before 061"; or a capture that fell back (metadata_extraction_failed
- * set, the egress refusal's marker included).
+ * lineage row's "tags with no tag lineage"; or a capture that fell back
+ * (metadata_extraction_failed set, the egress refusal's marker included).
  */
 export const RETAG_TAGS_ROW_SQL =
   "LEFT JOIN derivations d ON d.artifact_kind = 'metadata' AND d.artifact_id = t.id AND d.produced_by = 'metadata'";
@@ -1296,11 +1296,11 @@ export const RETAG_DUE_SQL =
   " OR t.metadata->>'metadata_extraction_failed' IS NOT NULL)";
 
 /**
- * The backlog counted for the pool keyed $1: by kind, the first that applies
- * in RETAG_DUE_SQL's order from the row's side (marked, stale, fallback,
- * missing), and against the key's claim rows — `unpooled` with none under it,
- * `due` re-tagged once (succeeded) and behind its text again, which a run puts
- * back. One row; run with `unsafe(RETAG_BACKLOG_SQL, [key])`.
+ * The backlog counted for the pool keyed $1: by kind, the first that applies,
+ * the row's side first (marked, stale, fallback, missing), and against the
+ * key's claim rows — `unpooled` with none under it, `due` re-tagged once
+ * (succeeded) and behind its text again, which a run puts back. One row; run
+ * with `unsafe(RETAG_BACKLOG_SQL, [key])`.
  */
 export const RETAG_BACKLOG_SQL =
   "WITH b AS (" +

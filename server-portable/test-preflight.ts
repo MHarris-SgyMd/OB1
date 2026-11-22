@@ -29,8 +29,8 @@ import { fileURLToPath } from "node:url";
 import { applyMigrations, createAssert, dropSchema, trackSections, migrationFiles, plantLedger, runScript } from "../db/test-support.ts";
 import { POSTGREST_RETIRED } from "./store.ts";
 import { consolidateKey } from "./consolidate.ts";
-import { METADATA_PROMPT_VERSION } from "./metadata.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
+import { METADATA_PROMPT_VERSION } from "./metadata.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
 import { ACCEPTED_CAVEAT_PREFIX, apply039, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, retagKey, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
@@ -2431,8 +2431,9 @@ else {
    * that key in ob1_config.retag_key, and rebuild_derived feeds it (150). The
    * re-embed and consolidate rows' rule; "not yet in the pool" is the worker's
    * own backlog, db/config.mjs's RETAG_BACKLOG_SQL. No follower or sleep pass
-   * runs it yet (PR 4): a live lease is a run going, anything else unfinished
-   * a run that stopped. With nothing unfinished, a backlog waiting is said.
+   * runs it yet (PR 4): a live lease is a run going, and pending rows wait for
+   * a run, one that stopped or a rebuild's requeue; an earlier key's pool is
+   * no worker's. With nothing unfinished, a backlog waiting is said.
    */
   const TAG_MODEL = "tag-model";
   const RENV = { ...SQL_ENV, OB1_METADATA_MODEL: TAG_MODEL };
@@ -2467,7 +2468,7 @@ else {
   assert(/!\s+retag pass\s+\S+: .* — a worker died holding 1 of the claim\(s\) in flight, their leases expired\s*$/m.test(rtDied.out)
       && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool \(work_type \S+\) returns them now\. Finish it: cd db && bun retag\.ts/.test(fix(rtDied.out, "retag pass")),
          `an expired lease reads as a worker that died holding it, the reclaim before the finish (${row(rtDied.out, "retag pass")} | ${fix(rtDied.out, "retag pass").trim()})`);
-  // A failed row: the finish returns it first.
+  // A failed row: what the run left, and --retry-failed beside the finish.
   await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL, ttl_expires_at = NULL, finished_at = now(), last_error = 'stub: 422' WHERE work_type = ${RT} AND status = 'claimed'`;
   const rtFailed = await run(RENV);
   assert(/retag pass\s+\S+: .* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool — a run under this key left 1 failed row\(s\)\s*$/m.test(rtFailed.out)
@@ -2482,7 +2483,8 @@ else {
       && !rtEarlier.out.includes("OB1_METADATA_MODEL=old-tag-model"),
          `…a key other than the recorded one is an earlier pool no worker runs, with no finish that would switch back (${earlierRow.trim()})`);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT_OLD}`;
-  // The recorded key at another prompt version than this tree's: a run here is another key's, refused without --switch-key.
+  // The recorded key at another prompt version than this tree's: a newer one is a newer tree's to finish, an older one
+  // needs --switch-key; with an expired lease, the reclaim is promised only for the newer tree's key.
   const RT_NEXT = retagKey(TAG_MODEL, METADATA_PROMPT_VERSION + 1);
   await claims`UPDATE thought_work_claims SET work_type = ${RT_NEXT} WHERE work_type = ${RT}`;
   await claims`UPDATE ob1_config SET value = ${RT_NEXT} WHERE key = 'retag_key'`;

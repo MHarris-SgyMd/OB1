@@ -5303,9 +5303,10 @@ if (configFailed) {
               add("retag pass", "warn", `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : waiting}`, fixOf(reclaims ? reclaim(key) : "", finish));
             }
             if (unfinished === 0) {
-              const b = await backlogOf(recorded ?? serverKey);
+              const key = recorded ?? serverKey;
+              const b = await backlogOf(key);
               const behind = Number(b.missing) + Number(b.marked) + Number(b.stale) + Number(b.fallback);
-              const how = runUnder(recorded ?? serverKey);
+              const how = runUnder(key);
               const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? " (none has run here: ob1_config.retag_key is unset)" : ""}`;
               if (behind === 0) add("retag pass", "ok", "none unfinished");
               else if ("words" in how) add("retag pass", "ok", `${words} — ${how.words}`);

@@ -24,7 +24,7 @@
  * pool"), and a thought tagged before 061 had no row at all. The backlog is
  * every thought
  *   - tagged (`type` or `topics`) with no tags row and no failure marker —
- *     preflight's "tagged before 061" count, the same predicate;
+ *     preflight's lineage row's "tags with no tag lineage", the same predicate;
  *   - whose tags row is marked (`stale_since`), or names a fingerprint other
  *     than the thought's text — the metadata share of preflight's `marked`
  *     and `stale` counts (preflight counts every kind's rows, and reads at
@@ -113,14 +113,14 @@
  * which skips a pooled one), and a thought re-tagged before and back in the
  * backlog since is put back (requeue_thought_work's reset, on a row still
  * `succeeded` when it is locked: review pass 1); a failed one waits for
- * --retry-failed, and a claimed one is its holder's. Preflight's `retag
- * pass` row counts the pool and the backlog by the same predicate,
+ * --retry-failed, and a claimed one is its holder's. Preflight's
+ * `retag pass` row counts the pool and the backlog by the same predicate,
  * db/config.mjs's RETAG_DUE_SQL (PR 3a). Not here (SMD-2298's later PRs):
  * the --switch for a prompt version (PR 3b), and a sleep pass and --follow
- * on the shared follower (PR 4). recipes/thought-enrichment's enrich-thoughts.mjs, which wrote its
- * own tag set through the SQL shim, is retired for this (decided 2026-11-15:
- * "not a second re-tag path"; SMD-3318 PR 3b): its summary, importance and
- * confidence fields are not the core's.
+ * on the shared follower (PR 4). recipes/thought-enrichment's
+ * enrich-thoughts.mjs, which wrote its own tag set through the SQL shim, is
+ * retired for this (decided 2026-11-15: "not a second re-tag path"; SMD-3318
+ * PR 3b): its summary, importance and confidence fields are not the core's.
  *
  * ── Identity ────────────────────────────────────────────────────────────────
  * OB1_WORKER_KEY, a key MCP_ACCESS_KEYS holds, names the worker as every
