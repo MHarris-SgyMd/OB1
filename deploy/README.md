@@ -2842,8 +2842,8 @@ than a second apart), then go on for a second before waiting again. The start sa
 as the yield first holds them back. On this Mac's Ollama, a 7B extracting and
 a 27B judging under a capture every 6 s: extraction's median wait 23 s
 against 122 s without it, consolidation's 599 s against 394 s. There is no
-switch of its own: one judge model with extraction's, or a share of two or
-more, turns it off. With one model and slots to spare, and on a hosted
+switch of its own: one judge model with extraction's and a share of two or
+more turns it off. With one model and slots to spare, and on a hosted
 provider, the judge runs beside extraction. The rule reads the brain's own
 count: an Ollama on the host answering one call at a time per model (its
 `OLLAMA_NUM_PARALLEL` unset) while the brain counts four is not seen — raise

@@ -246,12 +246,14 @@
  * consolidation joined only at a poll that found it empty, mostly once they
  * stopped. Where consolidation joins on the backlog, the subject sweep waits
  * for the whole pool, below. Where the judge's calls would take extraction's
- * turn — the judge's model is not extraction's, each turn between them then
- * able to load the other on the server, or extraction's background share of
- * its model is one slot — consolidation and the subject sweep yield to
- * extraction from consolidation's start to the period's end: they wait between
- * calls while an extraction call is asked for or running, and YIELD_GRACE_MS
- * after, --max-wait at most in one stretch of extraction's calls (SMD-4495,
+ * turn — on a local chat endpoint the judge's model is not extraction's, each
+ * turn between them then able to load the other on the server, or
+ * extraction's background share of its model is one slot — consolidation and
+ * a model subject sweep yield to extraction from the start of either to the
+ * period's end: they wait between calls while an extraction call is asked for
+ * or running, and YIELD_GRACE_MS after; one stretch of extraction's calls holds
+ * them --max-wait at most, then lets them through for a turn of
+ * YIELD_GRACE_MS before holding them again (SMD-4495,
  * the maintainer's rule: on a stub server of one slot, SMD-4468's join took
  * extraction's median wait from 26 s to 64 s, and with two models and a 5 s
  * load to 439 s). With one model and slots to spare the judge runs beside
@@ -1659,7 +1661,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   const env = opts.env ?? process.env;
   const cfg = resolveEmbedConfig(env as EmbedEnv);
   /**
-   * Why consolidation yields to extraction while it is joined on the backlog alone, or null where it does not (SMD-4495,
+   * Why consolidation and a model subject sweep yield to extraction from the start of either to the period's end, or null where they do not (SMD-4495,
    * the maintainer's rule): the judge's calls and extraction's go to one model server (cfg.chat.base, both), and where
    * the judge's model is not extraction's, each turn between them can make the server load the other model — 141 swaps
    * in a stub run's 300 s of captures, 18 of 74 extracted by its end — or where extraction's background share of its
@@ -2578,9 +2580,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // pass 2 of PR 1c-4b: a both-held end or a drained-and-held end skipped left one started each period).
     if (statementHeld.has(name)) return { name, done: Promise.resolve(0), settled: true, code: 0, stop: null, abortInHand: null, abort, hushed: true, start: null, timedOut: false };
     const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abortInHand: null, abort, hushed: false, start: null, timedOut: false };
-    // The judge model's passes yield to extraction from consolidation's start to the period's end (SMD-4495), begun
-    // before its first call (review pass 1: begun at the next poll, its first calls went out unheld).
-    if (name === "consolidate") startYield();
+    // The judge model's passes yield to extraction from the start of either to the period's end (SMD-4495), begun
+    // before its first call (review pass 1: begun at the next poll, its first calls went out unheld) — a model sweep's
+    // own start too, where a statement holds consolidation and the sweep has its turn alone (review pass 2).
+    if (name === "consolidate" || (name === "subjects" && JOBS.subjects !== SUBJECTS_RULES_POOL)) startYield();
     // Its banner and its summary's queries are left out: the check said the
     // one at the scheduler's start, and the other is a scan the scheduler
     // would wait for at a period's end (SMD-2752). Its start is reported, so a

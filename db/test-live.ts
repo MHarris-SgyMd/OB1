@@ -30392,7 +30392,7 @@ if (want("38y")) await (async () => {
       await sleepRun({ dryRun: true, env: runEnv });
       return lines.find((l) => YIELD_START.test(l)) ?? null;
     };
-    const plain = { ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: undefined };
+    const plain = { ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: undefined, OB1_CHAT_LOCAL: undefined };
     sw.alsoServed = [JUDGE];
     const cells = {
       twoLocal: await startOf({ ...plain, OB1_JUDGE_MODEL: JUDGE }),
@@ -30462,9 +30462,11 @@ if (want("38y")) await (async () => {
     // calls never all end, so the yield's cap (1.5 s here, --max-wait's 60 s shipped) is what lets judgements through,
     // a turn of the grace (200 ms here) each cap, the gate closing again after (review pass 1: open from the first cap
     // until the count reached 0, under two workers it stayed open for the rest of the period, the judge beside
-    // extraction throughout). At most the two workers' calls a turn, and a turn's own: four a turn bounds it.
+    // extraction throughout: 100 judgements in this window). Each worker fits two 150 ms calls in a 200 ms turn; eight a
+    // turn bounds it with room for a turn timer firing late under load (review pass 2). Extraction at 500 ms a call,
+    // two workers, takes 4 a second against 5 captured, so its calls never all end and no grace opens the gate.
     sw.alsoServed = [JUDGE];
-    sw.slowExtract = 400;
+    sw.slowExtract = 500;
     sw.slowJudge = 150;
     let judgedD = 0, joinedD = false, turnsD = 0;
     const d = await withRun({ ...env, OB1_JUDGE_MODEL: JUDGE }, CO2, { yieldCapMs: 1500, workers: 2 }, async (flow) => {
@@ -30475,8 +30477,8 @@ if (want("38y")) await (async () => {
       turnsD = Math.floor((Date.now() - from) / 1700) + 1;
       judgedD = modelCalls.filter((c) => c.kind === "judge" && c.at >= from && c.at <= Date.now()).length;
     });
-    assert(joinedD && judgedD > 0 && judgedD <= 4 * (turnsD + 1) && d.allJudged && d.code === 0,
-      `…and captures faster than two extraction workers take them: their calls never all end, and the yield's cap lets judgements through a turn at a time, the gate closing again after each (yielding ${joinedD}; ${judgedD} judged during the captures after, at most ${4 * (turnsD + 1)} for ${turnsD} turn(s); ${d.written.length} captured, all judged ${d.allJudged}; exit ${d.code}${joinedD && judgedD > 0 && judgedD <= 4 * (turnsD + 1) ? "" : lastLines()})`);
+    assert(joinedD && judgedD > 0 && judgedD <= 8 * (turnsD + 1) && d.allJudged && d.code === 0,
+      `…and captures faster than two extraction workers take them: their calls never all end, and the yield's cap lets judgements through a turn at a time, the gate closing again after each (yielding ${joinedD}; ${judgedD} judged during the captures after, at most ${8 * (turnsD + 1)} for ${turnsD} turn(s); ${d.written.length} captured, all judged ${d.allJudged}; exit ${d.code}${joinedD && judgedD > 0 && judgedD <= 8 * (turnsD + 1) ? "" : lastLines()})`);
   } finally {
     sw.alsoServed = [];
     await reset().catch(() => {});
