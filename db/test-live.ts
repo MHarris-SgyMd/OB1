@@ -68,7 +68,7 @@ import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe } from "../server-portable/lineage.ts";
 import { METADATA_PROMPT_VERSION, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { run as runRetag, type RetagOptions } from "./retag.ts";
-import { parseRetagKey, retagKey } from "./config.mjs";
+import { parseRetagKey, RETAG_RECIPE_KEY_SQL, retagKey } from "./config.mjs";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { identityHash, readForgottenIdentities } from "./ingest-structure.ts";
@@ -23849,9 +23849,9 @@ if (want("29")) {
       const lineage0 = await lineage();
       const status0 = await cli("--status");
       const dry = await retag({ dryRun: true });
-      const backlog0 = "backlog: 6 thought(s) — 1 tagged with no tags row (before 061), 2 with the row marked stale, 1 with the row at other text, 2 whose capture fell back; 6 not yet in the pool, 0 re-tagged before and due again";
+      const backlog0 = "backlog: 6 thought(s) — 1 tagged with no tags row (before 061), 2 with the row marked stale, 1 with the row at other text, 0 with the row under another model or prompt version, 2 whose capture fell back; 6 not yet in the pool, 0 re-tagged before and due again";
       assert(status0.code === 0 && status0.out.includes(`job:    ${JOB}`) && status0.out.includes(backlog0) && status0.out.includes("status: 0 re-tagged, 0 failed, 0 in flight, 0 pending") && status0.out.includes("ob1_config.retag_key is not set")
-          && dry.code === 0 && dry.out.includes(`would: record ${JOB} in ob1_config.retag_key; add 6 thought(s) to the pool and put 0 back; send up to 6 thought(s) to stub-meta`) && dry.out.includes("Nothing was written.")
+          && dry.code === 0 && dry.out.includes(`would: record ${JOB} in ob1_config.retag_key, putting the 0 thought(s) whose tags another recipe made in the backlog; add 6 thought(s) to the pool and put 0 back; send up to 6 thought(s) to stub-meta`) && dry.out.includes("Nothing was written.")
           && (await configured()) === undefined && (await claims()).length === 0 && (await lineage()) === lineage0 && bodies.length === 0,
         `bun db/retag.ts --status names the key and the backlog by kind, six, none pooled; --dry-run says what it would do; neither records the key, pools, moves a tags row or calls the model (${status0.code}/${dry.code}: ${line(status0.out, "backlog:")}; ${bodies.length} call(s))`);
 
@@ -23904,7 +23904,7 @@ if (want("29")) {
       const aFed = (await claims()).find((c) => c.id === A)?.status;
       await move(M, "[29] M, moved with no rebuild");
       const status2 = await cli("--status");
-      assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
+      assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 with the row under another model or prompt version, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
           && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && fed.enqueued === 1 && fed.unqueued === 0 && fed.pools.includes(JOB) && aFed === "pending" && drainer(JOB) === "bun db/retag.ts --url <url>"
           && status2.out.includes("backlog: 3 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale, 1 with the row at other text") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again")
           && status2.out.includes("status: 6 re-tagged, 1 failed, 0 in flight, 1 pending"),
@@ -24059,18 +24059,51 @@ if (want("29")) {
       assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
         `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
 
-      // --switch-key: a run under another key goes ahead and records it.
-      const OTHER = retagKey("stub-meta", METADATA_PROMPT_VERSION + 1);
-      const switched = await retag({ job: OTHER, switchKey: true, pausesMs: [10] });
+      // --switch-key (PR 3b): the key is the tags' target recipe, and every tags row made under another is behind it.
+      // A dry run under another model counts them (every row: none is under the new key yet); the switch, cut short
+      // by --limit 1, records the key, and a plain run under the new model finishes it; a third re-tags nothing (no
+      // loop). N, its metadata nulled by a raw writer, is behind by its row's recipe and refused as before, failed:
+      // the one row left under the old key. A capture tagged under the old recipe afterwards is behind the key too.
+      const OTHER = retagKey("stub-meta-2", METADATA_PROMPT_VERSION);
+      const envOther = { ...base, OB1_METADATA_MODEL: "stub-meta-2" };
+      SPECIAL.clear(); // the stub answers every thought now: the cases above left 413, 400 and prose answers set
+      const rowsUnder = async (key: string) => Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM derivations d WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND ${RETAG_RECIPE_KEY_SQL} = $1`, [key])) as { n: number }[])[0].n);
+      const tagRows = Number(((await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'metadata' AND produced_by = 'metadata'`) as { n: number }[])[0].n);
+      const dryOther = await retag({ dryRun: true }, envOther);
+      const refusedOther = await retag({ pausesMs: [10] }, envOther);
+      const callsBefore = bodies.length;
+      const switchedOne = await retag({ switchKey: true, limit: 1, pausesMs: [10] }, envOther);
+      const afterOneSwitch = await rowsUnder(OTHER);
+      const finished = await retag({ pausesMs: [10] }, envOther);
+      const failedOther = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${OTHER} AND status = 'failed'`) as { id: string }[];
+      const converged = await rowsUnder(OTHER);
+      const rowsNow = Number(((await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'metadata' AND produced_by = 'metadata'`) as { n: number }[])[0].n);
+      const statusAfter = await retag({ status: true }, envOther);
+      const callsThen = bodies.length;
+      const again = await retag({ pausesMs: [10] }, envOther);
+      assert(tagRows > 2 && finished.code === 1 && failedOther.length === 1 && failedOther[0].id === N && dryOther.code === 0 && dryOther.out.includes(`${tagRows} thought(s) carry tags made under another model or prompt version than ${OTHER}`)
+          && dryOther.out.includes(`putting the ${tagRows} thought(s) whose tags another recipe made in the backlog`)
+          && refusedOther.code === 2 && refusedOther.err.includes(`pass --switch-key: it records ${OTHER}, and the backlog — the ${tagRows} with them — is re-tagged under it`)
+          && (await configured()) === OTHER && switchedOne.code !== 2 && afterOneSwitch === 1 && converged === rowsNow - 1 && rowsNow >= tagRows && callsThen - callsBefore >= tagRows - 1
+          && /backlog: 1 thought\(s\)/.test(statusAfter.out) && again.code === 1 && /(^|\s)0 re-tagged \(/.test(again.out) && bodies.length === callsThen,
+        `a dry run under another model counts every tags row behind it (${tagRows}), a plain run is refused naming them, --switch-key --limit 1 records the key and re-tags one, a plain run finishes the rest — every tags row under the new key but N's, refused as before, N alone in the backlog — and a third run calls nothing (${afterOneSwitch}/${converged}/${rowsNow}; ${line(finished.out, "re-tagged (")}; ${line(again.out, "re-tagged (")})`);
+      const late = await tagged("[29] late, tagged under the old recipe after the switch");
+      const statusLate = await retag({ status: true }, envOther);
+      const lateRun = await retag({ pausesMs: [10] }, envOther);
+      const lateRow = await tagsRow(late);
+      assert(/backlog: 2 thought\(s\) — .* 1 with the row under another model or prompt version, /.test(statusLate.out) && lateRun.code === 1 && /(^|\s)1 re-tagged \(/.test(lateRun.out) && lateRow?.recipe?.model === "stub-meta-2" && !lateRow.marked,
+        `…a capture tagged under the old recipe after the switch is behind the key, --status counting it by its recipe: a plain run re-tags it under the new model (${line(statusLate.out, "backlog:")}; ${line(lateRun.out, "re-tagged (")})`);
+      // A writing run under a --job recipe it does not write would leave every row behind its key: refused; read-only, shown.
       const statusOther = await retag({ status: true });
+      const mismatched = await retag({ job: retagKey("stub-meta-3", METADATA_PROMPT_VERSION), switchKey: true }, envOther);
       const badJob = await retag({ dryRun: true, job: "extract:x@p1" });
       const shownJob = await retag({ status: true, job: "retag:x@p7" });
-      assert(switched.code !== 2 && (await configured()) === OTHER && switched.out.includes(`ob1_config.retag_key = ${OTHER}`)
+      assert(mismatched.code === 2 && mismatched.err.includes(`names a recipe this run does not write: its tags carry ${OTHER}'s`) && (await configured()) === OTHER
           && statusOther.code === 0 && statusOther.out.includes(`ob1_config.retag_key is ${OTHER}; this run uses ${JOB}`)
           && badJob.code === 2 && /--job names a re-tag pool/.test(badJob.err) && shownJob.code === 0 && shownJob.out.includes("job:    retag:x@p7")
           && retagKey("qwen3:8b", 1) === "retag:qwen3:8b@p1" && JSON.stringify(parseRetagKey("retag:qwen3:8b@p1")) === '{"model":"qwen3:8b","promptVersion":1}'
           && parseRetagKey("retag:m@p01") === null && parseRetagKey("extract:m@p1") === null,
-        `--switch-key: a run under another key goes ahead and records it; --status under another recorded key says so, exit 0; --job of another shape refused, exit 2, and one of this shape used; the key builds and parses back, p01 and another prefix refused (${switched.code}: ${await configured()}; ${statusOther.code}; ${badJob.code})`);
+        `a writing run under a --job recipe it does not write is refused, exit 2, nothing recorded; --status under another recorded key says so, exit 0; --job of another shape refused, and one of this shape shown read-only; the key builds and parses back, p01 and another prefix refused (${mismatched.code}: ${line(mismatched.err, "--job")})`);
     } finally {
       stub.stop(true);
       await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'retag:%'`;

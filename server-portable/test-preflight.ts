@@ -2455,6 +2455,15 @@ else {
   assert(rtStopped.code === 0 && new RegExp(`^\\s*!\\s+retag pass\\s+${rx(RT)}: 3 thoughts pooled or behind their tags — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — 1 pending row\\(s\\) wait for a run under this key: one that stopped, or a text move's rebuild requeued them\\s*$`, "m").test(rtStopped.out)
       && /^\s*→ Finish it: cd db && bun retag\.ts --url \$DATABASE_URL; bun retag\.ts --url \$DATABASE_URL --status shows where it stands\.\s*$/.test(fix(rtStopped.out, "retag pass")),
          `pending rows warn with the counts, a stop or a rebuild's requeue named, and the command that finishes them (${row(rtStopped.out, "retag pass")} | ${fix(rtStopped.out, "retag pass").trim()})`);
+  /** The line comparing the server's key with the recorded one, and its fix (PR 3b). */
+  const keyLine = (out: string) => {
+    const ls = out.split("\n");
+    const i = ls.findIndex((l) => /^\s*[✓✗!·]\s+retag pass\s+ob1_config\.retag_key is /.test(l));
+    return { row: i >= 0 ? ls[i].trim() : "", fix: i >= 0 && /^\s*→ /.test(ls[i + 1] ?? "") ? ls[i + 1].trim() : "" };
+  };
+  assert(new RegExp(`^✓\\s+retag pass\\s+ob1_config\\.retag_key is ${rx(RT)}, and this server tags captures under ${rx(retagKey("another-tag-model", METADATA_PROMPT_VERSION))}: each capture's tags stand behind the recorded key until db/retag\\.ts re-tags them with tag-model, one model call each$`).test(keyLine(rtOther.out).row)
+      && keyLine(rtOther.out).fix === "" && keyLine(rtStopped.out).row === "",
+         `the server tagging captures with another model than the recorded key's is said, ok — it may be meant — and not where the keys agree (PR 3b; ${keyLine(rtOther.out).row})`);
   assert(/Finish it: cd db && OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL --status/.test(fix(rtOther.out, "retag pass")),
          `…under the key's own model where the server's knob names another, since a run under that one is refused (${fix(rtOther.out, "retag pass").trim()})`);
   // A live lease: a run going, ok, no remedy; expired: a worker that died, the reclaim before the finish.
@@ -2516,6 +2525,12 @@ else {
   assert(new RegExp(`^\\s*→ ${rx(RT_NEXT)} was recorded by a tree whose tag prompt is version ${METADATA_PROMPT_VERSION + 1}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag\\.ts from that tree\\. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}\\.\\s*$`).test(fix(rtNewer.out, "retag pass"))
       && !/Finish it/.test(fix(rtNewer.out, "retag pass")),
          `…a newer tree's key is that tree's to finish, and a switch here would take it back (review pass 1; ${fix(rtNewer.out, "retag pass").trim()})`);
+  assert(new RegExp(`^!\\s+retag pass\\s+ob1_config\\.retag_key is ${rx(RT_PREV)}, and this server tags captures under ${rx(RT)}: this tree's tag prompt is version ${METADATA_PROMPT_VERSION}, newer than the recorded key's ${METADATA_PROMPT_VERSION - 1}, so a plain run here is refused, and each capture's tags stand behind the recorded key$`).test(keyLine(rtOlder.out).row)
+      && new RegExp(`^→ Make ${rx(RT)} the target: cd db && bun retag\\.ts --url \\$DATABASE_URL --switch-key records it, and re-tags the corpus under it \\(a --dry-run first says how many\\)\\.$`).test(keyLine(rtOlder.out).fix)
+      && new RegExp(`^!\\s+retag pass\\s+ob1_config\\.retag_key is ${rx(RT_NEXT)}, .*: the recorded key's tag prompt is version ${METADATA_PROMPT_VERSION + 1}, newer than this tree's ${METADATA_PROMPT_VERSION}, so this server's captures stand behind it$`).test(keyLine(rtNewer.out).row)
+      && new RegExp(`^→ Run this server from the tree that recorded ${rx(RT_NEXT)}; db/retag\\.ts from there re-tags what this one captured\\.$`).test(keyLine(rtNewer.out).fix)
+      && /^!\s+retag pass\s+ob1_config\.retag_key is retag:hand-set, .*: retag:hand-set is not a key db\/retag\.ts makes, so a plain run here is refused/.test(keyLine(rtHand.out).row),
+         `…this tree's prompt newer than the recorded key's warns, the switch the way forward; the recorded newer warns, its tree named; a hand-set key warns (PR 3b; ${keyLine(rtOlder.out).row.slice(0, 100)} | ${keyLine(rtNewer.out).row.slice(0, 100)})`);
   assert(new RegExp(`^\\s*→ This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${rx(RT)}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it\\.\\s*$`).test(fix(rtOlder.out, "retag pass"))
       && !/Finish it/.test(fix(rtOlder.out, "retag pass")),
          `…an older version's key is not this tree's to finish: the switch is named instead (${fix(rtOlder.out, "retag pass").trim()})`);
@@ -2527,14 +2542,22 @@ else {
   await claims`UPDATE ob1_config SET value = ${RT} WHERE key = 'retag_key'`;
   // Every row succeeded: none unfinished, and the backlog still behind its tags said, with the recorded key's run.
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${RT}`;
+  // Now a fourth tagged through update_thought under another model's recipe: its row is at its text, so with no key recorded
+  // there is no target and it is not behind (PR 3b); once a key is, it is.
+  await claims`SELECT update_thought(p_id := ${ids[3]}::uuid, p_metadata_patch := '{"type": "idea"}'::jsonb, p_lineage := ${{ metadata: { deterministic: false, model: "old-tag-model", prompt_version: METADATA_PROMPT_VERSION } }}::jsonb)`;
   const rtDone = await run(RENV);
-  assert(/^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDone.out),
-         `a finished pool with thoughts behind their tags again is ok, the backlog said without "none has run here" (${row(rtDone.out, "retag pass")})`);
+  await claims`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+  const rtDoneNoKey = await run(RENV);
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('retag_key', ${RT})`;
+  assert(/^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run \(none has run here: ob1_config\.retag_key is unset\)/m.test(rtDoneNoKey.out),
+         `…with no key recorded, a row under another model's recipe at its text is not behind: no target (PR 3b; ${row(rtDoneNoKey.out, "retag pass")})`);
+  assert(/^\s*✓\s+retag pass\s+none unfinished; 4 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDone.out),
+         `a finished pool with thoughts behind their tags again is ok, the backlog said without "none has run here" — the row under another model's recipe among them now a key is recorded (PR 3b; ${row(rtDone.out, "retag pass")})`);
   await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);
   const rtDoneBeside = await run(RENV);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT_OLD}`;
   assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier key's pool`).test(rtDoneBeside.out)
-      && /^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDoneBeside.out),
+      && /^\s*✓\s+retag pass\s+none unfinished; 4 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDoneBeside.out),
          `…an earlier key's pool beside it is no worker's, and hides the backlog no longer (review pass 1: it counted as unfinished, for good)`);
   // Before 063's mark the backlog cannot be read: a skip saying why.
   await claims.unsafe("ALTER TABLE derivations RENAME COLUMN stale_since TO stale_since_away_rt");
@@ -2544,7 +2567,8 @@ else {
          `before 063 the row is a skip saying why (${row(rtPre063.out, "retag pass")})`);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT}`;
   await claims`DELETE FROM ob1_config WHERE key = 'retag_key'`;
-  await claims`UPDATE thoughts SET metadata = metadata - 'type' - 'metadata_extraction_failed' WHERE id IN (${ids[0]}::uuid, ${ids[1]}::uuid, ${ids[2]}::uuid)`;
+  await claims`UPDATE thoughts SET metadata = metadata - 'type' - 'metadata_extraction_failed' WHERE id IN (${ids[0]}::uuid, ${ids[1]}::uuid, ${ids[2]}::uuid, ${ids[3]}::uuid)`;
+  await claims`DELETE FROM derivations WHERE artifact_kind = 'metadata' AND artifact_id = ${ids[3]}::uuid`;
   // 070 (SMD-2313): the pending proposal set on a lineage pair — the newer
   // thought's derived_from naming the older, raw, as a page names its
   // evidence — is counted by the lineage check with its id, and the remedy is

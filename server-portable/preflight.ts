@@ -5211,7 +5211,11 @@ if (configFailed) {
          * nothing unfinished. With nothing unfinished, a backlog waiting for a
          * run is said beside "none unfinished": the lineage row counts its
          * kinds (review pass 1: an earlier pool hid it for good, and every
-         * pending row read as a run that stopped).
+         * pending row read as a run that stopped). Since PR 3b the recorded key
+         * is the tags' target recipe, and a row under another recipe is behind
+         * it: where this server tags captures under another key than the one
+         * recorded, a line says what follows (each capture behind it, or a
+         * plain run here refused, the switch the way forward).
          */
         try {
           const { RETAG_BACKLOG_SQL, RETAG_KEY_PREFIX, formatPassCounts, parseRetagKey, passUnfinished, retagKey } = await import("../db/config.mjs");
@@ -5247,7 +5251,7 @@ if (configFailed) {
               else if (r.status === "pending") c.pending = n;
               byKey.set(r.work_type, c);
             }
-            type RetagBacklog = { missing: number; marked: number; stale: number; fallback: number; unpooled: number; due: number };
+            type RetagBacklog = { missing: number; marked: number; stale: number; recipe: number; fallback: number; unpooled: number; due: number };
             const backlogOf = async (key: string) => ((await sql.unsafe(RETAG_BACKLOG_SQL, [key])) as RetagBacklog[])[0];
             // How a run reaches a key from this tree: under the key's own model, which the server's knob may name
             // otherwise. A key at another prompt version is not this tree's to run, its extractor writing its own: an
@@ -5305,12 +5309,29 @@ if (configFailed) {
             if (unfinished === 0) {
               const key = recorded ?? serverKey;
               const b = await backlogOf(key);
-              const behind = Number(b.missing) + Number(b.marked) + Number(b.stale) + Number(b.fallback);
+              const behind = Number(b.missing) + Number(b.marked) + Number(b.stale) + Number(b.recipe) + Number(b.fallback);
               const how = runUnder(key);
               const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? " (none has run here: ob1_config.retag_key is unset)" : ""}`;
               if (behind === 0) add("retag pass", "ok", "none unfinished");
               else if ("words" in how) add("retag pass", "ok", `${words} — ${how.words}`);
               else add("retag pass", "ok", `${words} — cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL re-tags them`);
+            }
+            // The server's captures against the target (PR 3b): a capture's tags carry this server's key, and a row under
+            // another recipe than the recorded key's is behind it. Another model at this tree's version may be meant (a
+            // fast model at capture, a stronger one re-tagging), so it is said, ok; another version is not this tree's
+            // to keep up — a plain run here is refused, or this tree is the older one.
+            if (recorded !== null && recorded !== serverKey) {
+              const rec = parseRetagKey(recorded);
+              const lead = `ob1_config.retag_key is ${recorded}, and this server tags captures under ${serverKey}`;
+              if (rec && rec.promptVersion === METADATA_PROMPT_VERSION) {
+                add("retag pass", "ok", `${lead}: each capture's tags stand behind the recorded key until db/retag.ts re-tags them with ${rec.model}, one model call each`);
+              } else if (rec && rec.promptVersion > METADATA_PROMPT_VERSION) {
+                add("retag pass", "warn", `${lead}: the recorded key's tag prompt is version ${rec.promptVersion}, newer than this tree's ${METADATA_PROMPT_VERSION}, so this server's captures stand behind it`,
+                    `Run this server from the tree that recorded ${recorded}; db/retag.ts from there re-tags what this one captured.`);
+              } else {
+                add("retag pass", "warn", `${lead}: ${rec ? `this tree's tag prompt is version ${METADATA_PROMPT_VERSION}, newer than the recorded key's ${rec.promptVersion}` : `${recorded} is not a key db/retag.ts makes`}, so a plain run here is refused, and each capture's tags stand behind the recorded key`,
+                    `Make ${serverKey} the target: cd db && bun retag.ts --url $DATABASE_URL --switch-key records it, and re-tags the corpus under it (a --dry-run first says how many).`);
+              }
             }
           }
         } catch (e) {

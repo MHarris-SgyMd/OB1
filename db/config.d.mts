@@ -249,8 +249,14 @@ export function parseRetagKey(key: string): { model: string; promptVersion: numb
 export const RETAG_TAGS_ROW_SQL: string;
 /** Whether thought `t`, beside its tags row `d`, is in the re-tag backlog: db/retag.ts's pool and preflight's count. */
 export const RETAG_DUE_SQL: string;
-/** The backlog by kind (missing, marked, stale, fallback) and against key $1's claim rows (unpooled, due): one row. */
+/** The backlog by kind (missing, marked, stale, recipe, fallback) and against key $1's claim rows (unpooled, due): one row. */
 export const RETAG_BACKLOG_SQL: string;
+/** ob1_config.retag_key, NULL where unset or blank: the tags' target recipe. */
+export const RETAG_RECORDED_KEY_SQL: string;
+/** The retag: key tags row `d`'s recipe makes; NULL where it names no model or prompt version. */
+export const RETAG_RECIPE_KEY_SQL: string;
+/** The tags rows made under a recipe other than key $1's: one row, `n`. */
+export const RETAG_RECIPE_BEHIND_SQL: string;
 /** `SELECT embedding_model AS model, count(*) AS c` over the rows with a vector, grouped (021). */
 export const CORPUS_BY_MODEL_SQL: string;
 /** Those rows read against one model: at it, unlabelled, and the other models with counts. */

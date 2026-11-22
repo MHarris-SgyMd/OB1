@@ -11,7 +11,7 @@
  *   bun db/retag.ts --url … --retry-failed         # failed rows back into the pool first
  *   bun db/retag.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config's
  *   await run({ url, dryRun: true })               # in-process: import { run } from "./retag.ts"
- *   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (per model call; OB1_LLM_TIMEOUT's, as the capture's, when absent)   --job <key> (the pool, a retag: key)
+ *   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (per model call; OB1_LLM_TIMEOUT's, as the capture's, when absent)   --job <key> (a retag: key; a writing run's must be its model's and prompt version's, so in practice --status and --dry-run)
  *   exits 0 clean · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
  *
  * ── What it re-tags ─────────────────────────────────────────────────────────
@@ -35,8 +35,13 @@
  *     tags), so it is pooled, and while the policy still refuses it the
  *     worker's own gate fails it naming the rule — once the policy changes,
  *     --retry-failed revisits it.
- * A tags row under another recipe at the current text is current here: a
- * new model or prompt version is a new pool and a --switch (SMD-2298 PR 3b).
+ *   - whose tags row was made under a recipe other than the recorded key's,
+ *     another model or prompt version (PR 3b; decided 2026-11-22: every run,
+ *     as re-embed's model is). The key is the tags' target: a run records its
+ *     own before it pools, so a first run, or a --switch-key to a new model
+ *     or prompt version, re-tags the corpus under it, and a switch cut short
+ *     finishes with a plain run. --status and --dry-run count what recording
+ *     a new key adds, before anything is recorded.
  *
  * Each claimed thought is read again first: one no longer in the backlog —
  * re-tagged meanwhile by another run, board-sync's re-tag of an issue or a
@@ -115,9 +120,8 @@
  * `succeeded` when it is locked: review pass 1); a failed one waits for
  * --retry-failed, and a claimed one is its holder's. Preflight's
  * `retag pass` row counts the pool and the backlog by the same predicate,
- * db/config.mjs's RETAG_DUE_SQL (PR 3a). Not here (SMD-2298's later PRs):
- * the --switch for a prompt version (PR 3b), and a sleep pass and --follow
- * on the shared follower (PR 4). recipes/thought-enrichment's
+ * db/config.mjs's RETAG_DUE_SQL (PR 3a). Not here (SMD-2298 PR 4): a
+ * sleep pass and --follow on the shared follower. recipes/thought-enrichment's
  * enrich-thoughts.mjs, which wrote its own tag set through the SQL shim, is
  * retired for this (decided 2026-11-15: "not a second re-tag path"; SMD-3318
  * PR 3b): its summary, importance and confidence fields are not the core's.
@@ -142,7 +146,7 @@ import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, lease
 import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
 import { claimWorker, recordFailedAndStop, releaseFinished, thoughtFault, type FaultHost, type ReleaseHost } from "./claim-loop.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
-import { parseRetagKey, RETAG_BACKLOG_SQL, RETAG_DUE_SQL, RETAG_TAGS_ROW_SQL, retagKey } from "./config.mjs";
+import { parseRetagKey, RETAG_BACKLOG_SQL, RETAG_DUE_SQL, RETAG_RECIPE_BEHIND_SQL, RETAG_TAGS_ROW_SQL, retagKey } from "./config.mjs";
 
 /** Every argument accounted for (db/cli.ts): an unknown flag, or one given twice, is refused before anything is read (SMD-2015). */
 const FLAGS = {
@@ -297,7 +301,7 @@ type Outcome =
   | { outcome: "abandoned" };
 
 type Counts = { pending: number; claimed: number; succeeded: number; failed: number };
-type Backlog = { missing: number; marked: number; stale: number; fallback: number; unpooled: number; due: number };
+type Backlog = { missing: number; marked: number; stale: number; recipe: number; fallback: number; unpooled: number; due: number };
 
 async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach: AbortSignal): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
@@ -316,6 +320,13 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   // --timeout bounds each call as OB1_LLM_TIMEOUT does the capture's (embed.ts's providerCall reads timeoutMs).
   const cfg = settled.timeout === null ? resolved : { ...resolved, timeoutMs: settled.timeout * 1000 };
   const JOB = opts.job ?? retagKey(cfg.metadataModel, METADATA_PROMPT_VERSION);
+  // The key is the tags' target recipe (PR 3b): a writing run under a key whose model or prompt version is not the one
+  // its tags carry would leave every row it wrote behind the key it records, and the next run would re-tag them again.
+  const writes = retagKey(cfg.metadataModel, METADATA_PROMPT_VERSION);
+  if (JOB !== writes && !READ_ONLY) {
+    err(`retag.ts: --job ${JOB} names a recipe this run does not write: its tags carry ${writes}'s (OB1_METADATA_MODEL and this tree's prompt version ${METADATA_PROMPT_VERSION}), so every row it wrote would stay behind ${JOB}. Set OB1_METADATA_MODEL to the model instead, and leave --job out.`);
+    return 2;
+  }
   out(`  job:    ${JOB}`);
   out(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}, ${cfg.timeoutMs / 1000} s per call, prompt version ${METADATA_PROMPT_VERSION}`);
   out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
@@ -391,14 +402,14 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   /** The backlog by kind — the first that applies, in the order the header lists them from the row's side — and what the pool step would do with it. */
   async function backlog(): Promise<Backlog> {
     const [b] = (await sql.unsafe(RETAG_BACKLOG_SQL, [JOB])) as Backlog[];
-    return { missing: Number(b.missing), marked: Number(b.marked), stale: Number(b.stale), fallback: Number(b.fallback), unpooled: Number(b.unpooled), due: Number(b.due) };
+    return { missing: Number(b.missing), marked: Number(b.marked), stale: Number(b.stale), recipe: Number(b.recipe), fallback: Number(b.fallback), unpooled: Number(b.unpooled), due: Number(b.due) };
   }
 
   const printCounts = (c: Counts, label: string): void =>
     out(`  ${label}: ${c.succeeded} re-tagged, ${c.failed} failed, ${c.claimed} in flight, ${c.pending} pending`);
   const printBacklog = (b: Backlog): void => {
-    const total = b.missing + b.marked + b.stale + b.fallback;
-    out(`  backlog: ${total} thought(s) — ${b.missing} tagged with no tags row (before 061), ${b.marked} with the row marked stale, ${b.stale} with the row at other text, ${b.fallback} whose capture fell back; ` +
+    const total = b.missing + b.marked + b.stale + b.recipe + b.fallback;
+    out(`  backlog: ${total} thought(s) — ${b.missing} tagged with no tags row (before 061), ${b.marked} with the row marked stale, ${b.stale} with the row at other text, ${b.recipe} with the row under another model or prompt version, ${b.fallback} whose capture fell back; ` +
       `${b.unpooled} not yet in the pool, ${b.due} re-tagged before and due again`);
   };
   async function printFailures(limit = 10): Promise<void> {
@@ -410,16 +421,20 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
 
   const [rec] = (await sql`SELECT value AS key FROM ob1_config WHERE key = ${RETAG_CONFIG_KEY}`) as { key: string }[];
   const recordedKey: string | undefined = rec?.key;
+  // What recording JOB adds to the backlog: the tags rows made under another recipe (PR 3b), counted before it is recorded.
+  const recipeBehind = recordedKey === JOB ? 0 : Number(((await sql.unsafe(RETAG_RECIPE_BEHIND_SQL, [JOB])) as { n: number }[])[0].n);
+  const recipeWords = `${recipeBehind} thought(s) carry tags made under another model or prompt version than ${JOB}`;
   if (recordedKey && recordedKey !== JOB) {
-    out(`  ob1_config.${RETAG_CONFIG_KEY} is ${recordedKey}; this run uses ${JOB} — a different model or prompt version`);
+    out(`  ob1_config.${RETAG_CONFIG_KEY} is ${recordedKey}; this run uses ${JOB} — a different model or prompt version; ${recipeWords}`);
     if (opts.switchKey !== true && !READ_ONLY) {
       err(`\n  Refusing to re-tag under a key other than the one ob1_config records without --switch-key.\n` +
         `  The thoughts this run touches would carry ${JOB}'s tags beside others' ${recordedKey}'s. If that is the intent,\n` +
-        `  pass --switch-key and run the whole backlog; if OB1_METADATA_MODEL is simply set differently in this shell, fix it instead.`);
+        `  pass --switch-key: it records ${JOB}, and the backlog — the ${recipeBehind} with them — is re-tagged under it;\n` +
+        `  if OB1_METADATA_MODEL is simply set differently in this shell, fix it instead.`);
       return 2;
     }
   } else if (!recordedKey) {
-    out(`  ob1_config.${RETAG_CONFIG_KEY} is not set: ${READ_ONLY ? "a run sets it" : "this run sets it"}`);
+    out(`  ob1_config.${RETAG_CONFIG_KEY} is not set: ${READ_ONLY ? "a run sets it" : "this run sets it"}; ${recipeWords}, which join the backlog`);
   }
 
   if (READ_ONLY) {
@@ -433,8 +448,9 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       await printFailures();
     }
     if (DRY_RUN) {
-      const todo = c.pending + b.unpooled + b.due + (opts.retryFailed ? c.failed : 0);
-      out(`\n  would: ${recordedKey === JOB ? "" : `record ${JOB} in ob1_config.${RETAG_CONFIG_KEY}; `}` +
+      // Recording a new key adds its recipe's rows, some of which the backlog above may already hold: an upper bound.
+      const todo = c.pending + b.unpooled + b.due + (opts.retryFailed ? c.failed : 0) + recipeBehind;
+      out(`\n  would: ${recordedKey === JOB ? "" : `record ${JOB} in ob1_config.${RETAG_CONFIG_KEY}, putting the ${recipeBehind} thought(s) whose tags another recipe made in the backlog; `}` +
         `${opts.retryFailed ? `return ${c.failed} failed row(s) to the pool; ` : ""}add ${b.unpooled} thought(s) to the pool and put ${b.due} back; ` +
         `send up to ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) to ${cfg.metadataModel} with ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`);
     }
