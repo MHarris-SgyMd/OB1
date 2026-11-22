@@ -5125,6 +5125,48 @@ part A is labelled.
 
 It holds texts and the read's answers, so it lives outside any repo. The fixture holds only ids and indexes.
 
+### Results, 2026-11-21: PASSES, every miss explained, no read bug
+
+**How it ran:**
+- **The registration:** pinned as `0275b08cf87e7bf1` after two pilots, with the maintainer settling the conventions between them.
+- **The salt:** the id of the SMD-3887 comment that announced the draw, `11826482-b198-4f0c-8ef3-2ec5d1864559`.
+- **The draw:** the canary held 4,143 thoughts (pointer 1,123, proposal 683, neither 2,337), and the read was taken in the same snapshot.
+- **The raters:** two blind agents labelled all 120 items (Opus 5.5 and Sonnet 5.5, 4 shards of 30 each), and the maintainer labelled 20 blind.
+
+| Axis | Read agrees | Weighted | Misses | Record gap | Rule divergence | Read bug | No claim |
+|---|---|---|---|---|---|---|---|
+| validity | 88 of 120 | 0.789 | 32 | 28 | 4 (row 2) | 0 | 2 |
+| review | 119 of 120 | 0.996 | 1 | 1 | 0 | 0 | 0 |
+| freshness | 105 of 120 | 0.882 | 15 | 14 | 1 (row 6) | 0 | 29 |
+
+**The raters:**
+- **κ between the agents:** validity 0.793, review 0.984, freshness 0.656.
+- **The maintainer's blind 20** matched the agents' agreed label on validity 17 of 20, review 18 of 20 and freshness 19 of 20. That clears the 0.8 bar on every axis, so the agents' labels are the gold.
+- **The agents' 19 splits** all fell outside the 20, and the maintainer decided each one: 10 validity, 8 freshness, 1 review.
+
+**Each miss was checked against the read's records,** and the unchallenged ones against the canary directly. The maintainer confirmed every cause.
+
+The record gaps:
+- **14 validity items read contested** from a pending judge proposal that the texts don't bear out. The proposals come from `@p4d1` (10), `@p4d3` (2) and `@p4d4` (2): evidence on SMD-3288. One more review miss is a proposal still pending though a later text answers it.
+- **13 validity items read unchallenged** where later work moved past a session summary's end state, and no pointer or proposal records it. Filed as SMD-4523.
+- **1 validity item reads superseded** from a pointer the texts don't bear out.
+- **14 freshness items read current** where the extractor named a subject the text never discusses: PostgreSQL 13 times, "tweak" once. Across the canary, 692 of the 1,234 thoughts tagged PostgreSQL never name it, 691 of them from `extract:qwen2.5:7b@p2`. Filed as SMD-4522.
+
+The rule divergences:
+- **Row 2:** 4 correct proposals, never reviewed, read contested until accepted.
+- **Row 6:** 1 edited text whose views still fit reads stale, because freshness is the fingerprint.
+
+**What it leaves untested:** `supported`, `checked` and `unchecked` occur nowhere on the canary, which has no citations and no deliverable events.
+
+**What the reader should know:**
+- **Blind by instruction only.** The agents were told to open nothing outside their own shard. I wrote the read and drew the sample, and I am not blind. The read's answers stayed sealed in the snapshot until the labels were frozen.
+- **Three rater slips, none changing a label anyone can see:**
+  - The Opus rater of items 61–90 wanted to relabel item 086's freshness as stale after writing it. The never-relabel rule blocked the rewrite, so the label stands as written. The agents then split on 086, and the maintainer decided it stale.
+  - The Sonnet rater of items 1–30 read its whole part B before writing it. Part B is about three lines an item.
+  - The Opus rater of items 31–60 read two part B pages together. Neither had a question.
+- **The maintainer's files were reshaped before the freeze, not relabelled.** They came tab-separated with short ids, and the splits as one truth a line. Each was converted to the reply format, and the conversion was refused if a short id did not match its item or a truth did not fit its axis.
+- **Who adjudicated:** I adjudicated each miss by its pattern, and the maintainer confirmed the causes.
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
