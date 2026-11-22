@@ -309,9 +309,10 @@ fetch_lists() {
   run=$(limit 15 gh api "repos/$GITHUB_REPOSITORY/actions/workflows/${WORKFLOW##*/}/runs?branch=$default&event=push&status=success&per_page=1" --jq '.workflow_runs[0].id' 2> /dev/null) || return 1
   id=${run%%[!0-9]*}
   if [ -z "$id" ] || [ "$id" != "$run" ]; then return 1; fi
-  arts=$(limit 15 gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | "\(.name) \(.id)"' 2> /dev/null) || return 1
+  arts=$(limit 15 gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$id/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | "\(.name) \(.id)"' 2> /dev/null) || return 1
   # A run whose failed jobs were run again can hold a name twice, the failed attempt's list and the
-  # passing one's: the newest, the highest id, is the one the run's success stands on.
+  # passing one's: the newest, the highest id, is the one the run's success stands on. Every page of
+  # them is read: a run run again whole holds its artifacts over, and a hundred is a page.
   for name in $MAP_LISTS; do
     ids="$ids $(awk -v want="reads-${name//./-}" '$1 == want && $2 ~ /^[0-9]+$/ && $2 + 0 > best { best = $2 + 0; id = $2 } END { if (id != "") print id }' <<< "$arts")"
   done
@@ -455,24 +456,24 @@ by_map() {
             opened[p] = 1; q = dirname(p); worked[q] = 1
             for (;;) { above[q] = 1; if (q == "") break; q = dirname(q) }
           }
-          if (r < 0) { print "its list could not be read"; done = 1; exit }
+          if (r < 0) { print "its list could not be read"; exit }
           n = split(looked, name, " "); for (i = 1; i <= n; i++) lookedfor[name[i]] = 1
         }
         {
           s = $1; p = substr($0, 3)
-          if (s != "A" && (p in opened)) { print "it read " p ", which differs"; done = 1; exit }
+          if (s != "A" && (p in opened)) { print "it read " p ", which differs"; exit }
           q = dirname(p)
           b = basename(p)
-          if (b == ".gitattributes" && (q in above)) { print p " sets how the files it read are checked out, and differs"; done = 1; exit }
+          if (b == ".gitattributes" && (q in above)) { print p " sets how the files it read are checked out, and differs"; exit }
           if (s == "M") next
-          if (((b in lookedfor) || b ~ /^\.env(\..*)?$/) && (q in above)) { print p " is looked for above files it read"; done = 1; exit }
+          if (((b in lookedfor) || b ~ /^\.env(\..*)?$/) && (q in above)) { print p " is looked for above files it read"; exit }
           for (stem = b; match(stem, /\.[^.]*$/); ) {
             stem = substr(stem, 1, RSTART - 1)
-            if (stem != "" && (((q == "" ? "" : q "/") stem) in above)) { print p " came or went beside " shown((q == "" ? "" : q "/") stem) ", a folder it read through"; done = 1; exit }
+            if (stem != "" && (((q == "" ? "" : q "/") stem) in above)) { print p " came or went beside " shown((q == "" ? "" : q "/") stem) ", a folder it read through"; exit }
           }
           for (;;) {
-            if (q in listed) { print "it listed " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
-            if (q in worked) { print "it read files in " shown(q) ", where " p " came, went or changed mode"; done = 1; exit }
+            if (q in listed) { print "it listed " shown(q) ", where " p " came, went or changed mode"; exit }
+            if (q in worked) { print "it read files in " shown(q) ", where " p " came, went or changed mode"; exit }
             if (q == "" || (s == "A" ? (q in xdirs) : (q in hdirs))) break
             q = dirname(q)
           }

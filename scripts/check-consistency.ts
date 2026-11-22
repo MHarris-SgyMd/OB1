@@ -12143,11 +12143,12 @@ function containerProblem(line: string): string | null {
   // Each word as written less its leading quotes, where a flag shows, and bare, where a runtime's name does: what follows the last `$(`, `(`, backtick, quote or `=` in it.
   const raw = line.trim().split(/\s+/).map((w) => w.replace(/^["']+/, "").replace(/["']+$/, ""));
   const words = raw.map((w) => w.replace(/[`);]+$/, "").replace(/^.*(?:\$\(|["'`(=])/, ""));
-  const mounts = (from: number) => raw.slice(from).some((x) => /^-[a-zA-Z]*v/.test(x) || /^--(?:volume|mount|volumes-from)(?:=|$)/.test(x));
+  // A mount flag at a word's start or inside it, after what is no part of another flag (`${SEED:+-v`).
+  const mounts = (from: number) => raw.slice(from).some((x) => /(?:^|[^\w-])-[a-zA-Z]*v/.test(x) || /(?:^|[^\w-])--(?:volume|mount|volumes-from)(?:[^\w-]|$)/.test(x));
   for (let at = 0; at < words.length; at++) {
     const w = words[at], next = words[at + 1] ?? "";
     if (/^(?:\S*\/)?(?:nerdctl|buildah)$/.test(w)) return `\`${w}\`, a container runtime check 56 does not read`;
-    if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(w)) {
+    if (/^\$\{?[A-Za-z_]/.test(w)) {
       if (/DOCKER|PODMAN|COMPOSE|NERDCTL/i.test(w)) return `${w}, a container runtime named through a variable, which check 56 cannot read`;
       if (["compose", "build", "buildx"].includes(next) || (["run", "create"].includes(next) && mounts(at + 2))) return `\`${w} ${next}\`, a container runtime named through a variable`;
       continue;
@@ -12179,12 +12180,27 @@ const MAP_PUSH_ALONE_IFS = [READS_KEEP_IF, "${{ !cancelled() && github.event_nam
 /** The `github` names an expression reads that MAP_NEUTRAL_CONTEXTS lacks; `github` alone and `github[` among them. */
 function eventNames(expression: string): string[] {
   // Less its string literals: `hashFiles('.github/ci/x')` names a path, not the context. In any case: GitHub
-  // reads `GitHub.Event_Name` as it reads `github.event_name`. With `github`, a secret (a pull request from another
-  // repository is given none) and what a needed job said (the changes job's answer is empty on a push).
+  // reads `GitHub.Event_Name` as it reads `github.event_name`. With `github`, a secret or a variable of the
+  // repository's (a pull request from another repository is given neither) and what a needed job said (the changes
+  // job's answer is empty on a push).
   const bare = expression.replace(/'(?:[^']|'')*'/g, "''");
-  return [...bare.matchAll(/\b(github|secrets|needs)\b((?:\s*\.\s*[A-Za-z_][\w-]*)*)(\s*\[)?/gi)]
+  return [...bare.matchAll(/\b(github|secrets|vars|needs)\b((?:\s*\.\s*[A-Za-z_][\w-]*)*)(\s*\[)?/gi)]
     .map((m) => `${m[1].toLowerCase()}${m[2].replace(/\s+/g, "").toLowerCase()}${m[3] ? "[" : ""}`)
     .filter((name) => !MAP_NEUTRAL_CONTEXTS.has(name));
+}
+/** Each `${{ … }}` in a string, less its braces: up to the `}}` that ends it, which is not one inside a string literal (`format('{{"a":"{0}"}}', …)`). */
+function expressionsIn(text: string): string[] {
+  const found: string[] = [];
+  for (let at = text.indexOf("${{"); at !== -1; ) {
+    let end = at + 3, quoted = false;
+    for (; end < text.length; end++) {
+      if (text[end] === "'") quoted = !quoted;
+      else if (!quoted && text.startsWith("}}", end)) break;
+    }
+    found.push(text.slice(at + 3, end));
+    at = text.indexOf("${{", end);
+  }
+  return found;
 }
 /** Every string under a value, with the key it stands under. */
 function stringsUnder(v: unknown, key = ""): [string, string][] {
@@ -12197,7 +12213,7 @@ function stringsUnder(v: unknown, key = ""): [string, string][] {
 function eventReads(v: unknown, key = ""): string[] {
   return [...new Set(stringsUnder(v, key).flatMap(([k, text]) => {
     if (k === "if") return MAP_PUSH_ALONE_IFS.includes(text.trim()) ? [] : eventNames(text);
-    const inExpressions = [...text.matchAll(/\$\{\{([\s\S]*?)\}\}/g)].flatMap((m) => eventNames(m[1]));
+    const inExpressions = expressionsIn(text).flatMap(eventNames);
     // A variable wherever it stands, a command or an action's input.
     const variables = [...text.matchAll(/\bGITHUB_[A-Z_]+/g)].map((m) => m[0]).filter((name) => !MAP_NEUTRAL_VARIABLES.has(name));
     return [...inExpressions, ...variables];
@@ -12259,7 +12275,7 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
       const reads = eventReads(step);
       if (reads.length) problems.push(`job ${key}, which MAP_LISTS names, has step ${i + 1}${typeof step.name === "string" ? ` (${JSON.stringify(step.name)})` : ""} read the event that started the run (${reads.join(", ")}) — ${EVENT_WHY} (check 56, SMD-2435)`);
       const lines = typeof run === "string" ? run.replace(/\s*\\\n\s*/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)) : [];
-      const byGit = lines.find((l) => [...l.matchAll(/(?:^|[\s;|&(`"'=])git((?:\s+-[cC]\s+\S+)*)\s+([A-Za-z-]+)/g)].some((m) => !MAP_GIT_MAY.has(m[2])));
+      const byGit = lines.find((l) => [...l.matchAll(/(?:^|[\s;|&(`"'=])(?:[\w.\/-]*\/)?git["')]*((?:\s+-[cC]\s+\S+)*)\s+([A-Za-z-]+)/g)].some((m) => !MAP_GIT_MAY.has(m[2])));
       if (byGit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${byGit.trim().slice(0, 80)}\` in step ${i + 1} — git names the tracked files from its index and reads their bytes from its own store, listing no folder and opening no file, so the job's list would say less than it read; a mapped job asks git only to ${[...MAP_GIT_MAY].join(", ")} (check 56, SMD-2435)`);
       const hit = lines.map((l) => [l, containerProblem(l)] as const).find(([, why]) => why !== null);
       if (hit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${hit[0].trim().slice(0, 80)}\` in step ${i + 1}: ${hit[1]} — a container reads the checkout where no access time moves, so the job's list would say less than it read; write it one of the ways check 56 can read, or take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
@@ -12349,6 +12365,12 @@ function checkMapLists() {
     ["git asked which commit this is", ["a", "m.x", "m.y"], wf(job("a", step("echo \"at $(git rev-parse --short HEAD)\"")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a secret, which a pull request from elsewhere lacks", ["a", "m.x", "m.y"], wf(job("a", "      - run: bun x.ts\n        env:\n          KEY: ${{ secrets.SOME_KEY }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (secrets.some_key)"]],
     ["a cell with a dot in its name", ["a", "m.16.4", "m.17.2"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        pg: [\"16.4\", \"17.2\"]\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["whose matrix has the cells 16.4, 17.2"]],
+    ["the event read after braces in a string", ["a", "m.x", "m.y"], wf(job("a", "      - run: bun x.ts\n        env:\n          P: ${{ format('{{\"ev\":\"{0}\"}}', github.event_name) }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (github.event_name)"]],
+    ["a variable of the repository's", ["a", "m.x", "m.y"], wf(job("a", "      - run: bun x.ts\n        env:\n          TARGET: ${{ vars.TARGET }}\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["has step 1 read the event that started the run (vars.target)"]],
+    ["git reached by its path", ["a", "m.x", "m.y"], wf(job("a", step("/usr/bin/git grep -n supabase -- '*.ts'")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `/usr/bin/git grep"]],
+    ["git in quotes", ["a", "m.x", "m.y"], wf(job("a", "      - run: |\n          \"git\" ls-files\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["job a, which MAP_LISTS names, runs `\"git\" ls-files`"]],
+    ["a runtime in a variable with a default", ["a", "m.x", "m.y"], wf(job("a", "      - run: |\n          \"${RUNTIME:-docker}\" compose up -d\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": ${RUNTIME:-docker}, a container runtime named through a variable"]],
+    ["a mount inside an expansion", ["a", "m.x", "m.y"], wf(job("a", step("docker run -d ${SEED:+-v \"$SEED:/seed:ro\"} image")), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, [": a container given a path"]],
     ["a step run on a push alone", ["a", "m.x", "m.y"], wf(job("a", "      - if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n        run: bun keep.ts\n"), job("m", PG, MATRIX), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a matrix of one value, named whole, as its list step names its list with no cell", ["a", "m"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x]\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, []],
     ["a matrix with a cell added by include", ["a", "m.x", "m.y"], wf(job("a", step("true")), job("m", PG, "    strategy:\n      matrix:\n        shard: [x, y]\n        include:\n          - shard: z\n"), job("s", step("true"))), ["a", "m", "s"], ALWAYS, ["it sets include, which add and take cells no axis lists"]],
