@@ -68,6 +68,24 @@ const FIXTURE = join(HERE, "fixtures", "claim-validity.json");
  */
 export const REGISTERED: string | null = "0275b08cf87e7bf1";
 
+/**
+ * The rows of docs/claim-validity.md the read follows (migration 149: rows 1 to 7 and 9 to 11). A rule divergence can
+ * only be "the read follows an accepted row" for one of these. The registered verdict takes any row from 1 to 13, and
+ * the runner holds the stricter rule outside the hash, which this run meets (rows 2 and 6) (review pass 6, the
+ * maintainer's "fix the findings").
+ */
+export const READ_ROWS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 9, 10, 11];
+
+/**
+ * The maintainer's check, failing an axis it measured on no item as well as one under the bar. The registered check
+ * passes an axis with no agent-agreed item in the subset, so the agents would be the gold there on no evidence. The
+ * runner holds the stricter rule outside the hash, which this run meets (20 items on every axis).
+ */
+export function checkWithEvidence(items: readonly { a: Labels; b: Labels; m: Labels | null }[]): ReturnType<typeof maintainerCheck> {
+  const c = maintainerCheck(items);
+  return { ...c, agentsAreGold: c.agentsAreGold && AXES.every((x) => c[x].n > 0) };
+}
+
 /** The UUID shape the salt (the announcing comment's id) and every thought id take. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -356,7 +374,7 @@ export function fromFixture(f: Fixture): { items: FrozenItem[]; adjudicated: Map
  * not the gold.
  */
 export function goldFor(items: readonly FrozenItem[], subset: ReadonlySet<string>): { scored: Scored[]; agentsAreGold: boolean; check: ReturnType<typeof maintainerCheck>; splits: number; unlabelled: number } {
-  const check = maintainerCheck(items.filter((i) => subset.has(i.id)).map((i) => ({ a: i.a1, b: i.a2, m: i.m })));
+  const check = checkWithEvidence(items.filter((i) => subset.has(i.id)).map((i) => ({ a: i.a1, b: i.a2, m: i.m })));
   let splits = 0, unlabelled = 0;
   const scored = items.map((i): Scored => {
     // The maintainer's label per axis: the blind one where the subset holds it, else the splits file's (review pass 4).
@@ -385,6 +403,12 @@ export function reportLines(f: Fixture, current: string = registrationHash(), pi
   // The registered score counts a read that makes no single claim (unresolved, legacy) as agreeing; this is the same
   // score over the reads that commit to a state alone (review pass 1). It moves no verdict: a no-claim read is no miss.
   const committed = (x: Axis) => score(scored.map((i) => (noClaim(x, i.read[x]) ? { ...i, gold: { ...i.gold, [x]: null } } : i)), f.population)[x];
+  // A stratum with nothing scored drops out of the registered weighting, which then covers the rest alone: say which
+  // strata a weighted figure covers when one is missing (review pass 6). Nothing in this run.
+  const covers = (x: Axis, commitOnly: boolean) => {
+    const has = STRATA.filter((st) => scored.some((i) => i.stratum === st && i.gold[x] !== null && i.gold[x] !== "unclear" && !(commitOnly && noClaim(x, i.read[x]))));
+    return has.length === STRATA.length ? "" : `, over ${has.join(" and ") || "no stratum"} only`;
+  };
   const v = verdict(s, adjudicated, { splits, unlabelled });
   const k = (x: Axis) => {
     const both = items.filter((i) => i.a1[x] !== null && i.a2[x] !== null);
@@ -403,7 +427,7 @@ export function reportLines(f: Fixture, current: string = registrationHash(), pi
   const pop = STRATA.map((st) => `${st} ${f.population[st]}`).join(", ");
   return [
     `population ${STRATA.reduce((a, st) => a + f.population[st], 0)} (${pop}); sample ${items.length}; salt ${f.salt}`,
-    ...AXES.map((x) => `${x.padEnd(9)} agrees on ${s[x].agree} of ${s[x].scored} scored (weighted ${f3(s[x].weighted)}); ${s[x].misses.length} misses: ${causes(x)}; unclear ${s[x].unclear}; no claim ${s[x].noClaim}\n${" ".repeat(10)}on the reads that commit to a state: ${committed(x).agree} of ${committed(x).scored} (weighted ${f3(committed(x).weighted)})`),
+    ...AXES.map((x) => `${x.padEnd(9)} agrees on ${s[x].agree} of ${s[x].scored} scored (weighted ${f3(s[x].weighted)}${covers(x, false)}); ${s[x].misses.length} misses: ${causes(x)}; unclear ${s[x].unclear}; no claim ${s[x].noClaim}\n${" ".repeat(10)}on the reads that commit to a state: ${committed(x).agree} of ${committed(x).scored} (weighted ${f3(committed(x).weighted)}${covers(x, true)})`),
     `κ between the agents: ${AXES.map((x) => `${x} ${f3(k(x))}`).join(", ")}`,
     `the maintainer's check (subset ${f.subset.length}, bar ${MAINTAINER_AGREEMENT_MIN}): ${AXES.map((x) => `${x} ${check[x].hit} of ${check[x].n}`).join(", ")}: ${agentsAreGold ? "the agents are the gold" : "the maintainer's labels are the gold"}`,
     !atPin
@@ -575,7 +599,7 @@ export function openSplits(ids: readonly string[], a1: Map<string, Labels>, a2: 
  * for every axis of every item outside the subset, since the maintainer's labels are then the gold (review pass 5).
  */
 export function splitsTemplate(ids: readonly string[], subset: readonly string[], a1: Map<string, Labels>, a2: Map<string, Labels>, m: Map<string, Labels>): { lines: string[]; fallback: boolean } {
-  const fallback = !maintainerCheck(subset.map((id) => ({ a: a1.get(id)!, b: a2.get(id)!, m: m.get(id)! }))).agentsAreGold;
+  const fallback = !checkWithEvidence(subset.map((id) => ({ a: a1.get(id)!, b: a2.get(id)!, m: m.get(id)! }))).agentsAreGold;
   const sub = new Set(subset);
   const cells = fallback
     ? ids.filter((id) => !sub.has(id)).flatMap((id) => AXES.map((axis) => ({ id, axis })))
@@ -610,7 +634,7 @@ function freeze(path: string, salt: string, files: string[], splitsPath: string 
   const s = splitsPath ? parseSplits(readFileSync(outsideRepo(splitsPath, "the splits file"), "utf8"), ids) : { labels: new Map<string, Partial<Labels>>(), problems: [] };
   // While the agents are the gold, the splits file decides open splits alone. When the check makes the maintainer's
   // labels the gold, it carries them for every item outside the subset.
-  const agentsAreGold = maintainerCheck(d.subset.map((id) => ({ a: a1.labels.get(id)!, b: a2.labels.get(id)!, m: m.labels.get(id)! }))).agentsAreGold;
+  const agentsAreGold = checkWithEvidence(d.subset.map((id) => ({ a: a1.labels.get(id)!, b: a2.labels.get(id)!, m: m.labels.get(id)! }))).agentsAreGold;
   if (agentsAreGold) s.problems.push(...strayDecisions(s.labels, openSplits(ids, a1.labels, a2.labels, m.labels)));
   else s.problems.push(...[...s.labels.keys()].filter((id) => d.subset.includes(id)).map((id) => `${id.slice(0, 8)}: a subset item, which the blind labels decide`));
   if (s.problems.length) throw new Error(`${splitsPath}:\n  ${s.problems.join("\n  ")}`);
@@ -681,6 +705,7 @@ export function applyAdjudications(f: Fixture, per: ReadonlyMap<string, Partial<
     if (!(id in f.items)) { problems.push(`${id.slice(0, 8)} is not an item`); continue; }
     for (const [x, a] of Object.entries(axes) as [Axis, Adjudication][]) {
       if (!s[x].misses.includes(id)) { problems.push(`${id.slice(0, 8)} ${x}: not a miss`); continue; }
+      if (a.cause === "rule" && !READ_ROWS.includes(a.row ?? 0)) { problems.push(`${id.slice(0, 8)} ${x}: rule row ${a.row} is not one the read follows (${READ_ROWS.join(", ")})`); continue; }
       const had = out.adjudication[id]?.[x];
       if (had && !replace && had.join() !== adjTo(a).join()) { problems.push(`${id.slice(0, 8)} ${x}: adjudicated already, as ${adjFrom(had)?.cause ?? "?"} (give --replace to change a confirmed cause)`); continue; }
       out.adjudication[id] = { ...out.adjudication[id], [x]: adjTo(a) };
@@ -846,6 +871,9 @@ function selfCheck(): void {
   const ten = (hit: number) => Array.from({ length: 10 }, (_, i) => ({ a: L("holds", "none", "current"), b: L("holds", "none", "current"), m: L(i < hit ? "holds" : "superseded", "none", "current") }));
   assert(maintainerCheck(ten(8)).agentsAreGold && maintainerCheck(ten(8)).validity.share === 0.8, "8 of 10 is at the bar: the agents are the gold");
   assert(!maintainerCheck(ten(7)).agentsAreGold, "7 of 10 is under it: the maintainer's labels are the gold");
+  const splitAll = ten(10).map((i) => ({ ...i, b: { ...i.b, freshness: "stale" } }));
+  assert(maintainerCheck(splitAll).agentsAreGold && splitAll.length === 10 && maintainerCheck(splitAll).freshness.n === 0 && !checkWithEvidence(splitAll).agentsAreGold && checkWithEvidence(ten(8)).agentsAreGold,
+    "an axis the check measured on no item fails it in the runner, though the registered check passes it (review pass 6)");
   assert(maintainerCheck([{ a: L("holds", "none", "current"), b: L("superseded", "none", "current"), m: L("holds", "none", "current") }]).validity.n === 0, "the check counts only the items the agents agree on");
 
   // The score and the verdict, at their edges.
@@ -953,6 +981,13 @@ function selfCheck(): void {
   assert(again.problems.some((p) => /adjudicated already, as rule/.test(p)) && again.fixture.adjudication[id(2)].validity!.join() === adjTo({ cause: "rule", row: 2 }).join(), "a confirmed cause is not replaced without --replace (review pass 4)");
   assert(applyAdjudications(fx, new Map([[id(2), { validity: { cause: "record" } as Adjudication }]]), true).fixture.adjudication[id(2)].validity!.join() === adjTo({ cause: "record" }).join()
     && applyAdjudications(fx, new Map([[id(2), { validity: { cause: "rule", row: 2 } as Adjudication }]])).problems.length === 0, "with --replace it is, and the same cause again is no change");
+  const rows = (row: number) => applyAdjudications(fx, new Map([[id(2), { validity: { cause: "rule", row } as Adjudication }]]), true).problems;
+  assert([8, 12, 13].every((r) => rows(r).some((p) => /not one the read follows/.test(p))) && [1, 6, 11].every((r) => rows(r).length === 0), "a rule divergence may name only a row the read follows (review pass 6)");
+  const noProposal = structuredClone(fx);
+  for (const k of [id(5), id(6)]) { noProposal.items[k].a1[0] = 3; noProposal.items[k].a2[0] = 3; }
+  const covered = reportLines(noProposal, registrationHash(), registrationHash());
+  assert(covered.some((l) => l.startsWith("validity") && l.includes("(weighted 0.944, over pointer and neither only)")) && !covered.some((l) => l.startsWith("review") && l.includes("only)")),
+    "a weighted figure that lost a stratum says which strata it covers (review pass 6)");
   assert(list([{ task: "x", owner: "y" }]) === '{"task":"x","owner":"y"}' && list({ kind: "note" }) === '{"kind":"note"}' && list(["a", 2]) === "a; 2", "a view's object is shown as JSON, never [object Object] (review pass 4)");
   assert(/no population line/.test(emptySnapshot(0, 5).join()) && /no item/.test(emptySnapshot(4000, 0).join()) && emptySnapshot(4000, 120).length === 0, "a snapshot with no population, or a draw of nothing, is refused (review pass 3)");
 
