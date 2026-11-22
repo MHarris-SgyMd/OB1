@@ -2611,6 +2611,23 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const verPipedFresh = await runHook({ session_id: "s-version-fresh" }, { OB1_SESSION_CAPTURE_STATE: freshState }, ["--version"]);
   assert(verNull.code === 0 && verNull.out === `${VERSION_LINE}\n` && !nullMadeState && verPipedFresh.code === 0 && existsSync(join(freshState, "log")),
     `--version on /dev/null with no state dir makes none; piped, the log is written (SMD-4378 review pass 2) (${nullMadeState})`);
+  // A copy of the hook under another name, its lib/ beside it (SMD-4338): the file names itself, so its guard runs main
+  // and the hooks it prints name the copy, as its children do, re-running SELF (review pass 1: lib/ derived the entry as `session-capture.mjs`,
+  // and such a copy ran nothing, exit 0, saying nothing).
+  const renamedDir = join(TMP, "renamed-copy"), renamed = join(renamedDir, "ob1-capture.mjs");
+  mkdirSync(join(renamedDir, "lib"), { recursive: true });
+  writeFileSync(renamed, readFileSync(SCRIPT));
+  for (const f of readdirSync(join(HERE, "lib"))) writeFileSync(join(renamedDir, "lib", f), readFileSync(join(HERE, "lib", f)));
+  const runCopy = (args) => new Promise((resolve) => {
+    const child = spawn(process.execPath, [renamed, ...args], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { err += d; });
+    child.on("close", (code) => resolve({ code, out, err }));
+  });
+  const copyVer = await runCopy(["--version"]), copyHook = await runCopy(["--print-hook", "claude-code", "--claims"]);
+  assert(copyVer.code === 0 && copyVer.out === `${VERSION_LINE}\n` && copyHook.code === 0 && copyHook.out.includes(realpathSync(renamed)) && !copyHook.out.includes(SCRIPT),
+    `a renamed copy with its lib/ runs, and the hook it prints re-runs the copy, not the checkout (SMD-4338 review pass 1) (${copyVer.code} ${JSON.stringify(copyVer.out)} ${copyHook.code})`);
   assert([ver, verPiped, verWith].every((r) => r.code === 0 && r.out === `${VERSION_LINE}\n` && !r.err) && received.length === sentBefore,
     `--version prints "session-capture <version>" and exits 0, stdin piped or not, captures nothing, and is first: beside --check, a bad --harness, a misspelt mode and no config (SMD-4378) (${JSON.stringify([ver, verPiped, verWith].map((r) => [r.code, r.out, r.err.slice(0, 60)]))})`);
   assert(ok.out.split("\n")[0] === VERSION_LINE && noCfgTypo.out.split("\n")[0] === VERSION_LINE,

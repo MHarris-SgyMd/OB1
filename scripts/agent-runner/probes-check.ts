@@ -386,6 +386,9 @@ if (scenario === "turn-first") {
     appendFileSync(record + "/guard-worker.log", JSON.stringify({ id: "t1", decision: "pass" }) + "\\n");
     out(res);
     out({ type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0.01, permission_denials: [] });
+  } else if (scenario === "api-error") {
+    // The result measured on 2.1.329 when the API answered 401 to the session's key (SMD-4490).
+    out({ type: "result", subtype: "success", is_error: true, num_turns: 1, total_cost_usd: 0, permission_denials: [], terminal_reason: "api_error", api_error_status: 401, result: "Invalid API key" });
   } else if (scenario === "unlogged") {
     out(use);
     out(res);
@@ -451,6 +454,11 @@ if (scenario === "turn-first") {
         const resultFirst = await runSession(spec(), deps);
         await ok(() => resultFirst.ended === "init" && resultFirst.why.includes("before its init event") && resultFirst.why.includes("sandbox_required_unavailable") && resultFirst.why.includes("failed validation"), "a result before the init is a session that never started: it ends as init, with the startup failure's reason and first error");
         await ok(() => resultFirst.report === "" && resultFirst.calls.length === 0 && resultFirst.results.length === 0, "and its text is not taken as a report");
+        // An API error ends the session with a result after a normal init (SMD-4490). session.ts keeps what run.ts reads to tell it from a session that finished.
+        scenario("api-error");
+        clean();
+        const apiError = await runSession(spec(), deps);
+        await ok(() => apiError.ended === "result" && apiError.result?.subtype === "success" && apiError.result?.isError === true && apiError.result?.terminalReason === "api_error" && apiError.result?.apiErrorStatus === 401, "a result that is an API error keeps its error flag, its terminal reason and the API's status");
         scenario("unlogged");
         clean();
         const unlogged = await runSession(spec(), deps);

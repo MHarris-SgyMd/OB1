@@ -1935,7 +1935,9 @@ runs out; a kill) leaves the count before it as its series' last. Prometheus
 goes on reading that for its lookback, five minutes unless set otherwise, and a
 sum over servers is too high for as long (measured on the image: three streams
 open at a kill were still counted beside the next server's one 286 s on, and no
-longer at 302 s).
+longer at 302 s). The observability profile's dashboard shows that sum, as
+**Listen streams open** in its Requests row (below), and the panel's
+description says the same.
 
 On its keyed `/health`, as `listen`, read as the route answers: `open`, the two
 bounds (`max` for the server and `perCaller` for one caller) and `callers`, one
@@ -2141,7 +2143,10 @@ What it holds, from the servers (the workers send nothing, SMD-2910):
   a classic histogram (`_bucket`, `_count`, `_sum`), each label the attribute
   underscored (`ob1_tool`, `gen_ai_request_model`, `error_type`); `job` is the
   service's name, `instance` its `service.instance.id`, new at each start, and
-  a pipeline tier's `deployment_environment_name` its tier.
+  a pipeline tier's `deployment_environment_name` its tier. Two more are single
+  series with no label of their own: `process_uptime_seconds`, which every
+  server sends from its start, and `ob1_mcp_listen_streams`, which a server
+  sends only where it holds listen streams (none does yet; SMD-4458).
 - **Log records** in Loki: each request's, its body the line's fields, under
   `service_name`.
 - **The database's own numbers** in Prometheus under `job` `postgres`, from
@@ -2215,8 +2220,13 @@ panel saying what it counts:
 - **Requests**, every server: per second by door and the tool each ran (an
   MCP tool call's, a REST route's operation, a mirror's; a keyed `/health` is
   `brain_info`'s), latency p50 and p99 by tool, by outcome, the share the
-  server failed (`error`, `stalled`, `cut`; a refusal is the caller's), and
-  those failures by fault code or outcome.
+  server failed (`error`, `stalled`, `cut`; a refusal is the caller's),
+  those failures by fault code or outcome, and the listen streams the MCP
+  server holds open (`ob1_mcp_listen_streams`, summed over the servers picked;
+  SMD-4458). That last panel reads 0 where no server picked sends the count
+  (none does until SMD-4347's last PR, and the REST core never will) and no
+  data where none sends metrics at all. What the count is, and when a sum of
+  it is too high or too low, is under "Traces, metrics and log records" above.
 - **Model provider**: calls per second by model, latency p50 and p99 by
   operation, and failures by status or kind.
 - **Store**: operations per second and p99 by the store's method, and its
@@ -2802,12 +2812,32 @@ until its pool drains, or for `OB1_SLEEP_REEMBED_SHARE` seconds while
 extraction or consolidation has work (unset, 120; SMD-4384), the two then
 taking turns in the period as long each — then
 extraction, and
-consolidation beside it once extraction's pool is drained, so the backlog
-order above is built in. Beside consolidation runs the subject sweep
+consolidation beside it once the thoughts captured before the period began are
+extracted, so the backlog order above is built in: a thought captured since is
+judged against neighbours captured on an earlier UTC date, and every one of
+them not yet extracted is in that backlog, except across 00:00 UTC. Writes
+that pause nothing (an `ingested` key's, board-sync's among them) no longer
+keep consolidation out of a period for as long as they come, as they did while
+it waited for extraction's whole pool to drain (SMD-4468). Board-sync's
+observation of the day, dated 00:00 UTC, and a ticket it re-renders (which
+keeps its entities until it is extracted again) hold nothing back. A ticket
+created on an earlier day that it first writes during the period is backlog
+until extracted, as it should be — if it lands before consolidation joins; one
+landing after is judged without a wait, and a thought judged before it misses
+its pair with it. A backlog thought a pause has taken goes behind the newer
+writes, and the join waits until extraction reaches it, which, while writes
+outpace extraction, comes only once they slow, as before. A thought whose
+entities are only an older extraction key's, after a model's switch, holds the
+join too, until extraction re-extracts it. Consolidation's judge calls now run
+while such writes arrive: on a model server of one slot they share it with
+extraction. Under a steady inflow the period can run on until the writes stop.
+Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
-model's: started once a period, its claims bounded by the period's start plus
-30 days, so a thought it sets back waits for a later period. On a brain with
+model's: started once a period, once extraction's whole pool has drained or
+been joined past (not the backlog consolidation joins on, SMD-4468), its
+claims bounded by the period's start plus 30 days, so a thought it sets back
+waits for a later period. On a brain with
 no pool named, the first period names one and pools every thought with no
 current subject, the rules keying what they can and the judge model asked the
 rest, one call at a time — a median of 71 s for the 27B with its reasoning
@@ -2905,8 +2935,11 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 The log says `working:` when a period begins, `extraction drained — consolidating
-beside it`, `paused:` with the live call that paused it and `resumed:` once
-the capture has passed, and `the pools drained — the period ends`; `share:`
+beside it` (or `extraction has done the thoughts captured before the period
+began — consolidating beside it while it extracts the writes since` while
+newer writes keep coming, SMD-4468), `paused:` with the live call that paused
+it and `resumed:` once the capture has passed, and
+`the pools drained — the period ends`; `share:`
 at its start names the turns, `re-embed has had its share — 120 s alone — N
 thought(s) left for its next turn …` when re-embed gives way to extraction,
 and `the claim passes have had their turn — 120 s — with N thought(s) waiting
@@ -2919,7 +2952,13 @@ at its start names the session settings in force, and a statement past its
 timeout says `<pass>: a statement passed the pass's statement_timeout (300 s)`
 and `<pass> held until a restart`. Each period begins with the re-derive
 sweep, which says `re-derive: N orphaned lineage row(s) swept` when it deletes
-any.
+any. A period that says `working:` and no consolidating line while writes keep
+arriving still has backlog to extract: a thought captured before the period
+began that extraction has not reached, such as one a pause took, behind the
+newer writes. `extract-entities.ts --status` counts extraction's whole pool,
+not that backlog: while writes arrive faster than extraction takes them it
+grows, and the join waits until they slow (the limit above). `sleep.ts
+--dry-run` names a thought held back across stops.
 The settings go out as startup parameters, which a transaction pooler
 (PgBouncer, a managed host's pooled endpoint) refuses: the scheduler connects to
 Postgres directly, as the stack's own does. `extract-entities.ts

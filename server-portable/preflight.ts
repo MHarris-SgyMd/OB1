@@ -489,7 +489,7 @@ const FORGOTTEN_TIMEOUT_MS = 10_000;
 const DIRECT_CHECKS = [
   "vector extension",
   "atomic capture", "write privileges", "fingerprint backfill", "audit trail", "audit events", "lineage", "agent identity",
-  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
+  "keyword search", "hybrid search", "stats summary", "provenance", "worker claims", "ticket claims", "priority", "open items", "deliverables", "validity", "forget definer", "forgotten", "search signatures", "edit signature", "delete signature", "transaction isolation", "filtered search", "vector index memory", "filter bitmap memory",
   "candidate scan", "walk index", "chunk context", "trigram index", "thought indexes", "embedding contract", "vector models",
   "updated_at trigger", "re-embed pass", "consolidate pass", "proposals", "priority findings", "threads", "migration ledger", "plugin tables", "schema version", "query log", "tier", "workers", "sleep", "tasks", "slot relay",
 ];
@@ -614,10 +614,24 @@ const APPLY_060 = "Apply db/migrations/060_append_then_project.sql.";
 const APPLY_061 = "Apply db/migrations/061_derivations.sql.";
 const APPLY_063 = "Apply db/migrations/063_rebuild_derived.sql.";
 const APPLY_066 = "Apply db/migrations/066_lineage_excludes_candidates.sql.";
-const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql.";
+const APPLY_067 = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/150_rebuild_requeues_tags.sql — 150 last defines rebuild_derived (on 067's body), so 067 alone puts back a body that requeues no stale tags row.";
 const APPLY_110 = "Apply db/migrations/110_listing_pages.sql.";
 const APPLY_073 = "Apply db/migrations/073_thought_trust_on_the_row.sql.";
 const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
+/**
+ * 063 also holds rebuild_derived, derivation_descendants and
+ * ob1_record_derivation, which the settled parts' file last defines
+ * (SMD-4446: rebuild_derived on 150's body, which is 067's with the tags'
+ * arm): 063 re-applied by hand puts all three back, and 067 applied alone
+ * after it leaves them knowing no part — a moved text sets no pending part
+ * stale, and the lineage writer refuses the kind, so a part's write fails —
+ * and requeueing no stale tags row. So where the parts' table stands, 067's
+ * remedy names that file after it, in place of 150, whose body it carries.
+ * On a brain from before the file the remedy is APPLY_067's, and the
+ * migrator applies the file in its turn: its guard would refuse a hand
+ * apply ahead of 114.
+ */
+const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused (bun migrate.ts --reapply runs every file in order).";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -2666,6 +2680,8 @@ if (configFailed) {
                      -- on a text move (its sentinel); 063 re-applied by hand over 067 puts the body back that keeps every rejected row.
                      to_regprocedure('public.settle_supersession_proposal(uuid, text, jsonb, text, text, text, jsonb, uuid)') IS NOT NULL AS has_067,
                      (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
+                     -- The settled parts' table (SMD-4446), where its file is applied: that file last defines rebuild_derived, so 067's remedy names it there.
+                     to_regclass('public.settled_parts') IS NOT NULL AS has_parts,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
                      -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
@@ -2681,7 +2697,7 @@ if (configFailed) {
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
@@ -2748,7 +2764,10 @@ if (configFailed) {
                            -- (SMD-2726 adds its arm); a closed one's row stays as history (SMD-1873 PR 2 review pass 1).
                            -- 111: a subject off its text is the subject pass's to find again — its pool reads the fingerprint —
                            -- until rebuild_derived gains its arm (SMD-3306).
-                           WHERE d.artifact_kind NOT IN ('proposal', 'relation', 'subject')
+                           -- 151: a settled part's row is left out, as a proposal's is. Once a rebuild has run its status is
+                           -- its mark, and a decided part keeps the fingerprints it was judged at for good. (A pending part at
+                           -- a moved text with no rebuild since is so far counted nowhere: SMD-4446's later cuts.)
+                           WHERE d.artifact_kind NOT IN ('proposal', 'part', 'relation', 'subject')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d
                              WHERE (d.artifact_kind = 'chunks'   AND NOT EXISTS (SELECT 1 FROM public.thought_chunks c WHERE c.thought_id = d.artifact_id))
@@ -2808,7 +2827,7 @@ if (configFailed) {
               + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the key each edge is named under above>'." : "")
               // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
               + (Number(c.subjects) ? " An own subject's row is written with it by 130's record_thought_subjects (111's record_thought_subject its set of one): close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass, or a pool that does not exist — the tags'); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -2852,7 +2871,7 @@ if (configFailed) {
             } else if (reopenOlder) {
               add("lineage", "warn",
                   `every derived row has its lineage row, but rebuild_derived is from before 067 (063 re-applied by hand over it): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again (SMD-2297). ${coverage}`,
-                  ledgerRemedy("067", APPLY_067));
+                  ledgerRemedy("067", bodies.has_parts ? APPLY_067_PARTS : APPLY_067));
             } else if (Number(c.lineage_pairs)) {
               // 070 (SMD-2313): a proposal standing on a lineage pair — judged
               // before 066, or recorded raw — is a reviewer's alone: a pending
@@ -3352,6 +3371,44 @@ if (configFailed) {
                 "Grant the deliverables group (SMD-1715): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups deliverables (db/README.md, Grants for a capturing role).");
           } else {
             add("deliverables", "ok", "record_deliverable, verify_deliverable, and deliverable_history present; the server's role holds the deliverables group");
+          }
+        }
+
+        /**
+         * Migration 149's validity read (SMD-3887 PR 2b): thought_validity under 149's signature, which the validity
+         * tool calls, and which of the tables it reads the server's role may SELECT. A table it may not leaves the axes
+         * resting on it unknown, named in each answer's `unread`; thoughts itself faults the tool. Before 149 a skip;
+         * the function missing where the ledger records 149, a failure, and where the role cannot read the ledger, a warning.
+         */
+        {
+          const VALIDITY_TABLES = ["thoughts", "ob1_superseded_by", "supersession_proposals", "deliverable_events", "thought_facets", "derivations",
+            "thought_chunks", "thought_entities", "ob1_entity_edges", "thought_audit", "thought_forgotten"];
+          const vRows = await sql.unsafe(`
+            SELECT to_regprocedure('public.thought_validity(uuid[])') IS NOT NULL AS has_fn,
+                   -- CASE, not OR: the text form raises for a table not there.
+                   ARRAY(SELECT t FROM unnest(ARRAY[${VALIDITY_TABLES.map((t) => `'${t}'`).join(", ")}]) t
+                          WHERE CASE WHEN to_regclass('public.' || t) IS NULL THEN false ELSE NOT has_table_privilege('public.' || t, 'SELECT') END) AS unreadable`)
+            .then((r) => r as { has_fn: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+          const vl = Array.isArray(vRows) ? vRows[0] : null;
+          if (!vl) {
+            add("validity", "warn", `could not verify: ${(vRows as Error).message}`, "The check reads thought_validity and the tables it reads in public; the message says why it failed.");
+          } else if (!vl.has_fn && ledger.has("149")) {
+            // Recorded and not there (a --baseline adoption, a dropped function): the tool faults on every call (review pass 1).
+            add("validity", "fail", "migration 149's thought_validity(uuid[]) missing though the ledger records 149; the validity tool faults on every call",
+                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+          } else if (!vl.has_fn && ledgerPresent && !ledgerRead) {
+            // Missing, and this role cannot read whether the ledger records 149: a warning, the remedy naming both.
+            add("validity", "warn", `thought_validity(uuid[]) missing, and ${whyUnread}, so whether migration 149 is recorded is unknown; the validity tool faults until it is there`,
+                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+          } else if (!vl.has_fn) {
+            add("validity", "skip", "not checked — thought_validity does not exist (migration 149 not applied); the validity tool faults until it is");
+          } else if (vl.unreadable.includes("thoughts")) {
+            add("validity", "warn", "the server's role cannot SELECT thoughts: the validity tool faults", "Grant the server its read group (db/README.md, Grants).");
+          } else if (vl.unreadable.length) {
+            add("validity", "warn", `the server's role cannot SELECT ${vl.unreadable.join(", ")}: the validity read answers the axes resting on them unknown, naming them in unread`,
+                "Grant the server's role SELECT on them, if the read should see those records (db/README.md, Grants).");
+          } else {
+            add("validity", "ok", "thought_validity present; the server's role reads every table it reads");
           }
         }
 
