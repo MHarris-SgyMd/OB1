@@ -182,7 +182,7 @@ import { appendFileSync } from "node:fs";
 import { ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { consolidatePassKey, decidePair, partJudged, partWriteFault, type DecideNote } from "../server-portable/consolidate-decide.ts";
+import { consolidatePassKey, decidePair, partJudged, PARTS_MAX, partWriteError, partWriteFault, type DecideNote } from "../server-portable/consolidate-decide.ts";
 import { DecisionRefused, resolveDecideTier, type DecideTier, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, ProbeRefused, probeRefusal, probeTier, ProviderDown, ProviderOutage, JUDGE_REQUEST_FIELDS, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
@@ -668,6 +668,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // the proposals it calls. It needs a tier: its own at OB1_CONSOLIDATE_DECIDER_URL, else the shared one at
   // OB1_JEV_BASE_URL (a tier per caller, SMD-3326). The model the tier is held to is the decider, so an answer from
   // any other is refused (the pass key names the decider).
+  // Since decide version 6 (SMD-4446) what the judge's model writes of such a pair is its settled parts, and a
+  // whole-thought proposal only where it says a thought falls whole and a part shows so.
   // A review (--accept/--reject) judges nothing, so it needs no tier.
   let jev: JevConfig | null = null;
   // The knobs a message about the tier names: decide mode's own when it has them, the shared tier's otherwise.
@@ -720,9 +722,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     WHERE relname IN ('thought_work_claims', 'thought_entities', 'supersession_proposals') AND relkind = 'r'`)[0].tables));
   if (tables === null) return stoppedWaiting();
   if (tables < 3) return refused("tables", "\n  The lease table, the entity tables or the proposal table are missing. Apply migrations 015, 016 and 029 first:\n    cd db && bun migrate.ts --url …");
-  // Decide version 6 (SMD-4446) records the settled parts its writer names. On a brain without 151's store each would
-  // be judged and thrown away, its thought's claim ending succeeded, so the part would never be named again: a run
-  // that would judge refuses instead. A --status or a --dry-run judges nothing and goes on.
+  // Decide version 6 (SMD-4446) records the settled parts its writer names. On a brain without 151's store every
+  // thought with a part to record would fail at that write (the function does not exist), after its three model
+  // calls were paid for (review pass 1 ran it: exit 1, each such claim failed). A run that would judge refuses
+  // before it asks either model instead. A --status or a --dry-run judges nothing and goes on.
   if (jev && !STATUS_ONLY && !DRY_RUN) {
     const store = await atStart(async () => ((await sql`
       SELECT to_regprocedure('record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)') IS NOT NULL AS has_151`) as { has_151: boolean }[])[0].has_151);
@@ -1504,7 +1507,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       const todo = c.pending + c.unpooled + restale + (RETRY_FAILED ? c.failed : 0);
       out(
         `\n  would: ${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
-          `add ${c.unpooled} thoughts to the pool${restale ? ` and re-pool ${restale} for stale proposals` : ""}; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${jev ? `${cfg.decider} through the tier, ${cfg.judgeModel} writing the proposals it calls at >= ${MIN_CONFIDENCE},` : cfg.judgeModel} ` +
+          `add ${c.unpooled} thoughts to the pool${restale ? ` and re-pool ${restale} for stale proposals` : ""}; judge ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) against up to ${K} older neighbour(s) each with ${jev ? `${cfg.decider} through the tier, ${cfg.judgeModel} naming the settled parts of each pair it calls outdates at >= ${MIN_CONFIDENCE},` : cfg.judgeModel} ` +
           `and ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
       );
     }
@@ -1582,6 +1585,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   let lastPassIdle = false;
   let vanished = 0;
   let lost = 0;
+  /** Decide version 6 (SMD-4446): attempts the worker itself put back in the pool because a text of one of the thought's pairs moved while the pair was judged. A thought put back twice counts twice. */
+  let putBack = 0;
   /** Thoughts whose judge call in hand the pass's caller aborted, each set back in the queue (SMD-3379 PR 1b-2). */
   let abortedInHand = 0;
   /** Each worker's judge call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2). */
@@ -1602,10 +1607,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // a thought that falls whole (writerStood: of those, the ones a part showed, an outdates). By part: every one named,
     // the items of an answer's list that were no part, a statement named twice in one answer, a quote that did not
     // check out; then what its write came to: a new row (of them, one in place of an older undecided row, and one kept
-    // as the writer typed it, a span not read back in its thought's own characters), a row that already holds the
-    // statement, a thought gone, a text moved while the writer was out, a write the store refused.
-    writerParts: 0, wholeSaid: 0, partsNamed: 0, partsDropped: 0, partsRepeated: 0, partsQuotesFailed: 0,
-    partsRecorded: 0, partsReplaced: 0, partsTyped: 0, partsStood: 0, partsGone: 0, partsMoved: 0, partsRefused: 0,
+    // as the quote check read it, a span not read back in its thought's own characters), a row that already holds the
+    // statement, a thought gone, a text moved while the pair was judged, a write the store refused.
+    // Review pass 1: of the rows that already held a statement, the ones a reviewer had rejected; the items past the
+    // twelve an answer is read to, apart from the items that were no part; and the parts whose write threw, or that
+    // were still to write when one did (the thought's error says how).
+    writerParts: 0, wholeSaid: 0, partsNamed: 0, partsDropped: 0, partsOver: 0, partsRepeated: 0, partsQuotesFailed: 0,
+    partsRecorded: 0, partsReplaced: 0, partsTyped: 0, partsStood: 0, partsStoodRejected: 0, partsGone: 0, partsMoved: 0, partsRefused: 0, partsThrew: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
     // settled after a judgement that proposes nothing, settled because the
     // pair no longer meets the candidate rule, left waiting for a vector, or
@@ -1615,7 +1623,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const staleMet = { replaced: new Set<string>(), settled: new Set<string>(), settledOut: new Set<string>(), wait: new Set<string>(), raced: new Set<string>(), gone: new Set<string>() };
   /**
    * Decide version 6 (SMD-4446): how many times running each thought was put back because a text of one of its pairs
-   * moved while the writer was out (record_settled_part's EDITED_SINCE). A thought that ends an attempt any other way
+   * moved while the pair was judged (record_settled_part's EDITED_SINCE). A thought that ends an attempt any other way
    * leaves the count, so a follower running for days counts no edit of last week against one of today.
    */
   const partPutBacks = new Map<string, number>();
@@ -1637,6 +1645,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     out(
       `  ${done + failed}/${LIMIT ? Math.min(LIMIT, total) : total}  ${rate.toFixed(2)}/s  ` +
         `${totals.pairs} pairs judged, ${totals.proposed} proposed` +
+        // Decide version 6 (SMD-4446): a long run records parts while it proposes no whole thought.
+        (jev ? `, ${totals.partsRecorded} settled part(s) recorded` : "") +
         (failed ? `  ${failed} failed` : "") +
         (eta !== null ? `  ~${eta}s left` : "")
     );
@@ -1655,10 +1665,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     /**
      * Edited while its worker waited at the admit gate, still its claim: the worker puts it back in the pool for the
      * new text, nothing more judged (review passes 4 and 5). `under: "writer"` (decide version 6, SMD-4446): a text of
-     * one of its pairs, its own or the older thought's, moved while the writer was out, told by the part's write; the
-     * pairs judged before it stand as written.
+     * one of its pairs, its own or the older thought's, moved while the pair was judged, told by a part's write, and
+     * `moved` says which in words; the pairs judged before it stand as written, and of that pair's judgement
+     * nothing is recorded but a part written before the write that found the text moved.
      */
-    | { outcome: "moved"; under?: "writer" }
+    | { outcome: "moved"; under?: "writer"; moved?: string }
     /** Its judge call in hand aborted by the pass's caller (abortInHand): set back in the queue, its proposals so far standing (SMD-3379 PR 1b-2); `gone`, found deleted or another's instead, and said so (reportLost). */
     | { outcome: "setBack"; gone?: "deleted" | "lost" };
   /** 067: a stale proposal on the thought in hand (its newer side), with what the leftover rule needs of the older side. */
@@ -1767,6 +1778,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const problems: string[] = [];
     /** Decide version 6: whether any of `problems` is a pair that was judged and whose settled part was not recorded. */
     let partsUnrecorded = false;
+    /** The failed claim's error: how many of the thought's pairs are in `problems`, and each. Such a pair was not judged or, since decide version 6, was judged with a settled part unrecorded: the header says which may be among them. */
+    const unfinished = (): string => `${problems.length} of ${candidates.length} pair(s) ${partsUnrecorded ? "not judged or with a settled part unrecorded" : "not judged"}: ${problems.join("; ").slice(0, 400)}`;
     // 067: every candidate the loop REACHED — judged, or attempted and left in
     // `problems` (a timeout, an egress refusal, a malformed answer). A stale
     // row on a reached pair is never a leftover: the leftover rule below reads
@@ -1843,7 +1856,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         const callSignal = AbortSignal.any([deadline.signal, onHardStop.signal, ...(call ? [call.abort.signal] : [])]);
         // Decide mode (SMD-3115): the tier's verdict, the judge's model writing only a proposal it calls at this
         // pass's floor, which it would record (SMD-3151), after the link step that may cap the pair (SMD-3203); one
-        // deadline for all three calls, as for the judge's one.
+        // deadline for all three calls, as for the judge's one. Since decide version 6 (SMD-4446) the third call asks
+        // for the pair's settled parts, under the same deadline.
         try {
           j = await withCallWaits(callWaitsFor(() => inCall.get(workerId), deadline.waits), () =>
             jev ? decidePair(olderSide, newerSide, cfg, jev, MIN_CONFIDENCE, callSignal, keyName)
@@ -1924,6 +1938,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           const named = writer.parts ?? [];
           totals.partsNamed += named.length;
           totals.partsDropped += writer.dropped ?? 0;
+          totals.partsOver += writer.over ?? 0;
           totals.partsRepeated += named.filter((p) => p.repeated).length;
           totals.partsQuotesFailed += named.filter((p) => !(p.stale_found && p.shown_found)).length;
           if (writer.falls === "older" || writer.falls === "newer") totals.wholeSaid++;
@@ -1943,9 +1958,96 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // endpoint returned one, else the number the model wrote.
       const scored = proposalConfidence(j);
       if (proposing) totals[scored.source === "token" ? "tokenScored" : "statedScored"]++;
+      // Decide version 6 (SMD-4446): the settled parts the writer named whose quotes passed, each a write of its own,
+      // at the fingerprints of the texts the writer was sent. 151's rule for a caller: no thought's or claim's row
+      // held when the write is called, and nothing awaited before it commits, as every write of this pass is made.
+      // The parts are written BEFORE the pair's proposal, its stale row's settle and its relation (review pass 1): a
+      // part's write is the one that reads both texts, so it is where the pass learns that a text moved while the
+      // pair was judged (since the pass read the row: before the tier, the link step and the writer were asked, and
+      // for the thought in hand before its earlier pairs were), or that a thought is gone. Nothing more of the
+      // judgement is recorded then, nor when the store refuses a part or a part's write throws, and the pair is
+      // still a candidate when the thought is judged again. Written after them, the proposal had already closed
+      // the pair to the candidate rule (5 of 5: no part, and never judged again), and a thought gone under a whole
+      // failed the claim on the proposal's foreign key.
+      // What each write came to, by the part's place in the writer's answer, for the dump.
+      const partResults = new Map<number, { result: "recorded" | "replaced" | "stands" | "gone" | "moved" | "refused"; id?: string; status?: string }>();
+      /** Which text moved while the pair was judged, by the write's answer: none when null. */
+      let textMoved: { older: boolean; newer: boolean } | null = null;
+      /** A thought of the pair was gone when a part's write read it. */
+      let pairGone = false;
+      /** The store's own words for each part of the pair it refused. */
+      const refusals: string[] = [];
+      if (j.parts?.length) {
+        const judged = judgedRecipe(j, scored.source);
+        for (const [n, part] of j.parts.entries()) {
+          const rest = j.parts.slice(n);
+          let r: { ok: boolean; error?: string; action?: string; id?: string; status?: string; replaced?: string | null; older_edited?: boolean; newer_edited?: boolean };
+          try {
+            [{ r }] = (await sql`
+              SELECT record_settled_part(${c.older_id}::uuid, ${row.id}::uuid, ${part.holder}::text, ${part.statement}::text, ${part.shown_by}::text,
+                                         ${part.word}::text, ${part.reason}::text, ${JOB}::text, ${older.fingerprint}::text, ${row.fingerprint}::text,
+                                         ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, partJudged(judged, part.index))}::jsonb,
+                                         ${agentId}::uuid) AS r`) as { r: typeof r }[];
+          } catch (e) {
+            const fault = partWriteFault(e);
+            // The store's own refusal names its function and echoes no argument (151): the part's, said once for the
+            // pair on the claim (below), and the pair's other parts go on.
+            if (fault !== null && "refused" in fault) {
+              totals.partsRefused++;
+              partResults.set(part.index, { result: "refused" });
+              refusals.push(fault.refused);
+              continue;
+            }
+            // Any other throw ends the pair here: this part and those still to write are counted so, and the summary's
+            // line still adds up; the thought's error says what it was.
+            totals.partsThrew += rest.length;
+            // A data error that is not the store's own is Postgres's cast, which can quote the value it was given: a
+            // statement or a reason is the brain's text, so only its code goes on (151's note to a caller).
+            if (fault !== null) throw partWriteError(e, fault.sqlstate);
+            // Anything else is the worker's to classify, as any write's.
+            throw e;
+          }
+          if (r.ok) {
+            if (r.action === "stands") {
+              totals.partsStood++;
+              // A statement a reviewer rejected, named again, stands as rejected: counted, so the summary says so.
+              if (r.status === "rejected") totals.partsStoodRejected++;
+              partResults.set(part.index, { result: "stands", id: r.id, status: r.status });
+            } else {
+              totals.partsRecorded++;
+              if (r.replaced) totals.partsReplaced++;
+              const note = writer?.parts?.[part.index];
+              if (note && !(note.own.statement && note.own.shown_by)) totals.partsTyped++;
+              partResults.set(part.index, { result: r.replaced ? "replaced" : "recorded", id: r.id, status: r.status });
+            }
+            continue;
+          }
+          // A thought of the pair is gone, or a text moved while the pair was judged: every part of the pair still to
+          // write would be answered the same, so none is sent.
+          if (r.error === "NOT_FOUND") { totals.partsGone += rest.length; pairGone = true; }
+          else if (r.error === "EDITED_SINCE") { totals.partsMoved += rest.length; textMoved = { older: r.older_edited === true, newer: r.newer_edited === true }; }
+          else throw new Error(`record_settled_part answered ${String(r.error).slice(0, 40)}, which this pass does not know`);
+          for (const p of rest) partResults.set(p.index, { result: r.error === "NOT_FOUND" ? "gone" : "moved" });
+          break;
+        }
+      }
+      // One problem a pair, so the claim's count of pairs is one (review pass 1: two refused parts read "2 of 1 pair(s)").
+      if (refusals.length) {
+        problems.push(`pair with ${c.older_id}: ${refusals.length === 1 ? "a settled part was" : `${refusals.length} settled parts were`} refused — ${refusals[0]}`);
+        partsUnrecorded = true;
+      }
+      /**
+       * Nothing more of the judgement is recorded: it is of a text that is no longer there or of a thought that is
+       * gone, or the store refused a part of it. A proposal written now would close the pair to the candidate rule
+       * with that part unrecorded, and a retry, once the refusal's cause is mended, would never be offered the pair
+       * (review pass 1: under a session default of REPEATABLE READ the parts were lost so).
+       */
+      const judgedAway = textMoved !== null || pairGone || refusals.length > 0;
       let proposalId: string | null = null;
       let recorded: "proposed" | "under-confidence" | "already" | "replaced" | "settled" | null = null;
-      if (verdict === null || scored.confidence < MIN_CONFIDENCE) {
+      if (judgedAway) {
+        // No proposal, and no settle of a stale row: the pair stays as it was for the judgement to come.
+      } else if (verdict === null || scored.confidence < MIN_CONFIDENCE) {
         if (proposing) {
           totals.underConfidence++;
           recorded = "under-confidence";
@@ -1985,7 +2087,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // has none and none is due — record_thought_relation answers "none".
       let relation: string | null = null;
       const rv = relationVerdict(j);
-      if (RELATIONS_OFF === null) {
+      if (judgedAway) {
+        // No relation of a judgement of a text that is no longer there, and none closed on its word.
+      } else if (RELATIONS_OFF === null) {
         const rs = relationConfidence(j);
         // The floor on the mass of the three relation words (a distinct's on its own probability); the word's own probability is what the relation stores.
         const due = rv !== null && rs.mass >= MIN_CONFIDENCE ? rv : null;
@@ -2065,60 +2169,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         else if (r.action === "replaced") { totals.relationsReplaced++; totals.distinctReplaced += apart; }
         else if (r.action === "closed") totals.relationsClosed++;
       } else if (rv !== null) totals[rv === "distinct" ? "distinctUnstored" : "relationsUnstored"]++;
-      // Decide version 6 (SMD-4446): the settled parts the writer named whose quotes passed, each a write of its own,
-      // at the fingerprints of the texts the writer was sent. 151's rule for a caller: no thought's or claim's row
-      // held when the write is called, and nothing awaited before it commits, as every write of this pass is made.
-      // What each write came to, by the part's place in the writer's answer, for the dump.
-      const partResults = new Map<number, { result: "recorded" | "replaced" | "stands" | "gone" | "moved" | "refused"; id?: string; status?: string }>();
-      let textMoved = false;
-      if (j.parts?.length) {
-        const judged = judgedRecipe(j, scored.source);
-        for (const [n, part] of j.parts.entries()) {
-          const rest = j.parts.slice(n);
-          let r: { ok: boolean; error?: string; action?: string; id?: string; status?: string; replaced?: string | null };
-          try {
-            [{ r }] = (await sql`
-              SELECT record_settled_part(${c.older_id}::uuid, ${row.id}::uuid, ${part.holder}::text, ${part.statement}::text, ${part.shown_by}::text,
-                                         ${part.word}::text, ${part.reason}::text, ${JOB}::text, ${older.fingerprint}::text, ${row.fingerprint}::text,
-                                         ${proposalRecipe(cfg, { similarity: c.similarity, candidates: K, minSimilarity: MIN_SIM }, partJudged(judged, part.index))}::jsonb,
-                                         ${agentId}::uuid) AS r`) as { r: typeof r }[];
-          } catch (e) {
-            const fault = partWriteFault(e);
-            // Anything but the store's own refusal or a data error: the worker's to classify, as any write's.
-            if (fault === null) throw e;
-            // A data error that is not the store's own is Postgres's cast, which can quote the value it was given: a
-            // statement or a reason is the brain's text, so only its code goes on (151's note to a caller).
-            if ("sqlstate" in fault) throw Object.assign(new Error(`a settled part's write failed in the database (SQLSTATE ${fault.sqlstate})`), { code: fault.sqlstate });
-            // The store's own refusal names the function and echoes no argument (151): the part's, recorded on the
-            // claim, and the pair's other parts go on.
-            totals.partsRefused++;
-            partResults.set(part.index, { result: "refused" });
-            problems.push(`pair with ${c.older_id}: a settled part was refused — ${fault.refused}`);
-            partsUnrecorded = true;
-            continue;
-          }
-          if (r.ok) {
-            if (r.action === "stands") {
-              totals.partsStood++;
-              partResults.set(part.index, { result: "stands", id: r.id, status: r.status });
-            } else {
-              totals.partsRecorded++;
-              if (r.replaced) totals.partsReplaced++;
-              const note = writer?.parts?.[part.index];
-              if (note && !(note.own.statement && note.own.shown_by)) totals.partsTyped++;
-              partResults.set(part.index, { result: r.replaced ? "replaced" : "recorded", id: r.id, status: r.status });
-            }
-            continue;
-          }
-          // A thought of the pair is gone, or a text moved while the writer was out: every part of the pair still to
-          // write would be answered the same, so none is sent.
-          if (r.error === "NOT_FOUND") totals.partsGone += rest.length;
-          else if (r.error === "EDITED_SINCE") { totals.partsMoved += rest.length; textMoved = true; }
-          else throw new Error(`record_settled_part answered ${String(r.error).slice(0, 40)}, which this pass does not know`);
-          for (const p of rest) partResults.set(p.index, { result: r.error === "NOT_FOUND" ? "gone" : "moved" });
-          break;
-        }
-      }
       if (DUMP) {
         // The judge's reason and quotes are the brain's text: a file this creates is the owner's alone (SMD-3203).
         appendFileSync(DUMP, JSON.stringify({
@@ -2136,20 +2186,27 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           // its thought's own characters, and what the part's write came to (`result` null: none was made, a quote
           // having failed or the statement being named twice), with the row it made or met; and how many items of its
           // list were no part.
-          ...(writer?.parts ? { falls: writer.falls ?? null, dropped: writer.dropped ?? 0, parts: writer.parts.map((p, i) => ({ ...p, ...(partResults.get(i) ?? { result: null }) })) } : {}),
+          ...(writer?.parts ? { falls: writer.falls ?? null, dropped: writer.dropped ?? 0, over: writer.over ?? 0, parts: writer.parts.map((p, i) => ({ ...p, ...(partResults.get(i) ?? { result: null }) })) } : {}),
+          // What the answer held that was not read as a part (review pass 1): the answer itself when it was not the
+          // JSON asked for, else each item that was no part or came past the cap, each cut short. Only here: no row
+          // holds it.
+          ...(j.unread?.length ? { unread: j.unread } : {}),
         }) + "\n", { mode: 0o600 });
       }
-      // A text of this pair moved while the writer was out (record_settled_part's EDITED_SINCE): its parts were judged
-      // of a text that is no longer there, so the thought goes back to the pool and the pair is judged again at the
-      // texts as they stand. Bounded: a thought put back PART_PUT_BACKS times running is not put back again, its
-      // claim failing with the pair named, so a fault that draws the answer every time ends there and not in a loop
-      // (requeue_thought_work resets the claim's own attempt count).
-      if (textMoved) {
-        const backs = (partPutBacks.get(row.id) ?? 0) + 1;
-        partPutBacks.set(row.id, backs);
-        if (backs <= PART_PUT_BACKS) return { outcome: "moved", under: "writer" };
-        problems.push(`pair with ${c.older_id}: a text of the pair moved while the writer was out, ${backs} times running — its settled parts are not recorded, and the thought is not put back again`);
+      // A text of this pair moved while the pair was judged (record_settled_part's EDITED_SINCE): the judgement is of a
+      // text that is no longer there, and nothing of it was recorded (above). The thought goes back to the pool, and
+      // its pairs are judged again at the texts as they stand. Bounded: a thought the worker has put back
+      // PART_PUT_BACKS times running is not put back again. Its claim fails at once, naming the pair and the text that
+      // moved, and none of its other pairs is asked about a text known to have moved (review pass 1: the loop went
+      // on, five writer calls for three), so a fault that draws the answer every time ends there and not in a loop
+      // (requeue_thought_work resets the claim's own attempt count). The worker counts the put-backs.
+      if (textMoved !== null) {
+        const moved = textMoved.older && textMoved.newer ? `its own text and that of ${c.older_id}, the older thought of one of its pairs,`
+          : textMoved.older ? `the text of ${c.older_id}, the older thought of one of its pairs,` : `its own text (found at its pair with ${c.older_id})`;
+        if ((partPutBacks.get(row.id) ?? 0) < PART_PUT_BACKS) return { outcome: "moved", under: "writer", moved };
+        problems.push(`pair with ${c.older_id}: ${textMoved.older && textMoved.newer ? "both texts" : textMoved.older ? "the older thought's text" : "this thought's text"} moved while the pair was judged, the thought already put back ${PART_PUT_BACKS} times running for a moved text — nothing of the pair is recorded, and it is not put back again`);
         partsUnrecorded = true;
+        return { outcome: "failed", error: unfinished() };
       }
     }
     // 067: the stale rows no candidate reached — pairs the candidate rule no
@@ -2180,10 +2237,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         : "outside the candidate rule (the day rule, or a change no write function makes)";
       if (await settleStale(s, `no longer a candidate pair — ${why}`, s.older_fingerprint, row.fingerprint, "not-a-candidate", why)) staleMet.settledOut.add(s.id);
     }
-    // The attempt ended and the thought was not put back for a moved text: its count of such put-backs running ends.
-    partPutBacks.delete(row.id);
-    // A pair in `problems` was not judged, or, since decide version 6, was judged with a settled part unrecorded: the header says which may be among them.
-    if (problems.length) return { outcome: "failed", error: `${problems.length} of ${candidates.length} pair(s) ${partsUnrecorded ? "not judged or with a settled part unrecorded" : "not judged"}: ${problems.join("; ").slice(0, 400)}` };
+    if (problems.length) return { outcome: "failed", error: unfinished() };
     return answered > 0 ? { outcome: "succeeded", called: true } : { outcome: "succeeded" };
   }
 
@@ -2338,6 +2392,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
             return "stop";
           }
         }
+        // Decide version 6 (SMD-4446): the thought's count of put-backs running for a moved text ends with any other
+        // end of an attempt, whichever return of processRow it was (review pass 1: one return left it standing).
+        if (!(outcome.outcome === "moved" && outcome.under === "writer")) partPutBacks.delete(b.thought_id);
         // Never true here (the hard stop returned above); it narrows `outcome` for the release below.
         if (outcome.outcome === "abandoned") return "stop";
         // Out of the heartbeat's set before the release goes out, so a beat in
@@ -2362,17 +2419,22 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           // Back to the pool for its new text, out of the heartbeat's set first;
           // if that fails, the worker stops and its finally returns it (review pass 5).
           const requeued = await sql`SELECT requeue_thought_work(${JOB}, ${b.thought_id}::uuid)`.then(() => null, (re: Error) => re.message);
-          // Decide version 6 (SMD-4446): or a text of one of its pairs moved while the writer was out.
-          const how = outcome.under === "writer" ? "a text of one of its pairs moved while the writer was out" : "edited while this worker waited at the admit gate";
+          // Decide version 6 (SMD-4446): or a text of one of its pairs moved while the pair was judged.
+          const how = outcome.under === "writer" ? "a text of one of its pairs moved while the pair was judged" : "edited while this worker waited at the admit gate";
           if (requeued !== null) {
             hb.held.add(b.thought_id);
             err(`  ${workerId}: could not put ${b.thought_id}, ${how}, back in the pool (${requeued}) — this worker stops, returning it with its leases`);
             return "stop";
           }
-          lost++;
-          err(outcome.under === "writer"
-            ? `  ${b.thought_id}: a text of one of its pairs moved while the writer was out — that pair's settled parts were not recorded and nothing more of it was judged; it is pending again, to be judged at the texts as they stand`
-            : `  ${b.thought_id}: edited while its worker waited at the admit gate — nothing more of it was judged; it is pending again, to be judged at its new text`);
+          if (outcome.under === "writer") {
+            // The worker's own put-back, not a claim another took: counted apart, and against the thought's bound.
+            putBack++;
+            partPutBacks.set(b.thought_id, (partPutBacks.get(b.thought_id) ?? 0) + 1);
+            err(`  ${b.thought_id}: ${outcome.moved ?? "a text of one of its pairs"} moved while the pair was judged — that pair's judgement is of a text no longer there: no proposal or relation of it is recorded, nor a part from the write that found so on, and nothing more of the thought was judged; it is pending again, to be judged at the texts as they stand`);
+          } else {
+            lost++;
+            err(`  ${b.thought_id}: edited while its worker waited at the admit gate — nothing more of it was judged; it is pending again, to be judged at its new text`);
+          }
           return "next";
         }
         // The release's outcome is read by claim-loop.ts's releaseFinished, for both engines (SMD-4308): the statement is this engine's.
@@ -2578,7 +2640,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   if (after !== null) await unreturned.returnAtEnd(TTL, { err });
   const elapsed = (Date.now() - started) / 1000;
   out(
-    `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller, or by its stop as it waited for a slot` : ""}, in ${elapsed.toFixed(1)}s ` +
+    `\n  ${done} thought(s) judged, ${failed} failed, ${vanished} deleted mid-pass${lost ? `, ${lost} no longer this worker's when checked (each named above)` : ""}${putBack ? `, ${putBack} put back by the pass for a text that moved while a pair of the thought was judged (each named above; a thought put back twice is two)` : ""}${abortedInHand ? `, ${abortedInHand} set back in the queue, the judge call in hand aborted by the pass's caller, or by its stop as it waited for a slot` : ""}, in ${elapsed.toFixed(1)}s ` +
       `(${(llmMs / 1000).toFixed(1)}s in model calls across ${WORKERS} worker(s), ${beats} heartbeat(s))`
   );
   out(
@@ -2597,20 +2659,25 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // Decide mode (SMD-3151): what the writer was asked and what came back, and the tier's outdates under the floor it
   // was not asked about, so a run's writer calls are read from its summary.
   if (jev) {
+    // Counted by judgement: a pair judged again in the run, its thought put back for a moved text, is counted each
+    // time, in this line and the next (review pass 1: the line said "pair(s)", and read 7 for 4 pairs).
     out(
-      `  decide: the writer asked on ${totals.writerAsked} pair(s) — ${totals.writerParts} with a settled part, ${totals.writerDeclined} with no part named, ${totals.writerQuotesFailed} with quotes that did not check out, ` +
+      `  decide: the writer asked ${totals.writerAsked} time(s), a pair judged again counted again — ${totals.writerParts} with a settled part, ${totals.writerDeclined} with no part named, ${totals.writerQuotesFailed} with quotes that did not check out, ` +
         `${totals.writerUnparsed} unparsed; it said a thought falls whole on ${totals.wholeSaid}, ${totals.writerStood} of them shown by a part; ${totals.gated} outdates under the floor ${MIN_CONFIDENCE}, the writer not asked`
     );
-    // Decide version 6 (SMD-4446): the parts, by what became of each. A part recorded is a proposal for review.
+    // Decide version 6 (SMD-4446): the parts read, by what became of each. A part recorded is a proposal for review.
+    // The numbers after the dash add up to the parts read; an item of an answer that was no part, or that came after
+    // the PARTS_MAX an answer is read to, is counted apart and is in neither.
     out(
-      `  decide: ${totals.partsNamed} settled part(s) named — ${totals.partsRecorded} recorded for review` +
-        `${totals.partsReplaced || totals.partsTyped ? ` (${[totals.partsReplaced ? `${totals.partsReplaced} in place of an earlier judgement of the statement` : "", totals.partsTyped ? `${totals.partsTyped} kept as the writer typed a quote, its span not read back from the thought` : ""].filter(Boolean).join(", ")})` : ""}` +
-        `, ${totals.partsStood} already held, ${totals.partsQuotesFailed} with a quote that did not check out` +
+      `  decide: ${totals.partsNamed} settled part(s) read — ${totals.partsRecorded} recorded for review` +
+        `${totals.partsReplaced || totals.partsTyped ? ` (${[totals.partsReplaced ? `${totals.partsReplaced} in place of an earlier judgement of the statement` : "", totals.partsTyped ? `${totals.partsTyped} kept as the quote check read a quote, its span not read back from the thought` : ""].filter(Boolean).join(", ")})` : ""}` +
+        `, ${totals.partsStood} already held${totals.partsStoodRejected ? ` (${totals.partsStoodRejected} of them rejected by a reviewer)` : ""}, ${totals.partsQuotesFailed} with a quote that did not check out` +
         `${totals.partsRepeated ? `, ${totals.partsRepeated} named twice in one answer` : ""}` +
         `${totals.partsGone ? `, ${totals.partsGone} with a thought gone` : ""}` +
-        `${totals.partsMoved ? `, ${totals.partsMoved} of a text that moved while the writer was out` : ""}` +
+        `${totals.partsMoved ? `, ${totals.partsMoved} of a text that moved while the pair was judged` : ""}` +
         `${totals.partsRefused ? `, ${totals.partsRefused} refused by the store` : ""}` +
-        `${totals.partsDropped ? `; ${totals.partsDropped} item(s) of an answer were no part` : ""}`
+        `${totals.partsThrew ? `, ${totals.partsThrew} whose write failed or was not reached after one that did (the thought's error says how)` : ""}` +
+        `${totals.partsDropped || totals.partsOver ? `; ${[totals.partsDropped ? `${totals.partsDropped} item(s) of an answer were no part` : "", totals.partsOver ? `${totals.partsOver} item(s) came after the ${PARTS_MAX} an answer is read to` : ""].filter(Boolean).join(", ")}` : ""}`
     );
     // Decide version 4 (SMD-3203): the link step's calls, and the pairs it capped at related with no proposal.
     out(`  decide: the writer's link step asked on ${totals.linkAsked} pair(s) — ${totals.linkCapped} capped at related with no proposal (${totals.linkUnparsed} of them unparsed), ${totals.linkAsked - totals.linkCapped} direct or unlinked`);

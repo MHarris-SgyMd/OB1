@@ -785,7 +785,7 @@ if (resolvedEmbed.decider) {
   const tier = resolveDecideTier(env);
   if (!tier) add("consolidate decide mode", "warn", `OB1_CONSOLIDATE_DECIDER is ${resolvedEmbed.decider} and neither OB1_CONSOLIDATE_DECIDER_URL nor OB1_JEV_BASE_URL is set — db/consolidate.ts refuses to start; capture is unaffected`, `Point OB1_CONSOLIDATE_DECIDER_URL at the typed-decision tier serving ${resolvedEmbed.decider} (jev/h2o/README.md), or unset OB1_CONSOLIDATE_DECIDER for the judge.`);
   else if (!tier.own && tier.cfg.model && tier.cfg.model !== resolvedEmbed.decider) add("consolidate decide mode", "warn", `OB1_JEV_MODEL is ${tier.cfg.model} and OB1_CONSOLIDATE_DECIDER is ${resolvedEmbed.decider} — db/consolidate.ts refuses to start; capture is unaffected`, "Give decide mode a tier of its own (OB1_CONSOLIDATE_DECIDER_URL), or set the two to the same model.");
-  else add("consolidate decide mode", "ok", `${resolvedEmbed.decider} gives each verdict through ${tier.own ? "its own tier (OB1_CONSOLIDATE_DECIDER_URL)" : "the shared tier (OB1_JEV_BASE_URL)"}; ${judgeModel} only writes the proposals it calls (OB1_CONSOLIDATE_DECIDER, pass key ${consolidatePassKey(resolvedEmbed)})`);
+  else add("consolidate decide mode", "ok", `${resolvedEmbed.decider} gives each verdict through ${tier.own ? "its own tier (OB1_CONSOLIDATE_DECIDER_URL)" : "the shared tier (OB1_JEV_BASE_URL)"}; ${judgeModel} only names the settled parts of the pairs it calls outdates, and a whole-thought proposal where it says a thought falls whole (OB1_CONSOLIDATE_DECIDER, pass key ${consolidatePassKey(resolvedEmbed)})`);
 }
 
 /**

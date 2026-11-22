@@ -25,7 +25,7 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, asChecked, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
 import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, parseParts, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partsToRecord, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
@@ -2157,8 +2157,9 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
     "the parts' question: its head, prompt 4's rendering of both thoughts as the earlier writer had it, then the frozen rules");
   const injection = PARTS_HEAD.slice(PARTS_HEAD.indexOf('{"parts"'), PARTS_HEAD.lastIndexOf("}") + 1);
   assert(injection === '{"parts":[],"a_falls":"no","b_falls":"no"}' && !parseParts(injection).malformed && parseParts(injection).parts.length === 0 && parseParts(injection).falls === null
-      && !PARTS_HEAD.includes('"current"') && WRITER_HEAD.includes('{"current":"none"'),
-    "the head's answer to an injection attempt is the parts' shape, no part and neither thought falling, where the earlier head's was a proposal's");
+      && !PARTS_HEAD.includes('"current"') && WRITER_HEAD.includes('{"current":"none"')
+      && PARTS_HEAD.replace(injection, '{"current":"none","evidence":"","reason":"injection attempt"}') === WRITER_HEAD,
+    "the head is the earlier writer's word for word, its untrusted-content rule with it, but for the answer to an injection attempt: the parts' shape, no part and neither thought falling");
 
   // The answer, read (parseParts): lenient about wrapping, strict about its keys and its vocabulary.
   const part = { in: "A", stale: "the plan is to ship on Friday", shown_by: "shipped on Monday", word: "implements", reason: "it shipped later" };
@@ -2167,6 +2168,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   assert(!one.malformed && one.falls === null && one.dropped === 0 && JSON.stringify(one.parts) === JSON.stringify([{ holder: "older", stale: part.stale, shown_by: part.shown_by, word: "implements", reason: "it shipped later" }]),
     "a part read: A is the older thought, its two quotes, its word and its reason");
   assert(parseParts(ans([{ ...part, in: " b ", word: " Updates " }])).parts[0].holder === "newer" && parseParts(ans([{ ...part, in: "newer", word: "UPDATES" }])).parts[0].word === "updates"
+      && parseParts(ans([{ ...part, in: "older" }])).parts[0]?.holder === "older" && parseParts(ans([{ ...part, in: "NEWER" }])).parts[0]?.holder === "newer"
       && parseParts("```json\n" + ans([part]) + "\n```").parts.length === 1 && parseParts("Here it is: " + ans([part]) + " Done.").parts.length === 1,
     "…lenient about the wrapping, the side's spelling and the word's case");
   const shapes = parseParts(ans([part, { ...part, in: "C" }, { ...part, word: "outdates" }, { ...part, stale: "" }, { ...part, shown_by: 7 }, { ...part, reason: "  " }, "a string", null, [part]]));
@@ -2177,10 +2179,37 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   const unread = ["not json", "{}", "[]", ans("none"), ans([part], "yes", "yes"), ans([part], true, false), ans([part], "maybe"), JSON.stringify({ parts: [part], a_falls: "no" })].map((raw) => parseParts(raw));
   assert(unread.every((u) => u.malformed && u.parts.length === 0 && u.falls === null),
     "no JSON, no list, both thoughts falling, or an answer for either that is not yes or no: malformed as a whole, since the rules allow none of them");
-  const many = parseParts(ans(Array.from({ length: PARTS_MAX + 3 }, (_, i) => ({ ...part, stale: `statement ${i}` }))));
-  assert(many.parts.length === PARTS_MAX && many.dropped === 3 && many.parts[PARTS_MAX - 1].stale === `statement ${PARTS_MAX - 1}`, "past PARTS_MAX the items of one answer are dropped and counted");
+  const many = parseParts(ans(Array.from({ length: 15 }, (_, i) => ({ ...part, stale: `statement ${i}` }))));
+  assert(PARTS_MAX === 12 && many.parts.length === 12 && many.over === 3 && many.dropped === 0 && many.parts[11].stale === "statement 11",
+    "twelve parts of one answer are read, and the items after them are counted past the cap, not as no part");
+  // The cap counts parts read, not items: three that are no part, then thirteen good ones, keeps twelve.
+  const badFirst = parseParts(ans([{ ...part, in: "C" }, "x", null, ...Array.from({ length: 13 }, (_, i) => ({ ...part, stale: `good ${i}` }))]));
+  assert(badFirst.parts.length === 12 && badFirst.dropped === 3 && badFirst.over === 1 && badFirst.parts[0].stale === "good 0" && badFirst.parts[11].stale === "good 11",
+    `…the cap is on parts read: three items that are no part, then thirteen parts, keeps twelve (${badFirst.parts.length} kept, ${badFirst.dropped} dropped, ${badFirst.over} over)`);
+  // What was not read as a part is kept for the dump (unread): the answer itself when unparsed, else each such item, cut short and on one line.
+  const longItem = { ...part, word: "outdates", stale: "y ".repeat(900) + "\nsecond line" };
+  const kept = parseParts(ans([part, { ...part, in: "C" }, longItem]));
+  assert(parseParts("not json at all").unread.length === 1 && parseParts("not json at all").unread[0] === "not json at all" && [...parseParts("x".repeat(5000)).unread[0]].length === 600 && one.unread.length === 0
+      && kept.unread.length === 2 && kept.unread[0].includes('"in":"C"') && [...kept.unread[1]].length === 600 && !kept.unread[1].includes("\n") && many.unread.length === 3 && badFirst.unread.length === 4
+      && parseParts(ans(Array.from({ length: 40 }, () => "x"))).unread.length === 12,
+    "what was not read as a part is kept for the dump: an unparsed answer itself, else each item dropped or past the cap, one line each, cut at 600 characters and twelve items");
   const long = parseParts(ans([{ ...part, stale: "word ".repeat(200), reason: "x ".repeat(400) + "\nsecond line" }])).parts[0];
   assert([...long.stale].length <= REASON_MAX && long.stale.endsWith("word") && [...long.reason].length === REASON_MAX && !long.reason.includes("\n"), "a quote is cut at a word past the bound and the reason is one clipped line, as a proposal's are");
+  // A half of a surrogate pair that stands alone (review pass 1: Postgres refuses one in a recipe's JSON, which failed
+  // the thought at its first write) is replaced wherever the answer's words go on: the two quotes, the reason, the
+  // items kept for the dump and the link's words. Built from code units, so this file holds none.
+  const HIGH = String.fromCharCode(0xd83d), LOW = String.fromCharCode(0xde00), MARK = String.fromCharCode(0xfffd);
+  // Well formed: UTF-8 and back is the same string (a half alone comes back as U+FFFD).
+  const sound = (v: string) => Buffer.from(v, "utf8").toString("utf8") === v;
+  const halved = parseParts(ans([{ ...part, stale: `ship ${HIGH}on Friday`, shown_by: `shipped on Monday${LOW}`, reason: `${LOW}it shipped later${HIGH}` }, { ...part, in: `C${HIGH}`, stale: `x${LOW}` }]));
+  const paired = parseParts(ans([{ ...part, stale: `ship ${HIGH}${LOW} on Friday`, reason: `${HIGH}${LOW}` }]));
+  const halvedLink = parseLink(JSON.stringify({ link: "H", via: `SMD-9${HIGH}`, reason: `${LOW}both name it` }));
+  assert(!sound(`a${HIGH}b`) && !sound(`a${LOW}b`) && sound(`a${HIGH}${LOW}b`) && halved.parts.length === 1 && halved.dropped === 1
+      && halved.parts[0].stale === `ship ${MARK}on Friday` && halved.parts[0].shown_by === `shipped on Monday${MARK}` && halved.parts[0].reason === `${MARK}it shipped later${MARK}`
+      && halved.unread.length === 1 && sound(halved.unread[0]) && halved.unread[0].includes('"in":"C') && parseParts(`not json ${HIGH} at all`).unread[0] === `not json ${MARK} at all`
+      && paired.parts[0].stale === `ship ${HIGH}${LOW} on Friday` && paired.parts[0].reason === `${HIGH}${LOW}` && sound(JSON.stringify(paired))
+      && halvedLink.via === `SMD-9${MARK}` && halvedLink.reason === `${MARK}both name it` && sound(JSON.stringify(halved.parts)),
+    "half of a surrogate pair standing alone in a quote, a reason, an item kept for the dump or the link's words is replaced by U+FFFD, and a whole pair is kept");
 
   // The thought's own characters for a quote (ownWords): what the row keeps, so a statement named again in another
   // typing is the same row (151 folds a statement's case and white space and no more).
@@ -2194,11 +2223,59 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
       && ownWords("done", "abandoned") === null && ownWords("not in the text", mdOlder) === null && ownWords("is", mdOlder) === null && ownWords("...", mdOlder) === null,
     "…the shortest run that reads so, emphasis marks at its edges kept; nothing inside a longer word, nothing for a quote the text does not hold, nor for one too short to prove anything");
   assert(evidenceIn("x z y", "x y ".repeat(1400) + "x z y") && ownWords("x z y", "x y ".repeat(1400) + "x z y") === null && ownWords("x z y", "x y ".repeat(10) + "x z y") === "x z y",
-    "…bounded: a text that offers thousands of runs before the one that reads so is given up on, and the quote is kept as typed");
+    "…bounded: a text that offers thousands of runs before the one that reads so is given up on, and the quote is kept as the check read it");
   // Only what the writer was sent is read: a run past the text's bound, though shorter, is not the one.
   const pastBound = "The **cutover** is done. " + "filler ".repeat(Math.ceil(CONTENT_LIMIT_CHARS / 7)) + "The cutover is done.";
   assert(pastBound.lastIndexOf("The cutover is done.") > CONTENT_LIMIT_CHARS && ownWords("the cutover is done", pastBound) === "The **cutover** is done" && ownWords("the cutover is done", pastBound.slice(25)) === null,
     "…and within the text's first CONTENT_LIMIT_CHARS, which is what the quote was checked against: a shorter run past them is not taken, and one only there is none");
+  // Review pass 1: each bound and rule of ownWords held from both sides (an auditor's mutants of each had lived).
+  // The fold bound, 4,000 candidate runs: 77 repeats put the run that reads so behind 3,080 others, 120 behind 7,380.
+  const repeats = (n: number) => "x y ".repeat(n) + "x z y";
+  assert(ownWords("x z y", repeats(77)) === "x z y" && ownWords("x z y", repeats(120)) === null,
+    "…the fold bound from both sides: a run behind about 3,000 candidates is found, one behind about 7,000 is given up on");
+  // The length bound, the quote's own and 600 more: a link's target of 500 characters inside the run is read across, one of 700 is not.
+  const targeted = (n: number) => `We will migrate the queue [worker](https://example.test/${"a".repeat(n)}) next.`;
+  assert(ownWords("migrate the queue worker next", targeted(500)) === `migrate the queue [worker](https://example.test/${"a".repeat(500)}) next`
+      && evidenceIn("migrate the queue worker next", targeted(700)) && ownWords("migrate the queue worker next", targeted(700)) === null,
+    "…the length bound from both sides: markup of 500 characters inside a run is read across, of 700 is not, and the quote is kept as the check read it");
+  // A run starts and ends at a word's edge: the same letters inside a longer word are not it, though they come first in the text.
+  assert(ownWords("art is long", "stART is long, and art is long") === "art is long" && ownWords("art is long", "art is LONGer, and art is long") === "art is long",
+    "…a run neither starts nor ends inside a longer word");
+  // Emphasis marks are taken in three deep at most, and the quote's own bracket is found across them.
+  assert(ownWords("done", "it is ******done****** now") === "***done***" && ownWords("(measured on the old cluster)", "Latency is 240 ms (**measured** on the old cluster).") === "(**measured** on the old cluster)",
+    "…emphasis marks three deep at most on each side, and the quote's bracket found beyond them");
+  // A link whose text opens or ends the quote is taken with its bracket and target, so the run reads as the quote does and no bracket is left open.
+  const linkedBoth = "[XYZ-9001](https://tickets.example/XYZ-9001) is blocked on the vendor; see [the intake form](https://forms.example/intake).";
+  assert(ownWords("XYZ-9001 is blocked on the vendor", linkedBoth) === "[XYZ-9001](https://tickets.example/XYZ-9001) is blocked on the vendor"
+      && ownWords("see the intake form", linkedBoth) === "see [the intake form](https://forms.example/intake)",
+    "…a run that opens on a link's text takes its bracket, and one that ends on a link's text takes its target (review pass 1: the first read back nothing, the second left a bracket open)");
+  // A run reads as the WHOLE quote (review pass 1, the adversary's cases): a place that holds the quote's words
+  // without its marks is another statement, though it is shorter and comes first.
+  const marked = "Coverage is 80 on the old suite. Since the rewrite, coverage is 80% of lines. We moved to C at first and then moved to C++ for the solver. It was -5 degrees.";
+  assert(ownWords("coverage is 80%", marked) === "coverage is 80%" && ownWords("coverage is 80", marked) === "Coverage is 80" && ownWords("moved to C++", marked) === "moved to C++" && ownWords("moved to C", marked) === "moved to C"
+      && ownWords("-5 degrees", marked) === "-5 degrees" && ownWords("5 degrees", marked) === "5 degrees" && ownWords("coverage is 80!", marked) === null && ownWords("-5 degrees", "It was 5 degrees at noon.") === null && ownWords("is it -5 degrees?", "Is it -5 degrees? It is -5 degrees.") === "Is it -5 degrees?",
+    "…a quote's own marks at its edges are found beside the run or the place is passed over: 80% is not 80, C++ is not C, -5 is not 5");
+  // Every fold is counted (review pass 1: the widenings were not, and this call took 480 s). The adversary's text:
+  // a quote of two words inside 197 brackets each side, then struck one-letter words to the text's bound, each pair
+  // of which reads as the quote's two words.
+  const hostileQuote = "(".repeat(197) + "a b" + ")".repeat(197);
+  const hostileText = (hostileQuote + " " + "~~a~~ ~~b~~ ".repeat(Math.ceil(CONTENT_LIMIT_CHARS / 12))).slice(0, CONTENT_LIMIT_CHARS);
+  const hostileAt = performance.now();
+  const hostileRun = ownWords(hostileQuote, hostileText);
+  const hostileMs = performance.now() - hostileAt;
+  assert(evidenceIn(hostileQuote, hostileText) && hostileRun === hostileQuote && hostileMs < 5000,
+    `…bounded whatever the text: a quote that is mostly marks, in a text made to offer thousands of runs, is read back within the fold bound (${Math.round(hostileMs)} ms; 480 s before every fold was counted)`);
+  // …and every fold is counted, the widenings among them, held from both sides (review pass 1: a mutant that counted
+  // the candidates alone lived, the time above being a wide bound). Each place before the quote's own costs about
+  // 200 folds leftwards, looking for its 197 brackets: behind 5 such places the run is found, and behind 40 the
+  // 4,000 are spent first. Counting the candidates alone, 40 places cost under 900.
+  const bracketed = "(".repeat(197) + "a b";
+  const behind = (k: number) => "- ".repeat(125) + "a b ".repeat(k) + bracketed;
+  assert(ownWords(bracketed, behind(5)) === bracketed && ownWords(bracketed, behind(40)) === null,
+    "…every fold counted, a widening's as a candidate's: a run behind 5 places that each cost a long search for the quote's marks is found, one behind 40 is given up on");
+  // What it does not make one: a typing with the quote's own brackets and one without are two runs.
+  assert(ownWords("(measured on the old cluster)", mdOlder) !== ownWords("measured on the old cluster", mdOlder) && ownWords("measured on the old cluster", mdOlder) === "measured on the old cluster",
+    "…and two typings that differ by punctuation at the quote's edge are two runs: the limit the README states");
 
   // The parts against the two texts (checkParts), the ones the pass records (partsToRecord), and the judgement.
   const A1 = { in: "A", stale: 'the cutover is planned for "Friday" - pending review', shown_by: "Cutover done on Thursday", word: "implements", reason: "The plan was carried out." };
@@ -2213,17 +2290,49 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   const rec = partsToRecord(chk);
   assert(rec.map((r) => r.index).join() === "0,1,4" && rec[0].holder === "older" && rec[0].statement === chk[0].statement && rec[0].shown_by === "Cutover done on Thursday" && rec[0].word === "implements" && rec[0].reason === A1.reason && rec[2].holder === "newer",
     "the parts to record: those whose two quotes passed, once each, in their thoughts' own characters, with their place in the answer");
+  // Where a span cannot be read back the row holds the quote as the check read it, every word of which is in the
+  // thought, never the typing as it came (review pass 1): the check folds a link's target and struck words away, so
+  // a typing can hold both and still be found.
   const typed = partsToRecord([{ ...chk[0], statement: null, shown: null }])[0];
-  assert(typed.statement === A1.stale && typed.shown_by === A1.shown_by, "…and as the writer typed them where a span could not be read back");
+  assert(typed.statement === 'the cutover is planned for "friday" - pending review' && typed.shown_by === "cutover done on thursday" && asChecked(A1.stale) === typed.statement,
+    "…and as the quote check read them where a span could not be read back: plain, in small letters");
+  const splitFirst = "**Th**e board is blocked on the export.";
+  const foreign = checkParts(parseParts(ans([{ ...part, stale: "[the board](https://elsewhere.example/login?next=brain) is ~~not~~ blocked on the export", shown_by: "shipped on Monday" }])), splitFirst, newer.content);
+  assert(foreign[0].stale_found && foreign[0].shown_found && foreign[0].statement === null && partsToRecord(foreign)[0].statement === "the board is blocked on the export" && !JSON.stringify(partsToRecord(foreign)).includes("elsewhere"),
+    `…so a typing that holds a link target and struck words of the writer's own is found, and what is recorded holds neither (${JSON.stringify(partsToRecord(foreign)[0]?.statement)})`);
+  // Review pass 1, the repeat rule's cases (four mutants of it had lived). A repeat is the same statement of the same
+  // thought by the thought's own characters, among the parts that stand: A1; A1 again in the thought's own marks,
+  // another typing and the same run; A2 with showing words that fail, which does not make its statement seen; A2,
+  // which then stands and is no repeat; and A2 failing again, which is not marked, since it does not stand.
+  const rep = checkParts(parseParts(ans([A1, { ...A1, stale: "The cutover is planned for “Friday” — pending review" }, { ...A2, shown_by: "it was all migrated" }, A2, { ...A2, shown_by: "never said there" }])), mdOlder, mdNewer);
+  assert(rep.map((c) => `${c.stale_found && c.shown_found}/${c.repeated}`).join() === "true/false,true/true,false/false,true/false,false/false" && partsToRecord(rep).map((r) => r.index).join() === "0,3",
+    `a repeat is told by the thought's own run, not the typing; a naming that fails neither marks its statement seen nor is marked (${rep.map((c) => `${c.stale_found && c.shown_found}/${c.repeated}`).join()})`);
+  // …and by the store's fold, case and white space, where no run was read back and the quote as the check read it is what would be recorded.
+  const typedTwice = checkParts(parseParts(ans([{ ...part, stale: "x z y", shown_by: "moved to April" }, { ...part, stale: "X  Z Y", shown_by: "moved to April" }])), repeats(120), "The rota moved to April.");
+  assert(typedTwice[0].stale_found && typedTwice[0].statement === null && typedTwice[1].repeated === true && partsToRecord(typedTwice).length === 1 && partsToRecord(typedTwice)[0].statement === "x z y",
+    "…two typings kept as the check read them that differ in capitals and spacing are one statement, as the store reads them");
+  // A part held by the newer thought: its statement is read in the newer text, and recorded so.
+  assert(chk[4].holder === "newer" && rec[2].statement === "the review passed" && rec[2].shown_by === "pending review" && checkParts(parseParts(ans([{ ...B1, in: "A" }])), mdOlder, mdNewer)[0].stale_found === false,
+    "a part the newer thought holds is checked and recorded that way round: named of the older thought, the same quotes fail");
+  // Review pass 1: each quote must be in its own thought and NOT in the other, held from both sides (two mutants
+  // that dropped the second half had lived). "Latency p95 is" is in both thoughts.
+  const inBoth = checkParts(parseParts(ans([{ ...A1, stale: "Latency p95 is" }, { ...A1, shown_by: "Latency p95 is" }])), mdOlder, mdNewer);
+  assert(evidenceIn("Latency p95 is", mdOlder) && evidenceIn("Latency p95 is", mdNewer) && inBoth[0].stale_found === false && inBoth[0].shown_found === true && inBoth[1].stale_found === true && inBoth[1].shown_found === false
+      && partsToRecord(inBoth).length === 0,
+    "a statement that is in the other thought too does not stand, nor do showing words that are in the statement's own thought too");
   const pp = { unrelated: 0.02, related: 0.2, evolves: 0.08, duplicate: 0, outdates: 0.7 };
   const pj = partsJudgement(pp, named, chk);
   assert(pj.verdict === "related" && pj.confidence === 0.28 && pj.foldedEvolves === true && pj.supersedes === "unknown" && proposalVerdict(pj) === null && relationVerdict(pj) === "related" && pj.parts?.length === 3 && !pj.malformed
       && pj.reason === "the writer named 3 settled parts, and neither thought falls whole" && pj.probabilities?.verdict?.p.outdates === 0.7,
     "parts and no whole: H2O's best verdict that proposes nothing, evolves folded in, its relation under the same floor, and the parts the judgement's to record");
-  const fallsA = parseParts(ans([A1, A2], "yes")), wj = partsJudgement(pp, fallsA, checkParts(fallsA, mdOlder, mdNewer));
-  assert(wj.verdict === "outdates" && wj.supersedes === "newer" && wj.confidence === 0.7 && wj.evidence === "Cutover done on Thursday" && wj.evidenceFound === true && wj.reason === A1.reason && proposalVerdict(wj) === "newer_supersedes_older"
-      && proposalConfidence(wj).confidence === 0.7 && wj.parts?.length === 2,
-    "a thought the writer says falls whole, shown by a part in it: an outdates with the other thought current, that part's showing words its evidence, and its parts recorded beside the proposal");
+  // The showing words typed in small letters, where the thought has a capital: the proposal's evidence is the typing, as a proposal's quote always was, and the row's is the thought's own run.
+  const A1typed = { ...A1, shown_by: "cutover done on thursday" };
+  const fallsA = parseParts(ans([A1typed, A2], "yes")), wj = partsJudgement(pp, fallsA, checkParts(fallsA, mdOlder, mdNewer));
+  assert(wj.verdict === "outdates" && wj.supersedes === "newer" && wj.confidence === 0.7 && wj.evidence === "cutover done on thursday" && wj.evidenceFound === true && proposalVerdict(wj) === "newer_supersedes_older"
+      && wj.reason === `the writer says the older thought falls whole; a part that shows it: ${A1.reason}` && proposalConfidence(wj).confidence === 0.7 && wj.parts?.length === 2 && wj.parts[0].shown_by === "Cutover done on Thursday",
+    "a thought the writer says falls whole, shown by a part in it: an outdates with the other thought current, that part's showing words as typed its evidence, its reason said to be one part's, and its parts recorded beside the proposal");
+  const longReason = partsJudgement(pp, parseParts(ans([{ ...A1, reason: "r".repeat(390) }], "yes")), checkParts(parseParts(ans([{ ...A1, reason: "r".repeat(390) }], "yes")), mdOlder, mdNewer));
+  assert([...longReason.reason].length === REASON_MAX && longReason.reason.startsWith("the writer says the older thought falls whole; a part that shows it: rrr"), "…cut to the bound a reason is kept to");
   const fallsB = parseParts(ans([B1], "no", "yes")), wb = partsJudgement(pp, fallsB, checkParts(fallsB, mdOlder, mdNewer));
   assert(wb.verdict === "outdates" && wb.supersedes === "older" && proposalVerdict(wb) === "older_supersedes_newer" && wb.evidence === "pending review", "…the newer thought falling: the older current");
   const wrongSide = parseParts(ans([A1], "no", "yes")), noShow = partsJudgement(pp, wrongSide, checkParts(wrongSide, mdOlder, mdNewer));
@@ -2239,8 +2348,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
     "…with the threads' words after the writer's where the fold moved the verdict, as before");
   // The note a recipe keeps (partsNote), and one part's own (partJudged).
   const wholeNote = partsNote("w", fallsA, checkParts(fallsA, mdOlder, mdNewer)), plainNote = partsNote("w", named, chk);
-  assert(wholeNote.model === "w" && wholeNote.falls === "older" && wholeNote.current === "newer" && wholeNote.evidence === "Cutover done on Thursday" && wholeNote.stale === A1.stale && wholeNote.evidence_found === true && wholeNote.stale_found === true
-      && wholeNote.reason === A1.reason && wholeNote.parts?.length === 2 && wholeNote.dropped === 0,
+  assert(wholeNote.model === "w" && wholeNote.falls === "older" && wholeNote.current === "newer" && wholeNote.evidence === "cutover done on thursday" && wholeNote.stale === A1.stale && wholeNote.evidence_found === true && wholeNote.stale_found === true
+      && wholeNote.reason === A1.reason && wholeNote.parts?.length === 2 && wholeNote.dropped === 0 && wholeNote.over === undefined && partsNote("w", many, []).over === 3,
     "the note of a whole: the thought that falls, and a proposal's six keys from the part that shows it, so an earlier version's reader reads it the same way");
   assert(plainNote.falls === "none" && plainNote.current === undefined && plainNote.evidence === undefined && plainNote.parts?.length === 5 && plainNote.parts[0].stale === A1.stale && plainNote.parts[0].own.statement === true
       && plainNote.parts[2].repeated === true && plainNote.parts[1].repeated === undefined && plainNote.parts[3].shown_found === false && plainNote.parts[3].own.shown_by === false
@@ -2259,6 +2368,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
       && castError !== null && "sqlstate" in castError && castError.sqlstate === "22P02" && !JSON.stringify(castError).includes("cutover"),
     "the store's own refusal keeps its words, which echo no argument; a cast's error keeps its SQLSTATE alone, not the value it quotes");
   const isolation = partWriteFault(pgError("0A000", "record_settled_part must run under READ COMMITTED; this transaction is SERIALIZABLE")), longOwn = partWriteFault(pgError("22023", "record_settled_part: " + "x".repeat(500)));
+  const lineage = partWriteFault(pgError("22023", 'ob1_record_derivation: recipe must be a JSON object carrying a boolean "deterministic"'));
+  assert(lineage !== null && "refused" in lineage && lineage.refused.startsWith("ob1_record_derivation: recipe must be"), "…the lineage writer the store calls refuses in its own name, with no text of a thought: its words are kept too");
   assert(isolation !== null && "refused" in isolation && longOwn !== null && "refused" in longOwn && longOwn.refused.length === 200
       && (partWriteFault(Object.assign(new Error("value too long for type character varying(3)"), { code: "22001" })) as { sqlstate?: string } | null)?.sqlstate === "22001",
     "…a refusal outside class 22 is the store's by its name, a long one is cut, and a code read from `code` where there is no `errno`");

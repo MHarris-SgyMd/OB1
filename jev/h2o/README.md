@@ -329,6 +329,11 @@ judge's easy pairs", has the tables.
 
 ## SMD-3115: deciding in the consolidation pass
 
+This section is the mode as decide versions 1 to 5 ran it, where the writer
+wrote a whole-thought proposal. Since version 6 (SMD-4446) the pass asks the
+writer for the settled parts of a pair instead: "The pass key", at this
+section's end, and `db/README.md`, "Decide mode".
+
 SMD-3114 measured H2O deciding supersession while an LLM writes only the
 proposal, and the maintainer adopted it on 2026-10-18 as the consolidation
 pass's decide mode, to be reviewed on the canary. With
@@ -445,9 +450,9 @@ To try it by hand instead:
   (migration 151), and a whole-thought proposal is the exception
   (`db/README.md`, "Decide mode"). Whole-thought proposals are reviewed as
   the judge's are (`bun db/consolidate.ts --list`, then `--accept` or
-  `--reject`); the surfaces that list and decide a part are that ticket's
-  next cut. Each row's lineage records the decider, the writer, decide
-  mode's prompt hash, and what each model said.
+  `--reject`); the surfaces that list and decide a part are a later cut of
+  that ticket (its PR 3). Each row's lineage records the decider, the
+  writer, decide mode's prompt hash, and what each model said.
 - **Memory and co-load** (measured 2026-11-09 on the dogfood Mac, 64 GB:
   `evals/eval-jev-coload.ts --n 30` against the deployed :8022, beside
   Ollama's embedder and the 27B writer, `OLLAMA_NUM_PARALLEL=3`,

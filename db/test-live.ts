@@ -19986,7 +19986,7 @@ if (want("16")) {
           : /gateway/.test(both) ? { unrelated: 0.02, related: 0.15, evolves: 0.1, duplicate: 0.03, outdates: 0.7 }
           : /pager/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.6, duplicate: 0.05, outdates: 0.1 }
           // Decide version 6's pairs (SMD-4446), each an outdates at the floor the writer names a part of.
-          : /audit export|rota|badge|locker/.test(both) ? { unrelated: 0.03, related: 0.15, evolves: 0.1, duplicate: 0.02, outdates: 0.7 }
+          : /audit export|rota|badge|locker|vault|kiosk|ferry|gazebo|harbor|marina|orchard|paddock|quarry|silo|jetty/.test(both) ? { unrelated: 0.03, related: 0.15, evolves: 0.1, duplicate: 0.02, outdates: 0.7 }
           : { unrelated: 0.9, related: 0.05, evolves: 0.02, duplicate: 0.01, outdates: 0.02 };
         const probabilities: Record<string, number> = { ...Object.fromEntries(d.options.map((o) => [o.id, p[o.id] ?? 0])), __insufficient_evidence__: 0 };
         const ids = Object.keys(probabilities);
@@ -19994,11 +19994,10 @@ if (want("16")) {
       },
     });
     let writerCalls = 0, writerPartsAsked = 0, linkCalls = 0;
-    // Decide version 6's cases (SMD-4446): what the stub writer does while it is "out" on a pair, set once the pair is
-    // seeded. The rota pair's newer thought is edited during its first call; the badge pair's during every call; the
-    // locker pair's older thought is deleted during its call. `auditCalls` counts the audit pair's, whose second
-    // answer types the same statement another way.
-    const parts6 = { rotaNew: "", badgeNew: "", lockerOld: "", rotaCalls: 0, badgeCalls: 0, lockerCalls: 0, auditCalls: 0 };
+    // Decide version 6's cases (SMD-4446): what the stub writer does to a pair's thoughts while the pair is judged, each
+    // id set once its pair is seeded, and how many times it was asked about each pair (`calls`, by the pair's name).
+    // `siloMoves` names the calls during which the silo pair's newer text moves.
+    const parts6 = { rotaOld: "", badgeNew: "", lockerOld: "", vaultNew: "", kioskOld: "", jettyNew: "", siloNew: "", siloMoves: [] as number[], calls: {} as Record<string, number> };
     /** While set, the writer's next proposal call is refused 401, and the tier's address answers 404 from then on, as an address that is no tier (SMD-4352). */
     let writerRefusesAsTierMoves = false;
     let tierIsGone = false;
@@ -20029,42 +20028,86 @@ if (want("16")) {
         // The pass's writer since decide version 6 (SMD-4446): the parts' head, the pair, SMD-3340's frozen rules.
         if (prompt.startsWith(PARTS_HEAD) && prompt.endsWith(PARTS_RULES)) writerPartsAsked++;
         const both = thoughtsIn(prompt);
-        const none = { parts: [], a_falls: "no", b_falls: "no" };
+        const none = { parts: [] as unknown[], a_falls: "no", b_falls: "no" };
         const partOf = (stale: string, shown_by: string, word: string, reason: string) => ({ in: "A", stale, shown_by, word, reason });
+        const called = (pair: string) => (parts6.calls[pair] = (parts6.calls[pair] ?? 0) + 1);
+        const move = (id: string, text: string) => sql`UPDATE thoughts SET content = ${text}, content_fingerprint = content_fingerprint_of(${text}) WHERE id = ${id}::uuid`;
         // The tenancy pair: the older thought falls whole, and its one part shows it. The migration pair's answer would
         // stand if the writer were asked: under the floor it must not be, or a whole would record nothing and close the
         // pair's relation (SMD-3151 review pass 4).
-        let answer: { parts: unknown[]; a_falls: string; b_falls: string } = /tenancy/.test(both) ? { parts: [partOf("runs 30 days", "now runs 90 days", "updates", "the tenancy was extended")], a_falls: "yes", b_falls: "no" }
+        let answer: { parts: unknown[]; a_falls: string; b_falls: string } | string = /tenancy/.test(both) ? { parts: [partOf("runs 30 days", "now runs 90 days", "updates", "the tenancy was extended")], a_falls: "yes", b_falls: "no" }
           : /migration/.test(both) ? { parts: [partOf("opens at noon", "moved to the evening", "revises", "the window moved")], a_falls: "yes", b_falls: "no" }
           : none;
         if (/audit export/.test(both)) {
-          // A part and no whole. The older thought writes it with bold marks, curly quotes and a dash; the writer types
-          // it plain, and the second time in capitals with a full stop: one statement, one row.
-          parts6.auditCalls++;
-          const typed = parts6.auditCalls === 1 ? 'the audit export is "broken" on Safari - see the board' : 'THE AUDIT EXPORT IS "BROKEN" ON SAFARI - SEE THE BOARD.';
-          answer = { parts: [partOf(typed, "was fixed for Safari in release 9", "resolves", "the bug was fixed"), partOf("words the older thought never wrote", "was fixed for Safari in release 9", "resolves", "a quote that fails"), { in: "A", stale: "x" }], a_falls: "no", b_falls: "no" };
+          // Parts and no whole. The older thought writes its statement with bold marks, curly quotes and a dash, and the
+          // writer types it plain; from the third judgement on, in capitals with a full stop: one statement, one row.
+          // The first answer also names that statement twice, a quote that fails, an item that is no part, a part the
+          // NEWER thought holds, and a statement whose first word the thought splits with bold marks, so no run of the
+          // thought reads back as it and it is kept as the quote check read it.
+          const n = called("audit");
+          const loud = n >= 3;
+          const stated = partOf(loud ? 'THE AUDIT EXPORT IS "BROKEN" ON SAFARI - SEE THE BOARD.' : 'the audit export is "broken" on Safari - see the board', "was fixed for Safari in release 9", "resolves", "the bug was fixed");
+          const heldByNewer = { in: "B", stale: "logs are now kept for a month", shown_by: "see the board", word: "updates", reason: "made up, the other way round" };
+          const asTyped = partOf(loud ? "EXPORT LOGS ARE KEPT FOR A WEEK" : "export logs are kept for a week", "logs are now kept for a month", "updates", "the logs are kept longer");
+          answer = {
+            parts: n > 1 ? [stated, heldByNewer, asTyped]
+              : [stated, partOf('THE AUDIT EXPORT IS "BROKEN" ON SAFARI - SEE THE BOARD.', "was fixed for Safari in release 9", "resolves", "said twice"),
+                 partOf("words the older thought never wrote", "was fixed for Safari in release 9", "resolves", "a quote that fails"), heldByNewer, asTyped, { in: "A", stale: "x" }],
+            a_falls: "no", b_falls: "no",
+          };
         } else if (/rota/.test(both)) {
-          // The newer thought is edited while the writer is out, the first time only: the part's write is refused as of
-          // a text that moved, the thought is put back, and the second answer is of the text as it stands.
-          parts6.rotaCalls++;
-          if (parts6.rotaCalls === 1) {
-            const moved = "[16d] The rota moved to April, by the committee's vote.";
-            await sql`UPDATE thoughts SET content = ${moved}, content_fingerprint = content_fingerprint_of(${moved}) WHERE id = ${parts6.rotaNew}::uuid`;
-          }
-          answer = { parts: [partOf("starts in March", "moved to April", "revises", "the rota moved")], a_falls: "no", b_falls: "no" };
+          // The OLDER thought is edited while the pair is judged, the first time only: the first part's write is
+          // refused as of a text that moved, neither part is written, the thought is put back, and the second answer
+          // is of the texts as they stand.
+          if (called("rota") === 1) await move(parts6.rotaOld, "[16d] The rota starts in March and runs for six weeks, per the notice.");
+          answer = { parts: [partOf("starts in March", "moved to April", "revises", "the rota moved"), partOf("runs for six weeks", "now runs for eight weeks", "updates", "the rota is longer")], a_falls: "no", b_falls: "no" };
         } else if (/badge/.test(both)) {
-          // …and here during every call, so every write is of a text that moved: the put-backs are bounded.
-          parts6.badgeCalls++;
-          const moved = `[16d] The badge office moved to the annex, revision ${parts6.badgeCalls}.`;
-          await sql`UPDATE thoughts SET content = ${moved}, content_fingerprint = content_fingerprint_of(${moved}) WHERE id = ${parts6.badgeNew}::uuid`;
-          answer = { parts: [partOf("is in the main hall", "moved to the annex", "updates", "the office moved")], a_falls: "no", b_falls: "no" };
+          // The newer thought is edited during every call, so every write is of a text that moved: the put-backs are bounded.
+          await move(parts6.badgeNew, `[16d] The badge office moved to the annex and opens at ten, revision ${called("badge")}.`);
+          answer = { parts: [partOf("is in the main hall", "moved to the annex", "updates", "the office moved"), partOf("opens at nine", "opens at ten", "updates", "the hours changed")], a_falls: "no", b_falls: "no" };
         } else if (/locker/.test(both)) {
-          // The older thought is deleted while the writer is out: the part's write finds it gone.
-          parts6.lockerCalls++;
+          // The older thought is deleted while the pair is judged: the first part's write finds it gone.
+          called("locker");
           await sql`DELETE FROM thoughts WHERE id = ${parts6.lockerOld}::uuid`;
-          answer = { parts: [partOf("are assigned by lottery", "are now first come, first served", "revises", "the rule changed")], a_falls: "no", b_falls: "no" };
+          answer = { parts: [partOf("are assigned by lottery", "are now first come, first served", "revises", "the rule changed"), partOf("cost five pounds", "cost eight pounds", "updates", "the price changed")], a_falls: "no", b_falls: "no" };
+        } else if (/vault/.test(both)) {
+          // A whole, shown by its part, on a newer text edited during the first call: nothing of that judgement is
+          // recorded, and the second records the proposal and the part at the text as it stands.
+          if (called("vault") === 1) await move(parts6.vaultNew, "[16d] The vault code is now 5678, changed on Monday.");
+          answer = { parts: [partOf("code is 1234", "code is now 5678", "updates", "the code changed")], a_falls: "yes", b_falls: "no" };
+        } else if (/kiosk/.test(both)) {
+          // A whole, shown by its part, whose older thought is deleted during the call: no proposal is written for it.
+          called("kiosk");
+          await sql`DELETE FROM thoughts WHERE id = ${parts6.kioskOld}::uuid`;
+          answer = { parts: [partOf("closes at five", "now closes at seven", "updates", "the hours changed")], a_falls: "yes", b_falls: "no" };
+        } else if (/ferry/.test(both)) {
+          // Thirteen parts, and no statement of them is in the thought: twelve are read, and the thirteenth is past the cap.
+          answer = { parts: Array.from({ length: 13 }, (_, i) => partOf(`leaves at dawn on day ${i + 1}`, "now leaves at two", "updates", "a quote that fails")), a_falls: "no", b_falls: "no" };
+        } else if (/jetty/.test(both)) {
+          // A part and no whole, on a pair that holds a stale proposal; the newer thought is edited during the first call.
+          if (called("jetty") === 1) await move(parts6.jettyNew, "[16d] The jetty lamp was replaced in May, with a brighter one, the warden says.");
+          answer = { parts: [partOf("lamp is broken", "lamp was replaced in May", "resolves", "the lamp was replaced")], a_falls: "no", b_falls: "no" };
+        } else if (/gazebo/.test(both)) {
+          answer = "The roof was patched, so the first note is out of date.";
+        } else if (/harbor/.test(both)) {
+          // A thought said to fall whole, and no part named to show it.
+          answer = { parts: [], a_falls: "yes", b_falls: "no" };
+        } else if (/marina/.test(both)) {
+          // A whole, shown by its parts: were anything of the judgement still written after the store's refusal, it would be this pair's proposal.
+          answer = { parts: [partOf("costs forty pounds", "now costs fifty pounds", "updates", "the price rose"), partOf("closes in October", "closes in November", "updates", "the season is longer")], a_falls: "yes", b_falls: "no" };
+        } else if (/orchard/.test(both)) {
+          answer = { parts: [partOf("orchard fence is broken", "orchard fence was mended", "resolves", "the fence was mended"), partOf("orchard gate sticks", "orchard gate was oiled", "resolves", "the gate was oiled")], a_falls: "no", b_falls: "no" };
+        } else if (/paddock/.test(both)) {
+          answer = { parts: [partOf("paddock trough leaks", "paddock trough was sealed", "resolves", "the trough was sealed"), partOf("paddock rail is loose", "paddock rail was fixed", "resolves", "the rail was fixed")], a_falls: "no", b_falls: "no" };
+        } else if (/quarry/.test(both)) {
+          answer = { parts: [partOf("road is closed", "road reopened on Tuesday", "resolves", "the road reopened")], a_falls: "no", b_falls: "no" };
+        } else if (/silo/.test(both)) {
+          // The newer thought is edited during the calls the test names (siloMoves), and not during the others.
+          const n = called("silo");
+          if (parts6.siloMoves.includes(n)) await move(parts6.siloNew, `[16d] The silo hatch is now open, checked at visit ${n}.`);
+          answer = { parts: [partOf("hatch is locked", "hatch is now open", "updates", "the hatch was opened")], a_falls: "no", b_falls: "no" };
         }
-        return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }] });
+        return Response.json({ choices: [{ message: { content: typeof answer === "string" ? answer : JSON.stringify(answer) } }] });
       },
     });
     const ddump = join(tmpdir(), `ob1-test-live-decide-${process.pid}.jsonl`);
@@ -20141,16 +20184,19 @@ if (want("16")) {
       // for review, with its own lineage row whose recipe holds the writer's answer cut to that part.
       const partsOf = async (o: string, n: string) => (await sql`
         SELECT sp.id::text AS id, sp.holder, sp.statement, sp.shown_by, sp.word, sp.word_group, sp.reason, sp.status, sp.judge_key, sp.older_fingerprint AS ofp, sp.newer_fingerprint AS nfp,
-               (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = sp.older_id) AS ofp_now, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = sp.newer_id) AS nfp_now, d.recipe
+               (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = sp.older_id) AS ofp_now, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = sp.newer_id) AS nfp_now, d.recipe,
+               sp.canonical_agent_id::text AS agent, d.canonical_agent_id::text AS lineage_agent
           FROM settled_parts sp LEFT JOIN derivations d ON d.artifact_kind = 'part' AND d.artifact_id = sp.id AND d.produced_by = ${DKEY}
-         WHERE sp.older_id = ${o}::uuid AND sp.newer_id = ${n}::uuid ORDER BY sp.judged_at, sp.id`) as { id: string; holder: string; statement: string; shown_by: string; word: string; word_group: string; reason: string; status: string; judge_key: string; ofp: string; nfp: string; ofp_now: string; nfp_now: string; recipe: DecideRecipe | null }[];
+         WHERE sp.older_id = ${o}::uuid AND sp.newer_id = ${n}::uuid ORDER BY sp.judged_at, sp.id`) as { id: string; holder: string; statement: string; shown_by: string; word: string; word_group: string; reason: string; status: string; judge_key: string; ofp: string; nfp: string; ofp_now: string; nfp_now: string; recipe: DecideRecipe | null; agent: string | null; lineage_agent: string | null }[];
       const tenParts = await partsOf(tenOld, tenNew);
+      const passAgent = ((await sql`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = 'consolidator'`) as { id: string }[])[0]?.id ?? "no agent";
       const [{ n: partsInAll }] = (await sql`SELECT count(*)::int AS n FROM settled_parts`) as { n: number }[];
       assert(tenParts.length === 1 && partsInAll === 1 && tenParts[0].holder === "older" && tenParts[0].statement === "runs 30 days" && tenParts[0].shown_by === "now runs 90 days" && tenParts[0].word === "updates" && tenParts[0].word_group === "done_or_settled"
           && tenParts[0].reason === "the tenancy was extended" && tenParts[0].status === "pending" && tenParts[0].judge_key === DKEY && tenParts[0].ofp === tenParts[0].ofp_now && tenParts[0].nfp === tenParts[0].nfp_now
           && tenParts[0].recipe?.decide_version === 6 && tenParts[0].recipe.prompt_hash === promptHash(DECIDE_PROMPT) && tenParts[0].recipe.judged?.verdict === "outdates" && tenParts[0].recipe.judged.decide?.writer?.part?.stale === "runs 30 days"
-          && tenParts[0].recipe.judged.decide.writer.named === 1 && tenParts[0].recipe.judged.decide.writer.index === 0 && tenParts[0].recipe.judged.decide.writer.parts === undefined && tenParts[0].recipe.judged.decide.writer.current === undefined,
-        `the whole's part is recorded beside the proposal, pending under decide mode's key at the fingerprints the writer was sent, and no other pair holds one; its lineage row's recipe holds the writer's answer cut to that part (${JSON.stringify(tenParts.map(({ recipe: _, ...r }) => r))}; ${partsInAll} part(s) in all; ${JSON.stringify(tenParts[0]?.recipe?.judged?.decide?.writer ?? null).slice(0, 300)})`);
+          && tenParts[0].recipe.judged.decide.writer.named === 1 && tenParts[0].recipe.judged.decide.writer.index === 0 && tenParts[0].recipe.judged.decide.writer.parts === undefined && tenParts[0].recipe.judged.decide.writer.current === undefined
+          && tenParts[0].agent === passAgent && tenParts[0].lineage_agent === passAgent,
+        `the whole's part is recorded beside the proposal, pending under decide mode's key at the fingerprints the writer was sent, the pass's agent on it and on its lineage row, and no other pair holds one; its lineage row's recipe holds the writer's answer cut to that part (${JSON.stringify(tenParts.map(({ recipe: _, ...r }) => r))}; ${partsInAll} part(s) in all; ${JSON.stringify(tenParts[0]?.recipe?.judged?.decide?.writer ?? null).slice(0, 300)})`);
       const drels = (await sql`SELECT thought_id::text AS t, payload->>'target' AS target, payload->>'relation' AS relation, payload->>'judge_key' AS key
                                  FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL
                                   AND thought_id IN (SELECT id FROM thoughts WHERE content LIKE '[16d]%')`) as { t: string; target: string; relation: string; key: string }[];
@@ -20192,8 +20238,8 @@ if (want("16")) {
         .find((l) => l.newer === tenNew && l.older === tenOld);
       assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 3 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartsAsked === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out)
-          && /decide: the writer asked on 2 pair\(s\) — 1 with a settled part, 1 with no part named, 0 with quotes that did not check out, 0 unparsed; it said a thought falls whole on 1, 1 of them shown by a part; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)
-          && /decide: 1 settled part\(s\) named — 1 recorded for review, 0 already held, 0 with a quote that did not check out$/m.test(drun.out)
+          && /decide: the writer asked 2 time\(s\), a pair judged again counted again — 1 with a settled part, 1 with no part named, 0 with quotes that did not check out, 0 unparsed; it said a thought falls whole on 1, 1 of them shown by a part; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)
+          && /decide: 1 settled part\(s\) read — 1 recorded for review, 0 already held, 0 with a quote that did not check out$/m.test(drun.out)
           && /decide: the writer's link step asked on 3 pair\(s\) — 1 capped at related with no proposal \(0 of them unparsed\), 2 direct or unlinked/.test(drun.out)
           && tenLine?.falls === "older" && tenLine.dropped === 0 && tenLine.parts?.length === 1 && tenLine.parts[0].result === "recorded" && tenLine.parts[0].id === tenParts[0]?.id && tenLine.parts[0].status === "pending" && tenLine.parts[0].stale === "runs 30 days",
         `the tier was asked about each of the six pairs, the link step about the three outdates at the floor and not the evolves (version 5), and the writer only about the two the link step found direct, as the judge's model with the parts' question (version 6); the run's summary counts each pair and each part, and the dump line carries the writer's answer with what became of its part (tier ${tierCalls}, link ${linkCalls}, writer ${writerCalls}, the parts' question ${writerPartsAsked}: ${[...writerModels].join(", ")}; ${drun.out.split("\n").filter((l) => /^\s*decide: /.test(l)).map((l) => l.trim()).join(" | ") || "no decide line"}; dump ${JSON.stringify(tenLine ?? null).slice(0, 300)})`);
@@ -20212,91 +20258,309 @@ if (want("16")) {
       const [tenAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${tenId}::uuid`) as { status: string; review_note: string | null }[];
       const underNote = passSettledNote("judged again after a text moved — outdates at confidence 0.80 (token probability), under the floor 0.85, the writer not asked", DKEY);
       assert(tenRebuilt.stale_proposals === 1 && resettle.code === 0 && tenAfter?.status === "rejected" && tenAfter.review_note === underNote && writerCalls === askedBefore && linkCalls === linkedBefore
-          && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked on 0 pair\(s\) — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
+          && /1 under confidence 0\.85 not recorded/.test(resettle.out) && /decide: the writer asked 0 time\(s\), a pair judged again counted again — .*; 1 outdates under the floor 0\.85, the writer not asked/.test(resettle.out),
         `a stale proposal the tier calls outdates under the floor is settled as one, its note naming the floor and the writer not asked, and counted so (exit ${resettle.code}: ${JSON.stringify(tenAfter ?? null)}; ${resettle.out.split("\n").find((l) => /^\s*decide: the writer/.test(l))?.trim() ?? "no decide line"})`);
       // The pair's part went stale with the proposal (151's arm of rebuild_derived), and this run, whose writer was not
       // asked, names no part: the row stays as the rebuild left it. What settles a part the pass no longer names is
       // the ticket's next cut (SMD-4446 PR 2b).
       const tenPartAfter = await partsOf(tenOld, tenNew);
-      assert(tenRebuilt.stale_parts === 1 && tenPartAfter.length === 1 && tenPartAfter[0].id === tenParts[0]?.id && tenPartAfter[0].status === "stale" && /decide: 0 settled part\(s\) named — 0 recorded for review/.test(resettle.out),
+      assert(tenRebuilt.stale_parts === 1 && tenPartAfter.length === 1 && tenPartAfter[0].id === tenParts[0]?.id && tenPartAfter[0].status === "stale" && /decide: 0 settled part\(s\) read — 0 recorded for review/.test(resettle.out),
         `the pair's part was set stale by the rebuild, and a run that asks no writer leaves it so (${tenRebuilt.stale_parts} set stale; ${JSON.stringify(tenPartAfter.map(({ recipe: _, ...r }) => r))})`);
 
-      // SMD-4446 PR 2a, decide version 6: a part's write and its four answers, each on a pair of its own. One run.
-      //   audit:  a part and no whole, the statement kept in its thought's own characters; a quote that fails and an
-      //           item that is no part are counted and written nowhere but the dump.
-      //   rota:   the newer thought edited while the writer is out, once: the write answers that a text moved, the
-      //           thought is put back, and the part is recorded of the text as it stands.
-      //   badge:  the same during every call: put back twice, then the claim fails naming the pair.
-      //   locker: the older thought deleted while the writer is out: the part is skipped, the thought not failed.
-      const auditOld = await seed("[16d] The **audit export** is “broken” on Safari — see the board.", 61, 3, ["audit"]);
-      const auditNew = await seed("[16d] The audit export was fixed for Safari in release 9.", 61, 0, ["audit"]);
-      const rotaOld = await seed("[16d] The rota starts in March.", 62, 3, ["rota"]);
-      parts6.rotaNew = await seed("[16d] The rota moved to April.", 62, 0, ["rota"]);
-      const badgeOld = await seed("[16d] The badge office is in the main hall.", 63, 3, ["badge"]);
-      parts6.badgeNew = await seed("[16d] The badge office moved to the annex.", 63, 0, ["badge"]);
-      parts6.lockerOld = await seed("[16d] The locker keys are assigned by lottery.", 64, 3, ["locker"]);
-      const lockerNew = await seed("[16d] The locker keys are now first come, first served.", 64, 0, ["locker"]);
+      // SMD-4446 PR 2a, decide version 6: what becomes of a pair's parts, each case on a pair of its own. One run.
+      //   audit:  parts and no whole. Three are recorded: one in its thought's own characters, one the NEWER thought
+      //           holds, and one kept as the quote check read it, the thought splitting its first word with bold
+      //           marks. A statement named twice, a quote that fails and an item that is no part are counted and
+      //           written nowhere but the dump.
+      //   rota:   the OLDER thought edited while the pair is judged, once: the first part's write answers that a text
+      //           moved, neither part is written, the thought is put back, and both are recorded of the texts as
+      //           they stand.
+      //   badge:  the newer thought edited during every call: put back twice, then the claim fails at once, its second
+      //           pair not asked about a text known to have moved (review pass 1: the loop went on, five calls for three).
+      //   locker: the older thought deleted while the pair is judged: neither part is written, the thought not failed.
+      //   vault:  a whole shown by its part, the newer thought edited during the first call: nothing of that judgement
+      //           is recorded, no proposal either, and the second records both at the text as it stands (review pass
+      //           1: the proposal was written first, which closed the pair to the candidate rule, its part unrecorded).
+      //   kiosk:  a whole shown by its part, the older thought deleted during the call: no proposal is written of a
+      //           thought that is gone, and the claim succeeds (review pass 1: the proposal's foreign key failed it).
+      //   jetty:  a part and no whole, on a pair that holds a stale proposal, the newer thought edited during the first
+      //           call: the stale proposal is not settled on a judgement of a text that moved, and the judgement after
+      //           it settles it and records the part (review pass 1: settled first, the pair was closed, its part lost).
+      //   ferry:  thirteen parts, none with a statement the thought holds: twelve are read, the thirteenth is past the
+      //           cap. gazebo: an answer that is no JSON. harbor: a thought said to fall whole, and no part named to
+      //           show it.
+      const auditOld = await seed("[16d] The **audit export** is “broken” on Safari — see the board. **Ex**port logs are kept for a week.", 61, 3, ["audit"]);
+      const auditNew = await seed("[16d] The audit export was fixed for Safari in release 9. Logs are now kept for a month.", 61, 0, ["audit"]);
+      parts6.rotaOld = await seed("[16d] The rota starts in March and runs for six weeks.", 62, 3, ["rota"]);
+      const rotaNew = await seed("[16d] The rota moved to April and now runs for eight weeks.", 62, 0, ["rota"]);
+      const badgeOld = await seed("[16d] The badge office is in the main hall and opens at nine.", 63, 3, ["badge"]);
+      parts6.badgeNew = await seed("[16d] The badge office moved to the annex and opens at ten.", 63, 0, ["badge", "annex"]);
+      // …and a second, older neighbour of the badge thought alone (they share the annex, which the first does not name),
+      // tilted just off its axis so it comes second in the candidates' distance order.
+      const annexOld = await seed("[16d] The annex opens on weekdays.", 63, 4, ["annex"]);
+      const offBadge = new Array(EMBEDDING_DIM).fill(0);
+      [offBadge[63], offBadge[76]] = [Math.sqrt(1 - 0.1 ** 2), 0.1];
+      await sql`UPDATE thoughts SET embedding = ${`[${offBadge.join(",")}]`}::vector WHERE id = ${annexOld}::uuid`;
+      parts6.lockerOld = await seed("[16d] The locker keys are assigned by lottery and cost five pounds.", 64, 3, ["locker"]);
+      const lockerNew = await seed("[16d] The locker keys are now first come, first served and cost eight pounds.", 64, 0, ["locker"]);
+      const vaultOld = await seed("[16d] The vault code is 1234.", 65, 3, ["vault"]);
+      parts6.vaultNew = await seed("[16d] The vault code is now 5678.", 65, 0, ["vault"]);
+      parts6.kioskOld = await seed("[16d] The kiosk closes at five.", 66, 3, ["kiosk"]);
+      const kioskNew = await seed("[16d] The kiosk now closes at seven.", 66, 0, ["kiosk"]);
+      await seed("[16d] The ferry leaves at noon.", 67, 3, ["ferry"]);
+      const ferryNew = await seed("[16d] The ferry now leaves at two.", 67, 0, ["ferry"]);
+      await seed("[16d] The gazebo roof leaks.", 68, 3, ["gazebo"]);
+      const gazeboNew = await seed("[16d] The gazebo roof was patched last week.", 68, 0, ["gazebo"]);
+      await seed("[16d] The harbor office is open on weekends.", 69, 3, ["harbor"]);
+      const harborNew = await seed("[16d] The harbor office is now closed on weekends.", 69, 0, ["harbor"]);
+      // The jetty pair's proposal under the key, stale: its newer text moved, and a rebuild marked it.
+      const jettyOld = await seed("[16d] The jetty lamp is broken.", 75, 3, ["jetty"]);
+      parts6.jettyNew = await seed("[16d] The jetty lamp was replaced in May.", 75, 0, ["jetty"]);
+      const [{ id: jettyProp }] = (await sql`SELECT record_supersession_proposal(${jettyOld}::uuid, ${parts6.jettyNew}::uuid, 'newer_supersedes_older', 0.7, 'the lamp was replaced', 0.9, ${DKEY}, NULL) AS id`) as { id: string }[];
+      const jettyMoved = "[16d] The jetty lamp was replaced in May, with a brighter one.";
+      await sql`UPDATE thoughts SET content = ${jettyMoved}, content_fingerprint = content_fingerprint_of(${jettyMoved}) WHERE id = ${parts6.jettyNew}::uuid`;
+      const [{ r: jettyRebuilt }] = (await sql`SELECT rebuild_derived(${parts6.jettyNew}::uuid, 'live: edit') AS r`) as { r: { stale_proposals: number } }[];
       const pdump = join(tmpdir(), `ob1-test-live-parts-${process.pid}.jsonl`);
+      type PartLine = { newer: string; older: string; verdict: string; proposal: string | null; recorded: string | null; relation: string | null; falls?: string | null; dropped?: number; over?: number; unread?: string[];
+        parts?: (PartNoteRow & { result?: string | null; id?: string; status?: string; repeated?: boolean })[] };
+      const claim6 = async (t: string) => ((await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${DKEY} AND thought_id = ${t}::uuid`) as { status: string; last_error: string | null }[])[0];
+      const proposalsOf = async (newer: string) => (await sql`
+        SELECT status, verdict, newer_fingerprint AS nfp, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = newer_id) AS nfp_now
+          FROM supersession_proposals WHERE newer_id = ${newer}::uuid`) as { status: string; verdict: string; nfp: string; nfp_now: string }[];
+      const relationsOf = async (newer: string) => ((await sql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'relation' AND thought_id = ${newer}::uuid`) as { n: number }[])[0].n;
+      const partRowsOf = async (newer: string) => ((await sql`SELECT count(*)::int AS n FROM settled_parts WHERE newer_id = ${newer}::uuid`) as { n: number }[])[0].n;
+      const said = (out: string) => out.split("\n").filter((l) => /^\s*decide: /.test(l)).map((l) => l.trim()).join(" | ");
+      const plain = (rows: Awaited<ReturnType<typeof partsOf>>) => JSON.stringify(rows.map(({ recipe: _, ...r }) => r));
+      const moveText = (id: string, text: string) => sql`UPDATE thoughts SET content = ${text}, content_fingerprint = content_fingerprint_of(${text}) WHERE id = ${id}::uuid`;
       try {
         const prun = await decide(denv, "--dump", pdump);
-        const lines = readFileSync(pdump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { newer: string; older: string; verdict: string; proposal: string | null; falls?: string | null; dropped?: number; parts?: (PartNoteRow & { result?: string | null; id?: string; status?: string })[] });
-        const claim6 = async (t: string) => ((await sql`SELECT status, last_error FROM thought_work_claims WHERE work_type = ${DKEY} AND thought_id = ${t}::uuid`) as { status: string; last_error: string | null }[])[0];
-        const [auditParts, rotaParts, badgeParts] = [await partsOf(auditOld, auditNew), await partsOf(rotaOld, parts6.rotaNew), await partsOf(badgeOld, parts6.badgeNew)];
-        const auditLine = lines.find((l) => l.newer === auditNew);
-        const [{ n: auditProps }] = (await sql`SELECT count(*)::int AS n FROM supersession_proposals WHERE older_id = ${auditOld}::uuid AND newer_id = ${auditNew}::uuid`) as { n: number }[];
-        assert(auditParts.length === 1 && auditParts[0].statement === "The **audit export** is “broken” on Safari — see the board" && auditParts[0].shown_by === "was fixed for Safari in release 9" && auditParts[0].holder === "older"
-            && auditParts[0].word === "resolves" && auditParts[0].status === "pending" && auditParts[0].judge_key === DKEY && auditProps === 0 && (await claim6(auditNew))?.status === "succeeded"
-            && auditParts[0].recipe?.judged?.verdict === "related" && auditParts[0].recipe.judged.decide?.writer?.falls === "none" && auditParts[0].recipe.judged.decide.writer.part?.stale === 'the audit export is "broken" on Safari - see the board'
-            && auditParts[0].recipe.judged.decide.writer.part.own?.statement === true && auditParts[0].recipe.judged.decide.writer.named === 2 && auditParts[0].recipe.judged.decide.writer.dropped === 1,
-          `a part and no whole: one row and no proposal, the statement in its thought's own characters though the writer typed it plain, its recipe keeping the typing (${JSON.stringify(auditParts.map(({ recipe: _, ...r }) => r))}; ${auditProps} proposal(s); ${JSON.stringify(auditParts[0]?.recipe?.judged?.decide?.writer ?? null).slice(0, 300)})`);
-        assert(auditLine?.verdict === "related" && auditLine.proposal === null && auditLine.falls === "none" && auditLine.dropped === 1 && auditLine.parts?.length === 2 && auditLine.parts[0].result === "recorded" && auditLine.parts[0].id === auditParts[0]?.id
-            && auditLine.parts[1].stale_found === false && auditLine.parts[1].result === null,
-          `the dump carries every part the writer named, kept or not: the one recorded with its row, the one whose quote failed with no write, and the count of items that were no part (${JSON.stringify(auditLine ?? null).slice(0, 400)})`);
-        const rotaClaim = await claim6(parts6.rotaNew);
-        assert(parts6.rotaCalls === 2 && rotaParts.length === 1 && rotaParts[0].statement === "starts in March" && rotaParts[0].status === "pending" && rotaParts[0].nfp === rotaParts[0].nfp_now && rotaClaim?.status === "succeeded"
-            && /a text of one of its pairs moved while the writer was out — that pair's settled parts were not recorded and nothing more of it was judged; it is pending again/.test(prun.out),
-          `a text edited while the writer was out: the part's write is refused as of a text that moved, the thought is put back and judged again, and the part is recorded at the text as it stands (writer calls ${parts6.rotaCalls}; ${JSON.stringify(rotaParts.map(({ recipe: _, ...r }) => r))}; claim ${JSON.stringify(rotaClaim ?? null)})`);
-        const badgeClaim = await claim6(parts6.badgeNew);
-        assert(parts6.badgeCalls === 3 && badgeParts.length === 0 && badgeClaim?.status === "failed"
-            && (badgeClaim.last_error ?? "").startsWith(`1 of 1 pair(s) not judged or with a settled part unrecorded: pair with ${badgeOld}: a text of the pair moved while the writer was out, 3 times running`),
-          `a text that moves under every call: put back twice, and the third time the claim fails naming the pair, nothing recorded and no loop (writer calls ${parts6.badgeCalls}; ${badgeParts.length} part(s); claim ${JSON.stringify(badgeClaim ?? null)})`);
-        const lockerClaim = await claim6(lockerNew);
-        const [{ n: lockerParts }] = (await sql`SELECT count(*)::int AS n FROM settled_parts WHERE newer_id = ${lockerNew}::uuid`) as { n: number }[];
-        assert(parts6.lockerCalls === 1 && lockerParts === 0 && lockerClaim?.status === "succeeded" && lines.find((l) => l.newer === lockerNew)?.parts?.[0]?.result === "gone",
-          `a thought deleted while the writer was out: the part's write finds it gone, the part is skipped and the thought's claim still succeeds (writer calls ${parts6.lockerCalls}; ${lockerParts} part(s); claim ${JSON.stringify(lockerClaim ?? null)}; ${JSON.stringify(lines.find((l) => l.newer === lockerNew)?.parts ?? null)})`);
-        // Seven writer calls: the audit pair's one, the rota pair's two, the badge pair's three, the locker pair's one.
-        assert(prun.code === 1 && /decide: the writer asked on 7 pair\(s\) — 7 with a settled part, 0 with no part named, 0 with quotes that did not check out, 0 unparsed; it said a thought falls whole on 0, 0 of them shown by a part/.test(prun.out)
-            && /decide: 8 settled part\(s\) named — 2 recorded for review, 0 already held, 1 with a quote that did not check out, 1 with a thought gone, 4 of a text that moved while the writer was out; 1 item\(s\) of an answer were no part$/m.test(prun.out),
-          `the run's summary counts each pair's answer and each part's end, and exits 1 for the claim it left failed (exit ${prun.code}: ${prun.out.split("\n").filter((l) => /^\s*decide: /.test(l)).map((l) => l.trim()).join(" | ")})`);
+        const lines = readFileSync(pdump, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as PartLine);
+        const linesOf = (newer: string) => lines.filter((l) => l.newer === newer);
+        const results = (l: PartLine | undefined) => (l?.parts ?? []).map((p) => p.result ?? "none").join();
 
-        // Judged again at the same texts, the writer typing the statement another way: the store answers that the row
-        // already holds it, and nothing is written. One statement, one row, whatever the typing.
+        // The audit pair: three rows and no proposal.
+        const auditParts = await partsOf(auditOld, auditNew);
+        const byStatement = (rows: typeof auditParts, statement: string) => rows.find((r) => r.statement === statement);
+        const [auditOwn, auditNewer, auditChecked] = [byStatement(auditParts, "The **audit export** is “broken” on Safari — see the board"), byStatement(auditParts, "Logs are now kept for a month"), byStatement(auditParts, "export logs are kept for a week")];
+        const auditLine = linesOf(auditNew)[0];
+        assert(auditParts.length === 3 && auditOwn?.holder === "older" && auditOwn.shown_by === "was fixed for Safari in release 9" && auditOwn.word === "resolves" && auditOwn.status === "pending" && auditOwn.judge_key === DKEY
+            && (await proposalsOf(auditNew)).length === 0 && (await relationsOf(auditNew)) === 0 && (await claim6(auditNew))?.status === "succeeded" && auditParts.every((r) => r.agent === passAgent && r.lineage_agent === passAgent)
+            && auditOwn.recipe?.judged?.verdict === "related" && auditOwn.recipe.judged.decide?.writer?.falls === "none" && auditOwn.recipe.judged.decide.writer.part?.stale === 'the audit export is "broken" on Safari - see the board'
+            && auditOwn.recipe.judged.decide.writer.part.own?.statement === true && auditOwn.recipe.judged.decide.writer.named === 5 && auditOwn.recipe.judged.decide.writer.index === 0 && auditOwn.recipe.judged.decide.writer.dropped === 1,
+          `parts and no whole: rows and no proposal, a statement in its thought's own characters though the writer typed it plain, its recipe keeping the typing and its place among the five read (${plain(auditParts)}; ${JSON.stringify(auditOwn?.recipe?.judged?.decide?.writer ?? null).slice(0, 300)})`);
+        assert(auditNewer?.holder === "newer" && auditNewer.shown_by === "see the board" && auditNewer.word === "updates" && auditNewer.ofp === auditNewer.ofp_now && auditNewer.nfp === auditNewer.nfp_now
+            && auditNewer.recipe?.judged?.decide?.writer?.part?.holder === "newer" && auditNewer.recipe.judged.decide.writer.index === 3,
+          `…a part the newer thought holds is a row whose holder is the newer: its statement the newer thought's words, its showing words the older's (${JSON.stringify(auditNewer ? { holder: auditNewer.holder, statement: auditNewer.statement, shown_by: auditNewer.shown_by } : null)})`);
+        assert(auditChecked?.holder === "older" && auditChecked.shown_by === "Logs are now kept for a month" && auditChecked.recipe?.judged?.decide?.writer?.part?.own?.statement === false && auditChecked.recipe.judged.decide.writer.part.own.shown_by === true
+            && auditChecked.recipe.judged.decide.writer.part.stale === "export logs are kept for a week",
+          `…and a statement no run of the thought reads back as (bold marks split its first word) is kept as the quote check read it, plain and in small letters, its recipe saying its span was not read back (${JSON.stringify(auditChecked ? { statement: auditChecked.statement, own: auditChecked.recipe?.judged?.decide?.writer?.part?.own } : null)})`);
+        assert(linesOf(auditNew).length === 1 && auditLine?.verdict === "related" && auditLine.proposal === null && auditLine.falls === "none" && auditLine.dropped === 1 && auditLine.over === 0 && auditLine.parts?.length === 5
+            && results(auditLine) === "recorded,none,none,recorded,recorded" && auditLine.parts[0].id === auditOwn?.id && auditLine.parts[1].repeated === true && auditLine.parts[2].stale_found === false
+            && auditLine.unread?.length === 1 && auditLine.unread[0] === '{"in":"A","stale":"x"}',
+          `the dump carries every part the writer named, kept or not: those recorded with their rows, the one named twice and the one whose quote failed with no write, and the item that was no part as it came (${JSON.stringify(auditLine ?? null).slice(0, 500)})`);
+
+        // The rota pair: the OLDER thought moved during the first call.
+        const rotaParts = await partsOf(parts6.rotaOld, rotaNew);
+        const rotaClaim = await claim6(rotaNew);
+        assert(parts6.calls.rota === 2 && rotaParts.length === 2 && rotaParts.map((r) => r.statement).sort().join() === "runs for six weeks,starts in March" && rotaParts.every((r) => r.status === "pending" && r.ofp === r.ofp_now && r.nfp === r.nfp_now)
+            && rotaClaim?.status === "succeeded" && linesOf(rotaNew).length === 2 && results(linesOf(rotaNew)[0]) === "moved,moved" && linesOf(rotaNew)[0].relation === null && results(linesOf(rotaNew)[1]) === "recorded,recorded"
+            && prun.out.includes(`  ${rotaNew}: the text of ${parts6.rotaOld}, the older thought of one of its pairs, moved while the pair was judged — that pair's judgement is of a text no longer there: no proposal or relation of it is recorded, nor a part from the write that found so on, and nothing more of the thought was judged; it is pending again, to be judged at the texts as they stand`),
+          `the older thought edited while its pair was judged: the first part's write answers that a text moved, neither part is written, the thought is put back naming the text that moved, and both parts are recorded at the texts as they stand (writer calls ${parts6.calls.rota}; ${plain(rotaParts)}; claim ${JSON.stringify(rotaClaim ?? null)}; dump ${linesOf(rotaNew).map(results).join(" then ")})`);
+
+        // The badge pair: its newer text moves under every call.
+        const badgeClaim = await claim6(parts6.badgeNew);
+        assert(parts6.calls.badge === 3 && (await partRowsOf(parts6.badgeNew)) === 0 && badgeClaim?.status === "failed"
+            && badgeClaim.last_error === `1 of 2 pair(s) not judged or with a settled part unrecorded: pair with ${badgeOld}: this thought's text moved while the pair was judged, the thought already put back 2 times running for a moved text — nothing of the pair is recorded, and it is not put back again`
+            && !lines.some((l) => l.newer === parts6.badgeNew && l.older === annexOld)
+            && prun.out.includes(`  ${parts6.badgeNew}: its own text (found at its pair with ${badgeOld}) moved while the pair was judged`),
+          `a text that moves under every call: put back twice, and the third time the claim fails at once, naming the pair and whose text moved, nothing recorded, no loop, and the thought's second pair not asked (writer calls ${parts6.calls.badge}; claim ${JSON.stringify(badgeClaim ?? null)})`);
+
+        // The locker pair: its older thought deleted during the call.
+        const lockerClaim = await claim6(lockerNew);
+        assert(parts6.calls.locker === 1 && (await partRowsOf(lockerNew)) === 0 && lockerClaim?.status === "succeeded" && results(linesOf(lockerNew)[0]) === "gone,gone" && linesOf(lockerNew)[0]?.relation === null,
+          `a thought deleted while its pair was judged: the first part's write finds it gone, neither part is written, and the thought's claim still succeeds (writer calls ${parts6.calls.locker}; claim ${JSON.stringify(lockerClaim ?? null)}; dump ${results(linesOf(lockerNew)[0])})`);
+
+        // The vault pair: a whole and its part, on a text that moved during the first call.
+        const [vaultParts, vaultProps, vaultLines] = [await partsOf(vaultOld, parts6.vaultNew), await proposalsOf(parts6.vaultNew), linesOf(parts6.vaultNew)];
+        assert(parts6.calls.vault === 2 && vaultLines.length === 2 && vaultLines[0].verdict === "outdates" && vaultLines[0].falls === "older" && vaultLines[0].proposal === null && vaultLines[0].recorded === null && results(vaultLines[0]) === "moved"
+            && vaultLines[1].proposal !== null && vaultLines[1].recorded === "proposed" && results(vaultLines[1]) === "recorded"
+            && vaultProps.length === 1 && vaultProps[0].status === "pending" && vaultProps[0].verdict === "newer_supersedes_older" && vaultProps[0].nfp === vaultProps[0].nfp_now
+            && vaultParts.length === 1 && vaultParts[0].statement === "code is 1234" && vaultParts[0].nfp === vaultParts[0].nfp_now && (await claim6(parts6.vaultNew))?.status === "succeeded",
+          `a whole shown by its part, on a text that moved while the pair was judged: that judgement records neither the proposal nor the part, the pair stays a candidate, and the judgement after it records both at the text as it stands (writer calls ${parts6.calls.vault}; proposals ${JSON.stringify(vaultProps)}; ${plain(vaultParts)}; dump ${vaultLines.map((l) => `${l.recorded ?? "nothing"}/${results(l)}`).join(" then ")})`);
+
+        // The kiosk pair: a whole and its part, of a thought deleted during the call.
+        const kioskClaim = await claim6(kioskNew);
+        assert(parts6.calls.kiosk === 1 && (await proposalsOf(kioskNew)).length === 0 && (await partRowsOf(kioskNew)) === 0 && kioskClaim?.status === "succeeded" && linesOf(kioskNew)[0]?.verdict === "outdates" && linesOf(kioskNew)[0].proposal === null
+            && results(linesOf(kioskNew)[0]) === "gone",
+          `a whole shown by its part, of a thought deleted while the pair was judged: the part's write finds it gone, no proposal is written, and the claim succeeds (claim ${JSON.stringify(kioskClaim ?? null)}; dump ${JSON.stringify(linesOf(kioskNew)[0] ?? null).slice(0, 300)})`);
+
+        // The jetty pair: a stale proposal, and a text that moved again during the first call.
+        const [jettyParts, jettyLines] = [await partsOf(jettyOld, parts6.jettyNew), linesOf(parts6.jettyNew)];
+        const [jettyAfter] = (await sql`SELECT status, review_note FROM supersession_proposals WHERE id = ${jettyProp}::uuid`) as { status: string; review_note: string | null }[];
+        assert(jettyRebuilt.stale_proposals === 1 && parts6.calls.jetty === 2 && jettyLines.length === 2 && jettyLines[0].recorded === null && results(jettyLines[0]) === "moved" && jettyLines[1].recorded === "settled" && results(jettyLines[1]) === "recorded"
+            && jettyAfter?.status === "rejected" && jettyAfter.review_note === passSettledNote("judged again after a text moved — related", DKEY)
+            && jettyParts.length === 1 && jettyParts[0].statement === "lamp is broken" && jettyParts[0].status === "pending" && jettyParts[0].nfp === jettyParts[0].nfp_now && (await claim6(parts6.jettyNew))?.status === "succeeded",
+          `a stale proposal on a pair whose text moved again while it was judged is not settled on that judgement: the judgement after it settles the proposal and records the part (writer calls ${parts6.calls.jetty}; proposal ${JSON.stringify(jettyAfter ?? null)}; ${plain(jettyParts)}; dump ${jettyLines.map((l) => `${l.recorded ?? "nothing"}/${results(l)}`).join(" then ")})`);
+
+        // The ferry, gazebo and harbor pairs: nothing to record, said, and nothing failed.
+        const [ferryLine, gazeboLine, harborLine] = [linesOf(ferryNew)[0], linesOf(gazeboNew)[0], linesOf(harborNew)[0]];
+        const quiet = await Promise.all([ferryNew, gazeboNew, harborNew].map(async (t) => `${(await claim6(t))?.status}/${await partRowsOf(t)}/${(await proposalsOf(t)).length}`));
+        assert(quiet.join() === "succeeded/0/0,succeeded/0/0,succeeded/0/0" && ferryLine?.parts?.length === 12 && ferryLine.parts.every((p) => p.stale_found === false && (p.result ?? null) === null) && ferryLine.falls === "none"
+            && ferryLine.over === 1 && ferryLine.dropped === 0 && ferryLine.unread?.length === 1 && ferryLine.unread[0].includes("leaves at dawn on day 13")
+            && gazeboLine?.falls === "unparsed" && gazeboLine.parts?.length === 0 && gazeboLine.unread?.length === 1 && gazeboLine.unread[0] === "The roof was patched, so the first note is out of date."
+            && harborLine?.falls === "older" && harborLine.parts?.length === 0 && harborLine.proposal === null && harborLine.verdict === "related",
+          `parts whose quotes fail, an answer that is no JSON and a whole no part shows each record nothing and fail nothing; the dump keeps the item past the twelve and the answer that was not read, and says which thought was said to fall (claims, parts and proposals ${quiet.join(" ")}; ferry ${ferryLine?.parts?.length} part(s), ${ferryLine?.over} over; gazebo ${JSON.stringify(gazeboLine ?? null).slice(0, 260)})`);
+
+        // Fifteen writer calls: audit 1, rota 2, badge 3, locker 1, vault 2, kiosk 1, jetty 2, ferry 1, gazebo 1, harbor 1.
+        // Of the 34 parts read: 7 recorded (audit 3, rota 2, vault 1, jetty 1), 13 whose quote failed (audit 1, ferry
+        // 12), 1 named twice (audit), 3 with a thought gone (locker 2, kiosk 1) and 10 of a text that moved (rota 2,
+        // badge 6, vault 1, jetty 1). One item was no part (audit), and one came after the twelve (ferry).
+        assert(prun.code === 1 && /decide: the writer asked 15 time\(s\), a pair judged again counted again — 12 with a settled part, 1 with no part named, 1 with quotes that did not check out, 1 unparsed; it said a thought falls whole on 4, 3 of them shown by a part; 0 outdates under the floor 0\.5, the writer not asked$/m.test(prun.out)
+            && /decide: 34 settled part\(s\) read — 7 recorded for review \(1 kept as the quote check read a quote, its span not read back from the thought\), 0 already held, 13 with a quote that did not check out, 1 named twice in one answer, 3 with a thought gone, 10 of a text that moved while the pair was judged; 1 item\(s\) of an answer were no part, 1 item\(s\) came after the 12 an answer is read to$/m.test(prun.out)
+            && /, 5 put back by the pass for a text that moved while a pair of the thought was judged \(each named above; a thought put back twice is two\), in /.test(prun.out) && / 1 proposal\(s\) recorded /.test(prun.out),
+          `the run's summary counts each judgement's answer and each part's end, its numbers adding up to the parts read, counts the put-backs as its own, and exits 1 for the claim it left failed (exit ${prun.code}: ${said(prun.out)}; ${prun.out.split("\n").find((l) => /thought\(s\) judged/.test(l))?.trim().slice(0, 300)})`);
+
+        // Judged again after an edit of the newer text: each statement's row, pending at the earlier fingerprints, is no
+        // longer a judgement of the texts as they stand, and the new judgement takes its place as a new row.
+        await moveText(auditNew, "[16d] The audit export was fixed for Safari in release 9. Logs are now kept for a month. Confirmed by QA.");
         await sql`SELECT requeue_thought_work(${DKEY}, ${auditNew}::uuid)`;
         const again = await decide(denv);
         const auditAgain = await partsOf(auditOld, auditNew);
-        assert(again.code === 1 && parts6.auditCalls === 2 && auditAgain.length === 1 && auditAgain[0].id === auditParts[0]?.id && /decide: 2 settled part\(s\) named — 0 recorded for review, 1 already held, 1 with a quote that did not check out/.test(again.out),
-          `a statement named again in another typing is the row it already is: answered as standing, nothing written (writer calls ${parts6.auditCalls}; ${auditAgain.length} row(s), the same id ${auditAgain[0]?.id === auditParts[0]?.id}; ${again.out.split("\n").filter((l) => /^\s*decide: \d/.test(l)).map((l) => l.trim()).join(" | ")})`);
+        assert(again.code === 1 && parts6.calls.audit === 2 && auditAgain.length === 3 && auditAgain.every((r) => r.status === "pending" && r.nfp === r.nfp_now && !auditParts.some((was) => was.id === r.id))
+            && auditAgain.map((r) => r.statement).sort().join("|") === auditParts.map((r) => r.statement).sort().join("|")
+            && /decide: 3 settled part\(s\) read — 3 recorded for review \(3 in place of an earlier judgement of the statement, 1 kept as the quote check read a quote, its span not read back from the thought\), 0 already held, 0 with a quote that did not check out$/m.test(again.out),
+          `judged again at a text that moved, each statement is a new row in place of the earlier judgement's, and the summary says so (writer calls ${parts6.calls.audit}; ${auditAgain.length} row(s), ${auditAgain.filter((r) => auditParts.some((was) => was.id === r.id)).length} with an earlier id; ${said(again.out)})`);
+
+        // Judged again at the same texts, the writer typing each statement in capitals, one with a full stop: the store
+        // answers that the row already holds it, and nothing is written. One of the three a reviewer has rejected
+        // meanwhile: it stands as rejected, and the summary says how many did.
+        const rejectedId = byStatement(auditAgain, "The **audit export** is “broken” on Safari — see the board")?.id ?? null;
+        const [{ r: rejection }] = (await sql`SELECT review_settled_part(${rejectedId}::uuid, 'reject', 'a status line, not a statement of the thought', NULL, false, 'pending') AS r`) as { r: { ok: boolean; status?: string } }[];
+        await sql`SELECT requeue_thought_work(${DKEY}, ${auditNew}::uuid)`;
+        const held = await decide(denv);
+        const auditHeld = await partsOf(auditOld, auditNew);
+        assert(rejection.ok && rejection.status === "rejected" && held.code === 1 && parts6.calls.audit === 3 && auditHeld.length === 3 && auditHeld.map((r) => r.id).sort().join() === auditAgain.map((r) => r.id).sort().join()
+            && auditHeld.map((r) => r.status).sort().join() === "pending,pending,rejected" && auditHeld.find((r) => r.id === rejectedId)?.status === "rejected"
+            && /decide: 3 settled part\(s\) read — 0 recorded for review, 3 already held \(1 of them rejected by a reviewer\), 0 with a quote that did not check out$/m.test(held.out),
+          `a statement named again in another typing is the row it already is, a reviewer's rejection of one standing: nothing is written, and the summary counts the three as held, one of them rejected (writer calls ${parts6.calls.audit}; ${plain(auditHeld)}; ${said(held.out)})`);
+
+        // The count of put-backs running ends when the thought is judged through (review pass 1: one return left it
+        // standing, and a mutant that never ended it lived). Only a follower meets a thought again in one process, so
+        // this one runs under --follow: the silo pair's newer text moves during its first two calls (put back twice,
+        // the bound), the third judges it through, and an edit and a requeue by hand, as an operator's, pool it again.
+        // Its text moves during the fourth call too: counted from none, that is a first put-back, and the fifth call
+        // judges it. A count left standing fails the claim at the fourth.
+        parts6.siloMoves = [1, 2, 4];
+        const siloOld = await seed("[16d] The silo hatch is locked.", 74, 3, ["silo"]);
+        parts6.siloNew = await seed("[16d] The silo hatch is now open.", 74, 0, ["silo"]);
+        const siloFollower = Bun.spawn(["bun", "--no-env-file", join(HERE, "consolidate.ts"), "--url", URL_!, "--follow", "1"], { env: denv as Record<string, string>, stdout: "pipe", stderr: "pipe", cwd: HERE });
+        const stopSilo = setTimeout(() => siloFollower.kill(), 120_000);
+        const siloSaid = Promise.all([new Response(siloFollower.stdout).text(), new Response(siloFollower.stderr).text()]);
+        const siloEnded = async (calls: number) => { const c = await claim6(parts6.siloNew); return c?.status === "failed" || (c?.status === "succeeded" && (parts6.calls.silo ?? 0) >= calls); };
+        const firstEnded = await pollUntil(() => siloEnded(3), 50_000);
+        const siloFirst = { calls: parts6.calls.silo ?? 0, claim: await claim6(parts6.siloNew), parts: await partsOf(siloOld, parts6.siloNew) };
+        await moveText(parts6.siloNew, "[16d] The silo hatch is now open, as the warden reports.");
+        await sql`SELECT requeue_thought_work(${DKEY}, ${parts6.siloNew}::uuid)`;
+        const secondEnded = firstEnded && (await pollUntil(() => siloEnded(5), 50_000));
+        siloFollower.kill();
+        const [siloOut, siloErr] = await siloSaid;
+        await siloFollower.exited;
+        clearTimeout(stopSilo);
+        const siloSecond = { calls: parts6.calls.silo ?? 0, claim: await claim6(parts6.siloNew), parts: await partsOf(siloOld, parts6.siloNew) };
+        assert(firstEnded && siloFirst.calls === 3 && siloFirst.claim?.status === "succeeded" && siloFirst.parts.length === 1 && siloFirst.parts[0].statement === "hatch is locked"
+            && secondEnded && siloSecond.calls === 5 && siloSecond.claim?.status === "succeeded" && siloSecond.parts.length === 1 && siloSecond.parts[0].id !== siloFirst.parts[0]?.id && siloSecond.parts[0].nfp === siloSecond.parts[0].nfp_now
+            && (siloOut + siloErr).split(`${parts6.siloNew}: its own text (found at its pair with ${siloOld}) moved while the pair was judged`).length === 4,
+          `a thought put back twice and then judged through starts from none when it is pooled again: its next moved text is a first put-back, not the end of its claim (first: ${siloFirst.calls} call(s), claim ${JSON.stringify(siloFirst.claim ?? null)}; then: ${siloSecond.calls} call(s), claim ${JSON.stringify(siloSecond.claim ?? null)}, ${plain(siloSecond.parts)}; ${(siloOut + siloErr).split("\n").filter((l) => /put back|failed|not put back/.test(l)).map((l) => l.trim().slice(0, 160)).join(" | ").slice(0, 600)})`);
+
+        // The store's own refusal (review pass 1): a role whose sessions default to REPEATABLE READ, where
+        // record_settled_part refuses every call by name. Each refused part is counted, the pair is one problem on the
+        // claim with the store's words, and nothing else of the judgement is recorded, though the writer says the older
+        // thought falls whole: the proposal written then would close the pair with its parts unrecorded, and a retry
+        // under READ COMMITTED would never be offered it. The role holds the suite's own role, so its privileges are
+        // the same and only its default differs.
+        const marinaOld = await seed("[16d] The marina berth costs forty pounds and closes in October.", 70, 3, ["marina"]);
+        const marinaNew = await seed("[16d] The marina berth now costs fifty pounds and closes in November.", 70, 0, ["marina"]);
+        const RR_ROLE = "ob1_live_parts_rr";
+        const [{ owner }] = (await sql`SELECT current_user::text AS owner`) as { owner: string }[];
+        await sql.unsafe(`DROP ROLE IF EXISTS ${RR_ROLE}`);
+        await sql.unsafe(`CREATE ROLE ${RR_ROLE} LOGIN PASSWORD 'parts-rr'`);
+        let refusedRun: Awaited<ReturnType<typeof decide>>;
+        try {
+          await sql.unsafe(`GRANT "${owner}" TO ${RR_ROLE}`);
+          await sql.unsafe(`ALTER ROLE ${RR_ROLE} SET default_transaction_isolation = 'repeatable read'`);
+          const asRr = URL_!.replace(/\/\/[^@]*@/, `//${RR_ROLE}:parts-rr@`);
+          refusedRun = await runScript(["bun", join(HERE, "consolidate.ts"), "--url", asRr], { env: { ...denv, DATABASE_URL: asRr } as Record<string, string>, cwd: HERE });
+        } finally {
+          await sql.unsafe(`DROP ROLE IF EXISTS ${RR_ROLE}`);
+        }
+        const marinaClaim = await claim6(marinaNew);
+        assert(refusedRun.code === 1 && marinaClaim?.status === "failed"
+            && marinaClaim.last_error === `1 of 1 pair(s) not judged or with a settled part unrecorded: pair with ${marinaOld}: 2 settled parts were refused — record_settled_part must run under READ COMMITTED; this transaction is REPEATABLE READ`
+            && (await partRowsOf(marinaNew)) === 0 && (await proposalsOf(marinaNew)).length === 0 && (await relationsOf(marinaNew)) === 0
+            && /decide: 2 settled part\(s\) read — 0 recorded for review, 0 already held, 0 with a quote that did not check out, 2 refused by the store$/m.test(refusedRun.out)
+            && /it said a thought falls whole on 1, 1 of them shown by a part;/.test(refusedRun.out) && / 0 proposal\(s\) recorded /.test(refusedRun.out),
+          `parts the store refuses are counted and said once for the pair on the claim, in the store's own words, and nothing else of the judgement is recorded, so the pair is still a candidate once the cause is mended (exit ${refusedRun.code}: claim ${JSON.stringify(marinaClaim ?? null)}; ${said(refusedRun.out)})`);
+
+        // A part's write that throws (review pass 1). A data error that is not the store's own can quote the value it
+        // was given, a statement among them, so only its SQLSTATE goes into the claim's error and the log; any other
+        // error is the worker's to read, as any write's. Drawn here by a trigger of the suite's own on the store, which
+        // refuses the orchard pair's rows as a cast would, quoting the statement, and the paddock pair's with a guard's
+        // error: each thought fails, the parts are counted as not written, and nothing of either pair is recorded.
+        const orchardOld = await seed("[16d] The orchard fence is broken and the orchard gate sticks.", 71, 3, ["orchard"]);
+        const orchardNew = await seed("[16d] The orchard fence was mended and the orchard gate was oiled.", 71, 0, ["orchard"]);
+        await seed("[16d] The paddock trough leaks and the paddock rail is loose.", 72, 3, ["paddock"]);
+        const paddockNew = await seed("[16d] The paddock trough was sealed and the paddock rail was fixed.", 72, 0, ["paddock"]);
+        await sql.unsafe(`CREATE OR REPLACE FUNCTION ob1_live_part_guard() RETURNS trigger LANGUAGE plpgsql AS $guard$
+          BEGIN
+            IF NEW.statement LIKE '%orchard%' THEN
+              RAISE EXCEPTION USING MESSAGE = format('invalid input syntax for type uuid: "%s"', NEW.statement), ERRCODE = '22P02';
+            ELSIF NEW.statement LIKE '%paddock%' THEN
+              RAISE EXCEPTION USING MESSAGE = 'the live suite''s guard takes no row of this pair', ERRCODE = 'P0001';
+            END IF;
+            RETURN NEW;
+          END $guard$`);
+        let thrownRun: Awaited<ReturnType<typeof decide>>;
+        try {
+          await sql.unsafe(`CREATE TRIGGER ob1_live_part_guard BEFORE INSERT ON settled_parts FOR EACH ROW EXECUTE FUNCTION ob1_live_part_guard()`);
+          thrownRun = await decide(denv);
+        } finally {
+          await sql.unsafe(`DROP TRIGGER IF EXISTS ob1_live_part_guard ON settled_parts`);
+          await sql.unsafe(`DROP FUNCTION IF EXISTS ob1_live_part_guard()`);
+        }
+        const [orchardClaim, paddockClaim] = [await claim6(orchardNew), await claim6(paddockNew)];
+        assert(thrownRun.code === 1 && orchardClaim?.status === "failed" && orchardClaim.last_error === "a settled part's write failed in the database (SQLSTATE 22P02)" && !/fence|gate|invalid input/.test(orchardClaim.last_error)
+            && !thrownRun.out.includes("orchard fence is broken") && !thrownRun.out.includes("invalid input syntax")
+            && paddockClaim?.status === "failed" && (paddockClaim.last_error ?? "").includes("the live suite's guard takes no row of this pair")
+            && (await partRowsOf(orchardNew)) + (await partRowsOf(paddockNew)) === 0 && (await proposalsOf(orchardNew)).length + (await proposalsOf(paddockNew)).length === 0 && (await relationsOf(orchardNew)) + (await relationsOf(paddockNew)) === 0
+            && /decide: 4 settled part\(s\) read — 0 recorded for review, 0 already held, 0 with a quote that did not check out, 4 whose write failed or was not reached after one that did \(the thought's error says how\)$/m.test(thrownRun.out),
+          `a part's write that throws fails its thought and records nothing of the pair: a data error keeps its SQLSTATE and none of the database's words, which quote the statement (pair with ${orchardOld}), any other keeps its own, and the summary counts the parts not written (exit ${thrownRun.code}: orchard ${JSON.stringify(orchardClaim ?? null)}; paddock ${JSON.stringify(paddockClaim ?? null)}; ${said(thrownRun.out)})`);
 
         // A brain without 151's store: a run that would judge refuses at its start, naming the migration, and asks
-        // neither model; a dry run goes on. The function is moved aside and put back, not dropped.
+        // neither model, with a pair waiting; --status and a dry run go on. The function is moved aside and put back,
+        // not dropped.
+        await seed("[16d] The quarry road is closed.", 73, 3, ["quarry"]);
+        const quarryNew = await seed("[16d] The quarry road reopened on Tuesday.", 73, 0, ["quarry"]);
         const SIG = "record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)";
-        const callsBefore = { tier: tierCalls, writer: writerCalls };
+        const callsBefore = { tier: tierCalls, writer: writerCalls, link: linkCalls };
         await sql.unsafe(`ALTER FUNCTION ${SIG} RENAME TO record_settled_part_set_aside`);
-        let noStore: Awaited<ReturnType<typeof decide>>, noStoreDry: Awaited<ReturnType<typeof decide>>;
+        let noStore: Awaited<ReturnType<typeof decide>>, noStoreStatus: Awaited<ReturnType<typeof decide>>, noStoreDry: Awaited<ReturnType<typeof decide>>;
         try {
           noStore = await decide(denv);
+          noStoreStatus = await decide(denv, "--status");
           noStoreDry = await decide(denv, "--dry-run");
         } finally {
           await sql.unsafe(`ALTER FUNCTION ${SIG.replace("record_settled_part", "record_settled_part_set_aside")} RENAME TO record_settled_part`);
         }
-        assert(noStore.code === 2 && /Decide mode records settled parts \(decide version 6, SMD-4446\), and this brain has no store for them\. Apply migration 151 first/.test(noStore.out) && noStoreDry.code === 0
-            && tierCalls === callsBefore.tier && writerCalls === callsBefore.writer,
-          `decide mode on a brain without the parts' store is refused at start, naming migration 151, before either model is asked; a dry run is not (exit ${noStore.code} and ${noStoreDry.code}: ${last(noStore.out)})`);
+        const refusal = /Decide mode records settled parts \(decide version 6, SMD-4446\), and this brain has no store for them\. Apply migration 151 first/;
+        assert(noStore.code === 2 && refusal.test(noStore.out) && noStoreStatus.code !== 2 && !refusal.test(noStoreStatus.out) && noStoreDry.code === 0 && !refusal.test(noStoreDry.out)
+            && tierCalls === callsBefore.tier && writerCalls === callsBefore.writer && linkCalls === callsBefore.link && (await claim6(quarryNew))?.status !== "succeeded" && (await partRowsOf(quarryNew)) === 0,
+          `decide mode on a brain without the parts' store is refused at start, naming migration 151, before either model is asked and with a pair waiting; --status and a dry run are not (exit ${noStore.code}, ${noStoreStatus.code} and ${noStoreDry.code}: ${last(noStore.out)})`);
       } finally {
         try { unlinkSync(pdump); } catch { /* already gone */ }
       }
-      // The badge thought's claim is left failed by design: it is cleared here, so the runs below start from none.
-      await sql`DELETE FROM thoughts WHERE content LIKE '[16d] The badge%' OR content LIKE '[16d] The audit%' OR content LIKE '[16d] The rota%' OR content LIKE '[16d] The locker%'`;
+      // The badge, marina, orchard and paddock claims are left failed by design, and the quarry pair unjudged: all of
+      // this block's thoughts are cleared here, so the runs below start from none.
+      await sql`DELETE FROM thoughts WHERE content LIKE ANY (${sql.array(["audit", "rota", "badge", "annex", "locker", "vault", "kiosk", "jetty", "ferry", "gazebo", "harbor", "marina", "orchard", "paddock", "quarry", "silo"].map((n) => `[16d] The ${n}%`), "TEXT")}::text[])`;
 
       // SMD-3326: the tier's 422 — a pair it cannot read faithfully — is that pair's, recorded on the claim with the
       // tier's words and the older thought's id, and the thought's next pair is still judged. Review pass 1: it was read

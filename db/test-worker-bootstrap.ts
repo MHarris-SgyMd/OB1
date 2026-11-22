@@ -17,6 +17,7 @@
 
 import { providerEndpoint, ProviderError } from "../server-portable/embed.ts";
 import { DecisionRefused } from "../server-portable/jev.ts";
+import { partWriteError } from "../server-portable/consolidate-decide.ts";
 import { resolveEgressPolicy, ROW_UNITS } from "../server-portable/egress.ts";
 import { hashKey } from "../server-portable/auth.ts";
 import { REEMBED_THOUGHT_BACKOFF_MAX_MS, REEMBED_THOUGHT_BACKOFF_MS, REEMBED_THOUGHT_PERIOD_MS, REEMBED_THOUGHT_PROBE_MS, REEMBED_THOUGHT_WAIT_MS, ThoughtWaitBackoff } from "./sleep.ts";
@@ -528,6 +529,15 @@ const UNUSED_URL = "postgres://unused@127.0.0.1:1/none";
   ];
   const ownWrong = ownCells.filter(([e, want]) => followClassify(e) !== want).map(([e, want, what]) => `${what}: ${followClassify(e)}, not ${want}`);
   ok(ownWrong.length === 0, `followClassify reads the workers' own call errors as embed.ts's of the same status, and a deadline as a timeout (${ownWrong.join("; ") || `all ${ownCells.length}`})`);
+
+  // A settled part's write refused for its data (SMD-4446 PR 2a, review pass 1): the pass throws its own error in
+  // place of the database's, whose message can quote a statement. It keeps the name and the code, so it is the
+  // thought's here as the first error was; a bare Error of the same words is the probe's to decide, which asked the
+  // provider about a database's refusal.
+  const partData = partWriteError(pg("22P02", "22P02"), "22P02");
+  ok(followClassify(pg("22P02")) === "thought" && followClassify(partData) === "thought" && partData.message === "a settled part's write failed in the database (SQLSTATE 22P02)"
+      && !partData.message.includes("pg 22P02") && followClassify(new Error(partData.message)) === "probe-decides" && followClassify(partWriteError(new Error("not the database's"), "22P02")) === "probe-decides",
+    `a part's write refused for its data is the thought's, as the database's own error was: the pass's error keeps the name and the code, and none of the first message (${followClassify(partData)})`);
 
   // fault — what a follower does with a provider error (SMD-2636 PR 3a), on followClassify's split: paused for, an
   // outage at once, the probe's to decide, the thought's, or the request's; and whether it makes a suspect.
