@@ -6454,9 +6454,11 @@ call; a tag key the row holds and the answer leaves out is cleared (a list to
 edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
 key other than the recorded one needs `--switch-key`; `--status` and
 `--dry-run` write nothing. `rebuild_derived` requeues a tags row it marks
-under the recorded key since migration 150 (PR 2). Not yet: preflight's
-rows and the prompt version's `--switch` (PR 3), a sleep pass and `--follow`
-(PR 4). test-live [29] drives it against a stub chat endpoint.
+under the recorded key since migration 150 (PR 2). Preflight's `retag pass`
+row counts each `retag:` key's pool by the unfinished-pass rule, and the
+backlog by the worker's own predicate (`db/config.mjs`'s `RETAG_DUE_SQL`, PR
+3a). Not yet: the prompt version's `--switch` (PR 3b), a sleep pass and
+`--follow` (PR 4). test-live [29] drives it against a stub chat endpoint.
 
 ## Extensions
 
