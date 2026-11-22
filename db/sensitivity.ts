@@ -70,7 +70,7 @@ export const PATTERNS: { readonly restricted: readonly (readonly [string, string
   ],
 };
 /**
- * `recipes/session-capture-hook/session-capture.mjs`'s SECRET_PATTERNS, copied
+ * `recipes/session-capture-hook/lib/secrets.mjs`'s SECRET_PATTERNS, copied
  * whole (2026-11-17, review pass 4): the provider keys, credential and
  * password assignments, URLs that carry a password or a `?key=`, bearer
  * tokens, private-key blocks, work-claim tokens and 64-hex keys the brain's

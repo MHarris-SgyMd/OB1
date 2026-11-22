@@ -100,7 +100,7 @@ The runner acts as itself, never as the maintainer: its own agent-kind brain key
 bun scripts/agent-runner/setup.ts dirs                      # make the directory (0700), idempotent
 bun scripts/agent-runner/setup.ts install linear            # copy the key first; this reads it from the clipboard (pbpaste)
 bun scripts/agent-runner/setup.ts install brain --stdin     # or read the key from stdin
-bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork)
+bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork); the probe stamp's binary and install
 bun scripts/agent-runner/setup.ts check-github <bot-login>  # the fork exists and the bot cannot push here (needs gh)
 ```
 
@@ -186,10 +186,10 @@ Each runner session, the worker's and the review's, runs inside the five layers 
   * Outside the stamp: **`text.ts`** has the one-line cut and `maskTokens`, the one mask for a claim token (`wc_…` and the markdown-escaped `wc\_…`); **`facts.ts`** has `jsonOf` and `NOT_JSON`; **`fixture-git.ts`** has the git the self-checks build fixtures with.
 
 ```bash
-mkdir -p ~/.local/share/open-brain/agent-runner/claude && chmod 700 ~/.local/share/open-brain/agent-runner/claude
-cp -p ~/.local/share/claude/versions/2.1.329 ~/.local/share/open-brain/agent-runner/claude/  # the runner's own copy: the updater prunes its own directory
-shasum -a 256 ~/.local/share/open-brain/agent-runner/claude/2.1.329                   # the pinned copy's checksum
-bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.329
+bun scripts/agent-runner/setup.ts claude ~/.local/share/claude/versions/2.1.329       # the runner's own copy; prints --claude --sha256 --version
+bun scripts/agent-runner/setup.ts checkout                                            # the runner's own checkout, at the main checkout's origin/main
+cd ~/.local/share/open-brain/agent-runner/install                                     # the probes and a run start from the install
+bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts --claude <path> --sha256 <hex> --version 2.1.329 --main-checkout ~/Projects/OB1
 bun --no-env-file --config=/dev/null scripts/agent-runner/probes.ts … --state <dir> --only init,keychain --main-checkout ~/Projects/OB1
 bun scripts/agent-runner/probes.ts --self-check                                       # offline, no Claude Code; CI runs it
 ```
@@ -229,7 +229,15 @@ A probe tests one layer alone where it can. With the sandbox alone, the guard on
 
 **The brief probe passes on 2.1.329** (2026-11-20): the worker got past CLAUDE.md step 1 and edited the clone, in 17 turns for $0.21. The guard refused three of its sixteen calls, each for the command's shape (an `&`, a `git bundle` form other than `create`, an `ls`), none for a tool input it didn't know. A first try that day reached no model: the API answered 401 to the runner's Anthropic key, which the maintainer then replaced.
 
-**The stamp also names the checkout the probes ran from,** and a run must start from that checkout with the six hashed files as probed. Keep the runner's install a checkout that stays on one commit; a worktree that changes branch with each task refuses to run whenever its branch differs in one of them.
+**The stamp names two paths, and `setup.ts` makes both** (SMD-4491). A run starts only under a stamp whose Claude Code and whose checkout are still there and still as probed. Both were lost once: the binary to Claude Code's updater, the checkout to a worktree's removal.
+
+* **`setup.ts claude <path>`** copies that binary to `~/.local/share/open-brain/agent-runner/claude/<version>` (0500, in a 0700 directory), asking the binary its own version. It prints the three flags the probes and a run take. The same bytes again are left alone; other bytes under a version already there are refused, since a stamp may name the copy.
+* **`setup.ts checkout [--commit <sha>]`** makes `~/.local/share/open-brain/agent-runner/install`: a clone of the runner's bare repository on a detached HEAD, at the main checkout's `origin/main` unless a commit is given. Only a commit of main is taken: the bare repository also holds the branches sessions wrote, and the install is the code that holds a session. No task works in it. Run again, it moves the install to the newer commit, names each probed file the move changed, and prints what the stamp makes of the install as it now is, read from the files: when that says a file differs, the probe sweep runs again from the install. A checkout with changes of its own is refused.
+* **`setup.ts verify`** and **`live-run.ts --plan`** say what the stamp makes of both, before a run is tried: a binary gone or changed, an install gone, each probed file that differs, a run started from another checkout, a new Bun, git or macOS build.
+
+**From the install, give the sweep `--main-checkout`.** It defaults to the checkout the probes run from, which was the maintainer's own tree while they ran from a worktree of it. From the install that default is the install, and the probe that a session can't read the maintainer's checkout would test the wrong directory.
+
+Until the install is made and probed, the stamp names the checkout the last sweep ran from, and a run starts from there.
 
 ## The live run (`live-run.ts`)
 
@@ -237,6 +245,8 @@ The executor runs one ticket end to end with the real clients — the capstone o
 
 * `--plan --ticket SMD-NNNN`: loads the config and keys, takes the ticket (its full fields fetched from Linear, Verify and the named ids parsed, checked for a character that doesn't show), provisions the runner's bare repository (a local clone of the main checkout, fetched each run), and prints what a run would do. No session, no claim, no Linear write, no spend.
 * `--execute --ticket SMD-NNNN --claude <path> --sha256 <hex> --version <x.y.z>`: the real run. It refuses a ticket not labelled `agent-ready`, checks the probe stamp (so the profile is as-probed — run the mock probes on this Claude Code first), then assembles the real `RunDeps` and `LiveDeps` and runs `liveRun`: claim on stable, move to In Progress, the worker and review sessions on the pinned Claude Code (the Anthropic key through `apiKeyHelper`), the gate, the release and the hand-back to Backlog. Up to about $13, with no PR (cut 3 publishes). The branch stays in the bare repository; the run's record stays under `runs/<run>/`.
+
+**The hand-back comment** is all a person reads of a run until cut 3 publishes, so it says only what the run left (SMD-4516). It names the branch, the bundle and the diff when the run kept the worker's bundle beside its record, which it does only once the branch's import landed. A run that kept none (it ended at prepare, on a worker session that did not finish, or on a bundle it refused) is told as having kept nothing to publish from, and the claim's release reason says the same. The comment does not say nothing was imported: a copy that failed after the import leaves a branch and no bundle. When the review session did not finish, the comment says the branch was not reviewed by the runner, in the PR body's words.
 
 The sessions commit as a placeholder bot until SMD-4089's GitHub identity (cut 3). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
 
@@ -248,6 +258,20 @@ On a run that passed the gate, the runner publishes as the bot (cut 3a is the lo
 * **`publish`** runs the sequence over an injected GitHub client: step 8's renew with the day lease to confirm the claim — published only on a clean renewal, else the publish is left owed (a retryable refusal) or the ticket handed to a person (it closed, or another claim took the work) — then the push to the bot's fork, the draft PR, the record of its number, the PR-link comment on the ticket (a Linear outage leaves the comment owed), and the claim's lease set to a week now the PR is open. It never throws.
 
 The real GitHub client (the push, the REST call that opens the PR), `publish` wired into the live run, and step 0's reconcile are cut 3b; the launchd schedule is 3c. Both need SMD-4089's GitHub identity, and the schedule needs SMD-3606.
+
+## How a run reads a session's ending (`run.ts`, SMD-4490)
+
+Claude Code ends a session it could not finish with a result too, so a result alone is not a session that finished. A session finished only if its result is a plain success: subtype `success` with `is_error` false. `sessionEnding` reads anything else by kind, and the run acts on it:
+
+| The session's ending | Worker | Review | Resumed worker |
+| --- | --- | --- | --- |
+| The API did not answer, before any tool call: no status, 401, 403, 408, 429, 500 and up | environment failure, the label kept | no findings, no resume | the pre-resume branch kept |
+| The API refused the request, before any tool call: any other status | work failure | no findings, no resume | the pre-resume branch kept |
+| An API error after a tool call | work failure | no findings, no resume | the pre-resume branch kept |
+| The turn or budget limit | work failure | no findings, no resume | the pre-resume branch kept |
+| Any other result that is not a plain success | work failure | no findings, no resume | the pre-resume branch kept |
+
+A worker's bundle is imported only when it finished. A review that did not finish does not stop the run: the note says so, and the PR body says the branch was not reviewed. The run's record names the kind (`api-error`, `limit`, `error-result`) as the session's ending. A note carries the runner's words, the result's subtype and the API's status, never the result's text.
 
 ## Cuts still to come
 

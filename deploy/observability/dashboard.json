@@ -72,7 +72,7 @@
     {
       "type": "row",
       "id": 1,
-      "title": "Requests — every server, per request (http_server_request_duration_seconds)",
+      "title": "Requests — every server, per request (http_server_request_duration_seconds), and the listen streams held open (ob1_mcp_listen_streams)",
       "collapsed": false,
       "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1},
       "panels": []
@@ -170,7 +170,7 @@
       "title": "Server failures, share of requests",
       "description": "Requests whose outcome was error, stalled or cut, as a share of all; refusals are the caller's and are left out.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 0, "y": 17, "w": 12, "h": 7},
+      "gridPos": {"x": 0, "y": 17, "w": 8, "h": 7},
       "targets": [
         {
           "refId": "A",
@@ -191,7 +191,7 @@
       "title": "Server failures, by error type",
       "description": "Each failed request's fault code (STORE_UNAVAILABLE, FAILED or EMBEDDING_PROVIDER_ERROR) or, with none, its outcome.",
       "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "gridPos": {"x": 12, "y": 17, "w": 12, "h": 7},
+      "gridPos": {"x": 8, "y": 17, "w": 8, "h": 7},
       "targets": [
         {
           "refId": "A",
@@ -201,6 +201,27 @@
         }
       ],
       "fieldConfig": {"defaults": {"unit": "reqps", "noValue": "none"}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "Listen streams open",
+      "description": "The listen streams the MCP server holds open (ob1.mcp.listen_streams), summed over the servers picked: a sample at each metric export (a minute apart unless set otherwise), not each open and close, so a server just started is not counted until its first. 0 where no server picked sends the count, as none does yet (SMD-4347; the REST core never will); no data where none sends metrics at all. A stream is counted until its connection ends, read or not. A stopped server ends on 0; one killed, or stopped while the collector did not answer, stays counted at its last for five minutes, beside the server started after it. The bounds are each server's own, so a sum over two servers is not to be read against one: keyed /health's listen has them, with each caller's share.",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 16, "y": 17, "w": 8, "h": 7},
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
+          "expr": "(sum(ob1_mcp_listen_streams{service_name=~\"$service\", deployment_environment_name=~\"$tier\"}) or vector(0)) and on () sum(process_uptime_seconds{service_name=~\"$service\", deployment_environment_name=~\"$tier\"})",
+          "legendFormat": "open"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "min": 0, "custom": {"axisSoftMax": 1}}, "overrides": []},
       "options": {
         "legend": {"displayMode": "table", "placement": "right", "calcs": ["mean", "max"]},
         "tooltip": {"mode": "multi", "sort": "desc"}

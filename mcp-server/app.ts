@@ -379,6 +379,8 @@ const WORDS: Record<ToolName, Words> = {
   capture_deliverable: { render: (o) => say.renderCaptureDeliverable(o), fault: writeFault("capture_deliverable failed: ") },
   verify_deliverable: { render: (o) => say.renderVerifyDeliverable(o), fault: writeFault("verify_deliverable failed: ") },
   deliverable_history: { render: (o) => say.renderDeliverableHistory(o), fault: readFault() },
+  // The validity read (SMD-3887 PR 2b).
+  validity: { render: (o) => say.renderValidity(o), fault: readFault() },
   // The agenda (SMD-3669).
   agenda: { render: (o) => say.renderAgenda(o), fault: readFault(() => say.weightSettingHint) },
   // plan_context (SMD-2684).
@@ -523,9 +525,10 @@ export function createMcpApp(deps: McpDeps): Hono {
   };
 
   // The listen streams this server holds open (SMD-4347), where it holds any: how many are open (`listen.count`, for
-  // the entry's stop), and how many under each caller's name. The SDK bounds the streams of the whole server and
-  // nothing else, so one caller could take every place; the route gives each caller its share before the handler
-  // is asked, and gives the place back when the stream ends, however it ends.
+  // the entry's stop, and since SMD-4458 for keyed /health and the entry's metric), and how many under each caller's
+  // name. The SDK bounds the streams of the whole server and nothing else, so one caller could take every place; the
+  // route gives each caller its share before the handler is asked, and gives the place back when the stream ends,
+  // however it ends.
   const listen = deps.listen?.hold ? deps.listen : null;
   const listening = new Map<string, number>();
   /** A place for one more stream under this caller's name, to be given back once; or which bound refused it. */
@@ -547,6 +550,17 @@ export function createMcpApp(deps: McpDeps): Hono {
       },
     };
   };
+  /**
+   * What keyed /health says of the listen streams, on a server that holds any (SMD-4458): how many are open, the
+   * two bounds a refusal is read against, and each caller's share, the most first. It is shown to whoever may read
+   * the record, and a caller's name is its key's, or for a token its subject and client together.
+   */
+  const listenView = (streams: ListenStreams) => ({
+    open: streams.count,
+    max: streams.max,
+    perCaller: streams.perCaller,
+    callers: [...listening].map(([name, open]) => ({ name, open })).sort((a, b) => b.open - a.open || (a.name < b.name ? -1 : 1)),
+  });
   /**
    * Whether the stop has cut what is in flight, on a server that holds listen streams. Such a stop closes the
    * streams before the connections, through the SDK's handler, so for a moment (milliseconds as a rule, 200 ms
@@ -828,7 +842,10 @@ export function createMcpApp(deps: McpDeps): Hono {
     if (!body || (Object.keys(body).length === 1 && body.status === "ok")) return notCleared(c, traceOf(c.req.raw), null);
     // An answer that is no object is no record (review pass 3: a string's characters were served as its fields).
     if (typeof body !== "object" || Array.isArray(body)) return recordFault(new Error("the REST core answered /health with no record"));
-    return c.json({ ...body, oauth: await oauth }, 200, corsHeaders);
+    // Beside the REST core's record, what this server alone knows: its view of the public origin, and, where it holds
+    // listen streams, how many are open as it answers (SMD-4458). A server that holds none says nothing of them.
+    const edgeSeen = await oauth;
+    return c.json({ ...body, oauth: edgeSeen, ...(listen ? { listen: listenView(listen) } : {}) }, 200, corsHeaders);
   });
 
   // The worker-queue status as a keyed GET (SMD-2131), the worker_status tool's REST mirror.

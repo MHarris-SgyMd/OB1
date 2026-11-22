@@ -514,6 +514,48 @@ free:
     beside one. The loaded models' background goes on meanwhile, less the
     120 s of each drain tried.
 
+  Measured on one Mac's Ollama 0.33.3 (SMD-3379 PR 3c-2). Each run below
+  was made once. The Mac has 64 GiB, and Ollama keeps at most two models
+  loaded there (`OLLAMA_MAX_LOADED_MODELS=2`) where three were in use:
+  the embedder and the metadata model, which every capture calls
+  (extraction calls the metadata model too), and a 22 GiB judge model,
+  which the sleep's later passes call (here the subject sweep alone). One
+  brain's background asked for the metadata model and the judge model at
+  once, extraction with three workers and the sweep with its one. That
+  took loading its notes in two parts: a backlog that is there when the
+  sleep's period begins is extracted before the judge model's passes
+  start, so it asks for one model at a time, and notes that arrive during
+  those passes make it ask for both. Another brain, with no background of
+  its own, took a live capture and a search every 30 s for 20 minutes,
+  each timed to its answer (and from minute 12 a burst of 60 timed calls
+  was made on each brain):
+
+  | Run | Capture, median | 90th percentile | Over 60 s | Saved without a vector or tags | Backlogged brain: thoughts extracted | Its judge-model calls ended |
+  |---|---|---|---|---|---|---|
+  | `ps`, no backlog (6 minutes) | 3.3 s | 4.4 s | 0 of 12 | 0 | | |
+  | no `ps` | 53 s | 99 s | 17 of 40 | 3 | 8 | 10 |
+  | `ps` | 8.8 s | 65 s | 6 of 40 | 0 | 47 | 8 |
+  | `ps`, the backlogged brain's `OB1_SLEEP_MAX_WAIT=600` | 4.1 s | 7.9 s | 0 of 40 | 0 | 97 | 2 |
+
+  - **With `ps` and the wait unset, a live call still waits** when it
+    arrives while the judge model runs a call and a model it needs isn't
+    loaded: 16 of the 40 captures took over 30 s, 33 to 86 s. Fifteen
+    waited out what was left of the judge model's call in hand (71 s a
+    call on average there); the last waited behind a load of the judge
+    model that waited 46 s for room.
+  - **With the wait at 600 s** the judge model loaded twice, 607 and
+    611 s after it was asked for, and one capture took over 30 s. The
+    price is the backlogged brain's: its judge model ended 2 calls in the
+    20 minutes, not 8. That run differed in another way too, not
+    explained: after both of the judge model's loads the metadata model
+    loaded next and fitted beside it, where in the run with `ps` and the
+    wait unset the embedder always loaded next and the metadata model then
+    waited for room. Whether the order or the memory free at those moments
+    made the difference was not established, so the last row owes to that
+    as well as to the wait.
+  - Without `ps`, two of the 40 searches were answered by exact matches
+    alone, the embedder not answering in time.
+
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
 coordinator holds the brain's one connection, and its passes ask through it,
@@ -612,14 +654,23 @@ bun --no-env-file deploy/federated/federated.ts down
     `/api/tags` has the same shape and lists every model on disk, which
     would make every model look loaded.
   - **The rule takes the list to name a model only once it has loaded.**
-    Ollama 0.33.3's log reads that way: over 1,670 loads on one Mac it
-    says `loaded runners` after `llama-server started`, 28 ms after at the
-    median and under a second at most. This has not been probed with a
-    read during a load. A server that lists a model from the start of its
-    load ends the hold on the others early, counts `stay_s` from the
-    load's start, and has its failed loads go unpaced. A server that
-    doesn't answer during a load reads as unreadable: past 10 s the rule
-    is off until the load ends.
+    Ollama 0.33.3 does (probed, SMD-3379 PR 3c-2): over 187 loads on one
+    Mac, read every 15 ms, the list first named the model within 0.7 s of
+    Ollama logging `loaded runners`, 13 ms after at the median, and never
+    while it loaded. A model put out for another is gone from the list as
+    the other begins to load, so the list can be empty for a whole load.
+    The broker doesn't take that for a server with nothing loaded: it
+    grants background to no other model while a load it counts is under
+    way, and begins no other load even once that load is past its 120 s
+    bound. A load by a caller it doesn't count (a brain not keyed to it,
+    another client of the server) does read that way while the list is
+    empty. None of 254,000 reads during loads and evictions failed; the
+    slowest took 0.7 s, while a 22 GiB model was put out, inside the
+    broker's 2 s limit on a read. A server that lists a model from the
+    start of its load ends the hold on the others early, counts `stay_s`
+    from the load's start, and has its failed loads go unpaced. A server
+    that doesn't answer during a load reads as unreadable: past 10 s the
+    rule is off until the load ends.
   - The broker reads it every 3 s, and every second while a model loads.
     Unreadable for 10 s, the server has no residency rule until it reads
     again. The log says `its loaded models could not be read (<why>): no
@@ -643,9 +694,17 @@ bun --no-env-file deploy/federated/federated.ts down
   use 60). On a server with `ps` it is how long that brain's background
   ask for a model that isn't loaded waits before the broker drains for
   it. To keep one brain's background from putting out models another
-  brain's live calls use, raise that brain's `OB1_SLEEP_MAX_WAIT`: its
-  loads then wait for the server to be idle. No registry setting protects
-  a model that only live calls loaded, beyond the two-minute quiet.
+  brain's live calls use, raise the first brain's `OB1_SLEEP_MAX_WAIT`: its
+  sleep's loads then wait until the server has had no background call for
+  5 s and no live call for two minutes, or until the ask is that old.
+  Then they wait for a moment with no live call running, and for the
+  running background calls to end: 607 and 611 s in the run at 600 s
+  under "Measured" above, which also says what it cost that brain. While
+  live calls overlap without a gap they don't go at all. That brain's
+  board-sync and api background still ask with 60 s. The setting also
+  orders that brain's own passes: see `OB1_SLEEP_MAX_WAIT` under the
+  sleep's settings. No registry setting protects a model that only live
+  calls loaded, beyond the two-minute quiet.
 - **`bases` lists every base URL a brain reaches the server by**, such as
   `http://host.containers.internal:11434/v1` (`host.docker.internal` for a
   brain under Docker Engine on Linux). A call to any other base isn't
@@ -1527,8 +1586,8 @@ value that fails its rule is `?`, and a key with nothing to say is left out:
 | `tool` | the tool an MCP tool call names, a REST route runs or a mirror mirrors (the job routes' is `job_status`), from the manifest (`tools.ts`); a batch names none |
 | `agent` | the configured name of the key that authenticated — never the key; the single legacy `MCP_ACCESS_KEY` is named `MCP_ACCESS_KEY` |
 | `status` | the HTTP status (an MCP tool call is a 200 whatever the tool said). At the MCP endpoint, 0 when the client left before there was an answer — during the key check, the registry's answer, the body read or the transport's parse — and 408 when it was gone before the route ran; on an `abandoned` line from anywhere else, the status of the answer no one received (a REST body read the client cut off is the 500 it became), or 0 when the stop came before any answer |
-| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500 — or its refusal is the brain's own embedding provider failing, `EMBEDDING_PROVIDER_ERROR`, SMD-2892); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED`, `STORE_UNAVAILABLE` or `EMBEDDING_PROVIDER_ERROR`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok`. A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
-| `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which); the REST core's from its 4xx or 5xx answer |
+| `outcome` | on every line. A request the MCP server refuses at its key is `refused`, whatever its method and status — at its MCP endpoint with the refusal's code, at a keyed mirror (a 200 that shows the caller nothing — the keyless probe at `/health` aside, which is not logged) with `REVOKED` or `BUSY` where the registry said which, and none for a key missing, wrong or out of scope. An MCP tool call says the tool's: `ok`; `refused` (a refusal as a value); `error` (the tool threw, or the route did — a 500 — or its refusal is the brain's own embedding provider failing, `EMBEDDING_PROVIDER_ERROR`, SMD-2892); `unrun` (a call that never ran to an end — the transport refused the request, the SDK its input, the key's scope does not hold the tool, or it was sent as a notification, with no `id`); a batch its worst call's (error, refused, unrun, ok). Any other request, and every REST request, says its answer's: `error` for a fault (a 5xx `FAILED`, `STORE_UNAVAILABLE` or `EMBEDDING_PROVIDER_ERROR`, or one with no code), `refused` for any other 4xx or 5xx (a 503 `BUSY` is a refusal for now, on both doors), else `ok` — so a JSON-RPC error inside a 200, an unknown method, is `ok` (but a listen refused at a bound, on a server that holds listen streams, is `refused` with its code, though it too is a 200, or the 202 of a notification). A key whose scope lacks the tool, or an input the schema refuses, is `unrun` with no code on the MCP server, where the tool is not registered or the SDK refuses it, and `refused` with `FORBIDDEN` or `REFUSED_INPUT` on the REST core. `abandoned` is a client gone before a stream ended (an MCP answer, either job stream) — by its abort, or by letting go of the body — or before any other answer was handed over (one that leaves after keeps that answer's outcome); `cut` is a request the stop closed while its client was still there, on either server (status 0 where no answer had begun, 200 for a stream the server had begun — Bun sends its status line with the stream's first bytes, so a client cut before them received nothing), and one whose client had already left is `abandoned`; `stalled` a stream still running at the keepalive's ten minutes — written then, and its own end writes no second line. An abandoned or stalled call runs on to its end; whether a capture landed is `thought_audit`'s to say |
+| `code` | a refusal's or a fault's code (`NOT_FOUND`, `FAILED`) — the MCP server's from the tool's reply, from a worker action's refusal (`RUN_WORKER_DRAIN_NOT_AVAILABLE`, `REFUSED_EMPTY_WORK_TYPE`), from a mirror's store fault (`FAILED`), or at the key, `UNAUTHORIZED`, `REVOKED`, `BUSY` or `AUTH_UNREACHABLE` (at a keyed mirror, `REVOKED` or `BUSY` where the registry said which), or at a bound on listen streams, `LISTEN_SERVER_FULL` or `LISTEN_CALLER_FULL` (on a server that holds them: none yet, SMD-4347); the REST core's from its 4xx or 5xx answer |
 | `ms` | milliseconds from arrival to the line: a stream (an MCP answer, either server's job stream) to its end, including the time a slow reader takes to drain it; any other answer to its handing over, before its body is sent |
 | `bytes` | the bytes of a stream that ran to its end — an MCP answer's, either server's job stream's — the server's own keepalive frames apart (the MCP SDK transport's, every 15 s of a long call, are in the stream it writes, and counted) |
 | `trace` | the W3C trace id of the request's span (below): its own, or with `OB1_OTEL_TRUST_TRACEPARENT=1` — or at the REST core, for a request its forwarder carried — an incoming `traceparent`'s, continued — and with no collector set, a trusted incoming `traceparent`'s alone, so a line can still be found beside a trusted proxy's; absent otherwise. 32 hex digits, checked like any value |
@@ -1848,6 +1907,69 @@ passes (entity extraction, the consolidation judge, the re-embeds) make the
 heaviest provider and database calls, and install no OpenTelemetry, so a
 provider-latency panel shows the servers' calls alone (SMD-2910).
 
+A server that holds listen streams (the MCP server, once SMD-4347's last PR
+turns them on; none does yet) says how many are open, in two places (SMD-4458).
+A server that holds none sends no such series and has no such field. A stream
+is open from the answer that holds it until its connection ends or the server
+stops. Whether its client still reads it, and whether its key still stands, are
+not asked: a client that has gone quiet without closing keeps its place, and so
+does a key revoked since.
+
+As a metric, `ob1.mcp.listen_streams`: the total, with no label of its own, an
+up-down counter, `ob1_mcp_listen_streams` in the profile's Prometheus (measured
+on its image). It carries neither bound: `listen`, below, says both. It is a
+sample: the first one export interval after the start, then at each export
+(every 60 s unless `OTEL_METRIC_EXPORT_INTERVAL` says), and once more at the
+stop's flush. From the end of the stop's drain it reads 0, so that the series
+ends on 0: the stop then serves nothing new and is about to close every stream,
+after its flush where the drain finished, which a collector that is slow to
+answer can make 5 s. Each start is a new series, told from the last by
+`service.instance.id` (and, across an upgrade, the version). Three things
+follow. After a restart a sum over servers reads 0 until the new server's first
+export, though its clients may be back in seconds. A server that stops inside
+its first interval sends that 0 and nothing else, so one that restarts more
+often than it exports reads 0, or nothing, however many streams each life held.
+And a stop whose flush does not get its last export out (a collector that does
+not answer, or is still answering the export before it when the flush's bound
+runs out; a kill) leaves the count before it as its series' last. Prometheus
+goes on reading that for its lookback, five minutes unless set otherwise, and a
+sum over servers is too high for as long (measured on the image: three streams
+open at a kill were still counted beside the next server's one 286 s on, and no
+longer at 302 s). The observability profile's dashboard shows that sum, as
+**Listen streams open** in its Requests row (below), and the panel's
+description says the same.
+
+On its keyed `/health`, as `listen`, read as the route answers: `open`, the two
+bounds (`max` for the server and `perCaller` for one caller) and `callers`, one
+`{ name, open }` for each caller that holds a stream, the most first and equal
+counts in name order; `open` is their sum. It rides on the brain's record,
+so where the route answers `ok` there is no count, and the metric is the only
+reading: with the REST core away (that request's line is `error`, `FAILED`),
+with the key not cleared within the deadline, and for a key that may not read
+the record (each of those a line `refused`, with no code). Any key that may
+call `brain_info`, a read key included, sees every caller's name. A token is
+shown `ok` there and never the record, and so is a capture key, whose own
+streams are listed all the same. A caller is a name, and every session of one
+key is one caller: a key's is the name it has in `MCP_ACCESS_KEYS`; a token's is
+`oauth:` and its subject, with `+` and its client where it signed in through
+one, and that client may be an https URL. A line's `agent` is that name as a
+log line carries one, its first 64 characters with anything outside printable
+ASCII as `?`, so a long name is matched by its start.
+
+A listen refused at a bound is a line whose `outcome` is `refused` and whose
+`code` is `LISTEN_SERVER_FULL` or `LISTEN_CALLER_FULL`. A request's client was
+told "Subscription limit reached" in a JSON-RPC error; a notification's was
+told nothing, its answer a 202. The server's bound is asked first, so a caller
+at its own bound on a full server is `LISTEN_SERVER_FULL`. `listen` is what to
+read the line against, as it is when asked, not as it was at the refusal. No
+setting changes the bounds. A place comes back when a client closes its stream
+or its connection ends, and not before: a caller at its bound has that many
+streams open, or left open. Restarting `mcp` ends every stream, and is no lever
+to pull twice. What a client does when its stream ends is its own: Claude Code
+asks again 6, 8 and 12 seconds on and then stops asking (measured, SMD-4347),
+its documentation says five reopens in an hour make it wait about six hours,
+and no other client has been measured.
+
 `bun preflight.ts --deep` makes each provider probe a span and a point under
 the same names, marked `ob1.probe` (`preflight`) so a backend tells them from
 the server's calls — a probe's time is to the answer's headers, its error the
@@ -2021,7 +2143,10 @@ What it holds, from the servers (the workers send nothing, SMD-2910):
   a classic histogram (`_bucket`, `_count`, `_sum`), each label the attribute
   underscored (`ob1_tool`, `gen_ai_request_model`, `error_type`); `job` is the
   service's name, `instance` its `service.instance.id`, new at each start, and
-  a pipeline tier's `deployment_environment_name` its tier.
+  a pipeline tier's `deployment_environment_name` its tier. Two more are single
+  series with no label of their own: `process_uptime_seconds`, which every
+  server sends from its start, and `ob1_mcp_listen_streams`, which a server
+  sends only where it holds listen streams (none does yet; SMD-4458).
 - **Log records** in Loki: each request's, its body the line's fields, under
   `service_name`.
 - **The database's own numbers** in Prometheus under `job` `postgres`, from
@@ -2095,8 +2220,13 @@ panel saying what it counts:
 - **Requests**, every server: per second by door and the tool each ran (an
   MCP tool call's, a REST route's operation, a mirror's; a keyed `/health` is
   `brain_info`'s), latency p50 and p99 by tool, by outcome, the share the
-  server failed (`error`, `stalled`, `cut`; a refusal is the caller's), and
-  those failures by fault code or outcome.
+  server failed (`error`, `stalled`, `cut`; a refusal is the caller's),
+  those failures by fault code or outcome, and the listen streams the MCP
+  server holds open (`ob1_mcp_listen_streams`, summed over the servers picked;
+  SMD-4458). That last panel reads 0 where no server picked sends the count
+  (none does until SMD-4347's last PR, and the REST core never will) and no
+  data where none sends metrics at all. What the count is, and when a sum of
+  it is too high or too low, is under "Traces, metrics and log records" above.
 - **Model provider**: calls per second by model, latency p50 and p99 by
   operation, and failures by status or kind.
 - **Store**: operations per second and p99 by the store's method, and its
@@ -2682,12 +2812,32 @@ until its pool drains, or for `OB1_SLEEP_REEMBED_SHARE` seconds while
 extraction or consolidation has work (unset, 120; SMD-4384), the two then
 taking turns in the period as long each — then
 extraction, and
-consolidation beside it once extraction's pool is drained, so the backlog
-order above is built in. Beside consolidation runs the subject sweep
+consolidation beside it once the thoughts captured before the period began are
+extracted, so the backlog order above is built in: a thought captured since is
+judged against neighbours captured on an earlier UTC date, and every one of
+them not yet extracted is in that backlog, except across 00:00 UTC. Writes
+that pause nothing (an `ingested` key's, board-sync's among them) no longer
+keep consolidation out of a period for as long as they come, as they did while
+it waited for extraction's whole pool to drain (SMD-4468). Board-sync's
+observation of the day, dated 00:00 UTC, and a ticket it re-renders (which
+keeps its entities until it is extracted again) hold nothing back. A ticket
+created on an earlier day that it first writes during the period is backlog
+until extracted, as it should be — if it lands before consolidation joins; one
+landing after is judged without a wait, and a thought judged before it misses
+its pair with it. A backlog thought a pause has taken goes behind the newer
+writes, and the join waits until extraction reaches it, which, while writes
+outpace extraction, comes only once they slow, as before. A thought whose
+entities are only an older extraction key's, after a model's switch, holds the
+join too, until extraction re-extracts it. Consolidation's judge calls now run
+while such writes arrive: on a model server of one slot they share it with
+extraction. Under a steady inflow the period can run on until the writes stop.
+Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
-model's: started once a period, its claims bounded by the period's start plus
-30 days, so a thought it sets back waits for a later period. On a brain with
+model's: started once a period, once extraction's whole pool has drained or
+been joined past (not the backlog consolidation joins on, SMD-4468), its
+claims bounded by the period's start plus 30 days, so a thought it sets back
+waits for a later period. On a brain with
 no pool named, the first period names one and pools every thought with no
 current subject, the rules keying what they can and the judge model asked the
 rest, one call at a time — a median of 71 s for the 27B with its reasoning
@@ -2785,8 +2935,11 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 The log says `working:` when a period begins, `extraction drained — consolidating
-beside it`, `paused:` with the live call that paused it and `resumed:` once
-the capture has passed, and `the pools drained — the period ends`; `share:`
+beside it` (or `extraction has done the thoughts captured before the period
+began — consolidating beside it while it extracts the writes since` while
+newer writes keep coming, SMD-4468), `paused:` with the live call that paused
+it and `resumed:` once the capture has passed, and
+`the pools drained — the period ends`; `share:`
 at its start names the turns, `re-embed has had its share — 120 s alone — N
 thought(s) left for its next turn …` when re-embed gives way to extraction,
 and `the claim passes have had their turn — 120 s — with N thought(s) waiting
@@ -2799,7 +2952,13 @@ at its start names the session settings in force, and a statement past its
 timeout says `<pass>: a statement passed the pass's statement_timeout (300 s)`
 and `<pass> held until a restart`. Each period begins with the re-derive
 sweep, which says `re-derive: N orphaned lineage row(s) swept` when it deletes
-any.
+any. A period that says `working:` and no consolidating line while writes keep
+arriving still has backlog to extract: a thought captured before the period
+began that extraction has not reached, such as one a pause took, behind the
+newer writes. `extract-entities.ts --status` counts extraction's whole pool,
+not that backlog: while writes arrive faster than extraction takes them it
+grows, and the join waits until they slow (the limit above). `sleep.ts
+--dry-run` names a thought held back across stops.
 The settings go out as startup parameters, which a transaction pooler
 (PgBouncer, a managed host's pooled endpoint) refuses: the scheduler connects to
 Postgres directly, as the stack's own does. `extract-entities.ts

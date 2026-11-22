@@ -28,6 +28,7 @@ import type { FindingKind, FindingStatus } from "./priority-kinds.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
+import { normaliseValidity, type ValidityAnswer } from "./validity.ts";
 import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, normaliseStaleUnreviewed, type Unreviewed, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
 import type {
   Actor,
@@ -1511,6 +1512,13 @@ export class SqlStore implements ThoughtStore {
   async deliverableHistory(thought: string): Promise<DeliverableRecord> {
     const rows = await this.sql`SELECT deliverable_history(${thought}::text) AS r`;
     return normaliseDeliverableRecord(rows[0]?.r, "deliverable_history");
+  }
+
+  async thoughtValidity(ids: string[]): Promise<ValidityAnswer> {
+    // The ids as given: thought_validity de-duplicates, caps and keeps their order (149). Each is a UUID already (the
+    // operation's schema), so the cast refuses nothing a caller could send.
+    const rows = await this.sql`SELECT thought_validity(${this.sql.array(ids, "TEXT")}::uuid[]) AS r`;
+    return normaliseValidity(rows[0]?.r, "thought_validity");
   }
 
   async derivedFromOf(id: string): Promise<string[] | null> {

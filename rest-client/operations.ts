@@ -54,6 +54,7 @@ export const OPERATIONS = {
   thread: { method: "GET", path: "/v1/thread" },
   update_item: { method: "PATCH", path: "/v1/items/{id}" },
   update_thought: { method: "PATCH", path: "/v1/thoughts/{id}" },
+  validity: { method: "GET", path: "/v1/validity" },
   verify_deliverable: { method: "POST", path: "/v1/deliverables/{id}/verifications" },
   whoami: { method: "GET", path: "/v1/whoami" },
   worker_status: { method: "GET", path: "/v1/workers" },
