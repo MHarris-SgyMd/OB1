@@ -26775,6 +26775,15 @@ if (want("38")) {
     const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`)[0].c);
     const sessionsBefore = await sessions();
     sw.slowExtract = 1500;
+    // The order this row tests is one of two (SMD-4515). The period's first pool takes the three notes in one
+    // statement, so their claims' order is a tie, and today's note is no backlog (SMD-4468, backlogCut: pooled since
+    // the start and dated today). Were it extracted last, consolidation would join beside it once the two older
+    // notes were done — by design, with another line, and judging while it is extracted: [38c]'s cases. This row is
+    // the other order's, so at the first extraction call the older notes still to claim are dated after it. Without
+    // this the row failed 2 runs of 7 on 2026-11-21, and failed when today's note was put last by hand.
+    sw.onExtract = async () => {
+      await sql`UPDATE thought_work_claims SET enqueued_at = clock_timestamp() WHERE work_type = ${EX} AND status = 'pending' AND thought_id IN (${older}::uuid, ${deploy}::uuid)`;
+    };
     // Bounded: a period that never finds both pools drained would wait for ever.
     const acOnce = new AbortController();
     // With --dump-dir (SMD-3203): the period's consolidation pass writes every verdict there too.
@@ -26804,7 +26813,7 @@ if (want("38")) {
     assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
       `one period extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}${hungAt}`})`);
     assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText),
-      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it)`);
+      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it; consolidation joined on "${lines.find((l) => /consolidating beside it|consolidating first/.test(l))?.trim() ?? "no line"}")`);
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
     assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
       `…writing nothing to thoughts.supersedes and no audit row — its own work cannot pause it — and, without --follow, no heartbeat (${supersedes} superseding, ${(await auditRows()) - auditBefore} audit row(s), heartbeat ${JSON.stringify(await beat())})`);
