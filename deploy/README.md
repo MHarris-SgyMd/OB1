@@ -2834,20 +2834,21 @@ model server the judge's model (`OB1_JUDGE_MODEL`) is not extraction's, so
 each turn between them can load the other model, or extraction's background
 share of its model is one slot (on a local server `OB1_MODEL_SLOTS` 1 or 2;
 on any, `OB1_BACKGROUND_SLOTS`'s `chat=1` or an override for its model) —
-consolidation and a model subject sweep yield to extraction from
-consolidation's start to the period's end (SMD-4495): they wait between calls
-while an extraction call is asked for or running, and a second after,
+consolidation and a model subject sweep yield to extraction from the start of
+either to the period's end (SMD-4495): they wait between calls while an
+extraction call is asked for or running, and a second after,
 `OB1_SLEEP_MAX_WAIT` at most in one stretch of extraction's calls (calls less
-than a second apart), then go on for a second before waiting again. The start says `yield:` and why, and the period says so
-as the yield first holds them back. On this Mac's Ollama, a 7B extracting and
-a 27B judging under a capture every 6 s: extraction's median wait 23 s
-against 122 s without it, consolidation's 599 s against 394 s. There is no
-switch of its own: one judge model with extraction's and a share of two or
-more turns it off. With one model and slots to spare, and on a hosted
-provider, the judge runs beside extraction. The rule reads the brain's own
-count: an Ollama on the host answering one call at a time per model (its
-`OLLAMA_NUM_PARALLEL` unset) while the brain counts four is not seen — raise
-the host's to `OB1_MODEL_SLOTS`, 2 or more, as above. Under a steady inflow the period can run on until the writes stop.
+than a second apart), then go on for a second before waiting again. The start
+says `yield:` and why, and the period says so as the yield first holds them
+back. On one Ollama, a 7B extracting and a 27B judging under a capture every
+6 s: extraction's median wait 23 s against 122 s without it, consolidation's
+599 s against 394 s. There is no switch of its own: one judge model with
+extraction's and a share of two or more turns it off. With one model, or on a
+hosted provider, and slots to spare, the judge runs beside extraction. The
+rule reads the brain's own count: an Ollama on the host answering one call at
+a time per model (its `OLLAMA_NUM_PARALLEL` unset) while the brain counts four
+is not seen — raise the host's to `OB1_MODEL_SLOTS`, 2 or more, as above.
+Under a steady inflow the period can run on until the writes stop.
 Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge

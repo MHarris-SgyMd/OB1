@@ -26252,7 +26252,7 @@ async function sleepScaffold(sql: SQL) {
   const MODEL = "stub-sleep";
   const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
   await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
-  /** Each model call, in order: an extraction, a judgement or the subject sweep's question ([38s]), when it arrived and, once answered, when ([38y]). */
+  /** Each model call, in order: an extraction, a judgement or the subject sweep's question ([38s]), when it arrived and, for an extraction once answered, when ([38y]). */
   const modelCalls: { kind: "extract" | "judge" | "subject"; at: number; end?: number }[] = [];
   /** Each embedding's input but the probe's, in order (SMD-2679 PR 4b: re-embed first). */
   const embedCalls: { input: string; at: number }[] = [];
@@ -26402,8 +26402,7 @@ async function sleepScaffold(sql: SQL) {
       // The subject sweep's own question ([38s], SMD-3306 PR 6b-2), before the judge's, whose <thought_a> it shares: a
       // subject, or none (subjectNothing), held as slowJudge holds a judgement.
       if (prompt.startsWith("Each item is one stored thought.")) {
-        const asked: { kind: "subject"; at: number; end?: number } = { kind: "subject", at: Date.now() };
-        modelCalls.push(asked);
+        modelCalls.push({ kind: "subject", at: Date.now() });
         if (sw.subjectDown !== null && prompt.includes(sw.subjectDown)) return Response.json({ error: { message: "stub: overloaded" } }, { status: 503 });
         if (sw.slowSubject) {
           sw.subjectsHeld++;
@@ -26412,7 +26411,6 @@ async function sleepScaffold(sql: SQL) {
           hold.aborted = await Promise.race([Bun.sleep(sw.slowSubject).then(() => false), new Promise<boolean>((r) => req.signal.addEventListener("abort", () => r(true), { once: true }))]);
           sw.subjectsHeld--;
         }
-        asked.end = Date.now();
         return Response.json({ choices: [{ message: { content: JSON.stringify({ subject: sw.subjectNothing ? "" : "the sleep case work", deliverables: [] }) } }], model: body.model });
       }
       const judging = /<thought_a>/.test(prompt);
@@ -26447,7 +26445,6 @@ async function sleepScaffold(sql: SQL) {
           // SMD-1873 PR 2: the deploy note relates to both billing notes — a relation write in the period.
           : /deploy/.test(a + b) ? { verdict: "related", supersedes: "unknown", confidence: 0.9, reason: "the billing deploy" }
           : { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
-        call.end = Date.now();
         return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
       }
       call.end = Date.now();
@@ -30318,20 +30315,17 @@ if (want("38c")) await (async () => {
 })();
 
 if (want("38y")) await (async () => {
-  console.log("\n[38y] db/sleep.ts: the judge model's passes yield to extraction where they share a model server's slot or load another model on it (SMD-4495, the maintainer's rule) — with a judge model of its own, or extraction's background share one slot, consolidation and the subject sweep wait between calls while an extraction call is asked for or running, from consolidation's start to the period's end, a drain between captures ending nothing; a stretch of extraction's calls holds them --max-wait at most; with one model and slots to spare, the judge runs beside extraction as SMD-4468 made it");
+  console.log("\n[38y] db/sleep.ts: the judge model's passes yield to extraction where they share a model server's slot or load another model on it (SMD-4495, the maintainer's rule) — with a judge model of its own on a local model server, or extraction's background share one slot, consolidation and the subject sweep wait between calls while an extraction call is asked for or running, from consolidation's start to the period's end, a drain between captures ending nothing; a stretch of extraction's calls holds them --max-wait at most; with one model and slots to spare, the judge runs beside extraction as SMD-4468 made it");
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, CO, modelCalls, sw, env, capture, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
   const JUDGE = "stub-judge";
   const CO2 = consolidateKey(JUDGE);
-  const unpoolSubjects = async () => {
-    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
-    await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'subjects:%'`;
-  };
-  /** The brain emptied of this section's thoughts and claims, between cases. */
+  /** The brain emptied of this section's thoughts and claims, the subject sweep's pool and window too, between cases. */
   const reset = async () => {
     await sql`DELETE FROM thoughts`;
     await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO}, ${CO2})`;
-    await unpoolSubjects();
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'subjects:%'`;
   };
   /** Of `ids`, those judged under `co`. */
   const judgedOf = async (co: string, ids: string[]) => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${co} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...ids], "TEXT")}::uuid[])`)[0].c);
@@ -30348,9 +30342,10 @@ if (want("38y")) await (async () => {
   const YIELDING = /^ {2}consolidation and a model subject sweep now yield to extraction's calls, for the rest of the period$/;
   const lastLines = () => `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`;
   /**
-   * One --follow run (poll 250 ms, one worker a pass) on six older notes on axis 63, two to seven days old, each a
-   * neighbour of every capture today, under `runEnv`; `phase` runs while it goes on — writing captures every
-   * `everyMs` through `flow` — then each capture is waited to be judged under `co` (60 s) and the run stopped.
+   * One --follow run (poll 250 ms, the yield's grace 200 ms, one worker a pass unless `o.workers`) on six older notes on
+   * axis 63, two to seven days old, each a neighbour of every capture today, under `runEnv`; `phase` runs while it goes
+   * on — writing captures every `everyMs` through `flow` — then each capture is waited to be judged under `co` (60 s)
+   * and the run stopped.
    */
   const withRun = async (runEnv: Record<string, string | undefined>, co: string, o: { subjects?: boolean; yieldCapMs?: number; workers?: number }, phase: (flow: (label: string, everyMs: number, forMs: number) => Promise<string[]>) => Promise<void>) => {
     lines.length = 0;
@@ -30408,7 +30403,7 @@ if (want("38y")) await (async () => {
     // A judge model of its own, the canary's shape (a 7B extracting, a 27B judging, on one Ollama): each turn between the
     // two can load the other (stub runs: 141 loads in 300 s of captures, 18 of 74 extracted by its end). Four captures
     // drained first, so consolidation joins and the subject sweep starts on the drain — then captures every 1.2 s for
-    // 10 s, extraction 500 ms a call: no judgement nor subject question passes the gate while an extraction call runs,
+    // 10 s, extraction 500 ms a call: no judgement or subject question passes the gate while an extraction call runs,
     // the drain having ended no yield, and both go on in the gaps.
     sw.alsoServed = [JUDGE];
     sw.slowExtract = 500;
@@ -30420,11 +30415,11 @@ if (want("38y")) await (async () => {
       joinedA = await pollUntil(async () => lines.some((l) => /consolidating beside it/.test(l)) && lines.some((l) => /^ {2}the subject sweep starts beside consolidation/.test(l)), 30_000);
       const from = Date.now();
       await flow("ledger", 1200, 10_000);
-      judgedGapsA = modelCalls.filter((c) => c.kind !== "extract" && c.at >= from).length;
-      besideA = beside(from);
       startSaidA = lines.some((l) => YIELD_START.test(l) && l.includes(`the judge's model, ${JUDGE}, is not extraction's`));
-      askedA = modelCalls.filter((c) => c.kind === "subject" && c.at >= from).length;
       yieldSaidA = lines.some((l) => YIELDING.test(l));
+      besideA = beside(from);
+      judgedGapsA = modelCalls.filter((c) => c.kind !== "extract" && c.at >= from).length;
+      askedA = modelCalls.filter((c) => c.kind === "subject" && c.at >= from).length;
     });
     assert(joinedA && startSaidA && yieldSaidA && besideA === 0 && judgedGapsA > 0 && askedA >= 5 && a.allJudged && a.code === 0,
       `a judge model of its own: said at the start and as the yield first holds consolidation back, the subject sweep started on a drain, and from then to the period's end no judgement or subject question passes the gate while an extraction call runs, under captures every 1.2 s, both going on in its gaps (joined and swept ${joinedA}; start line ${startSaidA}, yield line ${yieldSaidA}; ${besideA} call(s) beside one, ${judgedGapsA} of the judge model's during the captures, ${askedA} of them subject questions (5 or more, so the sweep's own yield is tried); ${a.written.length} captured, all judged ${a.allJudged}; exit ${a.code}${joinedA && besideA === 0 && judgedGapsA > 0 ? "" : lastLines()})`);
@@ -30458,13 +30453,13 @@ if (want("38y")) await (async () => {
     assert(!saidC && besideC > 0 && c.allJudged && c.code === 0,
       `…one model with slots to spare: no yield said, and the judge runs beside extraction's calls (said ${saidC}; ${besideC} judgement(s) beside one; ${c.written.length} captured, all judged ${c.allJudged}; exit ${c.code}${!saidC && besideC > 0 ? "" : lastLines()})`);
 
-    // Captures faster than extraction takes them, under a judge model of its own and two workers a pass: extraction's
-    // calls never all end, so the yield's cap (1.5 s here, --max-wait's 60 s shipped) is what lets judgements through,
-    // a turn of the grace (200 ms here) each cap, the gate closing again after (review pass 1: open from the first cap
-    // until the count reached 0, under two workers it stayed open for the rest of the period, the judge beside
-    // extraction throughout: 100 judgements in this window). Each worker fits two 150 ms calls in a 200 ms turn; eight a
-    // turn bounds it with room for a turn timer firing late under load (review pass 2). Extraction at 500 ms a call,
-    // two workers, takes 4 a second against 5 captured, so its calls never all end and no grace opens the gate.
+    // Captures faster than extraction takes them, under a judge model of its own: two workers a pass at 500 ms a call
+    // take 4 a second against 5 captured, so extraction's calls never all end, no grace opens the gate, and the yield's
+    // cap (1.5 s here, --max-wait's 60 s shipped) is what lets judgements through, a turn of the grace (200 ms here) each
+    // cap, the gate closing again after (review pass 1: open from the first cap until the count reached 0, under two
+    // workers it stayed open for the rest of the period, the judge beside extraction throughout: 100 judgements in this
+    // window). Each worker fits two 150 ms calls in a 200 ms turn; eight a turn bounds it with room for a turn timer
+    // firing late under load (review pass 2).
     sw.alsoServed = [JUDGE];
     sw.slowExtract = 500;
     sw.slowJudge = 150;
@@ -30475,7 +30470,7 @@ if (want("38y")) await (async () => {
       const from = Date.now();
       await flowing;
       turnsD = Math.floor((Date.now() - from) / 1700) + 1;
-      judgedD = modelCalls.filter((c) => c.kind === "judge" && c.at >= from && c.at <= Date.now()).length;
+      judgedD = modelCalls.filter((c) => c.kind === "judge" && c.at >= from).length;
     });
     assert(joinedD && judgedD > 0 && judgedD <= 8 * (turnsD + 1) && d.allJudged && d.code === 0,
       `…and captures faster than two extraction workers take them: their calls never all end, and the yield's cap lets judgements through a turn at a time, the gate closing again after each (yielding ${joinedD}; ${judgedD} judged during the captures after, at most ${8 * (turnsD + 1)} for ${turnsD} turn(s); ${d.written.length} captured, all judged ${d.allJudged}; exit ${d.code}${joinedD && judgedD > 0 && judgedD <= 8 * (turnsD + 1) ? "" : lastLines()})`);

@@ -253,7 +253,7 @@ function timed<T>(call: ResolvedModelCall, run: () => Promise<T>): () => Promise
   };
 }
 
-/** Each pass's model calls in this process, from asked to settled — a wait on the hook included — and who hears the count change (SMD-4495). */
+/** Each pass's model calls in this process, from asked to settled — a wait for a slot included — and who hears the count change (SMD-4495). */
 const inFlight = new Map<string, number>();
 const passWatchers = new Map<string, Set<(n: number) => void>>();
 
@@ -267,8 +267,8 @@ function countPassCall(pass: string, by: 1 | -1): void {
 
 /**
  * Watches `pass`'s model calls in this process: `fn` told the count of them asked and not yet settled, a wait for a
- * slot included, at once and at each change (SMD-4495: the sleep scheduler's consolidation yields to extraction's
- * calls). Returns the unwatch.
+ * slot included, at once and at each change (SMD-4495: the sleep scheduler's consolidation and model subject
+ * sweep yield to extraction's calls). Returns the unwatch.
  */
 export function watchPassCalls(pass: string, fn: (n: number) => void): () => void {
   let set = passWatchers.get(pass);
