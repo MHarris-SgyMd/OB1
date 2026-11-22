@@ -252,9 +252,9 @@
  * extraction from consolidation's start to the period's end: they wait between
  * calls while an extraction call is asked for or running, and YIELD_GRACE_MS
  * after, --max-wait at most in one stretch of extraction's calls (SMD-4495,
- * the maintainer's rule: a stub server of one slot took extraction's median
- * wait from 13 s to 64 s, and with two models and a 5 s load 439 s, under
- * SMD-4468's join). With one model and slots to spare the judge runs beside
+ * the maintainer's rule: on a stub server of one slot, SMD-4468's join took
+ * extraction's median wait from 26 s to 64 s, and with two models and a 5 s
+ * load to 439 s). With one model and slots to spare the judge runs beside
  * extraction. A limit stands (review passes 1 and 2, the
  * maintainer's choice to name it): a backlog thought a pause has taken is
  * dated behind the captures since, as below, so while they come faster than
@@ -892,7 +892,7 @@ export interface SleepOptions {
   consolidateAborts?: number;
   /** YIELD_GRACE_MS in place of its default, when a test drives the yield to extraction (SMD-4495). */
   yieldGraceMs?: number;
-  /** The yield's cap in ms in place of --max-wait's, when a test reaches it sooner (SMD-4495). */
+  /** The yield's cap in ms (SMD-4495): the CLI's --max-wait, or a test's, to reach it sooner; `maxWait`'s, else 60 s, unset. */
   yieldCapMs?: number;
   /** The most of the subject sweep's calls N12 aborts in a period's hour, in place of SUBJECTS_ABORTS, when a test reaches the cap sooner. */
   subjectsAborts?: number;
@@ -1565,36 +1565,58 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    */
   let turnGate = liveGate();
   /**
-   * The judge model's passes' third gate (SMD-4495), consolidation's and the subject sweep's: under YIELD_WHY's rule,
-   * from consolidation's start in a period to its end, closed while an extraction call is asked for or running, or
-   * ended under YIELD_GRACE ago. A stretch of extraction's calls closes it for YIELD_CAP at most — a thought stalled on
-   * long calls, or captures extraction never catches up with, holds neither pass for good, as --max-wait holds no
-   * call — and it stays open then until extraction's calls end. One a period, as the others are; open, and nothing
-   * watched, outside a yield.
+   * The judge model's passes' third gate (SMD-4495), consolidation's and a model subject sweep's: under YIELD_WHY's
+   * rule, from consolidation's start in a period to its end, closed while an extraction call is asked for or running,
+   * or ended under YIELD_GRACE ago. A stretch of extraction's calls closes it for YIELD_CAP at most, then opens it for a
+   * turn of YIELD_GRACE before it closes again — a thought stalled on long calls, or captures extraction never catches
+   * up with, holds neither pass for good, as --max-wait holds no call. One a period, as the others are; open, and
+   * nothing watched, outside a yield.
    */
   let yieldGate = liveGate();
   /** The yield's unwatch and timers, while it lasts. */
   let yieldStop: (() => void) | null = null;
-  /** The yield begins: the gate follows extraction's calls in this process. */
+  /**
+   * The yield begins, as consolidation starts in a period: the gate follows extraction's calls in this process, the
+   * period's line said as it first closes. A stretch is extraction's calls with less than YIELD_GRACE between them; one
+   * that reaches YIELD_CAP opens the gate for a turn of YIELD_GRACE, the passes waiting at it let through, and closes it
+   * again while extraction's calls go on, its cap counted afresh (review pass 1: open until the count reached 0, the
+   * gate stayed open for the rest of the period under two extraction workers, whose calls seldom all end).
+   */
   const startYield = () => {
     if (YIELD_WHY === null || yieldStop !== null) return;
     let grace: ReturnType<typeof setTimeout> | undefined;
     let cap: ReturnType<typeof setTimeout> | undefined;
-    /** The cap reached in this stretch: open until extraction's calls end. */
-    let capped = false;
+    /** The judge's turn past a cap, while it runs. */
+    let turn: ReturnType<typeof setTimeout> | undefined;
+    /** Extraction's calls in flight, as last told. */
+    let inFlight = 0;
+    let said = false;
     const g = yieldGate;
+    const hold = () => {
+      g.close();
+      cap = setTimeout(() => {
+        g.open();
+        turn = setTimeout(() => {
+          turn = undefined;
+          if (inFlight > 0) hold();
+        }, YIELD_GRACE);
+      }, YIELD_CAP);
+    };
     const unwatch = watchPassCalls("extract", (calls) => {
+      inFlight = calls;
       clearTimeout(grace);
       if (calls > 0) {
-        if (capped || g.closed) return;
-        g.close();
-        cap = setTimeout(() => { capped = true; g.open(); }, YIELD_CAP);
-      } else {
-        capped = false;
-        if (g.closed) grace = setTimeout(() => { clearTimeout(cap); g.open(); }, YIELD_GRACE);
+        if (g.closed || turn !== undefined) return;
+        if (!said) {
+          said = true;
+          out("  consolidation and a model subject sweep now yield to extraction's calls, for the rest of the period");
+        }
+        hold();
+      } else if (g.closed) {
+        grace = setTimeout(() => { clearTimeout(cap); g.open(); }, YIELD_GRACE);
       }
     });
-    yieldStop = () => { unwatch(); clearTimeout(grace); clearTimeout(cap); g.open(); };
+    yieldStop = () => { unwatch(); clearTimeout(grace); clearTimeout(cap); clearTimeout(turn); turn = undefined; g.open(); };
   };
   /** The yield ends: its gate open, nothing watched. */
   const endYield = () => {
@@ -1617,9 +1639,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     })();
   }, { closedSince: (t: number) => (gate.admit.closedSince?.(t) ?? false) || (turnGate.admit.closedSince?.(t) ?? false) });
   /**
-   * The judge model's passes' admit, consolidation's and the subject sweep's: the claim passes', then the yield
-   * (SMD-4495), asked again while either closed meanwhile. A yield's closure moves a thought's stall clock and has its
-   * claim read again, as a pause's does: the wait is extraction's, not the judge's.
+   * The judge model's passes' admit, consolidation's and a model subject sweep's: the claim passes', then the yield
+   * (SMD-4495), asked again while either closed meanwhile. A yield's closure has the claim in hand read again before
+   * the next call, as a pause's does: two short reads a pair (review pass 1).
    */
   const judgeAdmit: Admit = Object.assign((signal: AbortSignal): Promise<void> => {
     if (!gate.closed && !turnGate.closed && !yieldGate.closed) return Promise.resolve();
@@ -1642,11 +1664,13 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
    * the judge's model is not extraction's, each turn between them can make the server load the other model — 141 swaps
    * in a stub run's 300 s of captures, 18 of 74 extracted by its end — or where extraction's background share of its
    * model is one slot, each judge call takes extraction's turn. Elsewhere the judge runs beside extraction, as SMD-4468
-   * made it. Extraction's share as this brain counts it (OB1_BACKGROUND_SLOTS, OB1_MODEL_SLOTS): one the server's own
-   * setting does not match, a host Ollama answering one call at a time while the brain counts four, is not seen.
+   * made it. The two models only on a local chat endpoint (OB1_CHAT_LOCAL, OB1_LLM_LOCAL): a hosted provider loads
+   * nothing in turn and shares no slot of the brain's (review pass 1). Extraction's share as this brain counts it
+   * (OB1_BACKGROUND_SLOTS, OB1_MODEL_SLOTS): one the server's own setting does not match, a host Ollama answering one
+   * call at a time while the brain counts four, is not seen.
    */
-  const YIELD_WHY: string | null = cfg.judgeModel !== cfg.metadataModel
-    ? `the judge's model, ${cfg.judgeModel}, is not extraction's, ${cfg.metadataModel}, on one model server`
+  const YIELD_WHY: string | null = cfg.chat.local && cfg.judgeModel !== cfg.metadataModel
+    ? `the judge's model, ${cfg.judgeModel}, is not extraction's, ${cfg.metadataModel}, on one local model server`
     : shareOf(slotsSettingFrom(env.OB1_BACKGROUND_SLOTS, env.OB1_MODEL_SLOTS), { type: "chat", model: cfg.metadataModel, base: cfg.chat.base, cls: "background", local: cfg.chat.local })?.limit === 1
       ? `extraction's background share of ${cfg.metadataModel} is one slot`
       : null;
@@ -1720,7 +1744,7 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
   if (REEMBED_OK) out(`  share:  ${REEMBED_SHARE > 0 ? `re-embed and the claim passes take turns in a period, ${REEMBED_SHARE / 1000} s each while the other has work — re-embed alone first, the claim passes waiting between thoughts in its turns, either side handing over sooner once caught up, after ${TURN_FLOOR / 1000} s; a pause and re-embed's isolation of an outage not counted` : "re-embed runs alone first in a period until its pool drains (--reembed-share 0)"}`);
   out(`  budget: ${budgetWords({ minutes: 0, statementTimeoutS: n.statementTimeout, workMemMb: n.workMem, maintenanceWorkMemMb: n.maintenanceWorkMem, stops: 0 })}${n.statementTimeout ? " — a statement past it holds its pass until a restart" : ""}`);
   if (opts.maxWait !== undefined) out(`  order:  among this process's calls waiting for a share of a model server's slots, consolidation's go first, and a call queued ${opts.maxWait} s goes first at the next turn, after older ones that go first; not a timeout`);
-  if (YIELD_WHY !== null) out(`  yield:  ${YIELD_WHY}, so once consolidation joins in a period it and the subject sweep wait between calls while an extraction call is asked for or running and for ${YIELD_GRACE / 1000} s after, ${YIELD_CAP / 1000} s at most in one stretch of extraction's calls`);
+  if (YIELD_WHY !== null) out(`  yield:  ${YIELD_WHY}, so once consolidation joins in a period it and a model subject sweep wait between calls while an extraction call is asked for or running and for ${YIELD_GRACE / 1000} s after, ${YIELD_CAP / 1000} s at most in one stretch of extraction's calls (less than ${YIELD_GRACE / 1000} s apart), then go on for ${YIELD_GRACE / 1000} s before waiting again; a call already in hand runs on, and the order above ranks only calls queued`);
   if (DUMP) out(`  dump:   each consolidation pass appends every verdict to ${DUMP}`);
   const outside = await atStart(() => followersOutside(sql));
   if (outside === null) { err(STOPPED_EARLY); return 130; }
@@ -2554,6 +2578,9 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
     // pass 2 of PR 1c-4b: a both-held end or a drained-and-held end skipped left one started each period).
     if (statementHeld.has(name)) return { name, done: Promise.resolve(0), settled: true, code: 0, stop: null, abortInHand: null, abort, hushed: true, start: null, timedOut: false };
     const p: Running = { name, done: Promise.resolve(0), settled: false, code: null, stop: null, abortInHand: null, abort, hushed: false, start: null, timedOut: false };
+    // The judge model's passes yield to extraction from consolidation's start to the period's end (SMD-4495), begun
+    // before its first call (review pass 1: begun at the next poll, its first calls went out unheld).
+    if (name === "consolidate") startYield();
     // Its banner and its summary's queries are left out: the check said the
     // one at the scheduler's start, and the other is a scan the scheduler
     // would wait for at a period's end (SMD-2752). Its start is reported, so a
@@ -4157,11 +4184,6 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
           }
         }
       }
-      // The judge model's passes yield to extraction from consolidation's start to the period's end (SMD-4495).
-      if (consolidating && YIELD_WHY !== null && yieldStop === null) {
-        out(`  consolidation and the subject sweep yield to extraction's calls for the rest of the period — ${YIELD_WHY}`);
-        startYield();
-      }
       if (consolidating && !sweepWaits) startSweep();
       await sleepUnless(POLL * 1000, wake);
     }
@@ -4265,10 +4287,10 @@ async function sleepWith(sql: SQL, url: string, opts: SleepOptions, n: Numbers, 
       // The row says when this period began, and once it is over when it ended,
       // on the database's clock (preflight's `sleep` row, SMD-2678).
       stamper.slept?.({ from: since.at.toISOString(), to: null });
-      const r = await stamper.during(asleep(since));
-      // Paused no longer once the period is over, however it ended (SMD-3379 PR 1c-3b); no yield watched (SMD-4495).
+      // No yield watched once the period is over, however it ended, a throw included (SMD-4495, review pass 1).
+      const r = await stamper.during(asleep(since)).finally(endYield);
+      // Paused no longer once the period is over, however it ended (SMD-3379 PR 1c-3b).
       stamper.paused?.(null);
-      endYield();
       stamper.slept?.({ from: since.at.toISOString(), to: sleptUntil.toISOString() });
       // A stop that landed while the follower was found wins, as it does idle (review pass 2).
       if (r === "outside" && !stopping) return refuseOutside();
@@ -4408,6 +4430,8 @@ if (import.meta.main) {
       sql, url, capture, abortAfter, reembedShare, rescan, poll, workers, statementTimeout, workMem, maintenanceWorkMem,
       // The order said only where the hook is in: under `off` there is none (review pass 3).
       ...(slots.installed ? { maxWait } : {}),
+      // The yield's cap is --max-wait's under `off` too (review pass 1).
+      yieldCapMs: maxWait * 1000,
       ...(dumpDir === undefined ? {} : { dumpDir }),
       follow: cli.has("follow"),
       dryRun: cli.has("dry-run"),

@@ -2829,18 +2829,25 @@ writes, and the join waits until extraction reaches it, which, while writes
 outpace extraction, comes only once they slow, as before. A thought whose
 entities are only an older extraction key's, after a model's switch, holds the
 join too, until extraction re-extracts it. Consolidation's judge calls now run
-while such writes arrive. Where they would take extraction's turn — the
-judge's model (`OB1_JUDGE_MODEL`) is not extraction's, so each turn between
-them can load the other model on the server, or extraction's background share
-of its model is one slot (`OB1_MODEL_SLOTS` 1 or 2, or `OB1_BACKGROUND_SLOTS`'s
-`chat=1`) — consolidation and the subject sweep yield to extraction from
+while such writes arrive. Where they would take extraction's turn — on a local
+model server the judge's model (`OB1_JUDGE_MODEL`) is not extraction's, so
+each turn between them can load the other model, or extraction's background
+share of its model is one slot (on a local server `OB1_MODEL_SLOTS` 1 or 2;
+on any, `OB1_BACKGROUND_SLOTS`'s `chat=1` or an override for its model) —
+consolidation and a model subject sweep yield to extraction from
 consolidation's start to the period's end (SMD-4495): they wait between calls
 while an extraction call is asked for or running, and a second after,
-`OB1_SLEEP_MAX_WAIT` at most in one stretch of extraction's calls. The start
-says `yield:` and why. With one model and slots to spare the judge runs beside
-extraction. An Ollama on the host answering one call at a time per model
-while the brain counts four (its `OLLAMA_NUM_PARALLEL` unset) is not seen: set
-`OB1_MODEL_SLOTS` to what it answers. Under a steady inflow the period can run on until the writes stop.
+`OB1_SLEEP_MAX_WAIT` at most in one stretch of extraction's calls (calls less
+than a second apart), then go on for a second before waiting again. The start says `yield:` and why, and the period says so
+as the yield first holds them back. On this Mac's Ollama, a 7B extracting and
+a 27B judging under a capture every 6 s: extraction's median wait 23 s
+against 122 s without it, consolidation's 599 s against 394 s. There is no
+switch of its own: one judge model with extraction's, or a share of two or
+more, turns it off. With one model and slots to spare, and on a hosted
+provider, the judge runs beside extraction. The rule reads the brain's own
+count: an Ollama on the host answering one call at a time per model (its
+`OLLAMA_NUM_PARALLEL` unset) while the brain counts four is not seen — raise
+the host's to `OB1_MODEL_SLOTS`, 2 or more, as above. Under a steady inflow the period can run on until the writes stop.
 Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
@@ -2947,9 +2954,9 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 The log says `working:` when a period begins, `extraction drained — consolidating
 beside it` (or `extraction has done the thoughts captured before the period
 began — consolidating beside it while it extracts the writes since` while
-newer writes keep coming, SMD-4468), `consolidation and the subject sweep yield
-to extraction's calls for the rest of the period — …` where they yield
-(SMD-4495), `paused:` with the live call that paused
+newer writes keep coming, SMD-4468), `consolidation and a model subject sweep
+now yield to extraction's calls, for the rest of the period` as the yield first
+holds them back (SMD-4495), `paused:` with the live call that paused
 it and `resumed:` once the capture has passed, and
 `the pools drained — the period ends`; `share:`
 at its start names the turns, `re-embed has had its share — 120 s alone — N
@@ -3041,8 +3048,9 @@ models (its registry's `ps`, PR 3c-1) it also decides when one of these calls
 for a model that isn't loaded is due a drain of the server: sooner where the
 server is idle, later while another model's stay runs, and a higher value
 leaves the loaded models to other brains for longer. It is also the most one
-stretch of extraction's calls holds consolidation and the subject sweep where
-they yield to it, SMD-4495),
+stretch of extraction's calls holds consolidation and a model subject sweep
+back where they yield to it, SMD-4495: there a lower value gives the judge
+more turns, at extraction's expense),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep

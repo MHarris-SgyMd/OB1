@@ -5556,18 +5556,20 @@ as it is written, so one was pending or in hand at nearly every poll, and
 consolidation joined mostly once they stopped. The subject sweep still waits
 for the whole pool (below): beside consolidation, its judge calls slowed
 extraction on a model server of one slot. Where the judge's calls would take
-extraction's turn — the judge's model (`OB1_JUDGE_MODEL`) is not extraction's,
-so each turn between them can load the other on the server, or extraction's
-background share of its model is one slot (`OB1_MODEL_SLOTS` 1 or 2, or
-`OB1_BACKGROUND_SLOTS`'s `chat=1`) — consolidation and the subject sweep yield
-to extraction from consolidation's start to the period's end, said at the
-start (`yield:`) and as they begin: they wait between calls while an
-extraction call is asked for or running, and a second after, `--max-wait` at
-most in one stretch of extraction's calls (SMD-4495). A stub server of one
-slot under a capture every 4 s: extraction's median wait 64 s without it, 15 s
-with it, and 439 s against 21 s with a judge model of its own and a 5 s load.
-With one model and slots to spare the judge runs beside extraction, as
-SMD-4468 made it. A limit stands: a backlog thought a
+extraction's turn — on a local chat endpoint the judge's model
+(`OB1_JUDGE_MODEL`) is not extraction's, so each turn between them can load the
+other, or extraction's background share of its model is one slot (on a local
+endpoint `OB1_MODEL_SLOTS` 1 or 2; on any, `OB1_BACKGROUND_SLOTS`'s `chat=1` or
+an override for its model) — consolidation and a model subject sweep yield to
+extraction from consolidation's start to the period's end, said at the start
+(`yield:`) and as the yield first holds them back: they wait between calls
+while an extraction call is asked for or running, and a second after,
+`--max-wait` at most in one stretch of extraction's calls (calls less than a
+second apart), then go on for a second before waiting again; a call in hand runs on (SMD-4495).
+A stub server of one slot under a capture every 4 s: extraction's median wait
+64 s without it, 15 s with it, and 439 s against 21 s with a judge model of
+its own and a 5 s load. With one model and slots to spare, and on a hosted
+provider, the judge runs beside extraction, as SMD-4468 made it. A limit stands: a backlog thought a
 pause has taken goes behind the newer writes (below), so while they come
 faster than extraction takes them it is not reached, and the join waits for
 it, as before; a stalled one is joined past only once extraction holds nothing
