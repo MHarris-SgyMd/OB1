@@ -105,14 +105,16 @@
  * answers. --status and --dry-run record nothing and register no agent.
  *
  * ── The pool, and what is not here ──────────────────────────────────────────
- * Nothing feeds the pool between runs yet: each run pools the backlog itself
- * — the thoughts not in the pool are added (enqueue_thoughts, which skips a
- * pooled one), and a thought re-tagged before and back in the backlog since
- * is put back (requeue_thought_work's reset, on a row still `succeeded` when it is
- * locked: review pass 1); a failed one waits for --retry-failed,
- * and a claimed one is its holder's. Not here (SMD-2298's later PRs):
- * rebuild_derived's metadata arm requeuing a marked row under the recorded
- * key (PR 2), preflight's retag rows (PR 3), the --switch for a prompt
+ * rebuild_derived feeds the pool between runs: a tags row it finds stale is
+ * requeued under the key this worker recorded (migration 150, SMD-2298 PR 2).
+ * Each run pools the rest of the backlog itself, what no rebuild marked (a
+ * thought tagged before 061, a capture that fell back, a text moved raw with
+ * no rebuild) — the thoughts not in the pool are added (enqueue_thoughts,
+ * which skips a pooled one), and a thought re-tagged before and back in the
+ * backlog since is put back (requeue_thought_work's reset, on a row still
+ * `succeeded` when it is locked: review pass 1); a failed one waits for
+ * --retry-failed, and a claimed one is its holder's. Not here (SMD-2298's
+ * later PRs): preflight's retag rows (PR 3), the --switch for a prompt
  * version (PR 3), and a sleep pass and --follow on the shared follower
  * (PR 4). recipes/thought-enrichment's enrich-thoughts.mjs, which wrote its
  * own tag set through the SQL shim, is retired for this (decided 2026-11-15:
@@ -469,7 +471,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
   if (stoppedEarly()) return 130;
-  // The pool, every run, until rebuild_derived feeds it (SMD-2298 PR 2): the backlog not pooled, and a re-tagged one due again.
+  // The pool, every run, beside rebuild_derived's requeue (150): the backlog not pooled, and a re-tagged one due again.
   const [{ added }] = (await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(${backlogIds()})) AS added`) as { added: number }[];
   // requeue_thought_work's reset, guarded: the UPDATE checks `succeeded` again on the row it locks (READ COMMITTED's
   // recheck), so a thought another run requeued and claimed since this statement began keeps its lease (review pass 1:
@@ -594,8 +596,13 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
            SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL, finished_at = NULL, enqueued_at = now(), worker_id = NULL
          WHERE work_type = ${JOB} AND thought_id = ${row.id}::uuid AND status = 'claimed' AND worker_id = ${workerId}
         RETURNING 1`) as unknown[];
-      // No row: the lease lapsed and another run holds the thought now; it re-tags it (review pass 3).
-      return requeued.length > 0 ? { outcome: "changed" } : { outcome: "lostClaim" };
+      if (requeued.length > 0) return { outcome: "changed" };
+      // No row: pending with no holder is a rebuild's requeue (migration 150 revokes the lease when the text moves), the
+      // same as this worker's own; claimed by another worker is a lease that lapsed and was taken since, which that
+      // run re-tags (review pass 3; SMD-2298 PR 2 review pass 1: the rebuild's case read as a lapse, and under --limit
+      // the thought went unre-tagged).
+      const [now] = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${JOB} AND thought_id = ${row.id}::uuid`) as { status: string }[];
+      return now?.status === "pending" ? { outcome: "changed" } : { outcome: "lostClaim" };
     }
     return { outcome: "failed", error: `update_thought: ${r.r.error}` };
   }
@@ -687,7 +694,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
           },
           failed: finished.outcome === "failed" ? finished.error : null,
           doing: "re-tagged",
-          lapsedWhy: `its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker`,
+          // A rebuild's requeue (150) that left the text as this worker read it — --force, or a raw move read before the
+          // rebuild — lets the write through and takes the claim: the row settled, its next claim finds it current and
+          // calls no model (SMD-2298 PR 2 review passes 2 and 3: the line named only a lapse or a hand).
+          lapsedWhy: `a rebuild requeued it (db/rebuild.ts, migration 150), its lease lapsed (no beat reached the database for ${TTL} s), or it was returned by hand with release_claims_for_worker`,
           succeeded: () => {
             if (finished.outcome === "retagged") {
               retagged++;

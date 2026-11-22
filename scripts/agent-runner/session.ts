@@ -47,7 +47,8 @@ export type SessionSpec = {
 };
 
 export type InitSummary = { version: unknown; permissionMode: unknown; apiKeySource: unknown; tools: unknown; mcpServers: unknown; model: unknown; cwd: unknown; sessionId: unknown; skills: unknown; slashCommands: unknown };
-export type ResultSummary = { subtype: unknown; isError: unknown; numTurns: unknown; totalCostUsd: unknown; permissionDenials: unknown; terminalReason: unknown };
+/** The result event's fields the run reads, as they came. `apiErrorStatus` is the HTTP status of the API error that ended the session, when one did (SMD-4490). */
+export type ResultSummary = { subtype: unknown; isError: unknown; numTurns: unknown; totalCostUsd: unknown; permissionDenials: unknown; terminalReason: unknown; apiErrorStatus: unknown };
 export type ToolCall = { id: string; name: string; input: unknown };
 export type ToolResult = { id: string; isError: boolean; text: string };
 /** Why a session ended: its result, its process exiting without one, a failed init check (or a turn or a result before any init), a tool result the guard never logged, its time limit, or a refusal before it started. */
@@ -334,7 +335,7 @@ export async function runSession(spec: SessionSpec, deps: SessionDeps = REAL_DEP
         if (!loggedIds(log).has(b.tool_use_id)) await end("unlogged-call", `a result came for call ${shownText(b.tool_use_id, 80)}, which the guard never logged`);
       }
     } else if (ev.type === "result") {
-      outcome.result = { subtype: ev.subtype, isError: ev.is_error, numTurns: ev.num_turns, totalCostUsd: ev.total_cost_usd, permissionDenials: ev.permission_denials, terminalReason: ev.terminal_reason };
+      outcome.result = { subtype: ev.subtype, isError: ev.is_error, numTurns: ev.num_turns, totalCostUsd: ev.total_cost_usd, permissionDenials: ev.permission_denials, terminalReason: ev.terminal_reason, apiErrorStatus: ev.api_error_status };
       // A result with no init before it is Claude Code refusing to start (since 2.1.329, a profile that fails validation:
       // one error result, no init event). The session never ran, so it did not end with its result, and its text is no report.
       if (outcome.init === null) {

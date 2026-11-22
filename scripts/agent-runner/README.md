@@ -246,6 +246,8 @@ The executor runs one ticket end to end with the real clients — the capstone o
 * `--plan --ticket SMD-NNNN`: loads the config and keys, takes the ticket (its full fields fetched from Linear, Verify and the named ids parsed, checked for a character that doesn't show), provisions the runner's bare repository (a local clone of the main checkout, fetched each run), and prints what a run would do. No session, no claim, no Linear write, no spend.
 * `--execute --ticket SMD-NNNN --claude <path> --sha256 <hex> --version <x.y.z>`: the real run. It refuses a ticket not labelled `agent-ready`, checks the probe stamp (so the profile is as-probed — run the mock probes on this Claude Code first), then assembles the real `RunDeps` and `LiveDeps` and runs `liveRun`: claim on stable, move to In Progress, the worker and review sessions on the pinned Claude Code (the Anthropic key through `apiKeyHelper`), the gate, the release and the hand-back to Backlog. Up to about $13, with no PR (cut 3 publishes). The branch stays in the bare repository; the run's record stays under `runs/<run>/`.
 
+**The hand-back comment** is all a person reads of a run until cut 3 publishes, so it says only what the run left (SMD-4516). It names the branch, the bundle and the diff when the run kept the worker's bundle beside its record, which it does only once the branch's import landed. A run that kept none (it ended at prepare, on a worker session that did not finish, or on a bundle it refused) is told as having kept nothing to publish from, and the claim's release reason says the same. The comment does not say nothing was imported: a copy that failed after the import leaves a branch and no bundle. When the review session did not finish, the comment says the branch was not reviewed by the runner, in the PR body's words.
+
 The sessions commit as a placeholder bot until SMD-4089's GitHub identity (cut 3). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
 
 ## The publish step (`publish.ts`)
@@ -256,6 +258,20 @@ On a run that passed the gate, the runner publishes as the bot (cut 3a is the lo
 * **`publish`** runs the sequence over an injected GitHub client: step 8's renew with the day lease to confirm the claim — published only on a clean renewal, else the publish is left owed (a retryable refusal) or the ticket handed to a person (it closed, or another claim took the work) — then the push to the bot's fork, the draft PR, the record of its number, the PR-link comment on the ticket (a Linear outage leaves the comment owed), and the claim's lease set to a week now the PR is open. It never throws.
 
 The real GitHub client (the push, the REST call that opens the PR), `publish` wired into the live run, and step 0's reconcile are cut 3b; the launchd schedule is 3c. Both need SMD-4089's GitHub identity, and the schedule needs SMD-3606.
+
+## How a run reads a session's ending (`run.ts`, SMD-4490)
+
+Claude Code ends a session it could not finish with a result too, so a result alone is not a session that finished. A session finished only if its result is a plain success: subtype `success` with `is_error` false. `sessionEnding` reads anything else by kind, and the run acts on it:
+
+| The session's ending | Worker | Review | Resumed worker |
+| --- | --- | --- | --- |
+| The API did not answer, before any tool call: no status, 401, 403, 408, 429, 500 and up | environment failure, the label kept | no findings, no resume | the pre-resume branch kept |
+| The API refused the request, before any tool call: any other status | work failure | no findings, no resume | the pre-resume branch kept |
+| An API error after a tool call | work failure | no findings, no resume | the pre-resume branch kept |
+| The turn or budget limit | work failure | no findings, no resume | the pre-resume branch kept |
+| Any other result that is not a plain success | work failure | no findings, no resume | the pre-resume branch kept |
+
+A worker's bundle is imported only when it finished. A review that did not finish does not stop the run: the note says so, and the PR body says the branch was not reviewed. The run's record names the kind (`api-error`, `limit`, `error-result`) as the session's ending. A note carries the runner's words, the result's subtype and the API's status, never the result's text.
 
 ## Cuts still to come
 

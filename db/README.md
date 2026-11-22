@@ -331,7 +331,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and forty-nine (149) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and fifty-one (151) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -372,7 +372,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298, 151 SMD-4446).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -783,9 +783,9 @@ pending, when the pass finds the conflict again; a pair the pass no longer
 finds in conflict is the pass's to settle since 067, below; a reviewer may
 decide a stale row sooner, accepting it with `p_force` or rejecting it —
 `consolidate.ts --list stale`); the
-tags are marked and not queued (`unqueued`): nothing requeues them under
-the re-tag key yet, and `db/retag.ts` pools a marked row at its next run
-(SMD-2298; its PR 2 gives this function the arm that requeues). With
+tags are marked and, since 150, requeued under the re-tag key
+`db/retag.ts` recorded (`ob1_config.retag_key`; with none recorded, marked
+alone, `unqueued`, and the worker pools the row at its first run). With
 `p_input_gone` —
 SMD-1723's forget, called BEFORE the row delete, in one transaction — the
 windows, the input's mentions and edges (the entities locked first, then the
@@ -938,7 +938,7 @@ as a person's decision, which would leave a pair the pass once found clear
 unproposable when its texts later conflict, and over a fifth status); a
 person's rejected or accepted row is kept, as before; and 064's `section`
 kind — a generated page section, which 063's body sent to the kept arm — is
-marked with no pool, as the tags are (its generator's next
+marked with no pool, as the tags were before 150 (its generator's next
 `write_page_section` clears the mark). `consolidate.ts` does
 the rest (its section below): every run re-pools each stale row's newer
 thought under its own key, judges a stale pair the top-k left out when it
@@ -2511,6 +2511,22 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 150 has `rebuild_derived` hand a stale tags row to the re-tag pool
+(SMD-2298 PR 2). 063's metadata arm marked the row and counted it unqueued: the
+tags had no pool. `db/retag.ts` records its key in `ob1_config.retag_key` on its
+first writing run; under 150 the arm marks the row and, when that key is set,
+requeues the thought under it, as the extraction arm requeues under
+`entity_extraction_key` — counted `enqueued`, the key in `pools`, and a live
+claim revoked as every arm's requeue does: its holder's write meets
+`STALE_READ` when the text moved under it, and the worker re-tags the thought
+from the new text in the same run; with the text as the worker read it
+(`--force`, or a raw move read before the rebuild) the write settles the row and
+the release finds the claim gone; the thought's next claim finds the row current,
+calls no model and settles the claim. With no key recorded the row is marked
+alone, as before. The worker still pools at each run what no rebuild marks: a
+thought tagged before 061, a capture that fell back, a text moved raw with no
+rebuild.
+
 Migration 148 has a re-tag that came out the same settle the tags' row (SMD-2298
 PR 1a). 061's `update_thought` recorded the tags' lineage only when the event moved
 the metadata or the text moved, so a re-run of the extractor on a thought's
@@ -3161,12 +3177,14 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
+| | `settled_parts` (151) | `SELECT, UPDATE` — a settled part (SMD-4446) is listed and decided as a proposal is, through 151's `review_settled_part`, which runs as the caller. An accept reads both thoughts' texts, which the capture group grants: with this group alone a reject is made and an accept is refused on `thoughts`. No server code reads the table yet: the surfaces that list and decide parts come later in SMD-4446. 151 carries this grant to every role holding `SELECT` and `UPDATE` on `supersession_proposals`, so such a role granted before 151 needs nothing more. One granted before SMD-3338 holds `SELECT` alone there, gains nothing from 151, and needs `--grant <role> --groups server` as it does for a proposal's decisions. Recording a part (`INSERT`, `DELETE`) stays the worker group's |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
 | | `forget_thought(uuid, jsonb, boolean)` (144) | `EXECUTE` — `forget_thought`, which runs as its owner since 144 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 144 carries a grant 139's function held to the wrapper; a role granted before 144 needs `--grant` again |
 | | `ob1_forget_leftovers()` (144) | `EXECUTE` — preflight's `forgotten` row, which reads every store `forget_thought` reaches as the function's owner; without it the row says it could not verify |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
+| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; the pass does not write them yet): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
 | | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks, and `sleep.ts` at its start and each poll for a migration (SMD-3379 PR 1c-1); without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -4968,6 +4986,197 @@ the entities nothing has mentioned within the window, quietest first, each
 with its newest capture.
 `--stale` prints it; nobody acts on it.
 
+**Settled parts** (migration 151, SMD-4446): the store for a statement in one
+thought that the other thought of a pair shows is no longer true or no longer
+open, while both thoughts stand (`docs/subject-anchored-claims.md`, rows 8 to
+10). Nothing writes a part yet: the pass, the review surfaces and the pending
+proposals are the ticket's later cuts.
+
+- **`settled_parts`**, one row a part: the pair, which thought holds the
+  statement, the quote from each, the word and its group (`no_longer_holds`
+  or `done_or_settled`), the reason, the fingerprint of each text as judged,
+  the judge's key, a status and who decided it. A pair may hold several
+  parts, and one statement of one thought once; it may hold a whole-thought
+  proposal beside them, since the two tables do not read each other. The
+  statement is read as a thought's text is (`content_fingerprint_of`: case,
+  runs of white space and white space at either end folded), so the same
+  words in other capitals are the same part. The fold is that much and no
+  more, and what counts as a capital or as white space is the database's
+  own (its ctype). A quote that differs by
+  a word or a full stop is another part, and so is one that differs by a
+  character a reader does not see (a no-break space, a zero-width space, an
+  accent typed as two characters), or by the straight quotes and hyphens
+  the pass's own quote check takes for curly ones and dashes. One span is
+  one part only if the pass records the holder's own characters for it (the
+  ticket's next cut). The identity's index is built on
+  `content_fingerprint_of` and holds what that function read when each row
+  was written: a later migration that changes what it folds leaves the
+  index at the old fold and says nothing (a rejected statement was recorded
+  again beside its rejection, and a `REINDEX` then failed on the pair), so
+  such a file rebuilds this index in its own transaction, as it must 023's
+  on the same function. A fold for parts alone is a function of its own.
+- **A row is one judgement, and none is written over another.** No UPDATE
+  moves a part's pair, holder, quotes, word, reason, fingerprints or judge,
+  whatever its status (`settled_parts_keep_judgement`). When the pass judges
+  a statement again, the judgement is another row with another id, or is not
+  recorded (below). So, through the two functions and against any UPDATE, an
+  id names the words a reviewer read, or nothing. An undecided part's id
+  ends when a later judgement replaces it, so a table that refers to a part
+  refers to a decided one, or lets its reference go with the row: a foreign
+  key that refused the delete would refuse the write. The table does not
+  hold a raw write to those rules: a role holding `UPDATE` can move a status
+  by hand, as it can a proposal's, and one holding `DELETE` and `INSERT` can
+  remove a row and write another under its id.
+- **`record_settled_part`** is the pass's write:
+  `(p_older_id, p_newer_id, p_holder, p_statement, p_shown_by, p_word,
+  p_reason, p_judge_key, p_older_fingerprint, p_newer_fingerprint, p_recipe,
+  p_agent_id DEFAULT NULL)`, every argument but the last required. It
+  refuses a part of the wrong shape, without echoing an argument, and a
+  call above READ COMMITTED. Otherwise it answers one of four ways:
+  - `{ok, action: "recorded", id, status: "pending", replaced}`: a new row.
+    `replaced` is the id of the row it took the place of, or null. A row is
+    replaced when it holds the statement, is undecided, and is no longer a
+    judgement of the texts as they stand: stale, or pending at other
+    fingerprints than the two given. That row is deleted, its lineage row
+    with it.
+  - `{ok, action: "stands", id, status}`: a row already holds the
+    statement, pending at these texts or decided, whatever its texts have
+    done since. Nothing is written, the judgement given is not recorded, and
+    the row is locked until the write's transaction ends. (The status is
+    `stale` only where one was moved by hand under the write: write again.)
+  - `{ok: false, error: "EDITED_SINCE", older_edited, newer_edited}`: a
+    fingerprint given is not its text's. Nothing is written, and the caller
+    puts the thought back to be judged at its new text.
+  - `{ok: false, error: "NOT_FOUND", older_gone, newer_gone}`: a thought is
+    not there, deleted or forgotten while the judge was out. Nothing is
+    written, and it is said before a fingerprint is compared. (A thought
+    deleted by hand after the write has read it fails the foreign key
+    instead, whose error names the id alone.)
+
+  It does not check that the words are in the texts: that check is the
+  pass's (SMD-4442).
+- **The write's lock.** The write takes the supersession advisory lock,
+  which a decision on a proposal or a part, a rebuild, `delete_thought` and
+  `forget_thought` each take first, and holds it until its transaction
+  ends: each of those waits for it meanwhile, and so does another write, so
+  no rebuild at READ COMMITTED runs between its read of the two texts and
+  its commit. (`rebuild_derived` has no guard of its own. A forget refuses
+  above READ COMMITTED; `db/rebuild.ts` and the sleep scheduler's sweep run
+  at their session's level, which is READ COMMITTED unless the database or
+  the role defaults higher. Above it, a rebuild that waited on the lock
+  reads the store as its transaction first saw it, and misses the part.)
+  The write locks no thought's row
+  beyond its foreign keys' key share, so an edit does not wait for it, and
+  an edit that commits while it runs leaves the part pending at the old
+  text, as one that commits after it does. A caller makes the write as a
+  statement of its own, as `db/consolidate.ts` writes a proposal: with no
+  thought's or claim's row held when it is called, which is the house lock
+  order backwards and can deadlock with a call that holds the lock and
+  waits for that row; and with nothing awaited before it commits.
+- **An edit is not followed by a rebuild.** `rebuild_derived` runs from
+  `db/rebuild.ts`, from a forget, and from the sleep scheduler's sweep, which
+  deletes orphans and marks nothing; not after `update_thought`. Until one
+  runs for the thought, a part recorded before the edit stays pending at
+  the old text: an accept of it is refused unless forced, and the next
+  judgement of its statement replaces it. When a rebuild does run, of
+  either thought, it sets a pending part stale and queues its newer thought
+  again, as it does a proposal (`stale_parts` in its result; a leaving
+  thought's parts are `cascading.parts`). A part already stale is queued
+  again by each later rebuild while a text stays moved, and counted stale
+  once. A decided part stands. The walk (`derivation_descendants`)
+  orders a part beside the proposal, ahead of the kinds its order does not
+  name, which share what its cap of 2,000 rows leaves, and behind the
+  thought's own proposals: a thought with 2,000 of those leaves its parts
+  unwalked (SMD-4476).
+- **`review_settled_part`** is the reviewer's decision, accept or reject:
+  `(p_id, p_decision, p_note DEFAULT NULL, p_actor DEFAULT NULL, p_force
+  DEFAULT false, p_was DEFAULT NULL)`.
+  An accept is refused when either text has moved since it was judged
+  (`EDITED_SINCE`), unless forced. A decision that repeats the row's status
+  is refused, and a reviewer may reverse one: the row keeps the last
+  decision alone. A stale row may be decided as a stale proposal may:
+  rejected, or accepted, which a moved text refuses unless forced. A
+  decision asks no actor, as a proposal's asks none: made with no envelope,
+  in a transaction and a session that set none, it names no reviewer. A
+  caller that passes `p_was`, the status it read,
+  is refused `STALE_READ`, with the row's status, when that is another: a
+  second reviewer does not undo a first unseen, and a row a rebuild has set
+  stale is not decided as pending. A decision that passes none is made on
+  the row as it stands, and `p_was` is the status alone: decisions made in
+  between that leave the status as the caller read it are not seen. The id
+  of a part a later judgement has replaced is
+  `NOT_FOUND`. Each refusal is a value, `{ok: false, error, id}`,
+  `STALE_READ` with `status` and `EDITED_SINCE` with `older_edited` and
+  `newer_edited`; a decision made answers `{ok, id, status, was}`. A reject
+  reads no text. A forced accept is recorded as any accept is: the row says
+  neither that it was forced nor at which texts. It runs under READ
+  COMMITTED alone. An accepted part writes no thought: no `supersedes`
+  pointer is set and nothing is demoted.
+- **A deleted or forgotten thought** takes its parts, and their lineage rows,
+  with it. The planner keeps no statistics on a part's words
+  (`SET STATISTICS 0`), so `ANALYZE` copies none into `pg_statistic`.
+- **Unlike a proposal,** a part has no confidence and no similarity, and
+  its write asks a reason; its write refuses a judgement of a text that has
+  moved, where a proposal's records it (SMD-4480); an undecided part judged
+  again once stale, or at other texts, is replaced by another row, where a
+  stale proposal is rewritten in place, so a decision by a part's id cannot
+  land on another judgement (SMD-4477); and nothing settles a part the pass
+  no longer names yet. No index serves a listing of parts: the review
+  surface brings the one its listing needs. `judged_at` is when the write's
+  transaction began, not the order rows commit in.
+- **What an operator sees: nothing yet.** `db/rebuild.ts --status` prints
+  the stale proposals and no stale part, and preflight, `brain_info` and
+  the dashboard say nothing of parts. Both censuses of stale lineage rows
+  leave a part's row out, as they do a proposal's (a decided part keeps the
+  fingerprints it was judged at for good), so a pending part at a moved
+  text shows nowhere until a rebuild or the next judgement. The sweep
+  (`db/rebuild.ts --orphans`, the sleep scheduler) and preflight look for
+  four kinds' orphaned lineage rows, and neither a proposal's nor a part's:
+  a rebuild of one of its thoughts deletes one. Preflight's lineage
+  coverage reads no `settled_parts`. No part exists before the pass writes
+  one: these are for the ticket's next cuts to bring with it.
+- **Grants.** `rebuild_derived` reads the table once a thought's walk holds
+  a part's lineage row, and locks and updates a pending part whose text has
+  moved: a role that runs it (`db/rebuild.ts`, the sleep scheduler's sweep)
+  needs `SELECT` on `settled_parts` for the orphan rule, and `UPDATE` to
+  set a part stale. The worker and server groups hold both, and 151 gives
+  both to every role holding `SELECT` and `UPDATE` on
+  `supersession_proposals`. A role that ran it before and holds neither is
+  refused there (`permission denied for table settled_parts`), on a
+  thought that holds a part and on no other. The role that records parts
+  holds `DELETE` on the table beside `INSERT`, which a proposal's write
+  does not need, and which a part's asks for on every call that gets past
+  its refusals: 151 gives both to every role holding `INSERT` on
+  `supersession_proposals` beside `SELECT` and `UPDATE`. A role holding one
+  of the three alone there, which no group gives, gains nothing on a part.
+  A re-apply copies the grants again, so a privilege on parts taken back by
+  hand from a role that still holds the proposals' comes back with it. An
+  accept reads both thoughts' texts, so the
+  role that decides parts holds the capture group beside the server's, as
+  the servers' role does: with the server group alone a reject is made and
+  an accept is refused on `thoughts`.
+
+Needs 016, 029, 061, 063, 067, 111 and 114, and carries 150's
+`rebuild_derived`, which is 067's with the tags' requeue (SMD-2298), since it
+last defines that function after 150. A re-apply moves no row: the
+table, its indexes and its constraints stand, and the lineage kind's CHECK
+is dropped, added and validated again. The apply takes `thoughts` (the two
+foreign keys) and then `derivations` (the kind's CHECK) in one transaction,
+the order a capture and an edit take them. A forget, and a write of a
+generated page section, take them the other way: one in flight as the file
+applies can be chosen as a deadlock's victim, fail with `40P01` and need
+running again (14 and 12 of 20 applies with two forgets looping; the
+migrator applied every time). 064 and 084 took both tables in one file the
+same way.
+An earlier definer applied by hand over 151 puts its bodies back: 063's
+three know no part (its lineage writer refuses the kind, so a part's write
+fails), and neither its `rebuild_derived` nor 067's nor 150's has an arm for
+one. Where preflight finds `rebuild_derived` from before 067 and the parts'
+table standing, its remedy names 151 after 067, in place of 150, whose body
+151 carries. It does not see 067 or 150 alone re-applied over 151:
+`migrate.ts --reapply` runs every file in order.
+test-schema [136], test-upgrade [20cn].
+
 ### `consolidate.ts`
 
 ```bash
@@ -6244,9 +6453,10 @@ call; a tag key the row holds and the answer leaves out is cleared (a list to
 `[]`, the type keys to null); a provider error is read by `claim-loop.ts`'s rule; an
 edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
 key other than the recorded one needs `--switch-key`; `--status` and
-`--dry-run` write nothing. Not yet: `rebuild_derived`'s requeue (PR 2),
-preflight's rows and the prompt version's `--switch` (PR 3), a sleep pass and
-`--follow` (PR 4). test-live [29] drives it against a stub chat endpoint.
+`--dry-run` write nothing. `rebuild_derived` requeues a tags row it marks
+under the recorded key since migration 150 (PR 2). Not yet: preflight's
+rows and the prompt version's `--switch` (PR 3), a sleep pass and `--follow`
+(PR 4). test-live [29] drives it against a stub chat endpoint.
 
 ## Extensions
 
@@ -6440,10 +6650,13 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
 "keyFile": "…"}}` takes a url and a file holding the key alone. An entry gives
 a connector or a key file, not both; a connector's entry may add `mcp` to send
 that key to another url. `load` and `clean` read only the brain they name;
-`sample` reads every entry. No key is printed. A refusal names a flag or a brain
+`sample` reads every entry. No brain may be named `(ollama)`: the model server's
+samples carry that name. No key is printed. A refusal names a flag or a brain
 and, for a file, the file system's code (`ENOENT`): never the path typed, a
 file's text, a connector's name or a parser's words, any of which could be a key
-put in the wrong place. Each subcommand refuses a flag it does not read.
+put in the wrong place. A brain's answer of a shape the harness does not read is
+said in those words, not in a thrown error's. Each subcommand refuses a flag it
+does not read.
 
 - **load** captures the arm's notes, generated from the arm's name and the index,
   so every brain gets the same text and no arm's note is another's. Each starts
@@ -6459,12 +6672,16 @@ put in the wrong place. Each subcommand refuses a flag it does not read.
   from it.
 - **sample** reads every brain's `brain_info` and `worker_status` each `--every`
   seconds (15), and, with `--ollama`, the model server's loaded models from
-  Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
-  if a brain never answered. A signal ends the wait; the round in hand is finished
+  Ollama's `/api/ps`. `--ollama` is an http or https url; a query it carries
+  stays behind the path. Each line keeps the time its run of `sample` began, the
+  thoughts the brain holds, and every pool's pending, claimed, failed and
+  unpooled counts with whether its key is the brain's own (the extraction rows,
+  below). It only reads, so stable can be one of the brains. It exits 1 if a
+  brain never answered. A signal ends the wait; the round in hand is finished
   and written, and it then exits 128 plus the signal's number, whatever the
-  brains answered. A second signal exits at once, the round in hand unwritten. It
-  appends to `--out` only where that file is new or holds samples alone, each a
-  JSON object with a time, an arm and a brain: not a brains file, nor
+  brains answered. A second signal exits at once, the round in hand unwritten.
+  It appends to `--out` only where that file is new or holds samples alone, each
+  a JSON object with a time, an arm and a brain: not a brains file, nor
   `bench-live.ts`'s samples, nor a file whose last sample was cut short. A
   `--brains` file that names no brain is refused, unless `--ollama` names a
   model server to sample alone.
@@ -6493,28 +6710,67 @@ put in the wrong place. Each subcommand refuses a flag it does not read.
   run finds it. It deletes the notes alone. The entities extraction drew from
   them stay until an operator prunes the orphans (`prune_orphan_entities()`),
   and the audit log keeps each note's text.
-- **summary** prints, for each arm and brain, its sleep's background calls in two
-  windows: before `--split` minutes, with no live load from the harness, and after
-  it, with `bench-live.ts` running. For each window it gives:
+- **summary** prints, for each run of an arm and each brain, its sleep's
+  background calls in two windows: before `--split` minutes (12 unless given)
+  and after it. For each window it gives:
   - `s`, the seconds from the window's first sleep stamp to its last;
   - the calls, and their time;
   - the mean number in flight: their time over `s`;
   - the slot waits, of every model server the sleep asks, its decide tier's
-    included, in all and by pass. A pass reads `extract 51/1322s (51 waited
-    658s)`: its calls, their seconds, and its asks that waited with their seconds.
+    included, in all and by pass. `waited` counts the asks that waited, and
+    `wait s` is the time every ask spent before its slot, so a little time can
+    stand beside no ask that waited. A pass reads `extract 51/1322s (51 waited
+    658s)`: its calls, their seconds, and its asks that waited with those
+    seconds; `-` where no pass called or waited.
 
-  It also gives the brain's extraction rows pending or claimed (first, last, most,
-  and when they ran dry), how many of its samples failed, how often the model
-  server's loaded models differed from one sample to the next, and each `--live`
-  file's latencies by label. A brain that never answered in an arm is said so.
-  Two runs of one arm name appended to one `--out` read as one arm. An `--out`
-  with no samples exits 1.
+  A row `between` the two is the one pair of stamps across the split, which is
+  in neither window: the three rows together are the arm's whole increase. A row
+  ending `(the sleep begun again N time(s))` spans that many restarts read; two
+  between one pair of stamps read as one. A window with fewer than two stamps
+  has no figures: its row says how many it has, and in how many of the window's
+  samples the sleep was working.
+
+  Under a brain's rows come its board-sync's, where that stamped tallies in the
+  arm: the same columns from board-sync's own stamps, in rows that name no brain
+  and say `its board-sync`. A line under those says in how many of the samples
+  that kept a dated mark the coordinator's mark for a pass was not `running`,
+  where any was not; or that no sample kept one, for a pass that stamped its
+  tallies twice or more. A mark is dated where its sample kept the time of the
+  coordinator's stamp; the marks are under "A process begun again".
+
+  It also gives the brain's extraction rows (below), how many of its samples
+  failed, the model server's loaded sets (`(none)` for none loaded) and how
+  often they differed from one sample to the next, and each `--live` file's
+  latencies by label. Each latency row ends with its file's place among the
+  `--live` flags. Under the latency table each file has a line: its name, its
+  calls, when the first and last of them began, and how many began in a sampled
+  arm's window after the split. A brain that never answered in an arm is said
+  so. Two runs of `sample` under one arm name, appended to one `--out`, are a
+  table each (`run 1 of 2 of that name in the file`). Samples are read in the
+  order of their times, whatever the file's. An `--out` with no samples exits 1.
+
+  **"Before" is no live load and "after" is under it only if you made it so.**
+  The summary splits each arm at `--split` minutes from its first sample and
+  checks nothing about when `bench-live.ts` ran. Read each `--live` file's line:
+  on the evidence of 2026-11-16, one arm's live files began 59 of their 60 calls
+  after its last sample. Start `bench-live.ts` at the split, and keep sampling
+  until it ends.
+
+  Other defaults: `sample` runs 20 minutes (`--minutes`) at 15 s (`--every`);
+  `load` captures 150 notes (`--notes`), two at a time (`--parallel`). An arm's
+  name is letters, digits and `-`.
 
 **Reading "in flight".** It is near the slots the sleep held on average, with
 these limits:
 
-- It is the sleep's alone. Board-sync's calls, the api's vector mender's and a
-  detached job's hold slots too and are not in it.
+- A row is one process's. Board-sync's calls hold the same slots and have rows
+  of their own. The two are not summed: each row's `s` runs between its own
+  process's stamps. Board-sync stamps at least as each pass starts and as it
+  ends, and a pass runs every `OB1_BOARD_SYNC_INTERVAL` (five minutes unless
+  set). So a window holds a few of its stamps, or fewer than the two a row
+  needs, and a row's `s` can be one pass's seconds.
+- The api's vector mender's calls and a detached job's hold slots too, stamp no
+  tallies, and are in no row.
 - A call's time runs from its slot to its answer, failed or not. Its wait inside
   the model server (a model loading, a call ahead of it) is in that time; its
   wait for a slot is not. A model server that stalls a call makes it read as held.
@@ -6531,21 +6787,115 @@ stamps them at least once a minute, more often while it works, by the database's
 clock, and a call counts when it ends. So a window's figures are the sum of the
 increases from stamp to stamp, over the time between its first and last stamps.
 That is up to a stamp short of its minutes at each end, and the pair of stamps
-across the split is in neither window. A pair of stamps in which any pass's
-tally falls, or a pass drops out, marks the process begun again: every pass's
-value then is the increase since, and the summary counts the restarts. The calls
-the old process made after its last stamp are lost. A restart whose first stamp
-already passes the old one's on every tally is not seen. Each sample keeps the
-coordinator's children and the time of its stamp, whose `for_s` says when one
-began. A sleep that has made no model call stamps no tallies, nor does a build
-before SMD-3379 PR 2b-2a: for those, the summary gives the share of samples in
-which the sleep was working.
+across the split is in neither window: it is the row `between`. A sleep that has
+made no model call stamps no tallies, nor does a build before SMD-3379 PR 2b-2a:
+for those, the summary gives the share of samples in which the sleep was
+working.
 
-**The extraction rows** are `worker_status`'s pending and claimed rows under
-every `extract:` key. They are thoughts, so `bench-live.ts`'s probes and any
-older backlog are among them. Failed rows are not counted, so "ran dry" does not
-say every note was extracted. A brain whose extraction has never run has no pool
-yet, and its loaded notes show only once its sleep's first pass pools them.
+**A process begun again.** Across a restart every pass's value is the increase
+since, and the summary counts the restarts. The calls the old process made after
+the last of its stamps a sample caught are lost. A restart is read two ways
+(SMD-4382), over every stamp of the arm, so a window that opens on a new
+process's first stamp still has the fall before it:
+
+- **From the tallies.** A pair of stamps in which any pass's tally falls, or a
+  pass drops out, is a restart. It is the only sign on a brain with no
+  coordinator, for a pass the coordinator does not run, and in samples that kept
+  no stamp time (those of 2026-11-16). It misses a restart whose first stamp
+  already passes the old one's on every tally.
+- **From the coordinator's marks,** for the restart the tallies miss. Each
+  sample keeps the coordinator's children and the time of its stamp. A child
+  marked `running` for `for_s` seconds began that long before the stamp. A
+  beginning that lies between the stamps of a fall is that fall's restart and
+  counts once. A beginning with no fall is a restart at the pair of stamps it
+  lies between.
+
+An enumeration of 217 million small cases (review pass 2, rerun at each change
+since) found no reading of the marks that counts an old process's whole tally as
+an increase. What it found:
+
+- **A restart counted in error** adds at most the tallies of the stamp before
+  it. That stamp is the running process's own, and no older than its mark was
+  late plus a second: 0.9 s old where every mark landed at once, 16 s where one
+  was twenty seconds late, on that grid.
+- **A restart missed** loses the old process's last sampled tallies, whatever
+  its age. It is missed only where the new process's first sampled tallies
+  already pass them.
+
+What the marks cannot say:
+
+- **A run no sample saw running has no mark.** One that lived wholly between two
+  samples, in a crash loop or while samples failed, is read by its tallies
+  alone. Read an arm whose summary says a pass's mark was not `running` in some
+  samples as one whose restarts may be undercounted. Where it says no sample
+  kept a dated mark, the tallies were the only reading.
+- **A beginning is read to the half second,** since `for_s` is rounded, and late
+  by as long as its mark's write took. A stamp half a second or less after a
+  beginning may be either process's. It is taken for the old one's last, unless
+  the tallies fall into it: read as a new one's first, an old process's last
+  stamp would count its whole life as the increase. Where it was the new one's
+  first, the pair after it reads as a restart, and that stamp's tallies, less
+  the old process's last, are counted beyond the truth. At two real restarts
+  the sleep stamped its first tallies 0.9 and 1.3 s after it began. They come
+  once its start's probes have answered or timed out, however long that takes.
+- **A beginning read early,** at or before the old process's last stamp, where
+  that stamp ends a fall, is taken for that fall's restart, whether or not
+  another beginning lies in the fall. Its own restart is not counted.
+- **A mark written late, beside a fall.** A beginning read up to ten seconds
+  after a fall's later stamp is taken for that fall's restart, unless a
+  beginning already lies between the fall's stamps, or one read late was
+  already given it: then it counts as a restart of its own. A run that did
+  begin there, its restart one the tallies hide, is not counted.
+- **A mark written late, with no fall.** A beginning read after its own
+  process's first stamp counts a restart a pair late, or one that never was, or
+  none where no stamp follows the time read.
+- **Two runs close together.** A run whose first mark reads within fifteen
+  seconds of the run before is read as that run.
+- **A mark more than fifteen seconds late,** on a run last seen running more
+  than fifteen seconds before the time it reads, reads as a run of its own. It
+  is dropped once a later mark reads within a second of the run it belongs to,
+  or more than fifteen seconds earlier than the late reading and within fifteen
+  seconds of that run. Until then, or with only marks themselves late after it,
+  it stands.
+
+**The extraction rows** are `worker_status`'s rows under the key the brain says
+is its own (`active`). They are thoughts, so `bench-live.ts`'s probes are among
+them. The line gives, first to last:
+
+- the rows pending or claimed, and the most there were;
+- the thoughts with no row under the key ("not yet pooled"). A capture is pooled
+  as it lands once the key is the brain's recorded one, so these are thoughts
+  from before that. A run pools them at its first pass, so they are work to do;
+- the rows failed.
+
+How the line ends:
+
+- **`ran dry at T`:** the first sample with nothing to do after the last with
+  some, where the last sample has none.
+- **`nothing to do throughout`:** a pool no sample saw with work.
+- **`never dry at the end`:** the last sample has work. Where a sample saw the
+  pool empty after its first work, the line says when (`nothing to do first at
+  T, then work again`): a probe's row after the backlog was done reads so, and
+  is no backlog left unfinished.
+- **`nothing left to do at T, but N more rows had failed …`:** said in place of
+  `ran dry`, which would read as every note extracted. N is the failed rows
+  under the key the arm ended on at the last sample, less that key's failed rows
+  at the arm's first sample; a key with no row then had none failed. Rows can
+  come and fail between two samples: a pool with nothing seen pending then reads
+  `nothing to do in any sample, but N more rows had failed …`.
+- **`no row under the key at the last sample`:** the key is gone or changed to
+  one with no row, so what was left to do is unread.
+
+An older key's leftover rows are said apart and keep no pool from running dry.
+A key that changed in the arm is said: first, last and most are then two pools'.
+
+`worker_status` names a pool only once it has a row. A brain whose extraction
+has never run has no row under its key, whatever was loaded on it: the line
+says so, with the thoughts the brain holds, which are that backlog. A sample
+with no row under the key, and one that kept no pools, are each passed over and
+counted. Samples taken before SMD-4382 kept the pending and claimed rows alone,
+under every `extract:` key, and are read as before:
+`extraction rows pending or claimed`.
 
 ### bench-querylog.ts
 
