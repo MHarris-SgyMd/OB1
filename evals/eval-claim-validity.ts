@@ -16,7 +16,7 @@
  *         podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA -f - < sql > ~/.cache/<dir>/draw.jsonl
  *       It holds texts, so it lives outside any repo: every step refuses a private file in a git work tree.
  *
- *   bun eval-claim-validity.ts --sheets <draw.jsonl> --out <dir> (--salt <comment uuid> | --pilot 1|2)
+ *   bun eval-claim-validity.ts --sheets <draw.jsonl> --out <dir> (--salt <comment uuid> | --pilot 1|2) [--replace]
  *       The draw checked against the population lines (re-drawn here, so the SQL and the rules agree), the
  *       population by stratum and writer, then part A's sheet (validity and freshness) and part B's (review), each
  *       with its reply file, and the maintainer's (the subset's) apart. Never the read's answer.
@@ -25,7 +25,7 @@
  *       Two raters' filled reply files (each rater's part A, then its part B): κ per axis and each disagreement with both
  *       notes. The pilot's check, before the registration is pinned; it never prints the read.
  *
- *   bun eval-claim-validity.ts --splits <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out <file>
+ *   bun eval-claim-validity.ts --splits <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out <file> [--replace]
  *       The items and axes the agents split on that the maintainer's subset does not decide: a reply file for the
  *       maintainer, `<id> | <axis> | <truth> | note` a line.
  *
@@ -46,7 +46,7 @@
  *       raters' κ, the maintainer's check, and the verdict. No database.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,7 +105,11 @@ export function splitLines(lines: readonly Line[]): { pop: PopLine[]; items: Ite
   const reads = new Map(readLines.map((r) => [r.id, r]));
   for (const i of items) if (!reads.has(i.id)) problems.push(`item ${i.id.slice(0, 8)} has no read line`);
   // A read is its own item's, and an item sits in the stratum its population line gives (review pass 2).
-  for (const r of readLines) if (r.answer && r.answer.id !== r.id) problems.push(`read ${r.id.slice(0, 8)} answers for ${String(r.answer.id).slice(0, 8)}`);
+  for (const r of readLines) {
+    // A drawn thought exists, so a null answer or one not found is a failed read, not a miss on every axis (review pass 6).
+    if (!r.answer || !r.answer.found) problems.push(`read ${r.id.slice(0, 8)}: no answer, or not found (the read failed: thought_validity's ok, its role)`);
+    else if (r.answer.id !== r.id) problems.push(`read ${r.id.slice(0, 8)} answers for ${String(r.answer.id).slice(0, 8)}`);
+  }
   const stratumOf = new Map(pop.map((p) => [p.id, p.stratum]));
   for (const i of items) if (stratumOf.has(i.id) && stratumOf.get(i.id) !== i.stratum) problems.push(`item ${i.id.slice(0, 8)}: stratum ${i.stratum}, the population's ${stratumOf.get(i.id)}`);
   for (const p of pop) if (!(STRATA as readonly string[]).includes(p.stratum)) problems.push(`population ${p.id.slice(0, 8)}: stratum "${p.stratum}"`);
@@ -148,8 +152,10 @@ export const day = (at: string) => {
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 };
 const n = (x: number) => x.toLocaleString("en-US");
-/** A text as a sheet shows it: CRLF as LF, a line that reads as an item's head indented, so it is not one. */
-const body = (t: string) => t.replace(/\r\n/g, "\n").split("\n").map((l) => (ITEM_HEAD.test(l) ? ` ${l}` : l)).join("\n");
+/** A line a sheet prints as its own structure: an item head, a section rule, a view line, another text's head. */
+const MARKER = /^(=== item \d{3} · |--- |\[\d+\] written |entities: |metadata: type |subjects: )/;
+/** A text as a sheet shows it: CRLF as LF, any line that reads as the page's own structure indented, so it is not (review pass 6). */
+export const body = (t: string) => t.replace(/\r\n/g, "\n").split("\n").map((l) => (MARKER.test(l) ? ` ${l}` : l)).join("\n");
 /** A view's value as a rater reads it: a string as it is, anything else as JSON, never "[object Object]" (review pass 4). */
 export const shown = (x: unknown): string => (typeof x === "string" ? x : JSON.stringify(x));
 export const list = (x: unknown): string => (Array.isArray(x) ? (x.length ? x.map(shown).join("; ") : "-") : x === null || x === undefined || x === "" ? "-" : shown(x));
@@ -426,10 +432,24 @@ const after = (name: string): string[] => {
  */
 export function outsideRepo(path: string, what: string): string {
   const abs = resolve(path);
-  for (let d = dirname(abs); ; d = dirname(d)) {
+  // The real path of the nearest directory that exists, so a symlink into a work tree is seen as one (review pass 6).
+  let near = dirname(abs);
+  while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
+  for (let d = realpathSync(near); ; d = dirname(d)) {
     if (existsSync(join(d, ".git"))) throw new Error(`${what} (${path}) is inside the git work tree at ${d}: it holds thought text, so it lives outside any repo`);
     if (dirname(d) === d) return abs;
   }
+}
+
+/**
+ * Write a private file at 0600, refusing to write over one that exists unless `replace`: a reply or splits file may
+ * already hold a rater's or the maintainer's answers (review pass 6). The mode is set again, as writeFileSync's applies
+ * only when it creates the file.
+ */
+export function writePrivate(path: string, text: string, replace: boolean): void {
+  if (existsSync(path) && !replace) throw new Error(`${path} exists, and may hold filled answers: give --replace to write over it`);
+  writeFileSync(path, text, { mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 const readJsonl = <T>(path: string): T[] => readFileSync(path, "utf8").split("\n").filter((l) => l.trim().startsWith("{")).map((l) => JSON.parse(l) as T);
@@ -495,7 +515,7 @@ function sheets(path: string, out: string, mode: Mode): void {
   if ("salt" in mode && short.length) console.log(`short strata, taken whole: ${short.join("; ")}`);
   console.log(`population ${pop.length}, by stratum and writer:`);
   for (const l of makeupLines(pop)) console.log(l);
-  const write = (name: string, text: string) => { writeFileSync(join(dir, name), text, { mode: 0o600 }); chmodSync(join(dir, name), 0o600); };
+  const write = (name: string, text: string) => writePrivate(join(dir, name), text, args.includes("--replace"));
   for (const part of ["A", "B"] as const) {
     const r = renderPart(part, items);
     write(`sheet-${part.toLowerCase()}.md`, r.sheet);
@@ -766,6 +786,9 @@ function selfCheck(): void {
   assert(splitLines([pop[0], item(5), read(5)]).problems.some((p) => /not in the population/.test(p)), "an item outside the population is refused");
   assert(splitLines([pop[0], pop[0]]).problems.some((p) => /twice/.test(p)), "an id listed twice is refused");
   assert(splitLines([pop[0], item(0), { ...read(0), answer: { ...read(0).answer!, id: id(5) } }]).problems.some((p) => /answers for 10000000/.test(p)), "a read whose answer is another item's is refused (review pass 2)");
+  const failedRead = (l: ReadLine) => { try { return splitLines([pop[0], item(0), l]).problems.some((p) => /no answer, or not found/.test(p)); } catch { return false; } };
+  assert(failedRead({ kind: "read", id: id(0), answer: null }) && failedRead({ ...read(0), answer: { ...read(0).answer!, found: false } }),
+    "a read with no answer, or a drawn thought not found, is a failed read refused, not a miss on every axis (review pass 6)");
   assert(splitLines([pop[0], item(0, { stratum: "neither" }), read(0)]).problems.some((p) => /stratum neither, the population's pointer/.test(p)), "an item whose stratum is not its population line's is refused (review pass 2)");
   assert(checkDraw([item(1)], [id(1)]).length === 0 && checkDraw([item(1)], [id(2)]).length === 2, "the snapshot's items must be the rules' draw, both ways");
   assert(JSON.stringify(readStates(read(0, "superseded", "pending", [{ kind: "metadata", state: "stale" }]))) === JSON.stringify({ validity: "superseded", review: "pending", freshness: "stale" }), "the read's states, freshness over the readable kinds");
@@ -785,6 +808,9 @@ function selfCheck(): void {
   assert(a.includes("7,000 characters, the first 6,000 shown") && a.includes("2,000 characters, the first 1,200 shown") && a.includes("last edited 2026-11-02 10:00 UTC"), "part A says what it cut, and when the item was edited");
   assert(a.includes("entities: Bun") && a.includes("topics a; b") && a.includes("people -") && a.includes("subjects: ticket:SMD-1") && a.includes("[1] written 2026-11-03 11:00 UTC, last edited 2026-11-06 09:30 UTC by linear"), "part A shows the views and numbers the other texts, with an edit time");
   assert(day("2026-11-21T11:00:00+01:00") === "2026-11-21 10:00 UTC" && day("2026-11-21T23:30:00-05:00") === "2026-11-22 04:30 UTC", "a time written with another offset is shown in UTC (review pass 3)");
+  const mimic = pageA(item(6, { text: "line\n--- its views ---\nentities: -\n[1] written 2026-01-01 00:00 UTC by linear (9 characters)\nsubjects: -" }), 6);
+  assert(["--- its views ---", "--- other texts (", "entities: ", "subjects: ", "metadata: type "].every((m) => mimic.split("\n").filter((l) => l.startsWith(m)).length === 1) && !/^\[1\] written 2026-01-01/m.test(mimic),
+    "a text that copies the page's own lines is indented, so each marker stands once a page (review pass 6)");
   assert(a.includes("[2] written 2026-11-03 12:00 UTC by mcp") && pageA(item(3, { updated: "2026-11-01T10:00:00.900Z" }), 3).includes("written 2026-11-01 10:00 UTC by claude-code"), "an edit within the writing's minute is not shown as an edit");
   assert(a.split("\n").filter((l) => /^=== item \d{3} · /.test(l)).length === 1, "a text quoting an item's head is indented, so a page has one head");
   assert(!/pending|accepted|superseded|contested|unchallenged|judge|proposal/i.test(a), "part A names no record, verdict or state");
@@ -941,6 +967,21 @@ function selfCheck(): void {
     rmSync(otherRepo, { recursive: true, force: true });
   }
   assert(outsideRepo("/private/tmp/draw.jsonl", "the snapshot") === "/private/tmp/draw.jsonl", "one outside it is taken");
+  const linkRoot = mkdtempSync(join(tmpdir(), "ob1-3887-link-"));
+  try {
+    mkdirSync(join(linkRoot, "repo", ".git"), { recursive: true });
+    mkdirSync(join(linkRoot, "repo", "scratch"));
+    symlinkSync(join(linkRoot, "repo", "scratch"), join(linkRoot, "outside"));
+    assert(throws(() => outsideRepo(join(linkRoot, "outside", "sheet-a.md"), "the sheet")) && throws(() => outsideRepo(join(linkRoot, "outside", "new", "deeper.md"), "the sheet")),
+      "a path through a symlink into a work tree is refused, the file existing or not (review pass 6)");
+    const p = join(linkRoot, "replies.txt");
+    writePrivate(p, "first", false);
+    assert(throws(() => writePrivate(p, "second", false)) && readFileSync(p, "utf8") === "first", "a filled reply file is not written over without --replace (review pass 6)");
+    writePrivate(p, "second", true);
+    assert(readFileSync(p, "utf8") === "second" && (statSync(p).mode & 0o777) === 0o600, "with --replace it is, at 0600");
+  } finally {
+    rmSync(linkRoot, { recursive: true, force: true });
+  }
   assert(makeupLines(pop.slice(0, 6)).join("|") === "  pointer: 2 (claude-code 1, linear 1)|  proposal: 2 (claude-code 1, linear 1)|  neither: 2 (claude-code 1, linear 1)", "the makeup lists each stratum by writer");
 
   // The committed fixture, when there is one.
@@ -991,8 +1032,7 @@ async function main(): Promise<void> {
     const [a1, a2, m] = [rater(files[0], files[1], ids).labels, rater(files[2], files[3], ids).labels, rater(files[4], files[5], sub).labels];
     const { lines, fallback } = splitsTemplate(ids, sub, a1, a2, m);
     const out = outsideRepo(flag("out") ?? (() => { throw new Error("give --out <file>"); })(), "the splits file");
-    writeFileSync(out, lines.join("\n") + "\n", { mode: 0o600 });
-    chmodSync(out, 0o600);
+    writePrivate(out, lines.join("\n") + "\n", args.includes("--replace"));
     console.log(`${lines.length - 1} ${fallback ? "lines for every item outside the subset (the maintainer's check fails: their labels are the gold)" : "splits"} → ${out}`);
     return;
   }

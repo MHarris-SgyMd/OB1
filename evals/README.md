@@ -5068,9 +5068,9 @@ bun eval-claim-validity.ts --self-check                 # the rules, the registr
 D=~/.cache/smd-3887/2c/<run>   # private files live outside any repo; every step refuses one in a git work tree
 bun eval-claim-validity.ts --print-sql --pilot 1 > $D/draw.sql     # or --salt <the announcing comment's uuid>, once pinned
 podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA -f - < $D/draw.sql > $D/draw.jsonl
-bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot 1   # parts A and B, each with a reply file; the maintainer's apart
+bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot 1 [--replace]   # parts A and B, each with a reply file; the maintainer's apart
 bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> --pilot 1   # two raters' κ per axis, each disagreement
-bun eval-claim-validity.ts --splits $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out $D/splits.txt
+bun eval-claim-validity.ts --splits $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out $D/splits.txt [--replace]
 bun eval-claim-validity.ts --freeze $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [$D/splits.txt] --salt <uuid> --note "…" [--replace]
 bun eval-claim-validity.ts --adjudicate $D/adjudication.txt   # each miss's cause, into the fixture
 bun eval-claim-validity.ts                              # the report and the verdict, from the fixture
@@ -5214,6 +5214,17 @@ The rule divergences:
   - A judge's reason on part B is kept on its own line.
   - A fixture missing a read or an agent's labels is named, not thrown.
   - A private file rewritten is set to 0600 again.
+- **Found by review pass 6, measured on this run:**
+  - **The pilots are kept out of the main draw by re-drawing them.** The main draw computes the pilots again from the population as it stands, not from the ids the pilots labelled, so a population that moved between the draws could let a pilot item in.
+    - **In this run:** none of the 19 pilot items is among the 120, checked against both pilot snapshots.
+  - **A text could copy the page's own lines** (a section rule, a view line, another text's head) and mislead a rater about where a page's parts begin. Only an item's head was indented.
+    - **In this run:** each marker appears exactly once a page, and each other text's head once a text, 1,041 in all.
+- **What review pass 6 fixed in the runner:**
+  - every line of a text that reads as the page's own structure is indented;
+  - a read with no answer, or a drawn thought not found, is refused as a failed read;
+  - `--sheets` and `--splits` will not write over a file, which may hold filled answers, without `--replace`;
+  - the private-file guard follows a symlink before looking for a work tree.
+- **Declined:** the branch is `michaelharris/…`, not the `contrib/<github-username>/…` that CLAUDE.md asks of contributions. That is the maintainer's own convention for this ticket's PRs.
 
 **The follow-ups:**
 - **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.
