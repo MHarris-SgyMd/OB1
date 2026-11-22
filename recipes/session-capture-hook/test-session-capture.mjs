@@ -2638,7 +2638,7 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
     child.stdout.on("data", (d) => { out += d; });
     child.on("close", (code) => resolve({ code, out: out.trim() }));
   });
-  assert(libAlone.code === 0 && libAlone.out === `bun ${realpathSync(SCRIPT)}`,
+  assert(libAlone.code === 0 && libAlone.out === `bun ${shellWord(realpathSync(SCRIPT))}`,
     `lib/ imported alone prints a hook naming the recipe's session-capture.mjs, not an empty path (SMD-4338 PR 3 review pass 2) (${libAlone.code} ${JSON.stringify(libAlone.out)})`);
   assert([ver, verPiped, verWith].every((r) => r.code === 0 && r.out === `${VERSION_LINE}\n` && !r.err) && received.length === sentBefore,
     `--version prints "session-capture <version>" and exits 0, stdin piped or not, captures nothing, and is first: beside --check, a bad --harness, a misspelt mode and no config (SMD-4378) (${JSON.stringify([ver, verPiped, verWith].map((r) => [r.code, r.out, r.err.slice(0, 60)]))})`);

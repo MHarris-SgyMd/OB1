@@ -20,8 +20,9 @@ import { fileURLToPath } from "node:url";
  * copy ran nothing and said nothing). One process, one entry: two entry files
  * loading this one module would share the last one's. Until the entry sets
  * it, it is the recipe's own `session-capture.mjs` beside lib/, so a module
- * imported without the entry (a suite of lib/'s own) prints and spawns a real
- * file, never `bun ''` (SMD-4338 PR 3 review pass 2).
+ * imported without the entry (a suite of lib/'s own) prints and spawns that
+ * path, not `bun ''` (SMD-4338 PR 3 review pass 2). A copy under another name
+ * has no such file beside its lib/: its own script sets the path.
  */
 let SELF = fileURLToPath(new URL("../session-capture.mjs", import.meta.url));
 function useSelf(path) { SELF = path; }
