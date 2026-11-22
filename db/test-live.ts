@@ -26781,8 +26781,11 @@ if (want("38")) {
     // notes were done — by design, with another line, and judging while it is extracted: [38c]'s cases. This row is
     // the other order's, so at the first extraction call the older notes still to claim are dated after it. Without
     // this the row failed 2 runs of 7 on 2026-11-21, and failed when today's note was put last by hand.
+    // How many it dated: none would mean the claims were no longer pending at that call (a worker that takes them in
+    // one batch), the tie standing again with nothing to say so, so the row holds it (review pass 1).
+    let datedLast = -1;
     sw.onExtract = async () => {
-      await sql`UPDATE thought_work_claims SET enqueued_at = clock_timestamp() WHERE work_type = ${EX} AND status = 'pending' AND thought_id IN (${older}::uuid, ${deploy}::uuid)`;
+      datedLast = (await sql`UPDATE thought_work_claims SET enqueued_at = clock_timestamp() WHERE work_type = ${EX} AND status = 'pending' AND thought_id IN (${older}::uuid, ${deploy}::uuid) RETURNING 1`).length;
     };
     // Bounded: a period that never finds both pools drained would wait for ever.
     const acOnce = new AbortController();
@@ -26804,6 +26807,7 @@ if (want("38")) {
     }
     const once = onceRace === "hung" ? -1 : onceRace;
     sw.slowExtract = 0;
+    sw.onExtract = null;
     await pollUntil(async () => (await sessions()) === sessionsBefore, 3_000);
     const sessionsAfter = await sessions();
     const onceText = lines.join("\n");
@@ -26812,8 +26816,8 @@ if (want("38")) {
     const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
     assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
       `one period extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}${hungAt}`})`);
-    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText),
-      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it; consolidation joined on "${lines.find((l) => /consolidating beside it|consolidating first/.test(l))?.trim() ?? "no line"}")`);
+    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText) && datedLast >= 1,
+      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it; consolidation joined on "${lines.find((l) => /consolidating beside it|consolidating first/.test(l))?.trim() ?? "no line"}"; ${datedLast} older note(s) dated after today's at the first call)`);
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
     assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
       `…writing nothing to thoughts.supersedes and no audit row — its own work cannot pause it — and, without --follow, no heartbeat (${supersedes} superseding, ${(await auditRows()) - auditBefore} audit row(s), heartbeat ${JSON.stringify(await beat())})`);
