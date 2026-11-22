@@ -5895,12 +5895,14 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       endListenStream({ agent: "desk", end: "client", heldMs: 4_250.4, trace: TRACE });
       endListenStream({ agent: "a\nb", end: "nonsense" as never, heldMs: -5, trace: "not-a-trace" });
       endListenStream({ end: "stop", heldMs: 90_000 });
-      // A sink that throws loses the line and nothing else: nothing is thrown at a stream's end, and the point and the record still go.
-      useRequestLog(() => { throw new Error("the sink threw"); });
       try {
-        endListenStream({ agent: "desk", end: "server", heldMs: 2 });
-        // …and a record it cannot read is left unsaid, not thrown on.
+        // A name that is no string is `?`, as any value that fails its rule is; what is no record at all is left
+        // unsaid, with no line, no point and no log record, and nothing is thrown for either.
         endListenStream({ agent: 7 as never, end: "client", heldMs: 1 });
+        endListenStream(null as never);
+        // A sink that throws loses the line and nothing else: nothing is thrown at a stream's end, and the point and the record still go.
+        useRequestLog(() => { throw new Error("the sink threw"); });
+        endListenStream({ agent: "desk", end: "server", heldMs: 2 });
       } catch (e) {
         endThrew = (e as Error).message;
       }
@@ -5908,28 +5910,30 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       useRequestLog(sinkBefore);
     }
     const endsSaid = endLines.map((l) => JSON.parse(l) as Record<string, unknown>);
-    assert(endsSaid.length === 3 && endsSaid.every((e) => typeof e.ts === "string" && Object.keys(e)[0] === "ts")
+    assert(endsSaid.length === 4 && endsSaid.every((e) => typeof e.ts === "string" && Object.keys(e)[0] === "ts")
       && endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return JSON.stringify(rest); }).join(" ") === [
         JSON.stringify({ door: "mcp", event: "listen_end", agent: "desk", end: "client", held_ms: 4250, trace: TRACE }),
         JSON.stringify({ door: "mcp", event: "listen_end", agent: "a?b", end: "?", held_ms: 0 }),
         JSON.stringify({ door: "mcp", event: "listen_end", end: "stop", held_ms: 90000 }),
+        JSON.stringify({ door: "mcp", event: "listen_end", agent: "?", end: "client", held_ms: 1 }),
       ].join(" ")
       && listenEndLine({ agent: "desk", end: "stop", heldMs: 1 }, new Date(0)) === JSON.stringify({ ts: "1970-01-01T00:00:00.000Z", door: "mcp", event: "listen_end", agent: "desk", end: "stop", held_ms: 1 }),
-      `a listen stream's end, on its line: its door, \`listen_end\`, the caller's name, how it ended, the milliseconds held and its opening's trace id, each held to its rule, and no outcome, method or status (${JSON.stringify(endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; }))})`);
+      `a listen stream's end, on its line: its door, \`listen_end\`, the caller's name, how it ended, the milliseconds held and its opening's trace id, each held to its rule (a name that is no string \`?\`), and no outcome, method or status; what is no record has no line (${JSON.stringify(endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; }))})`);
     await flushTelemetry();
     const metricsNow = measured.getMetrics().at(-1)?.scopeMetrics.flatMap((s) => s.metrics) ?? [];
     const heldHistograms = metricsNow.filter((m) => m.descriptor.name === "ob1.mcp.listen_stream.duration");
     const heldPoints = heldHistograms.flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown>; value: { count: number; sum: number; buckets: { boundaries: number[] } } }[];
     const heldBy = (end: string) => heldPoints.find((p) => p.attributes["ob1.end"] === end);
     assert(heldHistograms.length === 1 && heldHistograms[0].descriptor.unit === "s" && heldPoints.length === 4 && heldPoints.every((p) => Object.keys(p.attributes).join() === "ob1.end")
-      && heldBy("client")?.value.count === 1 && Math.abs((heldBy("client")?.value.sum ?? 0) - 4.25) < 1e-9 && heldBy("stop")?.value.count === 1 && heldBy("stop")?.value.sum === 90 && heldBy("?")?.value.sum === 0 && heldBy("server")?.value.count === 1
+      && heldBy("client")?.value.count === 2 && Math.abs((heldBy("client")?.value.sum ?? 0) - 4.251) < 1e-9 && heldBy("stop")?.value.count === 1 && heldBy("stop")?.value.sum === 90 && heldBy("?")?.value.count === 1 && heldBy("?")?.value.sum === 0 && heldBy("server")?.value.count === 1
       && heldBy("client")?.value.buckets.boundaries.join() === "1,5,15,60,300,900,3600,14400,43200,86400" && requestPointsBefore > 0 && requestPointsNow() === requestPointsBefore,
-      `…and each end one point on ob1.mcp.listen_stream.duration, in seconds from one to a day, labelled with how it ended and nothing else; none on the request-duration histogram, which counts the requests it did (${JSON.stringify(heldPoints.map((p) => [p.attributes, p.value.count, p.value.sum]))}; ${requestPointsBefore} request point(s) before, ${requestPointsNow()} after)`);
+      `…and each end one point on ob1.mcp.listen_stream.duration, in seconds from one to a day, labelled with how it ended and nothing else, none for what is no record; none on the request-duration histogram, which counts the requests it did (${JSON.stringify(heldPoints.map((p) => [p.attributes, p.value.count, p.value.sum]))}; ${requestPointsBefore} request point(s) before, ${requestPointsNow()} after)`);
     const endRecords = logged.getFinishedLogRecords().filter((r) => r.eventName === "ob1.listen_end");
-    assert(endThrew === "" && endRecords.length === 4 && endRecords.every((r) => r.severityText === "INFO" && !traceApi.isSpanContextValid(r.spanContext ?? { traceId: "", spanId: "", traceFlags: 0 }) && Math.abs(msOf(r.hrTime) - Date.now()) < 10_000)
-      && JSON.stringify(endRecords.slice(0, 3).map((r) => r.body)) === JSON.stringify(endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; })) && (endRecords[3].body as Record<string, unknown>).end === "server"
+    assert(endThrew === "" && endRecords.length === 5 && endRecords.every((r) => r.severityText === "INFO" && !traceApi.isSpanContextValid(r.spanContext ?? { traceId: "", spanId: "", traceFlags: 0 }))
+      && endsSaid.every((e, i) => Math.abs(msOf(endRecords[i]?.hrTime) - Date.parse(String(e.ts))) < 100)
+      && JSON.stringify(endRecords.slice(0, 4).map((r) => r.body)) === JSON.stringify(endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; })) && (endRecords[4].body as Record<string, unknown>).end === "server"
       && requestRecordsBefore > 0 && requestRecordsNow() === requestRecordsBefore,
-      `…and one log record, ob1.listen_end at INFO, its time its end's, its body the line's fields, under no span, and no request's record more; a sink that throws loses its line alone, a record that cannot be read is left unsaid, and nothing is thrown (threw ${JSON.stringify(endThrew)}; ${JSON.stringify(endRecords.map((r) => [r.eventName, r.severityText, r.body]))})`);
+      `…and one log record, ob1.listen_end at INFO, its time its line's to a tenth of a second, its body the line's fields, under no span, and no request's record more; a sink that throws loses its line alone, what is no record has none, and nothing is thrown (threw ${JSON.stringify(endThrew)}; ${JSON.stringify(endRecords.map((r, i) => [r.eventName, r.severityText, r.body, Math.round(msOf(r.hrTime) - Date.parse(String(endsSaid[i]?.ts ?? "")))]))})`);
 
     // A fault on its span: the throw's kind and code, never its message (the webhook's, review on SMD-2310).
     spans.reset();

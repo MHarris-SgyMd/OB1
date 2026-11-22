@@ -1065,9 +1065,11 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     const framed = cutTexts.filter((t) => t.includes('"resultType":"complete"') && !t.includes("(dropped")).length;
     const cutCall = cutStopped.lines.filter((l) => l.tool === "thought_stats");
     const cutListen = cutStopped.lines.filter((l) => l.rpc === "subscriptions/listen");
+    const cutEnds = cutStopped.lines.filter((l) => l.event === "listen_end");
     assert(cutStopped.code === 1 && cutCall.length === 2 && cutCall.every((l) => l.outcome === "cut") && cutListen.length === 24 && cutListen.every((l) => l.outcome === "ok") && framed === 24
+      && cutEnds.length === 24 && cutEnds.every((l) => l.end === "stop") && new Set(cutEnds.map((l) => l.trace)).size === 24
       && /2 requests still in flight.*closed unfinished/.test(cutStopped.out) && /24 held streams closed; exit 1/.test(cutStopped.out) && /cut off by the server's stop/.test(cutStopped.err),
-      `a stop with 24 streams open and two calls that never end, one of each revision: the calls cut at the bound and counted alone, each line \`cut\`; each stream's line \`ok\` and its closing frame read all the same; exit 1 (exit ${cutStopped.code} in ${Math.round(cutStopped.ms)} ms; ${JSON.stringify(cutCall.map((l) => l.outcome))}; ${cutListen.filter((l) => l.outcome === "ok").length} lines ok; ${framed} of 24 frames read; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")}; ${cutStopped.err.split("\n").filter(Boolean).join(" | ").slice(0, 240)})`);
+      `a stop with 24 streams open and two calls that never end, one of each revision: the calls cut at the bound and counted alone, each line \`cut\`; each stream's line \`ok\`, its closing frame read all the same and its end said once, the stop's (SMD-4459); exit 1 (exit ${cutStopped.code} in ${Math.round(cutStopped.ms)} ms; ${JSON.stringify(cutCall.map((l) => l.outcome))}; ${cutListen.filter((l) => l.outcome === "ok").length} lines ok; ${framed} of 24 frames read; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM")).join(" | ")}; ${cutStopped.err.split("\n").filter(Boolean).join(" | ").slice(0, 240)})`);
     const spansCut = listenSpans() - plainListenSpans;
     assert(spansCut === 25 && /; telemetry sent; 24 held streams closed; exit 1/.test(cutStopped.out), `…their spans sent too by the stop's end (${spansCut} span(s) in all; ${cutStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     // The count of open streams was 24 while they were open, the entry's own count and not a 1 for any; at this stop's flush it is 0 too.
@@ -1108,10 +1110,10 @@ console.log("\n[8h] The entry's stop with listen streams held (SMD-4347 PR 2a): 
     assert(ending.up && leavingStream.status === 200 && ends.length === 3 && opens.length === 3 && clientEnd !== undefined && Object.keys(clientEnd).join() === "ts,door,event,agent,end,held_ms,trace" && clientEnd.agent === "chatgpt"
       && (clientEnd.held_ms as number) >= leftAt - openedAt - 1 && (clientEnd.held_ms as number) <= leftAt - askedAt + 250 && clientEnd.trace === opens.find((l) => l.agent === "chatgpt")?.trace && typeof clientEnd.trace === "string",
       `a stream its client closes after 400 ms: one line for its end, \`client\`, under its caller's name, held about as long, with the trace id of the line that opened it (${JSON.stringify(clientEnd)}; closed ${Math.round(leftAt - openedAt)} ms after it opened; ${ends.length} end(s), ${opens.length} opening(s))`);
-    assert(endingStopped.code === 0 && stopEnd !== undefined && stopEnd.agent === "laptop" && (stopEnd.held_ms as number) >= 240 && typeof stopEnd.trace === "string" && opens.filter((l) => l.agent === "laptop" && l.trace === stopEnd.trace).length === 1 && stayingText.includes('"resultType":"complete"')
+    assert(endingStopped.code === 0 && stopEnd !== undefined && stopEnd.agent === "laptop" && (stopEnd.held_ms as number) >= 240 && typeof stopEnd.trace === "string" && stopEnd.trace === opens.filter((l) => l.agent === "laptop").at(-1)?.trace && stayingText.includes('"resultType":"complete"')
       && /; telemetry sent; 1 held stream closed; exit 0/.test(endingStopped.out) && endingStopped.ms < 1_000 && !ends.some((l) => "outcome" in l || "status" in l || "method" in l || "rpc" in l)
-      && askedNothing.includes('"resultType":"complete"') && ends.filter((l) => l.end === "server" && l.agent === "laptop" && (l.held_ms as number) < 500).length === 1,
-      `…and the one held to the stop: one line, \`stop\`, the stream still closed with its frame after the flush, and the stop no longer for it; the one that asked for nothing, \`server\`; no end's line has anything a request's has (${JSON.stringify(stopEnd)}; exit ${endingStopped.code} in ${Math.round(endingStopped.ms)} ms; ${endingStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
+      && askedNothing.includes('"resultType":"complete"') && ends.filter((l) => l.end === "server" && l.agent === "laptop" && (l.held_ms as number) < 500 && l.trace === opens.filter((o) => o.agent === "laptop")[0]?.trace && l.trace !== stopEnd.trace).length === 1,
+      `…and the one held to the stop: one line, \`stop\`, with its own opening's trace id and not the other's under its name, the stream still closed with its frame after the flush, and the stop no longer for it; the one that asked for nothing, \`server\`, with its own; no end's line has anything a request's has (${JSON.stringify(stopEnd)}; exit ${endingStopped.code} in ${Math.round(endingStopped.ms)} ms; ${endingStopped.out.split("\n").filter((l) => l.startsWith("SIGTERM: stopped")).join(" | ")})`);
     const endRecords = recordsOf(loggedAtEnds).filter((r) => r.name === "ob1.listen_end");
     const heldPoints = histogramOf("ob1.mcp.listen_stream.duration", meteredAtEnds);
     const listenRequests = histogramOf("http.server.request.duration", meteredAtEnds).filter((pt) => pt.labels["mcp.method.name"] === "subscriptions/listen");
@@ -1726,6 +1728,8 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   const atBound = await healthOf();
   assert(atBound.version === "1.0.0" && atBound.oauth !== undefined && same(atBound.listen, { open: 3, max: 3, perCaller: 2, callers: [{ name: "laptop", open: 2 }, { name: "chatgpt", open: 1 }] }),
     `keyed /health on a server that holds streams: beside the record, three open of three, two a caller, and each caller's share, the most first; a refusal at either bound left the count where it was (${JSON.stringify(atBound.listen)})`);
+  // The streams whose end is still to be said are the streams open (SMD-4459): those ended above are not kept.
+  assert(endsSaid().length >= 2 && streams.unsaid() === 3, `…and the streams whose end is unsaid are those three: one whose end was said is kept no longer (${streams.unsaid()} unsaid; ${endsSaid().length} end(s) said so far)`);
   // A place given back is a place to take: one stream closed, and the name refused a moment ago is held.
   await a1.close();
   await until(() => streams.count === 2);
@@ -1737,7 +1741,7 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
   assert(streams.count === 3 && c1.status === 200 && framesOf(c1Opened.text)[0]?.method === "notifications/subscriptions/acknowledged" && !c1Opened.ended, `a place given back is taken by the next to ask (open ${streams.count}; ${c1.status})`);
   for (const r of [a2, b1, c1]) await r.close();
   const emptied = await until(() => streams.count === 0);
-  assert(emptied, `every stream closed, none counted (open ${streams.count})`);
+  assert(emptied && streams.unsaid() === 0, `every stream closed, none counted and none kept for an end unsaid (open ${streams.count}; ${streams.unsaid()} unsaid)`);
   // With none open the field is still there, the bounds with it; an app that holds none says nothing of streams,
   // given its streams' settings as the entry gives them or given none.
   const noneOpen = await healthOf();
@@ -1978,8 +1982,9 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
     // The end of a stream at the stop (SMD-4459). As the drain ends, each stream still open is recorded as the
     // stop's, and keeps its place: the stop counts its streams by their places until they are closed. The close that
     // follows gives the places back and records nothing more. One whose client went before the stop was said then.
+    // Twenty-four are open, twelve under each of two names: the word is every stream's, not the first few's.
     const endStop = { cut: false, drainEnded: false };
-    const endStreams = createListenStreams(true, 4, 2);
+    const endStreams = createListenStreams(true, 32, 16);
     const endApp = createMcpApp({ rest, edge: () => ({ configured: false, origin: null }), warn: () => {}, listen: endStreams, stop: endStop });
     const askEnd = async (key: string) => reading(await endApp.fetch(requestFor("subscriptions/listen", listenParams, key, { modern: true })));
     const [e1, e2, e3] = [await askEnd("write-raw"), await askEnd("read-raw"), await askEnd("write-raw")];
@@ -1989,19 +1994,23 @@ console.log("\n[9c] A listen stream held open (SMD-4347 PR 2a): its line as it o
     await Bun.sleep(30);
     const e4 = await askEnd("write-raw");
     await e4.read(50);
+    const more = await Promise.all(Array.from({ length: 21 }, (_, i) => askEnd(i % 2 ? "write-raw" : "read-raw")));
+    await Promise.all(more.map((r) => r.read(50)));
     const endsAtStop = endsSaid().length;
     endStop.drainEnded = true;
     endStreams.stopped();
     const atDrain = endsSaid().slice(endsAtStop);
     const placesAtDrain = endStreams.count;
+    const unsaidAtDrain = endStreams.unsaid();
     await endStreams.close();
     const [e1Read, e2Read] = [await e1.read(500), await e2.read(500)];
     const placesBack = await until(() => endStreams.count === 0);
     await Bun.sleep(30);
     const afterClose = endsSaid().slice(endsAtStop);
-    assert(atDrain.length === 3 && atDrain.every((l) => l.end === "stop") && atDrain.map((l) => l.agent).sort().join() === "chatgpt,laptop,laptop" && placesAtDrain === 3
-      && e1Read.ended && e2Read.ended && e1Read.text.includes('"resultType":"complete"') && (await e4.read(500)).ended && placesBack && afterClose.length === 3,
-      `the stop's drain ended with three streams open, one more closed by its client before it: each of the three is recorded then, \`stop\`, its place kept; the close that follows gives the places back and records nothing more (${JSON.stringify(atDrain.map((l) => [l.agent, l.end]))}; ${placesAtDrain} place(s) at the drain's end, ${endStreams.count} after the close; ${afterClose.length} end(s) in all)`);
+    const moreEnded = (await Promise.all(more.map((r) => r.read(500)))).filter((r) => r.ended).length;
+    assert(atDrain.length === 24 && atDrain.every((l) => l.end === "stop") && atDrain.filter((l) => l.agent === "laptop").length === 12 && atDrain.filter((l) => l.agent === "chatgpt").length === 12 && placesAtDrain === 24 && unsaidAtDrain === 0
+      && e1Read.ended && e2Read.ended && e1Read.text.includes('"resultType":"complete"') && (await e4.read(500)).ended && moreEnded === 21 && placesBack && afterClose.length === 24,
+      `the stop's drain ended with twenty-four streams open, one more closed by its client before it: each of the twenty-four is recorded then, \`stop\`, its place kept and its end no longer unsaid; the close that follows gives the places back and records nothing more (${atDrain.length} end(s) at the drain's end, ${atDrain.filter((l) => l.agent === "laptop").length} and ${atDrain.filter((l) => l.agent === "chatgpt").length} by name; ${placesAtDrain} place(s) and ${unsaidAtDrain} unsaid then, ${endStreams.count} place(s) after the close; ${afterClose.length} end(s) in all)`);
     // A close after the drain's end that the app was not told of as above is the stop's all the same, said at the close.
     const flaggedStop = { cut: false, drainEnded: false };
     const flaggedStreams = createListenStreams(true, 3, 2);

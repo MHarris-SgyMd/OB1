@@ -49,9 +49,14 @@ export interface ListenStreams {
    * are closed after it; each is counted until then, and its close records nothing more.
    */
   stopped: () => void;
+  /**
+   * How many streams are held whose end is not yet said: the app's. It is `count` until the stop's word and 0 after
+   * it, and a suite holds it there, so that a stream whose end was said is not kept (SMD-4459, review pass 2).
+   */
+  unsaid: () => number;
 }
 
 /** An app's listen streams: the entry's with no argument, a suite's with what it tests. */
 export function createListenStreams(hold: boolean = HOLD_LISTEN_STREAMS, max: number = LISTEN_STREAMS_MAX, perCaller: number = LISTEN_STREAMS_PER_CALLER): ListenStreams {
-  return { hold, max, perCaller, count: 0, close: async () => {}, stopped: () => {} };
+  return { hold, max, perCaller, count: 0, close: async () => {}, stopped: () => {}, unsaid: () => 0 };
 }

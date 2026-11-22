@@ -1640,7 +1640,8 @@ docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(has("ou
 docker logs open-brain-api-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(has("outcome") and .outcome != "ok")'
 # the listen streams that ended, on a server that holds them; the same,
 # counted by caller and by how they ended, with each one's shortest hold;
-# and the requests that opened them
+# and every `subscriptions/listen` request: the openings, and beside them a
+# listen refused at a bound or by the SDK, which opened nothing
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.event == "listen_end")'
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -sc 'map(select(.event == "listen_end")) | group_by([.agent, .end])[] | {agent: .[0].agent, end: .[0].end, ends: length, shortest_ms: (map(.held_ms) | min)}'
 docker logs open-brain-mcp-1 2>/dev/null | grep '^{"ts"' | jq -c 'select(.rpc == "subscriptions/listen")'
@@ -1999,28 +2000,31 @@ ambiguous. `held_ms` is the milliseconds from the stream's opening to its end. `
 
 | `end` | What ended the stream |
 | -- | -- |
-| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one word here. That was measured with the client at the server; behind the proxy the server's peer is the proxy, and what it passes on of a client's leaving, and how soon, was not measured. The proxy's access log has a line for the stream's request (`RequestPath` `/mcp`) with how long the proxy held it; whether it tells a close from a drop was not measured either |
+| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one word here. That was measured with the client at the server; behind the proxy the server's peer is the proxy, and what it passes on of a client's leaving, and how soon, was not measured. Nor was the proxy's access log, which writes a line for a request at `/mcp`: what that line holds for a stream held open, and of how it ended |
 | `stop` | The server's stop closed it, or was about to: a stream still open as the stop's drain ends is the stop's, though its client may leave in the moment before it is closed. The line is written as the stop's drain ends, before its flush, so that a collector has it; the stream itself is closed after that flush where the drain finished. So `held_ms` is short of the real close by the flush: milliseconds as a rule, and up to 5 s where a collector is slow to answer |
 | `server` | The server ended it itself: a listen that asks for nothing this server sends is acknowledged and closed at once |
 
 A stream that keeps dropping (a tunnel that cuts streams, a proxy's timeout, a
 client that reopens in a loop) is `client` ends under one name, each a short
-`held_ms` after an `ok` line, for as long as its client asks again; a healthy
+`held_ms` after an `ok` line, for as long as its client asks again, where the
+drop reaches the server (not measured through the proxy, above); a healthy
 stream is held until its client goes or the server restarts. What a client
 does when its stream ends is its own (above): one that has stopped asking
 leaves a `client` end with no `subscriptions/listen` line after it. A
-connection that goes silent, with no close and no reset, ends late or not at
-all: a frozen client's stream had no end until the client was killed
-(SMD-4493), so its `held_ms` can run past its client's leaving, and its end
-can follow that client's next opening.
+connection that goes silent, with no close and no reset, may end late: a
+client frozen for 2 s had no end until it was killed (measured; a path that
+drops in silence was not, SMD-4493), so an end's `held_ms` can run past its
+client's leaving.
 
 A stop writes a `stop` line for each stream that was open, in the log of the
 container that stopped. `docker logs` reads the container that is there: an
 upgrade's `up -d` recreates the container, and the old one's log goes with it,
 so after an upgrade those lines are a collector's or no one's. A server that
-is killed writes none for the streams it drops: the sign is a
+is killed writes none for the streams it drops. What is left is a
 `subscriptions/listen` line, `ok`, with no end before the next
-`Started server:` line.
+`Started server:` line, in the log read whole (the filters above drop that
+line). A listen the SDK refuses inside a 200 reads the same and never has an
+end, so it is a sign and not a proof.
 
 Where the server sends telemetry, an end is also a log record named
 `ob1.listen_end`, at `INFO`, its body the line's fields, under no span (the
@@ -2209,10 +2213,11 @@ What it holds, from the servers (the workers send nothing, SMD-2910):
   series with no label of their own: `process_uptime_seconds`, which every
   server sends from its start, and `ob1_mcp_listen_streams`, which a server
   sends only where it holds listen streams (none does yet; SMD-4458). Such a
-  server also sends one more histogram, `ob1.mcp.listen_stream.duration`, the
-  seconds each stream was held, labelled `ob1_end` (SMD-4459). Its name here
-  was not measured: by the rule the six above follow, and as check 37 reads
-  it, `ob1_mcp_listen_stream_duration_seconds`.
+  server also sends one more histogram (`ob1.mcp.listen_stream.duration`,
+  SMD-4459), the seconds each stream was held, by how it ended. Neither its
+  name here nor its label's was measured: by the rule the six above follow,
+  and as check 37 reads the name, `ob1_mcp_listen_stream_duration_seconds`
+  and `ob1_end`.
 - **Log records** in Loki: each request's, its body the line's fields, under
   `service_name`; and, from a server that holds listen streams, each stream's
   end (`ob1.listen_end`), which has no `outcome`.

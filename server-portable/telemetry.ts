@@ -924,7 +924,7 @@ export function endsWithStream(trace: RequestTrace, signal: AbortSignal): Stream
  * - `client`: its client's side went. Its client closed it, or its connection dropped: the server is told one thing
  *   for both (measured on Bun 1.4.3: a fetch aborted, its reader cancelled, the client's exit, its kill, a socket
  *   half-closed, destroyed and reset each reach the request as "The connection was closed"), so the record has one
- *   word for them. The proxy's access log is where the two may differ, which was not measured;
+ *   word for them. Whether the proxy's access log tells the two apart was not measured;
  * - `stop`: the server's stop closed it. Written as the stop's drain ends, before its flush, so the record is sent;
  * - `server`: the server ended it itself: a listen that asks for nothing this server sends is acknowledged and
  *   closed at once.
@@ -959,7 +959,8 @@ function checkedEnd(r: ListenEndRecord) {
   return {
     door: "mcp" as const,
     event: "listen_end" as const,
-    agent: r.agent === undefined ? undefined : labelPart(r.agent),
+    // A name that is no string is `?`, as any value that fails its rule is.
+    agent: r.agent === undefined ? undefined : typeof r.agent === "string" ? labelPart(r.agent) : "?",
     end: known(r.end, LISTEN_ENDS) as ListenEnd | "?",
     held_ms: count(r.heldMs) ?? 0,
     trace: r.trace !== undefined && TRACE_ID.test(r.trace) ? r.trace : undefined,
@@ -981,7 +982,8 @@ export function listenEndLine(r: ListenEndRecord, now: Date = new Date()): strin
  * no span, the stream's request having ended its own when the stream opened. Nothing is held open for it either: a
  * stream has no record between its opening's and this one.
  * It throws nothing: it is called from a stream's end and from the stop, and a sink or an SDK that throws loses the
- * record and nothing else. Nor for a record it cannot read (a name that is no string), which it leaves unsaid.
+ * record and nothing else. A value that fails its rule is `?`, a name that is no string among them; what is no
+ * record at all is left unsaid.
  */
 export function endListenStream(r: ListenEndRecord): void {
   let fields: ReturnType<typeof checkedEnd>;
@@ -991,7 +993,7 @@ export function endListenStream(r: ListenEndRecord): void {
     return;
   }
   try {
-    sink(JSON.stringify({ ts: new Date().toISOString(), ...fields }));
+    sink(listenEndLine(r));
   } catch {}
   try {
     histogram("ob1.mcp.listen_stream.duration", LISTEN_HELD).record(fields.held_ms / 1000, { "ob1.end": fields.end });
