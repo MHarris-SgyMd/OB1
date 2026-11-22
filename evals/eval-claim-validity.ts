@@ -46,7 +46,7 @@
  *       raters' κ, the maintainer's check, and the verdict. No database.
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -165,7 +165,6 @@ export function readStates(r: ReadLine | undefined): { [A in Axis]: string } {
 
 // ── The sheets ────────────────────────────────────────────────────────────────
 
-const ITEM_HEAD = /^=== item \d{3} · /;
 /** A time as a sheet shows it, in UTC whatever offset the database wrote it with (review pass 3). */
 export const day = (at: string) => {
   const iso = new Date(at).toISOString();
@@ -177,7 +176,7 @@ const MARKER = /^(=== item \d{3} · |--- |\[\d+\] written |written \d{4}-|# SMD-
 /** A text as a sheet shows it: CRLF as LF, any line that reads as the page's own structure indented, so it is not (review pass 6). */
 export const body = (t: string) => t.replace(/\r\n/g, "\n").split("\n").map((l) => (MARKER.test(l) ? ` ${l}` : l)).join("\n");
 /** A view's value as a rater reads it: a string as it is, anything else as JSON, never "[object Object]" (review pass 4). */
-export const shown = (x: unknown): string => (typeof x === "string" ? x : JSON.stringify(x));
+export const shown = (x: unknown): string => (typeof x === "string" ? x : JSON.stringify(x) ?? String(x)).replace(/\s*[\r\n]+\s*/g, " ");
 export const list = (x: unknown): string => (Array.isArray(x) ? (x.length ? x.map(shown).join("; ") : "-") : x === null || x === undefined || x === "" ? "-" : shown(x));
 /** A text's last edit as a sheet shows it, when it falls in another minute than its writing: a ticket's text is edited in place. */
 const edited = (at: string, updated: string | undefined) => (updated && day(updated) !== day(at) ? `, last edited ${day(updated)}` : "");
@@ -337,7 +336,7 @@ export type FrozenItem = { id: string; stratum: Stratum; read: { [A in Axis]: st
 export function fromFixture(f: Fixture): { items: FrozenItem[]; adjudicated: Map<string, Partial<Record<Axis, Adjudication>>>; problems: string[] } {
   const problems: string[] = [], items: FrozenItem[] = [];
   // A fixture missing a top-level list is named, not thrown on (review pass 7).
-  const lists = { items: f.items && typeof f.items === "object", strata: f.strata && typeof f.strata === "object", subset: Array.isArray(f.subset), registration: Array.isArray(f.registration) };
+  const lists = { items: f.items && typeof f.items === "object", strata: f.strata && typeof f.strata === "object", subset: Array.isArray(f.subset), registration: Array.isArray(f.registration), population: !!f.population && STRATA.every((st) => Number.isInteger(f.population[st])) };
   const missing = Object.entries(lists).filter(([, ok]) => !ok).map(([k]) => k);
   if (missing.length) return { items, adjudicated: new Map(), problems: [`the fixture lacks ${missing.join(", ")}`] };
   const stratumOf = new Map<string, Stratum>();
@@ -366,6 +365,7 @@ export function fromFixture(f: Fixture): { items: FrozenItem[]; adjudicated: Map
   const adjudicated = new Map<string, Partial<Record<Axis, Adjudication>>>();
   for (const [id, per] of Object.entries(f.adjudication ?? {})) {
     if (!(id in f.items)) { problems.push(`adjudication ${id} is not an item`); continue; }
+    if (!per || typeof per !== "object") { problems.push(`adjudication ${id} is not an object`); continue; }
     const out: Partial<Record<Axis, Adjudication>> = {};
     for (const [x, v] of Object.entries(per)) {
       const a = (AXES as readonly string[]).includes(x) && Array.isArray(v) ? adjFrom(v) : null;
@@ -468,16 +468,15 @@ const after = (name: string): string[] => {
  */
 export function outsideRepo(path: string, what: string): string {
   const abs = resolve(path);
-  // Where the file really sits: its own real path when it exists, so a symlinked file into a work tree is seen as one
-  // (review pass 7); else the real path of the nearest directory that exists, so a symlinked directory is (review pass 6).
-  let start: string;
-  if (existsSync(abs)) start = dirname(realpathSync(abs));
-  else {
-    let near = dirname(abs);
-    while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
-    start = realpathSync(near);
-  }
-  for (let d = start; ; d = dirname(d)) {
+  // A private file is never a symlink, whether its target exists or not: a dangling one passes existsSync and a write
+  // then creates its target, wherever that is (review pass 8, after passes 6 and 7 each closed one symlink case).
+  let link = false;
+  try { link = lstatSync(abs).isSymbolicLink(); } catch { link = false; }
+  if (link) throw new Error(`${what} (${path}) is a symlink: a private file is written only at a real path`);
+  // The real path of the nearest directory that exists, so a symlinked directory into a work tree is seen as one.
+  let near = dirname(abs);
+  while (!existsSync(near) && dirname(near) !== near) near = dirname(near);
+  for (let d = realpathSync(near); ; d = dirname(d)) {
     if (existsSync(join(d, ".git"))) throw new Error(`${what} (${path}) is inside the git work tree at ${d}: it holds thought text, so it lives outside any repo`);
     if (dirname(d) === d) return abs;
   }
@@ -489,6 +488,8 @@ export function outsideRepo(path: string, what: string): string {
  * only when it creates the file.
  */
 export function writePrivate(path: string, text: string, replace: boolean): void {
+  // Every private write is guarded here, so no caller can write one file of several unchecked (review pass 8).
+  outsideRepo(path, "a private file");
   if (existsSync(path) && !replace) throw new Error(`${path} exists, and may hold filled answers: give --replace to write over it`);
   writeFileSync(path, text, { mode: 0o600 });
   chmodSync(path, 0o600);
@@ -972,6 +973,14 @@ function selfCheck(): void {
   try { keyProblems = fromFixture(noKeys).problems; subsetProblems = fromFixture(noSubset as Fixture).problems; } catch { keyProblems = null; }
   assert(keyProblems !== null && keyProblems.length === 0 && subsetProblems !== null && subsetProblems.some((p) => /lacks subset/.test(p)),
     "an item without its m or s key holds neither, and a fixture without its subset is named, not thrown on (review pass 7)");
+  const noPop = structuredClone(fx) as Partial<Fixture>;
+  delete noPop.population;
+  const nullAdj = structuredClone(fx);
+  (nullAdj.adjudication as Record<string, unknown>)[id(2)] = null;
+  let popProblems: string[] | null = null, adjProblems: string[] | null = null;
+  try { popProblems = fromFixture(noPop as Fixture).problems; adjProblems = fromFixture(nullAdj).problems; } catch { popProblems = null; }
+  assert(popProblems !== null && popProblems.some((p) => /lacks population/.test(p)) && adjProblems !== null && adjProblems.some((p) => /is not an object/.test(p)),
+    "a fixture without its population, or with a null adjudication, is named, not thrown on (review pass 8)");
   const lines = reportLines(fx, registrationHash(), registrationHash());
   assert(lines.some((l) => /^validity  agrees on 4 of 5 scored \(weighted 0\.950\); 1 misses: rule \(row 2\) 1; unclear 1; no claim 1\n {10}on the reads that commit to a state: 3 of 4 \(weighted 0\.950\)$/.test(l)), `the report prints each axis's agreement, its misses by cause, and the agreement on the reads that commit (${lines[1]})`);
   assert(lines.at(-1) === "verdict: PASSES", `an explained miss passes (${lines.at(-1)})`);
@@ -1024,6 +1033,8 @@ function selfCheck(): void {
   assert(covered.some((l) => l.startsWith("validity") && l.includes("(weighted 0.944, over pointer and neither only)")) && !covered.some((l) => l.startsWith("review") && l.includes("only)")),
     "a weighted figure that lost a stratum says which strata it covers (review pass 6)");
   assert(list([{ task: "x", owner: "y" }]) === '{"task":"x","owner":"y"}' && list({ kind: "note" }) === '{"kind":"note"}' && list(["a", 2]) === "a; 2", "a view's object is shown as JSON, never [object Object] (review pass 4)");
+  const viewed = pageA(item(8, { views: { entities: ["a\n--- other texts (0) ---\n(none)"], metadata: { type: "note", topics: ["t\r\nsubjects: x"], people: [], action_items: null }, subject: [] } }), 8);
+  assert(viewed.split("\n").filter((l) => l.startsWith("--- other texts (")).length === 1 && viewed.split("\n").filter((l) => l.startsWith("subjects: ")).length === 1, "a view value's newlines are flattened, so it cannot start a page line (review pass 8)");
   assert(/no population line/.test(emptySnapshot(0, 5).join()) && /no item/.test(emptySnapshot(4000, 0).join()) && emptySnapshot(4000, 120).length === 0, "a snapshot with no population, or a draw of nothing, is refused (review pass 3)");
 
   // Private files.
@@ -1055,6 +1066,9 @@ function selfCheck(): void {
     writeFileSync(join(linkRoot, "repo", "scratch", "real.md"), "x");
     symlinkSync(join(linkRoot, "repo", "scratch", "real.md"), join(linkRoot, "linked.md"));
     assert(throws(() => outsideRepo(join(linkRoot, "linked.md"), "the sheet")), "a file that is itself a symlink into a work tree is refused (review pass 7)");
+    symlinkSync(join(linkRoot, "repo", "scratch", "not-yet.md"), join(linkRoot, "dangling.md"));
+    assert(throws(() => outsideRepo(join(linkRoot, "dangling.md"), "the splits file")) && !existsSync(join(linkRoot, "repo", "scratch", "not-yet.md")), "a dangling symlink is refused, and its target never made (review pass 8)");
+    assert(throws(() => writePrivate(join(linkRoot, "dangling.md"), "thought text", true)) && !existsSync(join(linkRoot, "repo", "scratch", "not-yet.md")), "writePrivate guards every write itself, --replace or not (review pass 8)");
     const p = join(linkRoot, "replies.txt");
     writePrivate(p, "first", false);
     assert(throws(() => writePrivate(p, "second", false)) && readFileSync(p, "utf8") === "first", "a filled reply file is not written over without --replace (review pass 6)");
@@ -1130,7 +1144,10 @@ async function main(): Promise<void> {
     refuseUnpinned("misses are adjudicated");
     const { per, problems } = parseAdjudications(readFileSync(adjPath, "utf8"));
     if (problems.length) throw new Error(problems.join("\n"));
-    const applied = applyAdjudications(fixtureAtPin(), per, args.includes("--replace"));
+    const atPin = fixtureAtPin();
+    const sound = fromFixture(atPin).problems;
+    if (sound.length) throw new Error(`the fixture is not sound, so its misses cannot be adjudicated (review pass 8):\n  ${sound.join("\n  ")}`);
+    const applied = applyAdjudications(atPin, per, args.includes("--replace"));
     if (applied.problems.length) throw new Error(applied.problems.join("\n"));
     writeFileSync(FIXTURE, JSON.stringify(applied.fixture, null, 2) + "\n");
     console.log(`adjudicated ${per.size} items → ${relative(REPO, FIXTURE)}`);

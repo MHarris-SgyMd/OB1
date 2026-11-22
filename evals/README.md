@@ -5241,6 +5241,13 @@ The rule divergences:
   - a fixture item without its `m` or `s` key holds neither, and a fixture without a top-level list is named, not thrown on;
   - `--splits` refuses to run off the pin;
   - the self-check's "inside a repo" case runs on a temp directory, so it passes in a copy without `.git`.
+- **What review pass 8 fixed in the runner.** Passes 6 and 7 each closed one symlink case in the private-file guard, and pass 8 found two more, so this closes the class:
+  - **No symlinks at all.** A private file is never a symlink, whether its target exists or not. A dangling one had passed the guard, and the write would then make its target, wherever that was.
+  - **Every write is guarded.** `writePrivate` runs the guard on each file it writes. `--sheets` had guarded only its first file and written seven more unchecked.
+  - **A view value can't fake a page line.** Its newlines are flattened.
+  - **`--adjudicate` refuses an unsound fixture,** which would otherwise check misses against the items that parsed.
+  - **More malformed fixtures are reported, not crashed on.** A fixture without its population, or with a null adjudication entry, is named.
+- **Declined again:** the branch name. Recording an exception would be the maintainer's to write in CLAUDE.md, not this PR's.
 
 **The follow-ups:**
 - **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.
