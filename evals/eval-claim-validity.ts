@@ -25,11 +25,11 @@
  *       Two raters' filled reply files (each rater's part A, then its part B): κ per axis and each disagreement with both
  *       notes. The pilot's check, before the registration is pinned; it never prints the read.
  *
- *   bun eval-claim-validity.ts --splits <draw.jsonl> --salt <uuid> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --out <file>
+ *   bun eval-claim-validity.ts --splits <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out <file>
  *       The items and axes the agents split on that the maintainer's subset does not decide: a reply file for the
  *       maintainer, `<id> | <axis> | <truth> | note` a line.
  *
- *   bun eval-claim-validity.ts --freeze <draw.jsonl> --salt <uuid> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [<splits>] --note "<who, when>"
+ *   bun eval-claim-validity.ts --freeze <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [<splits>] --salt <uuid> --note "<who, when>"
  *       Every reply file and the read's answers → fixtures/claim-validity.json (ids and numbers only). Refuses a file
  *       with a blank or unknown truth, an id outside the draw, or a drawn item missing, and refuses everything at a
  *       registration other than the pinned one.
@@ -100,6 +100,10 @@ export function splitLines(lines: readonly Line[]): { pop: PopLine[]; items: Ite
   for (const l of [...items, ...readLines]) if (!members.has(l.id)) problems.push(`${l.kind} ${l.id.slice(0, 8)} is not in the population`);
   const reads = new Map(readLines.map((r) => [r.id, r]));
   for (const i of items) if (!reads.has(i.id)) problems.push(`item ${i.id.slice(0, 8)} has no read line`);
+  // A read is its own item's, and an item sits in the stratum its population line gives (review pass 2).
+  for (const r of readLines) if (r.answer && r.answer.id !== r.id) problems.push(`read ${r.id.slice(0, 8)} answers for ${String(r.answer.id).slice(0, 8)}`);
+  const stratumOf = new Map(pop.map((p) => [p.id, p.stratum]));
+  for (const i of items) if (stratumOf.has(i.id) && stratumOf.get(i.id) !== i.stratum) problems.push(`item ${i.id.slice(0, 8)}: stratum ${i.stratum}, the population's ${stratumOf.get(i.id)}`);
   for (const p of pop) if (!(STRATA as readonly string[]).includes(p.stratum)) problems.push(`population ${p.id.slice(0, 8)}: stratum "${p.stratum}"`);
   return { pop, items, reads, problems };
 }
@@ -466,6 +470,8 @@ function sheets(path: string, out: string, mode: Mode): void {
   const dir = dirname(outsideRepo(join(out, "sheet-a.md"), "the sheets' directory"));
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const { pop, items } = snapshot(path, mode);
+  const short = drawSample(pop, "salt" in mode ? mode.salt : DRAW.pilotSalt).short;
+  if ("salt" in mode && short.length) console.log(`short strata, taken whole: ${short.join("; ")}`);
   console.log(`population ${pop.length}, by stratum and writer:`);
   for (const l of makeupLines(pop)) console.log(l);
   const write = (name: string, text: string) => writeFileSync(join(dir, name), text, { mode: 0o600 });
@@ -523,6 +529,17 @@ export function openSplits(ids: readonly string[], a1: Map<string, Labels>, a2: 
   return out;
 }
 
+/**
+ * A splits file's decisions that decide no open split: an axis the agents agreed on, or one the maintainer's own label
+ * already decides. goldOf would drop them silently, so the maintainer would think a gold moved that did not (review pass 2).
+ */
+export function strayDecisions(decided: ReadonlyMap<string, Partial<Labels>>, open: readonly { id: string; axis: Axis }[]): string[] {
+  const isOpen = new Set(open.map((o) => `${o.id} ${o.axis}`));
+  const out: string[] = [];
+  for (const [id, per] of decided) for (const x of AXES) if (per[x] && !isOpen.has(`${id} ${x}`)) out.push(`${id.slice(0, 8)} ${x}: no open split there (the agents agree, or the maintainer's 20 decide it)`);
+  return out;
+}
+
 function freeze(path: string, salt: string, files: string[], splitsPath: string | undefined, note: string): void {
   refuseUnpinned("labels are frozen");
   const { pop, reads, ids } = snapshot(path, { salt });
@@ -530,7 +547,9 @@ function freeze(path: string, salt: string, files: string[], splitsPath: string 
   const [a1, a2] = [rater(files[0], files[1], ids), rater(files[2], files[3], ids)];
   const m = rater(files[4], files[5], d.subset, true);
   const s = splitsPath ? parseSplits(readFileSync(outsideRepo(splitsPath, "the splits file"), "utf8"), ids) : { labels: new Map<string, Partial<Labels>>(), problems: [] };
+  s.problems.push(...strayDecisions(s.labels, openSplits(ids, a1.labels, a2.labels, m.labels)));
   if (s.problems.length) throw new Error(`${splitsPath}:\n  ${s.problems.join("\n  ")}`);
+  if (d.short.length) console.log(`short strata, taken whole: ${d.short.join("; ")}`);
   const stratumOf = new Map(d.main.map((x) => [x.id, x.stratum]));
   const population = Object.fromEntries(STRATA.map((st) => [st, pop.filter((p) => p.stratum === st).length])) as Record<Stratum, number>;
   const fixture: Fixture = {
@@ -689,6 +708,8 @@ function selfCheck(): void {
   assert(splitLines([pop[0], item(0)]).problems.some((p) => /no read line/.test(p)), "an item without its read is refused");
   assert(splitLines([pop[0], item(5), read(5)]).problems.some((p) => /not in the population/.test(p)), "an item outside the population is refused");
   assert(splitLines([pop[0], pop[0]]).problems.some((p) => /twice/.test(p)), "an id listed twice is refused");
+  assert(splitLines([pop[0], item(0), { ...read(0), answer: { ...read(0).answer!, id: id(5) } }]).problems.some((p) => /answers for 10000000/.test(p)), "a read whose answer is another item's is refused (review pass 2)");
+  assert(splitLines([pop[0], item(0, { stratum: "neither" }), read(0)]).problems.some((p) => /stratum neither, the population's pointer/.test(p)), "an item whose stratum is not its population line's is refused (review pass 2)");
   assert(checkDraw([item(1)], [id(1)]).length === 0 && checkDraw([item(1)], [id(2)]).length === 2, "the snapshot's items must be the rules' draw, both ways");
   assert(JSON.stringify(readStates(read(0, "superseded", "pending", [{ kind: "metadata", state: "stale" }]))) === JSON.stringify({ validity: "superseded", review: "pending", freshness: "stale" }), "the read's states, freshness over the readable kinds");
   assert(JSON.stringify(readStates(undefined)) === JSON.stringify({ validity: "unknown", review: "unknown", freshness: "unknown" }) && readStates({ ...read(0, "superseded", "pending"), answer: { ...read(0, "superseded", "pending").answer!, found: false } }).validity === "unknown", "no answer, or not found, reads unknown");
@@ -763,6 +784,9 @@ function selfCheck(): void {
   const kl = kappaLines(drawn, r1, r2);
   assert(kl[0] === "validity: κ 0.000, the same on 1 of 2" && kl[1].includes(`002 ${id(2).slice(0, 8)}: superseded / holds  [x] [-]`), "κ lines name each disagreement with both notes");
   assert(JSON.stringify(openSplits(drawn, r1.labels, r2.labels, new Map())) === JSON.stringify([{ id: id(2), axis: "validity" }]) && openSplits(drawn, r1.labels, r2.labels, new Map([[id(2), L("holds", null, null)]])).length === 0, "a split the maintainer's label decides is not open");
+  const open2 = openSplits(drawn, r1.labels, r2.labels, new Map());
+  assert(strayDecisions(new Map([[id(2), { validity: "holds" }]]), open2).length === 0, "a decision on an open split is taken");
+  assert(strayDecisions(new Map([[id(2), { review: "open" }], [id(1), { validity: "holds" }]]), open2).length === 2, "a decision where the agents agree is refused, not dropped silently (review pass 2)");
 
   // The fixture.
   const fx: Fixture = {

@@ -5175,6 +5175,20 @@ The rule divergences:
   - **The nearest later texts are chosen by when they were written, while raters judge "later" by the last edit.** A ticket written before the item but edited after it is never offered as a nearest text. That can only hide a record gap, never a read bug: texts a record links are always shown, whatever their dates.
   - **A rule divergence may name any row from 1 to 13,** though the read follows only rows 1 to 7 and 9 to 11. This run's divergences name rows 2 and 6.
   - **The maintainer's check passes an axis with no agent-agreed item in the subset.** This run's check had all 20 items on every axis.
+- **Found by review pass 2, after the freeze:**
+  - **The "last edited" stamp was any write, not a content edit,** and the maintainer chose disclosure (2026-11-22). The sheets showed `updated_at`, and convention 2 told raters to judge "later" by it, but metadata re-extraction and embedding writes bump it too.
+    - **The size, measured against the audit log's content edits:** 366 of the 933 texts on the main sheets show a stamp later than their last content edit. The shown order differs from the content order on 208 of 1,041 item/other pairs, touching 64 of the 120 items.
+    - **Labels that may lean on it:** 38 of those 64 items have a rater note that leans on a time, 17 of them with a miss. The pattern match is broad, so this is an upper bound.
+    - **The effect:** the gold on those items may rest on a wrong order. That can move a miss between record gap and rule divergence, and move the agreement figures. It cannot hide a read bug, because the read never uses these times.
+  - **The review axis is not blind to its record.** Part B showed each proposal's status and review stamp, the same fields the read takes review from. So review's 119 of 120 mostly compares the record with itself. What it does test is whether a later text answered a pending question, and it found one that did.
+  - **The rest move nothing in this run:**
+    - **Time zone:** the snapshot never set one, but the canary's session time zone is `Etc/UTC`, and every time in it carries `+00:00`.
+    - **Code that decides the verdict but is not hashed:** `readStates`, the gold rule and the adjudication live outside the registered section. All 120 frozen read states re-derive the same with today's code, every read answers for its own item, and every item's stratum is its population line's.
+- **What review pass 2 fixed in the runner:**
+  - the snapshot check now refuses a read answering for another item, and an item whose stratum differs from its population line;
+  - the freeze refuses a split decision where no split is open;
+  - a short stratum is printed at the draw and the freeze;
+  - the usage lines give the files before the flags.
 
 **The follow-ups:**
 - **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.
