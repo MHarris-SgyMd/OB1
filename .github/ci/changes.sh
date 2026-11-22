@@ -70,10 +70,9 @@ HOLDS_THE_CUT="scripts/check-consistency.ts .github/ci/changes.sh"
 # Check 56 holds the mark to MAP_LISTS's jobs. It was `?` for a day: these
 # names are expanded unquoted, where a `?` is a glob, and a file at the top
 # named db-schemaX would have taken the job's place (review pass 5).
-# changes/* marks db-schema: a
-# step of its names ingest-records.ts, which can read a record, and over
-# main's runs its list never held one, so it ran for every pull request
-# with a record and read none of them.
+# changes/* marks db-schema: a step of its names ingest-records.ts, which can
+# read a record, and over main's runs its list never held one, so it ran for
+# every pull request with a record and read none of them.
 CHARGES="changes/*	deploy-stack db-schema:list
 scripts/check-consistency.ts	data-layer
 .github/ci/typecheck.sh	portable-server
@@ -102,10 +101,10 @@ MAP_LISTS="portable-server db-schema replay-gate data-layer preflight-rest db-li
 # against the job, though no list could hold it. Beside them by_map counts
 # .env and every .env.<name>, which Bun loads from the folder it is run in;
 # a file whose name, less one or more of its extensions, is a folder the job
-# read through, which an import of that folder would now find first; and .gitattributes,
-# whatever becomes of it, an edit too: the checkout applies it before any
-# marker is made, so no list holds it, and it sets the bytes of every file
-# under it.
+# read through, which an import of that folder would now find first; and
+# .gitattributes, whatever becomes of it, an edit too: the checkout applies
+# it before any marker is made, so no list holds it, and it sets the bytes
+# of every file under it.
 MAP_LOOKED_FOR="package.json tsconfig.json jsconfig.json bunfig.toml bun.lock bun.lockb .npmrc .gitignore"
 
 # Not code: a path no gated job reads, builds or runs. An allowlist, so a new
@@ -331,7 +330,9 @@ fetch_lists() {
 # lists were recorded on, and the change counted is everything between X and
 # HEAD, main's own commits since X with the pull request's: a job's list says
 # what it read at X, and holds here only if none of that has moved. A job runs
-# when, between X and HEAD:
+# when its list, or one of its cells', is missing, cut short, short of a path
+# it could not write, or not a passing job's that saw access times; or when,
+# between X and HEAD:
 # - a file its list holds (opened, or gone by its end) is modified or deleted;
 # - a path is added or deleted, or a file's mode changes, in a folder the job
 #   listed or opened a file in (or, the folder itself new or gone, the nearest
@@ -339,8 +340,8 @@ fetch_lists() {
 #   access time, and a job at work in a folder is taken to ask after its files;
 # - a MAP_LOOKED_FOR name or an .env is added or deleted in any folder above a
 #   file it opened, or a .gitattributes there differs at all;
-# - a file is added or deleted whose name, less its extensions, is a folder
-#   above a file it opened;
+# - a file is added or deleted whose name, less one or more of its
+#   extensions, is a folder above a file it opened;
 # - CHARGES names a path that differs, and the job with no `:list` after it;
 # - its block of the workflow differs, or it holds no gate on skip.
 # Every job runs (skip empty) with no lists to read, lists of more than one
@@ -437,7 +438,7 @@ by_map() {
     done
   fi
   for job in $ok; do
-    if [ -n "$only" ]; then case " $only " in *" $job "*) ;; *) continue ;; esac; fi
+    case " ${only:-$job} " in *" $job "*) ;; *) continue ;; esac
     hit=''
     case " $changed " in *" $job "*) hit="its block of $WORKFLOW differs" ;; esac
     case " $charged " in *" $job "*) hit=${hit:-a path CHARGES gives it differs} ;; esac
@@ -462,8 +463,7 @@ by_map() {
         {
           s = $1; p = substr($0, 3)
           if (s != "A" && (p in opened)) { print "it read " p ", which differs"; exit }
-          q = dirname(p)
-          b = basename(p)
+          q = dirname(p); b = basename(p)
           if (b == ".gitattributes" && (q in above)) { print p " sets how the files it read are checked out, and differs"; exit }
           if (s == "M") next
           if (((b in lookedfor) || b ~ /^\.env(\..*)?$/) && (q in above)) { print p " is looked for above files it read"; exit }
@@ -493,7 +493,7 @@ by_map() {
 # answer EVENT BASE_REF DEFAULT_BRANCH, in a checkout: prints
 # "true|false<TAB>skip<TAB>why", skip empty but when by_job or by_map fills it.
 answer() {
-  local event=$1 base=$2 default=$3 changed result
+  local event=$1 base=$2 default=$3 changed result rest jobs j marked='' first mapped why
   if [ "$event" != pull_request ]; then result=$(decide "$event" /dev/null); printf '%s\t\t%s\n' "${result%%$'\t'*}" "${result#*$'\t'}"; return; fi
   if [ -z "$default" ] || [ "$base" != "$default" ]; then
     printf 'true\t\ta pull request into %s, not %s, runs every job\n' "${base:-no branch}" "${default:-the default branch}"; return
@@ -506,10 +506,9 @@ answer() {
   result=$(decide "$event" "$changed")
   rm -f "$changed"
   if [ "${result%%$'\t'*}" = partial ]; then
-    local rest=${result#partial$'\t'} jobs
+    rest=${result#partial$'\t'}
     jobs=${rest#*$'\t'}; jobs=${jobs%%$'\t'*}
     # The jobs a row marked `:list` and none charged outright: by_job has them run, and by_map may clear them by their lists.
-    local j marked='' first mapped
     for j in $jobs; do
       case "$j" in *:list) case " $jobs " in *" ${j%:list} "*) ;; *) marked="$marked ${j%:list}" ;; esac ;; esac
     done
@@ -524,7 +523,7 @@ answer() {
     printf 'true\t%s\t%s\n' "${jobs% }" "${mapped#*$'\t'}"; return
   fi
   if [ "${result%%$'\t'*}" = true ] && [ "${result##*$'\t'}" = map ]; then
-    local why=${result#true$'\t'}
+    why=${result#true$'\t'}
     by_map "${why%$'\t'map}" "$default"; return
   fi
   printf '%s\t\t%s\n' "${result%%$'\t'*}" "${result#*$'\t'}"

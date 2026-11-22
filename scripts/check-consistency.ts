@@ -12106,9 +12106,12 @@ checkReadsRecorded();
 // container, where no access time moves on the checkout, so its list says
 // less than it read: such a job stays out. So does one with a step that
 // runs, or reads otherwise, on a pull request: the lists are recorded on a
-// push to main, and hold nothing a pull request's run alone reads. And a
-// gated job in neither list was never decided: MAP_ALWAYS_RUN gives each job
-// left out its reason.
+// push to main, and hold nothing a pull request's run alone reads. And one
+// that has git name or read the tracked files, which it does from its index
+// and its own store, opening none. Each of the three is held by an allowlist
+// of what a mapped job may say, not a list of what it may not. A gated job
+// in neither list was never decided: MAP_ALWAYS_RUN gives each job left out
+// its reason.
 const MAP_ALWAYS_RUN: Record<string, string> = {
   "deploy-stack": "runs the compose stack, whose containers read through mounts and build contexts (PR 3c)",
   "deploy-stack-brains": "runs the compose stack twice over, and canary.sh has git read the tree back",
@@ -12177,7 +12180,7 @@ const MAP_NEUTRAL_VARIABLES = new Set(["GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "
 const MAP_ACTIONS_MAY = new Set(["actions/checkout", "actions/upload-artifact", "oven-sh/setup-bun"]);
 /** The step conditions that run a step on a push to main alone, each verbatim: there a step can only add to what a list holds. */
 const MAP_PUSH_ALONE_IFS = [READS_KEEP_IF, "${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}"];
-/** The `github` names an expression reads that MAP_NEUTRAL_CONTEXTS lacks; `github` alone and `github[` among them. */
+/** The names an expression reads that tell a pull request's run from a push's: each `github` name MAP_NEUTRAL_CONTEXTS lacks (`github` alone and `github[` among them), and any of `secrets`, `vars` and `needs`. */
 function eventNames(expression: string): string[] {
   // Less its string literals: `hashFiles('.github/ci/x')` names a path, not the context. In any case: GitHub
   // reads `GitHub.Event_Name` as it reads `github.event_name`. With `github`, a secret or a variable of the
@@ -12240,6 +12243,7 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
   const twice = lists.filter((l, i) => lists.indexOf(l) !== i);
   if (twice.length) problems.push(`MAP_LISTS names ${[...new Set(twice)].join(", ")} twice (check 56, SMD-2435)`);
   const named = [...new Set(lists.map((l) => l.split(".")[0]))];
+  const EVENT_WHY = "the lists are a push run's, so what the job does on a pull request alone is in none; a step may name the event only by a condition that runs it on a push to main alone, MAP_PUSH_ALONE_IFS's, and MAP_NEUTRAL_CONTEXTS has the names that say nothing of it";
   for (const key of named) {
     const mine = lists.filter((l) => l === key || l.startsWith(`${key}.`));
     if (!gated.includes(key)) { problems.push(`MAP_LISTS names ${mine.join(", ")}, and ${key} is no gated job — only a job the changes job gates can skip by its list (check 56, SMD-2435)`); continue; }
@@ -12248,19 +12252,19 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
     if (!job) { problems.push(`MAP_LISTS names ${key}, which is no job in the workflow (check 56, SMD-2435)`); continue; }
     const matrix = mapping(job.strategy)?.matrix;
     const axes = matrix === undefined ? [] : matrixAxes(matrix);
-    let want: string[];
     const beside = ["include", "exclude"].filter((k) => mapping(matrix)?.[k] !== undefined);
+    let want: string[];
     if (axes === null || axes.length > 1 || beside.length) { problems.push(`MAP_LISTS names ${key}, whose matrix check 56 cannot read as one written-out axis${beside.length ? ` (it sets ${beside.join(" and ")}, which add and take cells no axis lists)` : ""} — its cells' lists cannot be told to be all there (check 56, SMD-2435)`); continue; }
     else if (axes.length === 0) want = [key];
     else {
       const values = mapping(matrix)?.[axes[0]];
-      want = (Array.isArray(values) ? values : []).map((v) => `${key}.${String(v)}`);
-      const odd = (Array.isArray(values) ? values : []).map(String).filter((v) => !/^[A-Za-z0-9_-]+$/.test(v));
+      const cells = (Array.isArray(values) ? values : []).map(String);
+      want = cells.map((v) => `${key}.${v}`);
+      const odd = cells.filter((v) => !/^[A-Za-z0-9_-]+$/.test(v));
       if (odd.length) problems.push(`MAP_LISTS names ${key}, whose matrix has the cell${odd.length === 1 ? "" : "s"} ${odd.join(", ")} — a cell is named in its list's file and in its artifact, where a dot or another character is written two ways, so its list would never be found; letters, digits, - and _ alone (check 56, SMD-2435)`);
     }
     const missing = want.filter((w) => !mine.includes(w)), extra = mine.filter((m) => !want.includes(m));
     if (missing.length || extra.length) problems.push(`MAP_LISTS names ${mine.join(", ")} for job ${key}, whose lists are ${want.join(", ")} — ${missing.length ? `without ${missing.join(", ")} the job would skip by its other cells' reads` : `${extra.join(", ")} is no list of its`} (check 56, SMD-2435)`);
-    const EVENT_WHY = "the lists are a push run's, so what the job does on a pull request alone is in none; a step may name the event only by a condition that runs it on a push to main alone, MAP_PUSH_ALONE_IFS's, and MAP_NEUTRAL_CONTEXTS has the names that say nothing of it";
     for (const k of ["container", "services"]) if (job[k] !== undefined) problems.push(`job ${key}, which MAP_LISTS names, sets ${k} — a container the runner makes can be given the checkout, and reads it where no access time moves; take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
     for (const [k, v] of Object.entries(job)) {
       if (k === "steps" || k === "if") continue;
@@ -12269,12 +12273,11 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
     }
     (Array.isArray(job.steps) ? job.steps : []).forEach((st, i) => {
       const step = mapping(st) ?? {};
-      const run = step.run;
       const uses = typeof step.uses === "string" ? step.uses : "";
       if (uses && !MAP_ACTIONS_MAY.has(uses.split("@")[0])) problems.push(`job ${key}, which MAP_LISTS names, uses ${uses.split("@")[0]} in step ${i + 1} — a mapped job uses only ${[...MAP_ACTIONS_MAY].join(", ")}: another action may build an image or run a container, which read the checkout where no access time moves, or do otherwise on a pull request than on the push its list is of (check 56, SMD-2435)`);
       const reads = eventReads(step);
       if (reads.length) problems.push(`job ${key}, which MAP_LISTS names, has step ${i + 1}${typeof step.name === "string" ? ` (${JSON.stringify(step.name)})` : ""} read the event that started the run (${reads.join(", ")}) — ${EVENT_WHY} (check 56, SMD-2435)`);
-      const lines = typeof run === "string" ? run.replace(/\s*\\\n\s*/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)) : [];
+      const lines = typeof step.run === "string" ? step.run.replace(/\s*\\\n\s*/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)) : [];
       const byGit = lines.find((l) => [...l.matchAll(/(?:^|[\s;|&(`"'=])(?:[\w.\/-]*\/)?git["')]*((?:\s+-[cC]\s+\S+)*)\s+([A-Za-z-]+)/g)].some((m) => !MAP_GIT_MAY.has(m[2])));
       if (byGit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${byGit.trim().slice(0, 80)}\` in step ${i + 1} — git names the tracked files from its index and reads their bytes from its own store, listing no folder and opening no file, so the job's list would say less than it read; a mapped job asks git only to ${[...MAP_GIT_MAY].join(", ")} (check 56, SMD-2435)`);
       const hit = lines.map((l) => [l, containerProblem(l)] as const).find(([, why]) => why !== null);
