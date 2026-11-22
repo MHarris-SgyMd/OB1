@@ -13,7 +13,7 @@
  *   bun eval-claim-validity.ts --print-sql (--salt <comment uuid> | --pilot 1|2)
  *       The snapshot's SQL: the population and its strata, the draw, each drawn item's material and the read's
  *       answer, one JSON line each, in one read-only transaction, for a brain whose database only a container reaches:
- *         podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -tA -f - < sql > ~/.cache/<dir>/draw.jsonl
+ *         podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA -f - < sql > ~/.cache/<dir>/draw.jsonl
  *       It holds texts, so it lives outside any repo: every step refuses a private file in a git work tree.
  *
  *   bun eval-claim-validity.ts --sheets <draw.jsonl> --out <dir> (--salt <comment uuid> | --pilot 1|2)
@@ -29,10 +29,12 @@
  *       The items and axes the agents split on that the maintainer's subset does not decide: a reply file for the
  *       maintainer, `<id> | <axis> | <truth> | note` a line.
  *
- *   bun eval-claim-validity.ts --freeze <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [<splits>] --salt <uuid> --note "<who, when>"
+ *   bun eval-claim-validity.ts --freeze <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [<splits>] --salt <uuid> --note "<who, when>" [--replace]
  *       Every reply file and the read's answers → fixtures/claim-validity.json (ids and numbers only). Refuses a file
  *       with a blank or unknown truth, an id outside the draw, or a drawn item missing, and refuses everything at a
- *       registration other than the pinned one.
+ *       registration other than the pinned one. The maintainer's files hold the subset at least, and every item when
+ *       the maintainer's check makes their labels the gold. Over a committed fixture, which holds the adjudications a
+ *       freeze would erase, it runs only with --replace.
  *
  *   bun eval-claim-validity.ts --adjudicate <file>
  *       Each miss's cause, `<id> <axis> label|record|read fixed|read open|rule <row>` a line, into the fixture.
@@ -138,7 +140,11 @@ export function readStates(r: ReadLine | undefined): { [A in Axis]: string } {
 // ── The sheets ────────────────────────────────────────────────────────────────
 
 const ITEM_HEAD = /^=== item \d{3} · /;
-const day = (at: string) => `${at.slice(0, 10)} ${at.slice(11, 16)} UTC`;
+/** A time as a sheet shows it, in UTC whatever offset the database wrote it with (review pass 3). */
+export const day = (at: string) => {
+  const iso = new Date(at).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+};
 const n = (x: number) => x.toLocaleString("en-US");
 /** A text as a sheet shows it: CRLF as LF, a line that reads as an item's head indented, so it is not one. */
 const body = (t: string) => t.replace(/\r\n/g, "\n").split("\n").map((l) => (ITEM_HEAD.test(l) ? ` ${l}` : l)).join("\n");
@@ -446,11 +452,21 @@ function refuseUnpinned(step: string): void {
   if (registrationHash() !== REGISTERED) throw new Error(`the registration is ${registrationHash()}, not the pinned ${REGISTERED}: ${step} only at the pinned registration`);
 }
 
+/**
+ * A snapshot with no population, or a draw of nothing, is a failed query, not an empty sheet: psql without
+ * ON_ERROR_STOP exits clean on an error and leaves BEGIN and ROLLBACK alone (review pass 3).
+ */
+export function emptySnapshot(population: number, drawn: number): string[] {
+  if (population === 0) return ["the snapshot holds no population line: the query failed (run psql with -v ON_ERROR_STOP=1)"];
+  if (drawn === 0) return ["the draw takes no item from this population"];
+  return [];
+}
+
 /** The snapshot read and checked: its lines, and the draw's ids in sheet order, refused on any problem. */
 function snapshot(path: string, mode: Mode): { pop: PopLine[]; items: ItemLine[]; reads: Map<string, ReadLine>; ids: string[] } {
   const { pop, items, reads, problems } = splitLines(readJsonl<Line>(outsideRepo(path, "the snapshot")));
   const ids = drawnIds(pop, mode);
-  problems.push(...checkDraw(items, ids));
+  problems.push(...checkDraw(items, ids), ...emptySnapshot(pop.length, ids.length));
   if (problems.length) throw new Error(problems.join("\n"));
   const byId = new Map(items.map((i) => [i.id, i]));
   return { pop, items: ids.map((id) => byId.get(id)!), reads, ids };
@@ -540,12 +556,18 @@ export function strayDecisions(decided: ReadonlyMap<string, Partial<Labels>>, op
   return out;
 }
 
-function freeze(path: string, salt: string, files: string[], splitsPath: string | undefined, note: string): void {
+function freeze(path: string, salt: string, files: string[], splitsPath: string | undefined, note: string, replace: boolean): void {
   refuseUnpinned("labels are frozen");
+  // A freeze writes no adjudication: over a fixture that holds causes it would erase them (review pass 3).
+  if (existsSync(FIXTURE) && !replace) throw new Error(`${relative(REPO, FIXTURE)} exists, with its adjudications: give --replace to freeze over it, then adjudicate again`);
   const { pop, reads, ids } = snapshot(path, { salt });
-  const d = drawSample(pop, salt), subset = new Set(d.subset);
+  const d = drawSample(pop, salt);
   const [a1, a2] = [rater(files[0], files[1], ids), rater(files[2], files[3], ids)];
-  const m = rater(files[4], files[5], d.subset, true);
+  // The maintainer's files hold the subset at least, and every drawn item when the check makes their labels the gold
+  // (review pass 3): any drawn id is taken, and a subset item missing is refused.
+  const m = rater(files[4], files[5], ids, false);
+  const unlabelledSubset = d.subset.filter((id) => !m.labels.has(id) || AXES.some((x) => m.labels.get(id)![x] === null));
+  if (unlabelledSubset.length) throw new Error(`the maintainer's files lack ${unlabelledSubset.length} of the subset's ${d.subset.length} items on some axis (${unlabelledSubset[0].slice(0, 8)} first)`);
   const s = splitsPath ? parseSplits(readFileSync(outsideRepo(splitsPath, "the splits file"), "utf8"), ids) : { labels: new Map<string, Partial<Labels>>(), problems: [] };
   s.problems.push(...strayDecisions(s.labels, openSplits(ids, a1.labels, a2.labels, m.labels)));
   if (s.problems.length) throw new Error(`${splitsPath}:\n  ${s.problems.join("\n  ")}`);
@@ -562,7 +584,7 @@ function freeze(path: string, salt: string, files: string[], splitsPath: string 
       return [id, {
         read: AXES.map((x) => (READ_STATES[x] as readonly string[]).indexOf(r[x])),
         a1: labelsTo(a1.labels.get(id)!)!, a2: labelsTo(a2.labels.get(id)!)!,
-        m: subset.has(id) ? labelsTo(m.labels.get(id)!) : null,
+        m: m.labels.has(id) ? labelsTo(m.labels.get(id)!) : null,
         s: sp ? labelsTo({ validity: sp.validity ?? null, review: sp.review ?? null, freshness: sp.freshness ?? null }) : null,
       }];
     })),
@@ -602,6 +624,7 @@ export function applyAdjudications(f: Fixture, per: ReadonlyMap<string, Partial<
   const { items } = fromFixture(f);
   const s = score(goldFor(items, new Set(f.subset)).scored, f.population);
   const out: Fixture = structuredClone(f);
+  out.adjudication ??= {};
   for (const [id, axes] of per) {
     if (!(id in f.items)) { problems.push(`${id.slice(0, 8)} is not an item`); continue; }
     for (const [x, a] of Object.entries(axes) as [Axis, Adjudication][]) {
@@ -727,6 +750,7 @@ function selfCheck(): void {
   const a = pageA(rich, 1), b = pageB(rich, 1);
   assert(a.includes("7,000 characters, the first 6,000 shown") && a.includes("2,000 characters, the first 1,200 shown") && a.includes("last edited 2026-11-02 10:00 UTC"), "part A says what it cut, and when the item was edited");
   assert(a.includes("entities: Bun") && a.includes("topics a; b") && a.includes("people -") && a.includes("subjects: ticket:SMD-1") && a.includes("[1] written 2026-11-03 11:00 UTC, last edited 2026-11-06 09:30 UTC by linear"), "part A shows the views and numbers the other texts, with an edit time");
+  assert(day("2026-11-21T11:00:00+01:00") === "2026-11-21 10:00 UTC" && day("2026-11-21T23:30:00-05:00") === "2026-11-22 04:30 UTC", "a time written with another offset is shown in UTC (review pass 3)");
   assert(a.includes("[2] written 2026-11-03 12:00 UTC by mcp") && pageA(item(3, { updated: "2026-11-01T10:00:00.900Z" }), 3).includes("written 2026-11-01 10:00 UTC by claude-code"), "an edit within the writing's minute is not shown as an edit");
   assert(a.split("\n").filter((l) => /^=== item \d{3} · /.test(l)).length === 1, "a text quoting an item's head is indented, so a page has one head");
   assert(!/pending|accepted|superseded|contested|unchallenged|judge|proposal/i.test(a), "part A names no record, verdict or state");
@@ -823,6 +847,12 @@ function selfCheck(): void {
   const disagree = structuredClone(fx); disagree.items[id(1)].m = labelsTo(L("holds", "none", "current")); disagree.items[id(3)].m = labelsTo(L("superseded", "none", "current"));
   assert(reportLines(disagree, registrationHash(), registrationHash()).some((l) => /the maintainer's labels are the gold/.test(l)), "the maintainer under the bar on the subset makes the maintainer's labels the gold");
   assert(reportLines(disagree, registrationHash(), registrationHash()).at(-1)!.includes("wait for the maintainer's labels"), "and then every item without them waits");
+  const fullM = structuredClone(disagree);
+  for (const [k, it] of Object.entries(fullM.items)) if (it.m === null) fullM.items[k].m = [...it.a1];
+  const fullLines = reportLines(fullM, registrationHash(), registrationHash());
+  assert(fullLines.some((l) => /the maintainer's labels are the gold/.test(l)) && !fullLines.at(-1)!.includes("wait for the maintainer's labels"), "with the maintainer's labels on every item, nothing waits for them (review pass 3)");
+  const fullAdj = applyAdjudications(fullM, new Map([[id(1), { validity: { cause: "record" } as Adjudication }], [id(3), { validity: { cause: "record" } as Adjudication }]]));
+  assert(fullAdj.problems.length === 0 && reportLines(fullAdj.fixture, registrationHash(), registrationHash()).at(-1) === "verdict: PASSES", "a failed maintainer check can still reach a verdict once the maintainer labels every item (review pass 3)");
 
   // Adjudication files.
   const adj = parseAdjudications(`${id(2)} validity rule 6\n${id(1)} review read fixed  # the fix\n${id(3)} freshness record\n${id(3)} freshness label\nnonsense`);
@@ -835,6 +865,12 @@ function selfCheck(): void {
   const notMiss = applyAdjudications(fx, new Map([[id(2), { review: { cause: "label" } as Adjudication }], [id(3), { validity: { cause: "record" } as Adjudication }], [id(9), { validity: { cause: "record" } as Adjudication }]]));
   assert(notMiss.problems.length === 3 && notMiss.problems.some((p) => /review: not a miss/.test(p)) && notMiss.problems.some((p) => /is not an item/.test(p)) && fx.adjudication[id(2)].review === undefined,
     "an adjudication of an axis that is no miss, or of no item, is refused, and the fixture given is left as it was");
+  const bare = structuredClone(fx) as Partial<Fixture> & Fixture;
+  delete (bare as Partial<Fixture>).adjudication;
+  let onBare: ReturnType<typeof applyAdjudications> | null = null;
+  try { onBare = applyAdjudications(bare, new Map([[id(2), { validity: { cause: "record" } as Adjudication }]])); } catch { onBare = null; }
+  assert(onBare !== null && onBare.problems.length === 0 && onBare.fixture.adjudication[id(2)]?.validity?.[0] === CAUSES.indexOf("record"), "a fixture with no adjudication key takes one, without throwing (review pass 3)");
+  assert(/no population line/.test(emptySnapshot(0, 5).join()) && /no item/.test(emptySnapshot(4000, 0).join()) && emptySnapshot(4000, 120).length === 0, "a snapshot with no population, or a draw of nothing, is refused (review pass 3)");
 
   // Private files.
   assert(throws(() => outsideRepo("draw.jsonl", "the snapshot")) && throws(() => outsideRepo(join(REPO, "x.jsonl"), "the snapshot")), "a private file inside the repo is refused");
@@ -895,7 +931,7 @@ async function main(): Promise<void> {
     if (rest.length < 6 || rest.length > 7) throw new Error("give --freeze <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [<splits>]");
     const note = flag("note");
     if (!note) throw new Error('give --note "<who labelled, when>"');
-    return freeze(path, mainSalt(mode()), rest.slice(0, 6), rest[6], note);
+    return freeze(path, mainSalt(mode()), rest.slice(0, 6), rest[6], note, args.includes("--replace"));
   }
   const adjPath = flag("adjudicate");
   if (adjPath) {

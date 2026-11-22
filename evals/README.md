@@ -5071,7 +5071,7 @@ podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -v ON_
 bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot 1   # parts A and B, each with a reply file; the maintainer's apart
 bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> --pilot 1   # two raters' κ per axis, each disagreement
 bun eval-claim-validity.ts --splits $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out $D/splits.txt
-bun eval-claim-validity.ts --freeze $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [$D/splits.txt] --salt <uuid> --note "…"
+bun eval-claim-validity.ts --freeze $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [$D/splits.txt] --salt <uuid> --note "…" [--replace]
 bun eval-claim-validity.ts --adjudicate $D/adjudication.txt   # each miss's cause, into the fixture
 bun eval-claim-validity.ts                              # the report and the verdict, from the fixture
 ```
@@ -5189,6 +5189,17 @@ The rule divergences:
   - the freeze refuses a split decision where no split is open;
   - a short stratum is printed at the draw and the freeze;
   - the usage lines give the files before the flags.
+- **Found by review pass 3, measured on this run:**
+  - **The nearest later texts can come up short.** The vector index filters after it searches (pgvector's `ef_search`, with no iterative scan, as in migrations 014 and 019), so an item can be shown fewer than five later texts.
+    - **In this run:** 119 of the 120 items show at least five later texts. The other one was written about 12 hours before the draw, and the brain held exactly 2 later thoughts.
+  - **The link cap hides more than it says.** A linked text past the cap of eight is barred from the nearest texts too, so it is shown nowhere.
+    - **In this run:** one item had more than eight links, ten in all, so 2 texts were shown nowhere.
+- **What review pass 3 fixed in the runner:**
+  - **The fallback rule can now finish.** When the maintainer's check makes their labels the gold, the freeze takes those labels on every item. Before, it refused any item outside the 20, so the verdict could only wait.
+  - **A failed query is caught.** A snapshot with no population is refused, and the usage line runs psql with `ON_ERROR_STOP`.
+  - **Times are shown in UTC** whatever offset the database wrote.
+  - **A freeze over a committed fixture,** which would erase its adjudications, needs `--replace`.
+  - **A fixture without an adjudication key** takes one.
 
 **The follow-ups:**
 - **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.
