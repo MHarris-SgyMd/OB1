@@ -5435,7 +5435,7 @@ bun sleep.ts --url …               # one period, if there is work, until its p
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --reembed-share SECONDS (120; 0 to 86,400, 0: alone until its pool drains)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
 #   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
-#   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
+#   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2); also the most one stretch of extraction's calls holds consolidation and a model subject sweep back where they yield to it (SMD-4495)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
 #   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share, or caught up, with its pool left, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
@@ -5764,7 +5764,22 @@ board-sync's among them) seldom let drain: the capture trigger pools each one
 as it is written, so one was pending or in hand at nearly every poll, and
 consolidation joined mostly once they stopped. The subject sweep still waits
 for the whole pool (below): beside consolidation, its judge calls slowed
-extraction on a model server of one slot. A limit stands: a backlog thought a
+extraction on a model server of one slot. Where the judge's calls would take
+extraction's turn — on a local chat endpoint the judge's model
+(`OB1_JUDGE_MODEL`) is not extraction's, so each turn between them can load the
+other model, or extraction's background share of its model is one slot (on a
+local endpoint `OB1_MODEL_SLOTS` 1 or 2; on any, `OB1_BACKGROUND_SLOTS`'s
+`chat=1` or an override for its model) — consolidation and a model subject
+sweep yield to extraction from the start of either to the period's end, said
+at the start (`yield:`) and as the yield first holds them back: they wait
+between calls while an extraction call is asked for or running, and a second
+after, `--max-wait` at most in one stretch of extraction's calls (calls less
+than a second apart), then go on for a second before waiting again; a call in
+hand runs on (SMD-4495). A stub server of one slot under a capture every 4 s:
+extraction's median wait 64 s without it, 15 s with it, and 439 s against
+21 s with a judge model of its own and a 5 s load. With one model, or on a
+hosted provider, and slots to spare, the judge runs beside extraction, as
+SMD-4468 made it. A limit stands: a backlog thought a
 pause has taken goes behind the newer writes (below), so while they come
 faster than extraction takes them it is not reached, and the join waits for
 it, as before; a stalled one is joined past only once extraction holds nothing
