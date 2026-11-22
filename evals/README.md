@@ -5176,6 +5176,11 @@ The rule divergences:
   - **A rule divergence may name any row from 1 to 13,** though the read follows only rows 1 to 7 and 9 to 11. This run's divergences name rows 2 and 6.
   - **The maintainer's check passes an axis with no agent-agreed item in the subset.** This run's check had all 20 items on every axis.
 
+**The follow-ups:**
+- **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.
+- **SMD-4525:** whether rows 2 and 6 change.
+- **SMD-4526:** the one unfounded pointer, a note that reports a ticket done superseding the ticket's own thought (7 such on the canary).
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline
