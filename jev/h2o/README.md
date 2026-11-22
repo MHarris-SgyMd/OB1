@@ -438,11 +438,15 @@ To try it by hand instead:
 - **An outage mid-pass** is handled like the judge's: a follower checks the
   writer's chat endpoint and then the tier's `/info` before it claims anything,
   and waits out an outage of either.
-- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d5`, so turning
+- **The pass key** is `consolidate:h2o-lightning-4b+<writer>@p4d6`, so turning
   decide mode on, or moving to a new decide version, starts a fresh pass over
-  the pool. Proposals are reviewed as
+  the pool. Since version 6 (SMD-4446) the writer names the settled parts of
+  a pair the tier calls outdates, each recorded as a proposal for review
+  (migration 151), and a whole-thought proposal is the exception
+  (`db/README.md`, "Decide mode"). Whole-thought proposals are reviewed as
   the judge's are (`bun db/consolidate.ts --list`, then `--accept` or
-  `--reject`). Each one's lineage records the decider, the writer, decide
+  `--reject`); the surfaces that list and decide a part are that ticket's
+  next cut. Each row's lineage records the decider, the writer, decide
   mode's prompt hash, and what each model said.
 - **Memory and co-load** (measured 2026-11-09 on the dogfood Mac, 64 GB:
   `evals/eval-jev-coload.ts --n 30` against the deployed :8022, beside

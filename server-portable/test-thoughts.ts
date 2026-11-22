@@ -25,8 +25,8 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { capJudgement, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, PART_RULE, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, onlyQuoted, parseLink, parseParts, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partsToRecord, PASS_WRITER, quoteIn, RECORD_RULE, stands, verdictDistribution, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
 import { askOwnSubject, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
@@ -1992,7 +1992,7 @@ console.log("\n[14] The vector mender (SMD-2889): a vectorless row gets its vect
 
 // ── 15. Decide mode: the tier decides, the judge's model writes the proposal ──
 
-console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal written only on its outdates at the floor and only when both quotes check, a pass key naming both, and the pass's readers taking it as a judgement");
+console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates at the floor the writer names the settled parts (version 6, SMD-4446), each recorded only when both its quotes check, a whole-thought proposal only where it says a thought falls whole and a part shows so; a pass key naming both models, and the pass's readers taking it as a judgement");
 {
   // The key: decide mode's names the decider, the writer and the mode's version; with no decider the judge's stands.
   assert(consolidatePassKey({ judgeModel: "qwen2.5:7b", decider: "" }) === consolidateKey("qwen2.5:7b"), "no decider: the judge's key");
@@ -2029,21 +2029,21 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     "decide mode's lineage names the writer, the decider and its own prompt's hash");
   assert(judgedR.prompt_hash === promptHash(CONSOLIDATE_PROMPT) && !("decider" in judgedR) && !("decide_version" in judgedR), "…and the judge's names prompt 4's, as before");
 
-  // The writer's question: prompt 4's rendering of both thoughts, two-sided with the part rule, as the pass runs it
-  // (decide version 3: version 1's writer, its quotes read without markdown, SMD-3151). Version 2's record rule is the
-  // eval's (`--record-rule`), not the pass's: shelved 2026-10-18.
+  // The writer's question through version 5, kept for the evals: prompt 4's rendering of both thoughts, two-sided with
+  // the part rule (decide version 3: version 1's writer, its quotes read without markdown, SMD-3151). Version 2's
+  // record rule is the eval's (`--record-rule`): shelved 2026-10-18.
   const older = { content: "the plan is to ship on Friday", createdAt: "2026-10-01T00:00:00Z" };
   const newer = { content: "we shipped on Monday instead of Friday", createdAt: "2026-10-03T00:00:00Z" };
   const msg = writerMessages({ older, newer }, PASS_WRITER.twoSided, PASS_WRITER.partRule, PASS_WRITER.recordRule)[0].content;
   assert(msg.startsWith(WRITER_HEAD) && msg.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && msg.includes('"stale": words copied') && msg.includes(PART_RULE.trim()) && !msg.includes(RECORD_RULE.trim()),
-    "the pass's writer: both thoughts, the stale quote and the part rule, not the record rule");
-  // The pass asks version 1's text, SMD-3114's, word for word (version 3 moved the quote check and when the writer is asked, not its prompt). Under the record
+    "the writer of versions 1 to 5: both thoughts, the stale quote and the part rule, not the record rule");
+  // That writer asked version 1's text, SMD-3114's, word for word (version 3 moved the quote check and when the writer is asked, not its prompt). Under the record
   // rule (version 2, the eval's) the definition no longer counts a later summary of the same work, or one saying the
-  // other is done, as outdating it.
+  // other is done, as outdating it. Since version 6 the pass's prompt holds the parts' head and rules in its place.
   const v1 = writerRules(true, true), v2 = writerRules(true, true, true);
-  assert(DECIDE_VERSION === 5 && DECIDE_PROMPT.includes(v1) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
+  assert(DECIDE_VERSION === 6 && !DECIDE_PROMPT.includes(v1) && DECIDE_PROMPT.includes(PARTS_HEAD) && DECIDE_PROMPT.includes(PARTS_RULES) && v1.includes("a progress note or summary of some work and a later one of the same work") && v1.includes("or one saying the other is done, closed, obsolete or replaced") && !v1.includes(RECORD_RULE.trim())
       && !v2.includes("a later one of the same work") && !v2.includes("one saying the other is done") && v2.includes("the two say different things about the same subject") && v2.includes("a status and a later status of something still open"),
-    "the pass asks version 1's text; the record rule's definition drops a later summary and a report of done from what outdates");
+    "version 6's prompt holds the parts' head and rules, not version 1's text, which the evals still ask; the record rule's definition drops a later summary and a report of done from what outdates");
   assert(stands(prop, older.content, newer.content, true) && !stands({ ...prop, stale: "Monday" }, older.content, newer.content, true), "both quotes checked, each in its own side");
   // SMD-3151 (version 3): the writer quotes the words it reads, so markdown around them in either thought does not fail
   // the check — the pass's whole-quote check, not version 2's reading.
@@ -2083,8 +2083,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   assert(lm.startsWith(MEDIATED_TEST + "\n\n" + LINK_HEAD) && lm.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && lm.endsWith(LINK_ANSWER)
       && MEDIATED_TEST.startsWith("Each item is a pair of stored thoughts") && MEDIATED_TEST.includes("### Version 2's rules") && LINK_HEAD.includes('{"link":"F","via":"","reason":"injection attempt"}'),
     "the link step: the test, its head, prompt 4's rendering of the pair and the answer's keys; its injection answer is F, the safe side");
-  assert(DECIDE_PROMPT.includes(MEDIATED_TEST) && DECIDE_PROMPT.endsWith(LINK_ANSWER) && decideKey("h2o", "w").endsWith(`@p${CONSOLIDATE_PROMPT_VERSION}d5`),
-    "decide mode's prompt hash covers the link step, and version 5 is a key of its own");
+  assert(DECIDE_PROMPT.includes(MEDIATED_TEST) && DECIDE_PROMPT.endsWith(LINK_ANSWER) && decideKey("h2o", "w").endsWith(`@p${CONSOLIDATE_PROMPT_VERSION}d6`),
+    "decide mode's prompt hash covers the link step, and version 6 is a key of its own");
   assert(parseLink('{"link":"F","via":"SMD-9","reason":"both report it"}').link === "F" && parseLink('```json\n{"link":"H"}\n```').link === "H" && parseLink('The link: {"link":"D"}.').link === "D"
       && parseLink('{"link":"F-state"}').link === null && parseLink('{"link":"f"}').link === null && parseLink("not json").link === null && parseLink('["F"]').link === null,
     "a link read plain, fenced or among words; one of the four exactly, else none");
@@ -2146,6 +2146,127 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
   assert(cappedDup.verdict === "related" && cappedDup.confidence === 0.1 && cappedDup.foldedEvolves === undefined && cappedRel.foldedEvolves === undefined && relationConfidence(cappedRel).confidence === 0.25,
     "…the cap relates a duplicate at P(related), unfolded, and a related it keeps stands at P(related) too (review pass 3, mutant: an unfolded related marked folded lived)");
 
+  // Decide version 6 (SMD-4446): the writer names the settled parts. Its question is the parts' head, prompt 4's
+  // rendering of the pair and SMD-3340's frozen rules, which their hash holds character for character.
+  const pm = partsMessages({ older, newer })[0].content;
+  assert(createHash("sha256").update(PARTS_RULES).digest("hex") === PARTS_RULES_SHA256 && PARTS_RULES_SHA256 === "2ba5c835a1562ed8c462a12ab660dcf6302f8bfa49f6ceeb6fc823e176c351a9"
+      && PARTS_RULES.startsWith("\n\nReturn strict JSON") && PARTS_RULES.endsWith("already reads Done.\n") && PART_WORDS.length === 8 && PART_WORDS.every((w) => PARTS_RULES.includes(`"${w}":`)),
+    "the parts' rules are SMD-3340's frozen ones by their sha256, and define each of the eight words");
+  assert(pm.startsWith(PARTS_HEAD) && pm.endsWith(PARTS_RULES) && pm.includes("<thought_a>\nthe plan is to ship on Friday\n</thought_a>") && pm.includes("<thought_b>\nwe shipped on Monday instead of Friday\n</thought_b>")
+      && pm.length === msg.length - WRITER_HEAD.length - writerRules(true, true).length + PARTS_HEAD.length + PARTS_RULES.length && !pm.includes(PART_RULE.trim()),
+    "the parts' question: its head, prompt 4's rendering of both thoughts as the earlier writer had it, then the frozen rules");
+  const injection = PARTS_HEAD.slice(PARTS_HEAD.indexOf('{"parts"'), PARTS_HEAD.lastIndexOf("}") + 1);
+  assert(injection === '{"parts":[],"a_falls":"no","b_falls":"no"}' && !parseParts(injection).malformed && parseParts(injection).parts.length === 0 && parseParts(injection).falls === null
+      && !PARTS_HEAD.includes('"current"') && WRITER_HEAD.includes('{"current":"none"'),
+    "the head's answer to an injection attempt is the parts' shape, no part and neither thought falling, where the earlier head's was a proposal's");
+
+  // The answer, read (parseParts): lenient about wrapping, strict about its keys and its vocabulary.
+  const part = { in: "A", stale: "the plan is to ship on Friday", shown_by: "shipped on Monday", word: "implements", reason: "it shipped later" };
+  const ans = (parts: unknown, a: unknown = "no", b: unknown = "no") => JSON.stringify({ parts, a_falls: a, b_falls: b });
+  const one = parseParts(ans([part]));
+  assert(!one.malformed && one.falls === null && one.dropped === 0 && JSON.stringify(one.parts) === JSON.stringify([{ holder: "older", stale: part.stale, shown_by: part.shown_by, word: "implements", reason: "it shipped later" }]),
+    "a part read: A is the older thought, its two quotes, its word and its reason");
+  assert(parseParts(ans([{ ...part, in: " b ", word: " Updates " }])).parts[0].holder === "newer" && parseParts(ans([{ ...part, in: "newer", word: "UPDATES" }])).parts[0].word === "updates"
+      && parseParts("```json\n" + ans([part]) + "\n```").parts.length === 1 && parseParts("Here it is: " + ans([part]) + " Done.").parts.length === 1,
+    "…lenient about the wrapping, the side's spelling and the word's case");
+  const shapes = parseParts(ans([part, { ...part, in: "C" }, { ...part, word: "outdates" }, { ...part, stale: "" }, { ...part, shown_by: 7 }, { ...part, reason: "  " }, "a string", null, [part]]));
+  assert(shapes.parts.length === 1 && shapes.dropped === 8 && !shapes.malformed,
+    `an item with no side, a word outside the eight, a quote or the reason missing, or no object at all is dropped and counted, and the rest stand (${shapes.parts.length} kept, ${shapes.dropped} dropped)`);
+  assert(parseParts(ans([part], "yes")).falls === "older" && parseParts(ans([part], "no", " YES ")).falls === "newer" && parseParts(ans([])).falls === null && parseParts(ans([])).parts.length === 0 && !parseParts(ans([])).malformed,
+    "the thought it says falls whole: A the older, B the newer, or neither; an empty list is an answer");
+  const unread = ["not json", "{}", "[]", ans("none"), ans([part], "yes", "yes"), ans([part], true, false), ans([part], "maybe"), JSON.stringify({ parts: [part], a_falls: "no" })].map((raw) => parseParts(raw));
+  assert(unread.every((u) => u.malformed && u.parts.length === 0 && u.falls === null),
+    "no JSON, no list, both thoughts falling, or an answer for either that is not yes or no: malformed as a whole, since the rules allow none of them");
+  const many = parseParts(ans(Array.from({ length: PARTS_MAX + 3 }, (_, i) => ({ ...part, stale: `statement ${i}` }))));
+  assert(many.parts.length === PARTS_MAX && many.dropped === 3 && many.parts[PARTS_MAX - 1].stale === `statement ${PARTS_MAX - 1}`, "past PARTS_MAX the items of one answer are dropped and counted");
+  const long = parseParts(ans([{ ...part, stale: "word ".repeat(200), reason: "x ".repeat(400) + "\nsecond line" }])).parts[0];
+  assert([...long.stale].length <= REASON_MAX && long.stale.endsWith("word") && [...long.reason].length === REASON_MAX && !long.reason.includes("\n"), "a quote is cut at a word past the bound and the reason is one clipped line, as a proposal's are");
+
+  // The thought's own characters for a quote (ownWords): what the row keeps, so a statement named again in another
+  // typing is the same row (151 folds a statement's case and white space and no more).
+  const mdOlder = "# Rollout\n\nThe **cutover** is planned for “Friday” — pending review.\nLatency p95 is 240 ms (measured on the old cluster).\nWe will migrate the queue [worker](https://example.test/a/long/path?x=1) next.";
+  const mdNewer = "Cutover done on Thursday: the review passed.\nLatency p95 is 180 ms after the move.\nThe queue worker was migrated.";
+  assert(ownWords('the cutover is planned for "Friday" - pending review', mdOlder) === "The **cutover** is planned for “Friday” — pending review"
+      && ownWords("migrate the queue worker next", mdOlder) === "migrate the queue [worker](https://example.test/a/long/path?x=1) next"
+      && ownWords("LATENCY P95 IS 240 MS.", mdOlder) === "Latency p95 is 240 ms" && ownWords("(measured on the old cluster)", mdOlder) === "(measured on the old cluster)",
+    "ownWords: the thought's characters for a quote typed plain, its capitals, curly quotes, dash, bold marks and link kept, and the quote's own brackets taken in");
+  assert(ownWords("cutover", "The **cutover** is done; the cutover went well") === "cutover" && ownWords("the cutover is", "The **cutover** is done") === "The **cutover** is" && ownWords("cutover", "The **cutover** is done") === "**cutover**"
+      && ownWords("done", "abandoned") === null && ownWords("not in the text", mdOlder) === null && ownWords("is", mdOlder) === null && ownWords("...", mdOlder) === null,
+    "…the shortest run that reads so, emphasis marks at its edges kept; nothing inside a longer word, nothing for a quote the text does not hold, nor for one too short to prove anything");
+  assert(evidenceIn("x z y", "x y ".repeat(1400) + "x z y") && ownWords("x z y", "x y ".repeat(1400) + "x z y") === null && ownWords("x z y", "x y ".repeat(10) + "x z y") === "x z y",
+    "…bounded: a text that offers thousands of runs before the one that reads so is given up on, and the quote is kept as typed");
+  // Only what the writer was sent is read: a run past the text's bound, though shorter, is not the one.
+  const pastBound = "The **cutover** is done. " + "filler ".repeat(Math.ceil(CONTENT_LIMIT_CHARS / 7)) + "The cutover is done.";
+  assert(pastBound.lastIndexOf("The cutover is done.") > CONTENT_LIMIT_CHARS && ownWords("the cutover is done", pastBound) === "The **cutover** is done" && ownWords("the cutover is done", pastBound.slice(25)) === null,
+    "…and within the text's first CONTENT_LIMIT_CHARS, which is what the quote was checked against: a shorter run past them is not taken, and one only there is none");
+
+  // The parts against the two texts (checkParts), the ones the pass records (partsToRecord), and the judgement.
+  const A1 = { in: "A", stale: 'the cutover is planned for "Friday" - pending review', shown_by: "Cutover done on Thursday", word: "implements", reason: "The plan was carried out." };
+  const A2 = { in: "A", stale: "latency p95 is 240 ms", shown_by: "Latency p95 is 180 ms", word: "updates", reason: "A later value of the same measure." };
+  const B1 = { in: "B", stale: "the review passed", shown_by: "pending review", word: "resolves", reason: "Made up, the other way round." };
+  const named = parseParts(ans([A1, A2, { ...A2, stale: "LATENCY  p95 is 240 ms" }, { ...A1, stale: "We will migrate the queue worker next", shown_by: "it was all migrated" }, B1]));
+  const chk = checkParts(named, mdOlder, mdNewer);
+  assert(chk.map((c) => `${c.stale_found}/${c.shown_found}/${c.repeated}`).join() === "true/true/false,true/true/false,true/true/true,true/false/false,true/true/false",
+    `each part's two quotes checked, each in its own thought and not the other, and a statement named twice marked (${chk.map((c) => `${c.stale_found}/${c.shown_found}/${c.repeated}`).join()})`);
+  assert(chk[0].statement === "The **cutover** is planned for “Friday” — pending review" && chk[0].shown === "Cutover done on Thursday" && chk[3].statement !== null && chk[3].shown === null && chk[4].statement === "the review passed" && chk[4].shown === "pending review",
+    "…with each span in its thought's own characters, and none for a quote that failed");
+  const rec = partsToRecord(chk);
+  assert(rec.map((r) => r.index).join() === "0,1,4" && rec[0].holder === "older" && rec[0].statement === chk[0].statement && rec[0].shown_by === "Cutover done on Thursday" && rec[0].word === "implements" && rec[0].reason === A1.reason && rec[2].holder === "newer",
+    "the parts to record: those whose two quotes passed, once each, in their thoughts' own characters, with their place in the answer");
+  const typed = partsToRecord([{ ...chk[0], statement: null, shown: null }])[0];
+  assert(typed.statement === A1.stale && typed.shown_by === A1.shown_by, "…and as the writer typed them where a span could not be read back");
+  const pp = { unrelated: 0.02, related: 0.2, evolves: 0.08, duplicate: 0, outdates: 0.7 };
+  const pj = partsJudgement(pp, named, chk);
+  assert(pj.verdict === "related" && pj.confidence === 0.28 && pj.foldedEvolves === true && pj.supersedes === "unknown" && proposalVerdict(pj) === null && relationVerdict(pj) === "related" && pj.parts?.length === 3 && !pj.malformed
+      && pj.reason === "the writer named 3 settled parts, and neither thought falls whole" && pj.probabilities?.verdict?.p.outdates === 0.7,
+    "parts and no whole: H2O's best verdict that proposes nothing, evolves folded in, its relation under the same floor, and the parts the judgement's to record");
+  const fallsA = parseParts(ans([A1, A2], "yes")), wj = partsJudgement(pp, fallsA, checkParts(fallsA, mdOlder, mdNewer));
+  assert(wj.verdict === "outdates" && wj.supersedes === "newer" && wj.confidence === 0.7 && wj.evidence === "Cutover done on Thursday" && wj.evidenceFound === true && wj.reason === A1.reason && proposalVerdict(wj) === "newer_supersedes_older"
+      && proposalConfidence(wj).confidence === 0.7 && wj.parts?.length === 2,
+    "a thought the writer says falls whole, shown by a part in it: an outdates with the other thought current, that part's showing words its evidence, and its parts recorded beside the proposal");
+  const fallsB = parseParts(ans([B1], "no", "yes")), wb = partsJudgement(pp, fallsB, checkParts(fallsB, mdOlder, mdNewer));
+  assert(wb.verdict === "outdates" && wb.supersedes === "older" && proposalVerdict(wb) === "older_supersedes_newer" && wb.evidence === "pending review", "…the newer thought falling: the older current");
+  const wrongSide = parseParts(ans([A1], "no", "yes")), noShow = partsJudgement(pp, wrongSide, checkParts(wrongSide, mdOlder, mdNewer));
+  assert(noShow.verdict === "related" && proposalVerdict(noShow) === null && noShow.parts?.length === 1 && noShow.reason === "the writer said the newer thought falls whole, and no part in it passed its quotes",
+    "a whole said of a thought no standing part is in proposes nothing, as a proposal whose quotes failed did, and the part that stands is still recorded");
+  const noneNamed = partsJudgement(pp, parseParts(ans([])), []), failed = parseParts(ans([{ ...A1, stale: "never written there" }])), noneStand = partsJudgement(pp, failed, checkParts(failed, mdOlder, mdNewer));
+  const garbled = partsJudgement(pp, parseParts("nope"), []);
+  assert(noneNamed.verdict === "related" && noneNamed.parts === undefined && noneNamed.reason === "the writer named no settled part" && noneStand.parts === undefined && noneStand.reason === "the writer's quotes did not check out"
+      && garbled.verdict === "related" && !garbled.malformed && garbled.reason === "the writer's answer was not JSON of the expected shape",
+    "no part named, no quote that checks, or an answer not read: nothing to record, said, and H2O's verdict stands");
+  const threadedParts = partsJudgement({ unrelated: 0.05, related: 0.1, evolves: 0.3, duplicate: 0, outdates: 0.55 }, parseParts(ans([])), []);
+  assert(threadedParts.verdict === "related" && threadedParts.confidence === 0.4 && threadedParts.reason === "the writer named no settled part; evolves comes from the work threads (SMD-3306), so the pair is related",
+    "…with the threads' words after the writer's where the fold moved the verdict, as before");
+  // The note a recipe keeps (partsNote), and one part's own (partJudged).
+  const wholeNote = partsNote("w", fallsA, checkParts(fallsA, mdOlder, mdNewer)), plainNote = partsNote("w", named, chk);
+  assert(wholeNote.model === "w" && wholeNote.falls === "older" && wholeNote.current === "newer" && wholeNote.evidence === "Cutover done on Thursday" && wholeNote.stale === A1.stale && wholeNote.evidence_found === true && wholeNote.stale_found === true
+      && wholeNote.reason === A1.reason && wholeNote.parts?.length === 2 && wholeNote.dropped === 0,
+    "the note of a whole: the thought that falls, and a proposal's six keys from the part that shows it, so an earlier version's reader reads it the same way");
+  assert(plainNote.falls === "none" && plainNote.current === undefined && plainNote.evidence === undefined && plainNote.parts?.length === 5 && plainNote.parts[0].stale === A1.stale && plainNote.parts[0].own.statement === true
+      && plainNote.parts[2].repeated === true && plainNote.parts[1].repeated === undefined && plainNote.parts[3].shown_found === false && plainNote.parts[3].own.shown_by === false
+      && partsNote("w", parseParts("nope"), []).falls === "unparsed" && partsNote("w", shapes, []).dropped === 8,
+    "the note without one: every part as the writer typed it, both checks, whether each span was read back, a repeat marked, and the items dropped counted; an answer not read is unparsed");
+  const ofPart = partJudged({ verdict: "related", decide: { top: "outdates", writer: plainNote } }, 1).decide.writer as Record<string, unknown>;
+  assert(ofPart.named === 5 && ofPart.index === 1 && (ofPart.part as { stale: string }).stale === A2.stale && !("parts" in ofPart) && ofPart.model === "w" && ofPart.falls === "none" && ofPart.dropped === 0
+      && !("current" in (partJudged({ decide: { writer: wholeNote } }, 0).decide.writer as Record<string, unknown>)) && JSON.stringify(partJudged({ verdict: "related" } as { verdict: string; decide?: Record<string, unknown> }, 0)) === '{"verdict":"related"}',
+    "a part's own recipe: the note with the writer's answer cut to that part beside how many it named, a whole's keys left to the proposal's; a judgement with no parts is as it was");
+  // What a write that threw was (partWriteFault): the store's own words are kept, Postgres's cast of an argument is
+  // cut to its code, since its message can quote a statement, and anything else is the worker's to classify.
+  const pgError = (code: string, message: string) => Object.assign(new Error(message), { errno: code, code });
+  const refusal = partWriteFault(pgError("22023", "record_settled_part: p_reason must hold 1 to 1000 characters and not white space alone, got 0"));
+  const castError = partWriteFault(pgError("22P02", 'invalid input syntax for type uuid: "the cutover is planned for Friday"'));
+  assert(refusal !== null && "refused" in refusal && refusal.refused === "record_settled_part: p_reason must hold 1 to 1000 characters and not white space alone, got 0"
+      && castError !== null && "sqlstate" in castError && castError.sqlstate === "22P02" && !JSON.stringify(castError).includes("cutover"),
+    "the store's own refusal keeps its words, which echo no argument; a cast's error keeps its SQLSTATE alone, not the value it quotes");
+  const isolation = partWriteFault(pgError("0A000", "record_settled_part must run under READ COMMITTED; this transaction is SERIALIZABLE")), longOwn = partWriteFault(pgError("22023", "record_settled_part: " + "x".repeat(500)));
+  assert(isolation !== null && "refused" in isolation && longOwn !== null && "refused" in longOwn && longOwn.refused.length === 200
+      && (partWriteFault(Object.assign(new Error("value too long for type character varying(3)"), { code: "22001" })) as { sqlstate?: string } | null)?.sqlstate === "22001",
+    "…a refusal outside class 22 is the store's by its name, a long one is cut, and a code read from `code` where there is no `errno`");
+  assert(partWriteFault(pgError("40P01", "deadlock detected")) === null && partWriteFault(pgError("42883", "function record_settled_part(uuid, uuid) does not exist")) === null
+      && partWriteFault(pgError("42501", "permission denied for table settled_parts")) === null && partWriteFault(pgError("23503", 'insert or update on table "settled_parts" violates foreign key constraint')) === null
+      && partWriteFault(new Error("Connection closed")) === null && partWriteFault("a string") === null && partWriteFault(null) === null && partWriteFault(pgError("57014", "canceling statement due to statement timeout")) === null,
+    "…and a deadlock, a missing function or grant, a foreign key, a lost connection or a timeout is none of them: rethrown as it came");
+
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
   const FLOOR = DEFAULT_MIN_CONFIDENCE;
@@ -2165,7 +2286,9 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
       return Response.json({ contract: "ob1-jev/1", model: MODEL, ms: 1, results: [{ id: d.id, kind: "choice", probabilities, selected: ids.reduce((a, k) => (probabilities[k] > probabilities[a] ? k : a)), abstained: false, p_insufficient: 0, logits: ids.map(() => 0), temperature: 1, tokens: 10, truncated: false }] });
     },
   });
-  let writerAnswer = JSON.stringify({ current: "B", evidence: "shipped on Monday", stale: "ship on Friday", reason: "it shipped later" });
+  // Version 6: the writer's parts answer. This one says the older thought falls whole, and its one part shows it.
+  const WHOLE = ans([part], "yes");
+  let writerAnswer = WHOLE;
   // Decide version 4 (SMD-3203): the link step is a call of its own to the same model, told apart here by its
   // answer's keys; a direct link unless a check says otherwise.
   let linkAnswer = JSON.stringify({ link: "D", via: "", reason: "the two share their own subject" });
@@ -2195,26 +2318,39 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     const jev = resolveJevConfig({ OB1_JEV_BASE_URL: `http://127.0.0.1:${tier.port}`, OB1_JEV_LOCAL: "1", OB1_JEV_MODEL: "h2o-test" })!;
     const a = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(a.verdict === "outdates" && a.supersedes === "newer" && a.decide.top === "outdates" && a.decide.writer?.stale_found === true && a.decide.decider.name === "h2o-test" && writerCalls === 1,
-      "the tier's outdates asks the writer, and its standing proposal is the judgement");
-    assert(a.decide.writer?.evidence === "shipped on Monday" && a.decide.writer.stale === "ship on Friday" && a.decide.floor === undefined,
-      "the writer's note keeps both quotes, so a recorded proposal can be checked again under another quote rule (version 3)");
-    assert(writerBody.model === "writer-test" && (writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()) && !(writerBody.messages?.[0]?.content ?? "").includes(RECORD_RULE.trim()),
-      "the writer is the judge's model, asked the pass's question, without the record rule");
+      "the tier's outdates asks the writer, and a thought it says falls whole, shown by a part in it, is the judgement");
+    assert(a.decide.writer?.falls === "older" && a.decide.writer.current === "newer" && a.decide.writer.evidence === "shipped on Monday" && a.decide.writer.stale === "the plan is to ship on Friday" && a.decide.floor === undefined
+        && a.decide.writer.parts?.length === 1 && a.decide.writer.parts[0].stale_found && a.decide.writer.parts[0].shown_found && a.decide.version === DECIDE_VERSION,
+      "the writer's note keeps the thought that falls, every part with both quotes and their checks, and a proposal's keys from the part that shows the whole");
+    assert(a.parts?.length === 1 && a.parts[0].holder === "older" && a.parts[0].statement === "the plan is to ship on Friday" && a.parts[0].shown_by === "shipped on Monday" && a.parts[0].word === "implements" && a.parts[0].index === 0,
+      "…and the part is the judgement's to record, beside the proposal");
+    assert(writerBody.model === "writer-test" && writerBody.response_format?.type === "json_object" && writerBody.messages?.[0]?.content === partsMessages({ older, newer })[0].content && !(writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()),
+      "the writer is the judge's model, asked for the settled parts under the frozen rules, for strict JSON");
     tierP = { ...p, outdates: 0.05, related: 0.75 };
     const b = await decidePair(older, newer, cfg, jev, FLOOR);
-    assert(b.verdict === "related" && b.decide.writer === undefined && b.decide.floor === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands, and its note names no floor, which only a gated outdates does");
+    assert(b.verdict === "related" && b.decide.writer === undefined && b.decide.floor === undefined && b.parts === undefined && writerCalls === 1, "the tier's related: no writer call, the relation stands, no part, and its note names no floor, which only a gated outdates does");
     tierP = p;
-    writerAnswer = JSON.stringify({ current: "B", evidence: "we shipped … instead of Friday", stale: "the plan is ... on Friday", reason: "it shipped later" });
+    // Parts and no whole: the pair takes H2O's best verdict that proposes nothing, and its part is recorded.
+    writerAnswer = ans([part]);
+    const partOnly = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(partOnly.verdict === "related" && proposalVerdict(partOnly) === null && partOnly.parts?.length === 1 && partOnly.decide.writer?.falls === "none" && partOnly.decide.writer.current === undefined
+        && /the writer named 1 settled part, and neither thought falls whole/.test(partOnly.reason) && relationVerdict(partOnly) === "related",
+      "a part and no whole: no proposal, the pair's relation as H2O gives it, and the part to record");
+    writerAnswer = ans([{ ...part, stale: "the plan is ... on Friday", shown_by: "we shipped … instead of Friday" }]);
     const s = await decidePair(older, newer, cfg, jev, FLOOR);
-    assert(s.verdict === "related" && /quotes did not check out/.test(s.reason) && s.decide.writer?.evidence_found === false && s.decide.writer.stale_found === false,
-      "a writer's quotes shortened with \"…\" do not stand in the pass, which reads quotes whole (version 3, as version 1 did), and its note says neither was found");
-    writerAnswer = JSON.stringify({ current: "none", evidence: "", stale: "", reason: "both stay current" });
+    assert(s.verdict === "related" && /quotes did not check out/.test(s.reason) && s.decide.writer?.parts?.[0].stale_found === false && s.decide.writer.parts[0].shown_found === false && s.parts === undefined,
+      "a part's quotes shortened with \"…\" do not stand in the pass, which reads quotes whole (version 3, as version 1 did): its note says neither was found, and nothing is recorded");
+    writerAnswer = ans([{ ...part, stale: "the plan is ... on Friday" }], "yes");
+    const unshown = await decidePair(older, newer, cfg, jev, FLOOR);
+    assert(unshown.verdict === "related" && proposalVerdict(unshown) === null && unshown.decide.writer?.falls === "older" && unshown.decide.writer.current === undefined && /falls whole, and no part in it passed its quotes/.test(unshown.reason),
+      "a thought said to fall whole with no part that passed its quotes proposes nothing");
+    writerAnswer = ans([]);
     const c = await decidePair(older, newer, cfg, jev, FLOOR);
-    assert(c.verdict === "related" && c.decide.writer?.current === "none" && c.decide.writer.stale_found === false && c.decide.writer.evidence_found === false && proposalVerdict(c) === null,
-      "a writer's none: H2O's best verdict that proposes nothing, its note checking no quote");
+    assert(c.verdict === "related" && c.decide.writer?.falls === "none" && c.decide.writer.parts?.length === 0 && c.parts === undefined && proposalVerdict(c) === null && /the writer named no settled part/.test(c.reason),
+      "a writer naming no part: H2O's best verdict that proposes nothing, its note holding an empty list");
     writerAnswer = "not json";
     const d = await decidePair(older, newer, cfg, jev, FLOOR);
-    assert(d.verdict === "related" && d.decide.writer?.current === "unparsed" && !d.malformed, "a writer's answer that does not parse is a decline, not a malformed judgement");
+    assert(d.verdict === "related" && d.decide.writer?.falls === "unparsed" && d.parts === undefined && !d.malformed, "a writer's answer that does not parse names no part, and is not a malformed judgement");
     writerStatus = 503;
     const e = await decidePair(older, newer, cfg, jev, FLOOR).then(() => null, (x: Error & { status?: number }) => x);
     assert(e?.status === 503 && /Writer request/.test(e.message), "a writer's 503 throws with its status, for the pass to classify");
@@ -2243,7 +2379,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     // confidence; under it a standing proposal would record nothing and close the pair's relation, so the pair takes
     // H2O's best verdict that proposes nothing, as a quote that fails does, and the note names the floor.
     const answered = writerAnswer;
-    writerAnswer = JSON.stringify({ current: "B", evidence: "shipped on Monday", stale: "ship on Friday", reason: "it shipped later" });
+    writerAnswer = WHOLE;
     const w0 = writerCalls;
     tierP = { unrelated: 0.05, related: 0.3, evolves: 0.2, duplicate: 0.05, outdates: 0.4 };
     const u = await decidePair(older, newer, cfg, jev, FLOOR);
@@ -2290,8 +2426,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     for (const l of ["D", "N"]) {
       linkAnswer = JSON.stringify({ link: l, via: "", reason: "r" });
       const free = await decidePair(older, newer, cfg, jev, FLOOR);
-      assert(free.verdict === "outdates" && free.supersedes === "newer" && free.decide.link?.link === l && !free.decide.link.capped && free.decide.writer?.current === "newer",
-        `a ${l} link: the proposal written, and standing, as version 3 did`);
+      assert(free.verdict === "outdates" && free.supersedes === "newer" && free.decide.link?.link === l && !free.decide.link.capped && free.decide.writer?.current === "newer" && free.parts?.length === 1,
+        `a ${l} link: the writer asked for the parts, and the whole it says, shown by one, standing`);
     }
     assert(linkCalls === n0.link + 2 && writerCalls === n0.writer + 2, "…the link step, then the writer, on each");
     tierP = { unrelated: 0.3, related: 0.05, evolves: 0.05, duplicate: 0, outdates: 0.6 };
@@ -2305,7 +2441,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     tierP = { unrelated: 0.05, related: 0.2, evolves: 0.6, duplicate: 0.05, outdates: 0.1 };
     const evolvesTop = await decidePair(older, newer, cfg, jev, FLOOR);
     assert(evolvesTop.verdict === "related" && evolvesTop.confidence === 0.8 && relationConfidence(evolvesTop).mass === 0.85 && evolvesTop.decide.top === "evolves" && evolvesTop.decide.link === undefined
-        && evolvesTop.decide.threaded === true && evolvesTop.decide.floor === undefined && evolvesTop.decide.version === 5 && linkCalls === n0.link && writerCalls === n0.writer,
+        && evolvesTop.decide.threaded === true && evolvesTop.decide.floor === undefined && evolvesTop.decide.version === 6 && linkCalls === n0.link && writerCalls === n0.writer,
       "H2O's evolves at the floor: related at P(related) + P(evolves), its mass still the relation words', the note marked, no link step asked");
     tierP = { unrelated: 0.3, related: 0.05, evolves: 0.35, duplicate: 0, outdates: 0.3 };
     const lowEvolves = await decidePair(older, newer, cfg, jev, FLOOR);
@@ -2324,18 +2460,18 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict, a proposal writt
     assert(gatedEvolves.verdict === "related" && gatedEvolves.confidence === 0.54 && gatedEvolves.decide.top === "outdates" && gatedEvolves.decide.threaded === true && gatedEvolves.decide.floor === FLOOR && gatedEvolves.decide.link === undefined && gatedEvolves.decide.writer === undefined
         && linkCalls === n0.link && writerCalls === n0.writer,
       "H2O's outdates under the floor falling back to an evolves: the note names the floor and is marked though its top is outdates, and the pair is related, no link step asked");
-    // H2O's outdates at the floor, a D link, and a writer who finds neither current: H2O's best verdict that proposes
+    // H2O's outdates at the floor, a D link, and a writer who names no part: H2O's best verdict that proposes
     // nothing, an evolves, stored as related.
     tierP = { unrelated: 0.05, related: 0.1, evolves: 0.3, duplicate: 0, outdates: 0.55 };
     linkAnswer = JSON.stringify({ link: "D", via: "", reason: "r" });
     const keptAnswer = writerAnswer;
-    writerAnswer = JSON.stringify({ current: "none", evidence: "", stale: "", reason: "both still hold" });
+    writerAnswer = ans([]);
     const declinedEvolves = await decidePair(older, newer, cfg, jev, FLOOR);
     writerAnswer = keptAnswer;
-    assert(declinedEvolves.verdict === "related" && declinedEvolves.confidence === 0.4 && declinedEvolves.decide.threaded === true && proposalVerdict(declinedEvolves) === null && declinedEvolves.decide.writer?.current === "none"
-        && /the writer found neither current: both still hold; evolves comes from the work threads/.test(declinedEvolves.reason) && linkCalls === n0.link + 1 && writerCalls === n0.writer + 1,
-      "H2O's outdates at the floor the writer declines, its next best an evolves: related, the writer's reason kept");
-    // The link step's provider error is the pass's to classify, as the writer's is; no proposal follows it.
+    assert(declinedEvolves.verdict === "related" && declinedEvolves.confidence === 0.4 && declinedEvolves.decide.threaded === true && proposalVerdict(declinedEvolves) === null && declinedEvolves.decide.writer?.falls === "none"
+        && /the writer named no settled part; evolves comes from the work threads/.test(declinedEvolves.reason) && linkCalls === n0.link + 1 && writerCalls === n0.writer + 1,
+      "H2O's outdates at the floor with no part named, its next best an evolves: related, the writer's words kept and the note marked");
+    // The link step's provider error is the pass's to classify, as the writer's is; no writer call follows it.
     tierP = p;
     linkStatus = 503;
     n0 = asked();

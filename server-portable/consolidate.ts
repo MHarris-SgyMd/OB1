@@ -155,7 +155,21 @@ export type Judgement = {
    * (relationConfidence), the recipe keeping H2O's five as they came.
    */
   foldedEvolves?: boolean;
+  /**
+   * Decide version 6 (consolidate-decide.ts, SMD-4446): the settled parts the writer named whose two quotes passed,
+   * for the pass to record (record_settled_part, migration 151), whatever the verdict. Absent from the judge's
+   * answers, and from a pair whose writer was not asked.
+   */
+  parts?: PartToRecord[];
 };
+
+/**
+ * One settled part as the pass records it (SMD-4446): which thought of the pair holds the outdated statement, the
+ * statement and the other thought's words that show it, each in its thought's own characters where they could be
+ * read back (ownWords) and else as the writer typed them, the word and the reason. `index` is its place in the
+ * writer's answer, which the decide note keeps whole.
+ */
+export type PartToRecord = { holder: "older" | "newer"; statement: string; shown_by: string; word: string; reason: string; index: number };
 
 /**
  * The model's probability over each answer field's words, read at the token
@@ -453,6 +467,68 @@ export function evidenceIn(evidence: string, content: string, other?: string): b
   const read = (t: string) => plainText(withoutMarkdown(t.slice(0, CONTENT_LIMIT_CHARS)));
   if (q.length < 3 || !holdsWords(read(content), q)) return false;
   return other === undefined || !holdsWords(read(other), q);
+}
+
+/** How far past a quote's own length ownWords looks for its last word: the markup a text may hold inside the span, a link's target among it. */
+const OWN_MARKUP = 600;
+/** How many candidate runs ownWords folds for one quote before it gives up: a text of one short word repeated offers thousands. */
+const OWN_FOLDS = 4000;
+/** The emphasis marks ownWords takes in at either edge of a span, so `**done**` is kept whole. */
+const EMPHASIS = /[*_~`]/;
+
+/**
+ * The thought's own characters for a quote evidenceIn finds in it (SMD-4446): the shortest run of `content`, between
+ * word boundaries, that reads as the quote does once both are folded as evidenceIn folds them. A model quoting a
+ * thought retypes it: straight quotes for curly ones, a hyphen for a dash, no markdown, its own capitals and line
+ * breaks. A settled part's statement is kept as its thought wrote it, so the same statement named again in another
+ * typing is the same row: migration 151 reads a statement's characters, folding case and white space and no more.
+ *
+ * The run goes from the quote's first word to its last, each found in the text at a word boundary, and is checked by
+ * folding it alone: it must read as the quote does. Punctuation the quote holds outside those two words (an opening
+ * bracket, a closing per cent sign) is taken in where the wider run still reads so, and emphasis marks at either edge
+ * with it. Null when no run reads so, as when markup splits a word of the quote in the text: the caller then keeps
+ * the quote as it was typed. Bounded twice: a candidate run is at most the quote's length and OWN_MARKUP characters,
+ * and at most OWN_FOLDS of them are folded, the shortest found by then being the answer.
+ */
+export function ownWords(quote: string, content: string): string | null {
+  const fold = (t: string) => forQuote(withoutMarkdown(t));
+  const q = fold(quote);
+  const words = q.match(/[\p{L}\p{N}]+/gu);
+  if (q.length < 3 || !words) return null;
+  const text = content.slice(0, CONTENT_LIMIT_CHARS);
+  const first = words[0], last = words[words.length - 1];
+  const lead = q.indexOf(first), tail = q.length - q.lastIndexOf(last) - last.length;
+  const core = q.slice(lead, q.length - tail);
+  const letters = words.reduce((n, w) => n + w.length, 0);
+  const word = /[\p{L}\p{N}]/u;
+  const free = (i: number) => !word.test(text[i] ?? "");
+  const starts = [...text.matchAll(new RegExp(first, "giu"))].map((m) => m.index as number).filter((i) => free(i - 1));
+  const ends = [...text.matchAll(new RegExp(last, "giu"))].map((m) => (m.index as number) + m[0].length).filter((i) => free(i));
+  let found: string | null = null;
+  let folds = 0;
+  for (const a0 of starts) {
+    for (const b0 of ends) {
+      if (b0 - a0 < letters || b0 - a0 > core.length + OWN_MARKUP) continue;
+      if (++folds > OWN_FOLDS) return found;
+      if (fold(text.slice(a0, b0)) !== core) continue;
+      // The quote's own punctuation outside its first and last words, where the wider run reads as the whole quote.
+      let a = a0, b = b0;
+      if (lead > 0 || tail > 0) {
+        wider: for (let x = a0; x >= Math.max(0, a0 - lead - 2); x--) {
+          for (let y = b0; y <= Math.min(text.length, b0 + tail + 2); y++) {
+            if (free(x - 1) && free(y) && fold(text.slice(x, y)) === q) { a = x; b = y; break wider; }
+          }
+        }
+      }
+      // Emphasis marks at either edge, while the run reads the same.
+      const reads = fold(text.slice(a, b));
+      while (a > 0 && a0 - a < 3 + lead && EMPHASIS.test(text[a - 1]) && fold(text.slice(a - 1, b)) === reads) a--;
+      while (b < text.length && b - b0 < 3 + tail && EMPHASIS.test(text[b]) && fold(text.slice(a, b + 1)) === reads) b++;
+      const run = text.slice(a, b);
+      if (found === null || run.length < found.length) found = run;
+    }
+  }
+  return found;
 }
 
 /**

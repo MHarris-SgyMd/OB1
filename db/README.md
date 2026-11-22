@@ -4874,25 +4874,85 @@ tier gives each pair's verdict, not the judge:
 - **The tier's question** is prompt 4's five verdicts as one choice, over
   prompt 4's own rendering of the pair.
 - **The writer.** Only when the tier's top verdict is outdates, at the pass's
-  `--min-confidence` floor, is the judge's model asked, and only to write the
-  proposal: which thought is current, the words in it that show the other is
-  not, and the other's words that no longer hold. **The part rule** holds it:
-  a part of some work finishing does not outdate the whole. Under the floor a
-  proposal could not be recorded, so the writer is not asked (SMD-3151): the
-  pair takes the relation the tier's distribution gives at the floor, as a
-  quote that fails does, else its edge is closed. The pass counts it under
-  confidence and as a proposing verdict (its verdicts line counts the
-  relation word it takes, as for a failed quote), settles a stale proposal
+  `--min-confidence` floor, is the judge's model asked. Since version 6 it is
+  asked for the **settled parts** of the pair (below), where versions 1 to 5
+  asked it to write a whole-thought proposal. Under the floor the writer is
+  not asked (SMD-3151): the pair takes the relation the tier's distribution
+  gives at the floor, as a quote that fails does, else its edge is closed.
+  The pass counts it under confidence and as a proposing verdict (its
+  verdicts line counts the relation word it takes), settles a stale proposal
   on it as an outdates under the floor, and a relation it writes carries the
   floor in its note. The run's summary counts the writer's calls by what came
   back.
-- **Both quotes must check out** in the side each names and not in the other,
-  or the pair stays at the tier's best verdict that proposes nothing. They are
-  read without their markdown (SMD-3151), in quote and text alike: asterisks,
-  backticks, brackets, escapes' backslashes, underscores at a word's edge and
-  a `#` or `>` run opening a word go (not `#433`, whose hashes need a space,
-  nor `>=`), an inline link keeps its text and loses its target, and struck text goes with its `~~`, read as withdrawn.
-- **Version 5 is the pass's** (`@p4d5`, SMD-3306 PR 7b): version 4, with no
+- **Both quotes must check out,** each in the thought it is from and not in
+  the other. They are read without their markdown (SMD-3151), in quote and
+  text alike: asterisks, backticks, brackets, escapes' backslashes,
+  underscores at a word's edge and a `#` or `>` run opening a word go (not
+  `#433`, whose hashes need a space, nor `>=`), an inline link keeps its text
+  and loses its target, and struck text goes with its `~~`, read as withdrawn.
+- **Version 6 is the pass's** (`@p4d6`, SMD-4446 PR 2a): version 5's tier
+  call, floor and link step, and a writer that names the settled parts. The
+  maintainer marked every proposal version 5 had made on the canary: of 41, 2
+  were right as a whole, 32 right about a part and 7 neither
+  (`docs/subject-anchored-claims.md`, rows 8 to 11).
+  - **The question** is SMD-3340's frozen rules, held in the pass by their
+    sha256 (`PARTS_RULES_SHA256`). It asks for a list of parts, each a
+    statement in one thought that the other shows is no longer true or no
+    longer open, with the words that show it, one of eight words and a
+    reason; and for whether either thought falls whole, which the rules say
+    is almost never. Its opening lines are the earlier writer's, with the
+    answer to an injection attempt in the new shape: no part, and neither
+    thought falling.
+  - **The answer** is read leniently about its wrapping and strictly about
+    its keys. An answer with no list, with no yes or no for either thought,
+    or with both falling is unparsed as a whole. An item that is no part (no
+    side, a quote or the reason missing, a word outside the eight) is dropped
+    and counted, and so is each item past twelve.
+  - **A part is recorded when both its quotes check out** (above; SMD-4442
+    decides a rule for parts). It is one call of `record_settled_part` (below)
+    of its own, at the fingerprints of the texts the writer was sent: a
+    proposal for review, both thoughts standing. A statement named twice in
+    one answer is written once.
+  - **The row holds each thought's own characters,** not the writer's typing
+    of them. The writer types straight quotes for curly ones, a hyphen for a
+    dash, and no markdown; the store reads a statement's exact characters,
+    folding case and white space and no more. So the pass finds the run of
+    the thought that the quote matched and records that. A statement named
+    again in another typing is then the row it already is. Where no run can
+    be read back (markup splitting a word of the quote, or a text of one
+    short word repeated thousands of times), the quote is kept as typed, and
+    the summary counts it.
+  - **The write's four answers:** recorded (in place of an earlier undecided
+    judgement of the statement, where there was one); stands, the statement
+    already held, nothing written; a thought gone, the pair's parts skipped;
+    or a text moved while the writer was out. On the last the thought goes
+    back to the pool, and the pair is judged again at the texts as they
+    stand. A thought put back twice running is not put back a third time:
+    its claim fails, naming the pair, so a fault that draws the answer every
+    time ends there. A write the store refuses fails the claim too, with the
+    store's own words, which echo no argument.
+  - **A whole-thought proposal** is written only when the writer says a
+    thought falls whole and a part in that thought passed its quotes. That
+    part is the proposal's evidence, as the two quotes were through version
+    5, and the proposal is recorded as before, at the tier's P(outdates). The
+    parts are recorded beside it: a reviewer who rejects the whole can still
+    accept them. A whole said with no such part proposes nothing.
+  - **Otherwise** the pair takes the tier's best verdict that proposes
+    nothing, as a declined proposal did, and its relation under the same
+    floor.
+  - **Not asked:** a pair the link step caps. Whether a mediated pair may
+    hold a part is not decided (`docs/subject-anchored-claims.md`, Not
+    decided here).
+  - **Not yet:** a pending part whose text moves afterwards is not judged
+    again until the ticket's next cut (PR 2b). `rebuild_derived` sets it
+    stale when it runs; nothing runs it after an edit.
+  - **Reported:** the summary has a line for the writer's calls (with a
+    settled part, with no part named, with quotes that did not check out,
+    unparsed, and the wholes it said) and a line for the parts by what became
+    of each. A dump line carries every part the writer named, kept or not,
+    with both quotes as typed, their checks, and the row its write made or
+    met.
+- **Version 5** (`@p4d5`, SMD-3306 PR 7b): version 4, with no
   evolves of its own. The tier's evolves is folded into related before its best
   verdict is chosen (related + evolves), so a related stands at the share of the
   word it now stands for, and the folded related outweighs a duplicate or an
@@ -4938,7 +4998,11 @@ tier gives each pair's verdict, not the judge:
     pair, and a stale proposal settled on a capped pair says so.
 - **Version 3** (`@p4d3`): version 1's writer, SMD-3114's,
   two-sided with the part rule, its quotes read without markdown and asked
-  only at the floor (SMD-3151). The writer quotes the words it reads, and on
+  only at the floor (SMD-3151). That writer, the pass's through version 5,
+  wrote a whole-thought proposal: which thought is current, the words in it
+  that show the other is not, and the other's words that no longer hold. The
+  part rule held it: a part of some work finishing does not outdate the
+  whole. The writer quotes the words it reads, and on
   SMD-3116's writer test the check refused 11 of the 18 proposals it wrote on
   settling pairs, 10 of the 12 missed quotes there over markup. Under version
   1 a standing proposal under the floor recorded nothing and closed the pair's
@@ -4968,7 +5032,10 @@ tier gives each pair's verdict, not the judge:
   3.8 s a pair.
 - **Refused at start:** the run refuses with neither `OB1_CONSOLIDATE_DECIDER_URL`
   nor `OB1_JEV_BASE_URL` set, or, on the shared tier, with `OB1_JEV_MODEL` naming
-  another model (SMD-3326).
+  another model (SMD-3326). Since version 6 a run that would judge also
+  refuses on a brain without migration 151's store, naming it: there each
+  part would be judged and thrown away, its thought's claim ending succeeded.
+  A `--status` or a `--dry-run` goes on.
 - **Probes:** a follower probes the tier's `/info` after the writer's endpoint,
   so a tier serving another model is refused at start and an outage of either
   is waited out.
@@ -4979,7 +5046,13 @@ tier gives each pair's verdict, not the judge:
   rule, and the floor when the writer was not asked; since version 4 the link
   step's answer, when it was asked (`judged.decide.link`); since version 5
   whether folding the tier's evolves moved the verdict
-  (`judged.decide.threaded`).
+  (`judged.decide.threaded`). Since version 6 `judged.decide.writer` holds
+  the thought the writer said falls whole (`falls`), every part it named with
+  both quotes as typed and their checks (`parts`), and the items that were no
+  part (`dropped`); when a whole stands it also holds the earlier versions'
+  keys (`current`, `evidence`, `stale`), from the part that shows it. A
+  part's own lineage row (kind `part`) carries the same recipe with the
+  writer's answer cut to that part (`part`, beside `named` and `index`).
 
 **Staleness**, the same pass's second output: `stale_entities(window)` names
 the entities nothing has mentioned within the window, quietest first, each
@@ -4989,8 +5062,9 @@ with its newest capture.
 **Settled parts** (migration 151, SMD-4446): the store for a statement in one
 thought that the other thought of a pair shows is no longer true or no longer
 open, while both thoughts stand (`docs/subject-anchored-claims.md`, rows 8 to
-10). Nothing writes a part yet: the pass, the review surfaces and the pending
-proposals are the ticket's later cuts.
+10). Decide version 6 writes them (Decide mode, above). Nothing shows or
+decides a part yet: the review surfaces and the pending proposals are the
+ticket's later cuts.
 
 - **`settled_parts`**, one row a part: the pair, which thought holds the
   statement, the quote from each, the word and its group (`no_longer_holds`
@@ -5007,8 +5081,8 @@ proposals are the ticket's later cuts.
   character a reader does not see (a no-break space, a zero-width space, an
   accent typed as two characters), or by the straight quotes and hyphens
   the pass's own quote check takes for curly ones and dashes. One span is
-  one part only if the pass records the holder's own characters for it (the
-  ticket's next cut). The identity's index is built on
+  one part only because the pass records the holder's own characters for it
+  (decide version 6, above). The identity's index is built on
   `content_fingerprint_of` and holds what that function read when each row
   was written: a later migration that changes what it folds leaves the
   index at the old fold and says nothing (a rejected statement was recorded
