@@ -5195,11 +5195,16 @@ The rule divergences:
   - **The link cap hides more than it says.** A linked text past the cap of eight is barred from the nearest texts too, so it is shown nowhere.
     - **In this run:** one item had more than eight links, ten in all, so 2 texts were shown nowhere.
 - **What review pass 3 fixed in the runner:**
-  - **The fallback rule can now finish.** When the maintainer's check makes their labels the gold, the freeze takes those labels on every item. Before, it refused any item outside the 20, so the verdict could only wait.
+  - **The fallback rule can now finish.** Before, the freeze refused any maintainer label outside the 20, so the verdict could only wait. As review pass 4 then settled it, those labels come in through the splits file.
   - **A failed query is caught.** A snapshot with no population is refused, and the usage line runs psql with `ON_ERROR_STOP`.
   - **Times are shown in UTC** whatever offset the database wrote.
   - **A freeze over a committed fixture,** which would erase its adjudications, needs `--replace`.
   - **A fixture without an adjudication key** takes one.
+- **What review pass 4 fixed in the runner.** Two of these undo a flaw in pass 3's fallback, and none moves this run:
+  - **The blind check stays blind.** The maintainer's pair holds the blind 20 alone. A label made later, with the agents' context in view, goes in the splits file. That file decides open splits while the agents are the gold, and carries every other item when the maintainer's labels are.
+  - **A decided split no longer stays open.** The maintainer's label is taken per axis: the blind one, else the splits file's. Before, a partial label could hide a decided split.
+  - **A confirmed cause changes only with `--replace`,** and `--adjudicate` refuses a fixture frozen at another registration.
+  - **A view's object is shown as JSON** on the sheet, never `[object Object]`.
 
 **The follow-ups:**
 - **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.

@@ -32,12 +32,14 @@
  *   bun eval-claim-validity.ts --freeze <draw.jsonl> <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [<splits>] --salt <uuid> --note "<who, when>" [--replace]
  *       Every reply file and the read's answers → fixtures/claim-validity.json (ids and numbers only). Refuses a file
  *       with a blank or unknown truth, an id outside the draw, or a drawn item missing, and refuses everything at a
- *       registration other than the pinned one. The maintainer's files hold the subset at least, and every item when
- *       the maintainer's check makes their labels the gold. Over a committed fixture, which holds the adjudications a
- *       freeze would erase, it runs only with --replace.
+ *       registration other than the pinned one. The maintainer's pair holds their blind subset alone, so the check
+ *       scores only blind labels. The splits file decides the agents' open splits, and, when the check makes the
+ *       maintainer's labels the gold, carries those labels for every item outside the subset. Over a committed
+ *       fixture, which holds the adjudications a freeze would erase, it runs only with --replace.
  *
- *   bun eval-claim-validity.ts --adjudicate <file>
- *       Each miss's cause, `<id> <axis> label|record|read fixed|read open|rule <row>` a line, into the fixture.
+ *   bun eval-claim-validity.ts --adjudicate <file> [--replace]
+ *       Each miss's cause, `<id> <axis> label|record|read fixed|read open|rule <row>` a line, into the fixture frozen
+ *       at the pinned registration. A cause already recorded on that axis changes only with --replace.
  *
  *   bun eval-claim-validity.ts
  *       The report from the fixture: per axis the agreement (raw and weighted), the misses with their causes, the
@@ -148,7 +150,9 @@ export const day = (at: string) => {
 const n = (x: number) => x.toLocaleString("en-US");
 /** A text as a sheet shows it: CRLF as LF, a line that reads as an item's head indented, so it is not one. */
 const body = (t: string) => t.replace(/\r\n/g, "\n").split("\n").map((l) => (ITEM_HEAD.test(l) ? ` ${l}` : l)).join("\n");
-const list = (x: unknown): string => (Array.isArray(x) ? (x.length ? x.map(String).join("; ") : "-") : x === null || x === undefined || x === "" ? "-" : String(x));
+/** A view's value as a rater reads it: a string as it is, anything else as JSON, never "[object Object]" (review pass 4). */
+export const shown = (x: unknown): string => (typeof x === "string" ? x : JSON.stringify(x));
+export const list = (x: unknown): string => (Array.isArray(x) ? (x.length ? x.map(shown).join("; ") : "-") : x === null || x === undefined || x === "" ? "-" : shown(x));
 /** A text's last edit as a sheet shows it, when it falls in another minute than its writing: a ticket's text is edited in place. */
 const edited = (at: string, updated: string | undefined) => (updated && day(updated) !== day(at) ? `, last edited ${day(updated)}` : "");
 const shownOf = (chars: number, cap: number) => (chars > cap ? `${n(chars)} characters, the first ${n(cap)} shown` : `${n(chars)} characters`);
@@ -348,12 +352,12 @@ export function goldFor(items: readonly FrozenItem[], subset: ReadonlySet<string
   const check = maintainerCheck(items.filter((i) => subset.has(i.id)).map((i) => ({ a: i.a1, b: i.a2, m: i.m })));
   let splits = 0, unlabelled = 0;
   const scored = items.map((i): Scored => {
+    // The maintainer's label per axis: the blind one where the subset holds it, else the splits file's (review pass 4).
+    const decider: Labels = { validity: i.m?.validity ?? i.s?.validity ?? null, review: i.m?.review ?? i.s?.review ?? null, freshness: i.m?.freshness ?? i.s?.freshness ?? null };
     if (!check.agentsAreGold) {
-      const g = i.m ?? i.s;
-      if (!g || AXES.some((x) => g[x] === null)) unlabelled++;
-      return { id: i.id, stratum: i.stratum, read: i.read, gold: g ?? { validity: null, review: null, freshness: null } };
+      if (AXES.some((x) => decider[x] === null)) unlabelled++;
+      return { id: i.id, stratum: i.stratum, read: i.read, gold: decider };
     }
-    const decider: Labels | null = i.m ?? i.s;
     const { gold, splits: open } = goldOf(i.a1, i.a2, decider);
     splits += open.length;
     return { id: i.id, stratum: i.stratum, read: i.read, gold };
@@ -563,13 +567,15 @@ function freeze(path: string, salt: string, files: string[], splitsPath: string 
   const { pop, reads, ids } = snapshot(path, { salt });
   const d = drawSample(pop, salt);
   const [a1, a2] = [rater(files[0], files[1], ids), rater(files[2], files[3], ids)];
-  // The maintainer's files hold the subset at least, and every drawn item when the check makes their labels the gold
-  // (review pass 3): any drawn id is taken, and a subset item missing is refused.
-  const m = rater(files[4], files[5], ids, false);
-  const unlabelledSubset = d.subset.filter((id) => !m.labels.has(id) || AXES.some((x) => m.labels.get(id)![x] === null));
-  if (unlabelledSubset.length) throw new Error(`the maintainer's files lack ${unlabelledSubset.length} of the subset's ${d.subset.length} items on some axis (${unlabelledSubset[0].slice(0, 8)} first)`);
+  // The maintainer's pair holds the blind subset alone, so the check scores only blind labels: a label made later, with
+  // the agents' context in view, goes in the splits file (review pass 4).
+  const m = rater(files[4], files[5], d.subset, true);
   const s = splitsPath ? parseSplits(readFileSync(outsideRepo(splitsPath, "the splits file"), "utf8"), ids) : { labels: new Map<string, Partial<Labels>>(), problems: [] };
-  s.problems.push(...strayDecisions(s.labels, openSplits(ids, a1.labels, a2.labels, m.labels)));
+  // While the agents are the gold, the splits file decides open splits alone. When the check makes the maintainer's
+  // labels the gold, it carries them for every item outside the subset.
+  const agentsAreGold = maintainerCheck(d.subset.map((id) => ({ a: a1.labels.get(id)!, b: a2.labels.get(id)!, m: m.labels.get(id)! }))).agentsAreGold;
+  if (agentsAreGold) s.problems.push(...strayDecisions(s.labels, openSplits(ids, a1.labels, a2.labels, m.labels)));
+  else s.problems.push(...[...s.labels.keys()].filter((id) => d.subset.includes(id)).map((id) => `${id.slice(0, 8)}: a subset item, which the blind labels decide`));
   if (s.problems.length) throw new Error(`${splitsPath}:\n  ${s.problems.join("\n  ")}`);
   if (d.short.length) console.log(`short strata, taken whole: ${d.short.join("; ")}`);
   const stratumOf = new Map(d.main.map((x) => [x.id, x.stratum]));
@@ -584,7 +590,7 @@ function freeze(path: string, salt: string, files: string[], splitsPath: string 
       return [id, {
         read: AXES.map((x) => (READ_STATES[x] as readonly string[]).indexOf(r[x])),
         a1: labelsTo(a1.labels.get(id)!)!, a2: labelsTo(a2.labels.get(id)!)!,
-        m: m.labels.has(id) ? labelsTo(m.labels.get(id)!) : null,
+        m: d.subset.includes(id) ? labelsTo(m.labels.get(id)!) : null,
         s: sp ? labelsTo({ validity: sp.validity ?? null, review: sp.review ?? null, freshness: sp.freshness ?? null }) : null,
       }];
     })),
@@ -615,11 +621,20 @@ export function parseAdjudications(text: string): { per: Map<string, Partial<Rec
   return { per, problems };
 }
 
+/** The committed fixture, refused when there is none or it was frozen at another registration than the pinned one (review pass 4). */
+function fixtureAtPin(): Fixture {
+  if (!existsSync(FIXTURE)) throw new Error(`no ${relative(REPO, FIXTURE)} yet: freeze the labels first`);
+  const f = JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture;
+  const at = f.registration.map((d) => d.toString(16)).join("");
+  if (at !== REGISTERED) throw new Error(`the fixture was frozen at registration ${at}, not the pinned ${REGISTERED}`);
+  return f;
+}
+
 /**
  * Adjudications merged into a fixture, axis by axis: an earlier file's cause on another axis of the same item stays.
  * Refuses, naming each, an id that is no item and an axis the read does not miss on that item.
  */
-export function applyAdjudications(f: Fixture, per: ReadonlyMap<string, Partial<Record<Axis, Adjudication>>>): { fixture: Fixture; problems: string[] } {
+export function applyAdjudications(f: Fixture, per: ReadonlyMap<string, Partial<Record<Axis, Adjudication>>>, replace = false): { fixture: Fixture; problems: string[] } {
   const problems: string[] = [];
   const { items } = fromFixture(f);
   const s = score(goldFor(items, new Set(f.subset)).scored, f.population);
@@ -629,6 +644,8 @@ export function applyAdjudications(f: Fixture, per: ReadonlyMap<string, Partial<
     if (!(id in f.items)) { problems.push(`${id.slice(0, 8)} is not an item`); continue; }
     for (const [x, a] of Object.entries(axes) as [Axis, Adjudication][]) {
       if (!s[x].misses.includes(id)) { problems.push(`${id.slice(0, 8)} ${x}: not a miss`); continue; }
+      const had = out.adjudication[id]?.[x];
+      if (had && !replace && had.join() !== adjTo(a).join()) { problems.push(`${id.slice(0, 8)} ${x}: adjudicated already, as ${adjFrom(had)?.cause ?? "?"} (give --replace to change a confirmed cause)`); continue; }
       out.adjudication[id] = { ...out.adjudication[id], [x]: adjTo(a) };
     }
   }
@@ -848,11 +865,17 @@ function selfCheck(): void {
   assert(reportLines(disagree, registrationHash(), registrationHash()).some((l) => /the maintainer's labels are the gold/.test(l)), "the maintainer under the bar on the subset makes the maintainer's labels the gold");
   assert(reportLines(disagree, registrationHash(), registrationHash()).at(-1)!.includes("wait for the maintainer's labels"), "and then every item without them waits");
   const fullM = structuredClone(disagree);
-  for (const [k, it] of Object.entries(fullM.items)) if (it.m === null) fullM.items[k].m = [...it.a1];
+  for (const [k, it] of Object.entries(fullM.items)) if (it.m === null) fullM.items[k].s = [...it.a1];
   const fullLines = reportLines(fullM, registrationHash(), registrationHash());
   assert(fullLines.some((l) => /the maintainer's labels are the gold/.test(l)) && !fullLines.at(-1)!.includes("wait for the maintainer's labels"), "with the maintainer's labels on every item, nothing waits for them (review pass 3)");
   const fullAdj = applyAdjudications(fullM, new Map([[id(1), { validity: { cause: "record" } as Adjudication }], [id(3), { validity: { cause: "record" } as Adjudication }]]));
   assert(fullAdj.problems.length === 0 && reportLines(fullAdj.fixture, registrationHash(), registrationHash()).at(-1) === "verdict: PASSES", "a failed maintainer check can still reach a verdict once the maintainer labels every item (review pass 3)");
+  const perAxis = structuredClone(fx);
+  perAxis.items[id(5)].a2[1] = 1; perAxis.items[id(5)].s = [-1, 0, -1];
+  perAxis.items[id(1)].m = [perAxis.items[id(1)].m![0], -1, perAxis.items[id(1)].m![2]]; perAxis.items[id(1)].a2[1] = 1; perAxis.items[id(1)].s = [-1, 0, -1];
+  const perAxisGold = goldFor(fromFixture(perAxis).items, new Set(perAxis.subset));
+  assert(perAxisGold.splits === 0 && perAxisGold.scored.find((i) => i.id === id(5))!.gold.review === "open" && perAxisGold.scored.find((i) => i.id === id(1))!.gold.review === "open",
+    "the maintainer's label is taken per axis: a split the splits file decides is decided, though the item has a blind label on another axis (review pass 4)");
 
   // Adjudication files.
   const adj = parseAdjudications(`${id(2)} validity rule 6\n${id(1)} review read fixed  # the fix\n${id(3)} freshness record\n${id(3)} freshness label\nnonsense`);
@@ -870,6 +893,11 @@ function selfCheck(): void {
   let onBare: ReturnType<typeof applyAdjudications> | null = null;
   try { onBare = applyAdjudications(bare, new Map([[id(2), { validity: { cause: "record" } as Adjudication }]])); } catch { onBare = null; }
   assert(onBare !== null && onBare.problems.length === 0 && onBare.fixture.adjudication[id(2)]?.validity?.[0] === CAUSES.indexOf("record"), "a fixture with no adjudication key takes one, without throwing (review pass 3)");
+  const again = applyAdjudications(fx, new Map([[id(2), { validity: { cause: "record" } as Adjudication }]]));
+  assert(again.problems.some((p) => /adjudicated already, as rule/.test(p)) && again.fixture.adjudication[id(2)].validity!.join() === adjTo({ cause: "rule", row: 2 }).join(), "a confirmed cause is not replaced without --replace (review pass 4)");
+  assert(applyAdjudications(fx, new Map([[id(2), { validity: { cause: "record" } as Adjudication }]]), true).fixture.adjudication[id(2)].validity!.join() === adjTo({ cause: "record" }).join()
+    && applyAdjudications(fx, new Map([[id(2), { validity: { cause: "rule", row: 2 } as Adjudication }]])).problems.length === 0, "with --replace it is, and the same cause again is no change");
+  assert(list([{ task: "x", owner: "y" }]) === '{"task":"x","owner":"y"}' && list({ kind: "note" }) === '{"kind":"note"}' && list(["a", 2]) === "a; 2", "a view's object is shown as JSON, never [object Object] (review pass 4)");
   assert(/no population line/.test(emptySnapshot(0, 5).join()) && /no item/.test(emptySnapshot(4000, 0).join()) && emptySnapshot(4000, 120).length === 0, "a snapshot with no population, or a draw of nothing, is refused (review pass 3)");
 
   // Private files.
@@ -938,7 +966,7 @@ async function main(): Promise<void> {
     refuseUnpinned("misses are adjudicated");
     const { per, problems } = parseAdjudications(readFileSync(adjPath, "utf8"));
     if (problems.length) throw new Error(problems.join("\n"));
-    const applied = applyAdjudications(JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture, per);
+    const applied = applyAdjudications(fixtureAtPin(), per, args.includes("--replace"));
     if (applied.problems.length) throw new Error(applied.problems.join("\n"));
     writeFileSync(FIXTURE, JSON.stringify(applied.fixture, null, 2) + "\n");
     console.log(`adjudicated ${per.size} items → ${relative(REPO, FIXTURE)}`);
