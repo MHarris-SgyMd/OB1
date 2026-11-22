@@ -5253,17 +5253,19 @@ if (configFailed) {
             // otherwise. A key at another prompt version is not this tree's to run, its extractor writing its own: an
             // older one is left by --switch-key, a newer one is a newer tree's, which a switch here would take back. A
             // key db/retag.ts never makes (hand-set: --job refuses its shape) no run is under (review pass 1: a plain
-            // run, refused, was named for it, and --switch-key for a newer tree's).
-            const runUnder = (key: string): { prefix: string } | { words: string } => {
+            // run, refused, was named for it, and --switch-key for a newer tree's). `reclaims`: whether a pass claims
+            // under the key again, so an expired lease's reclaim is true of it — the newer tree's does; no pass takes up
+            // an older version's or a hand-set key's (review pass 2).
+            const runUnder = (key: string): { prefix: string } | { words: string; reclaims: boolean } => {
               const parsed = parseRetagKey(key);
               if (parsed === null) {
-                return { words: `${key} is not a key db/retag.ts makes (retag:<model>@p<version>), so no run is under it: cd db && bun retag.ts --url $DATABASE_URL --switch-key records ${serverKey}, and the backlog is re-tagged under it.` };
+                return { reclaims: false, words: `${key} is not a key db/retag.ts makes (retag:<model>@p<version>), so no run is under it: cd db && bun retag.ts --url $DATABASE_URL --switch-key records ${serverKey}, and the backlog is re-tagged under it.` };
               }
               if (parsed.promptVersion > METADATA_PROMPT_VERSION) {
-                return { words: `${key} was recorded by a tree whose tag prompt is version ${parsed.promptVersion}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag.ts from that tree. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}.` };
+                return { reclaims: true, words: `${key} was recorded by a tree whose tag prompt is version ${parsed.promptVersion}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag.ts from that tree. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}.` };
               }
               if (parsed.promptVersion < METADATA_PROMPT_VERSION) {
-                return { words: `This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${serverKey}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it.` };
+                return { reclaims: false, words: `This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${serverKey}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it.` };
               }
               return { prefix: parsed.model !== metaModel ? `OB1_METADATA_MODEL=${shellWord(parsed.model)} ` : "" };
             };
@@ -5285,7 +5287,7 @@ if (configFailed) {
               // the recorded key, refusing any other without --switch-key, and rebuild_derived feeds it: nothing finishes
               // this one, so it is said, with no remedy that would switch back.
               if (recorded !== null && key !== recorded) {
-                add("retag pass", "ok", `${key}: ${counts} — an earlier model or prompt version's pool, which no worker runs any more: db/retag.ts and rebuild_derived re-tag under ${recorded} (ob1_config.retag_key), nothing here to finish or retry`);
+                add("retag pass", "ok", `${key}: ${counts} — an earlier key's pool, which no worker runs any more: db/retag.ts and rebuild_derived re-tag under ${recorded} (ob1_config.retag_key), nothing here to finish or retry`);
                 continue;
               }
               unfinished++;
@@ -5297,7 +5299,8 @@ if (configFailed) {
               const waiting = c.pending > 0
                 ? `${c.pending} pending row(s) wait for a run under this key: one that stopped, or a text move's rebuild requeued them`
                 : `a run under this key left ${c.failed} failed row(s)`;
-              add("retag pass", "warn", `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : waiting}`, fixOf(l.expired > 0 ? reclaim(key) : "", finish));
+              const reclaims = l.expired > 0 && ("prefix" in how || how.reclaims);
+              add("retag pass", "warn", `${key}: ${counts} — ${l.expired > 0 ? diedWords(l) : waiting}`, fixOf(reclaims ? reclaim(key) : "", finish));
             }
             if (unfinished === 0) {
               const b = await backlogOf(recorded ?? serverKey);

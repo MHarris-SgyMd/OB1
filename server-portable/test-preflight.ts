@@ -2478,7 +2478,7 @@ else {
   await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);
   const rtEarlier = await run(RENV);
   const earlierRow = rtEarlier.out.split("\n").find((l) => /retag pass/.test(l) && l.includes(`${RT_OLD}:`)) ?? "";
-  assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier model or prompt version's pool, which no worker runs any more: db/retag\\.ts and rebuild_derived re-tag under ${rx(RT)} \\(ob1_config\\.retag_key\\), nothing here to finish or retry$`).test(earlierRow.trim())
+  assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier key's pool, which no worker runs any more: db/retag\\.ts and rebuild_derived re-tag under ${rx(RT)} \\(ob1_config\\.retag_key\\), nothing here to finish or retry$`).test(earlierRow.trim())
       && !rtEarlier.out.includes("OB1_METADATA_MODEL=old-tag-model"),
          `…a key other than the recorded one is an earlier pool no worker runs, with no finish that would switch back (${earlierRow.trim()})`);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT_OLD}`;
@@ -2491,6 +2491,17 @@ else {
   await claims`UPDATE thought_work_claims SET work_type = ${RT_PREV} WHERE work_type = ${RT_NEXT}`;
   await claims`UPDATE ob1_config SET value = ${RT_PREV} WHERE key = 'retag_key'`;
   const rtOlder = await run(RENV);
+  await claims`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'preflight-dead', ttl_expires_at = now() - interval '1 minute', finished_at = NULL WHERE work_type = ${RT_PREV} AND status = 'failed'`;
+  const rtOlderDied = await run(RENV);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_NEXT} WHERE work_type = ${RT_PREV}`;
+  await claims`UPDATE ob1_config SET value = ${RT_NEXT} WHERE key = 'retag_key'`;
+  const rtNewerDied = await run(RENV);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_PREV} WHERE work_type = ${RT_NEXT}`;
+  await claims`UPDATE ob1_config SET value = ${RT_PREV} WHERE key = 'retag_key'`;
+  await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL, ttl_expires_at = NULL, finished_at = now() WHERE work_type = ${RT_PREV} AND status = 'claimed'`;
+  assert(/a worker died holding 1 of the claim\(s\) in flight/.test(row(rtOlderDied.out, "retag pass")) && /^\s*→ This tree's tag prompt is version/.test(fix(rtOlderDied.out, "retag pass"))
+      && /^\s*→ The next pass reclaims the expired claims .* was recorded by a tree whose tag prompt is version/.test(fix(rtNewerDied.out, "retag pass")),
+         `…an expired lease under an older version's key promises no reclaim, no pass claiming there again; under a newer tree's, whose pass does, it does (review pass 2; ${fix(rtOlderDied.out, "retag pass").trim().slice(0, 80)} | ${fix(rtNewerDied.out, "retag pass").trim().slice(0, 80)})`);
   // A key db/retag.ts never makes (hand-set: --job refuses the shape): no run is under it.
   await claims`UPDATE thought_work_claims SET work_type = 'retag:hand-set' WHERE work_type = ${RT_PREV}`;
   await claims`UPDATE ob1_config SET value = 'retag:hand-set' WHERE key = 'retag_key'`;
@@ -2520,7 +2531,7 @@ else {
   await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);
   const rtDoneBeside = await run(RENV);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT_OLD}`;
-  assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier model or prompt version's pool`).test(rtDoneBeside.out)
+  assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier key's pool`).test(rtDoneBeside.out)
       && /^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDoneBeside.out),
          `…an earlier key's pool beside it is no worker's, and hides the backlog no longer (review pass 1: it counted as unfinished, for good)`);
   // Before 063's mark the backlog cannot be read: a skip saying why.
