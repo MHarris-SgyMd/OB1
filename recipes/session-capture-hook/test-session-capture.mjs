@@ -2935,6 +2935,13 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   assert(typeof earlyDigest.text === "string" && !earlyDigest.withheld && !earlyDigest.text.includes(hexBody) && earlyDigest.text.length === LIMITS.modelInputChars
       && reachedFrom > 0 && reachedFrom < reachedMsg.length && /password assignment at char \d+ in the assistant messages/.test(reachedPw.withheld ?? ""),
     `a secret in a message the cut leaves out withholds nothing; one before the cut in a message the cut reaches withholds the excerpt (SMD-3656 review pass 2) (${JSON.stringify([earlyDigest.withheld ?? "sent", reachedFrom, reachedPw.withheld ?? "sent"])})`);
+  // Review pass 3: the cut exactly on the separator after a message leaves that message out (mutant: `>=` reached it);
+  // and each reached message is read on its own, so a key ending one, which the joiner's blank line made read as
+  // sha256sum's output to the 64-hex rule, withholds the excerpt.
+  const onSep = assistantExcerpt({ assistant: [`the hash: ${hexBody} recorded`, "k".repeat(LIMITS.modelInputChars - 8)] });
+  const keyLast = assistantExcerpt({ assistant: [`Your key is:\n${hexBody}`, "Done."] });
+  assert(typeof onSep.text === "string" && !onSep.text.includes(hexBody) && /64-hex token/.test(keyLast.withheld ?? ""),
+    `the cut on the separator leaves the message before it out, its digest withholding nothing; a key ending a message withholds the excerpt (SMD-3656 review pass 3) (${JSON.stringify([onSep.withheld ?? "sent", keyLast.withheld ?? keyLast.text?.slice(0, 20)])})`);
   // Any secret withholds the messages, a key block or one line alike: they are not blanked and sent, since a blanking's
   // residue reached the model where nothing did before (review pass 1, secrets adversary: a quoted passphrase's second
   // line, a password after a second keyword or in `os.environ.get(…, "…")`, a `> `-quoted key block's short lines).

@@ -608,6 +608,10 @@ export function provenanceOf(s) {
  * model where none did before (review pass 1, secrets adversary). A message the
  * clip leaves out whole sends nothing, so a hit there withholds nothing (review
  * pass 2: a digest quoted early in a long episode cost it its model summary).
+ * Each reached message is read on its own too, as well as joined: the joiner's
+ * blank line after a message's last line reads to the 64-hex rule as
+ * `sha256sum`'s two-space gap, and a key ending a message went out whole
+ * (review pass 3).
  */
 export function assistantExcerpt(ep) {
   const SEP = "\n\n----\n\n";
@@ -617,8 +621,13 @@ export function assistantExcerpt(ep) {
   // Where the first message the clip reaches begins: the scan reads it whole, and every message after it.
   let reached = 0;
   for (let i = 0, at = 0; i < messages.length; at += messages[i].length + SEP.length, i++) if (at + messages[i].length > from) { reached = at; break; }
-  const hit = scanForSecrets(joined.slice(reached))[0];
-  if (hit) return { withheld: `${hit.reason} at char ${reached + hit.at} in the assistant messages` };
+  let hit = scanForSecrets(joined.slice(reached))[0], hitAt = hit ? reached + hit.at : 0;
+  for (let i = 0, at = 0; !hit && i < messages.length; at += messages[i].length + SEP.length, i++) {
+    if (at < reached) continue;
+    const own = scanForSecrets(messages[i])[0];
+    if (own) { hit = own; hitAt = at + own.at; }
+  }
+  if (hit) return { withheld: `${hit.reason} at char ${hitAt} in the assistant messages` };
   return { text: joined.slice(from) };
 }
 
