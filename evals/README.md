@@ -5250,7 +5250,7 @@ The rule divergences:
 - **Declined again:** the branch name. Recording an exception would be the maintainer's to write in CLAUDE.md, not this PR's.
 
 **The follow-ups:**
-- **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked` once a brain holds citations and deliverables.
+- **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked`, once a brain holds citations and deliverables and the sheets show them: this run's material carries neither, so a rater could never see what those states rest on (review pass 9).
 - **SMD-4525:** whether rows 2 and 6 change.
 - **SMD-4526:** the one unfounded pointer, a note that reports a ticket done superseding the ticket's own thought (7 such on the canary).
 

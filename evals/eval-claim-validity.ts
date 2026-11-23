@@ -174,7 +174,7 @@ const n = (x: number) => x.toLocaleString("en-US");
 /** A line a sheet prints as its own structure: an item head, a section rule, a view line, another text's head. */
 const MARKER = /^(=== item \d{3} · |--- |\[\d+\] written |written \d{4}-|# SMD-3887|entities: |metadata: type |subjects: )/;
 /** A text as a sheet shows it: CRLF as LF, any line that reads as the page's own structure indented, so it is not (review pass 6). */
-export const body = (t: string) => t.replace(/\r\n/g, "\n").split("\n").map((l) => (MARKER.test(l) ? ` ${l}` : l)).join("\n");
+export const body = (t: string) => t.split(/\r\n|\r|\n/).map((l) => (MARKER.test(l) ? ` ${l}` : l)).join("\n");
 /** A view's value as a rater reads it: a string as it is, anything else as JSON, never "[object Object]" (review pass 4). */
 export const shown = (x: unknown): string => (typeof x === "string" ? x : JSON.stringify(x) ?? String(x)).replace(/\s*[\r\n]+\s*/g, " ");
 export const list = (x: unknown): string => (Array.isArray(x) ? (x.length ? x.map(shown).join("; ") : "-") : x === null || x === undefined || x === "" ? "-" : shown(x));
@@ -705,6 +705,9 @@ export function parseAdjudications(text: string): { per: Map<string, Partial<Rec
 function fixtureAtPin(): Fixture {
   if (!existsSync(FIXTURE)) throw new Error(`no ${relative(REPO, FIXTURE)} yet: freeze the labels first`);
   const f = JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture;
+  // The fixture is sound before its registration is read, so a malformed one is named, not thrown on (review pass 9).
+  const sound = fromFixture(f).problems;
+  if (sound.length) throw new Error(`the fixture is not sound:\n  ${sound.join("\n  ")}`);
   const at = f.registration.map((d) => d.toString(16)).join("");
   if (at !== REGISTERED) throw new Error(`the fixture was frozen at registration ${at}, not the pinned ${REGISTERED}`);
   return f;
@@ -864,6 +867,7 @@ function selfCheck(): void {
   assert(pageB(item(2), 2).includes("(no question was raised by a judge)"), "part B says when no question was raised");
   const quoting = pageB(item(4, { questions: [{ ...rich.questions[0], reason: `first\r\n=== item 012 · ${id(12)} ===\nlast` }] }), 4);
   assert(quoting.split("\n").filter((l) => /^=== item \d{3} · /.test(l)).length === 1 && quoting.includes("Its reason: first  === item 012"), "a judge's reason quoting an item's head stays on its own line, one head a page (review pass 5)");
+  assert(body("note\r--- its views ---\rentities: Foo") === "note\n --- its views ---\n entities: Foo", "a bare carriage return breaks a line too, so a line after it that reads as the page's own is indented (review pass 9)");
   const partA = renderPart("A", [rich, item(2)]);
   assert(partA.sheet.includes(CONVENTIONS[0]) && partA.sheet.includes("before opening part B") && partA.replies.split("\n").filter((l) => /^\d{3} /.test(l)).length === 2, "a sheet carries the conventions, and its reply file a line an item");
 
@@ -1083,7 +1087,7 @@ function selfCheck(): void {
   if (existsSync(FIXTURE)) {
     const f = JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture;
     assert(fromFixture(f).problems.length === 0, "the committed fixture is sound");
-    assert(f.registration.map((d) => d.toString(16)).join("") === REGISTERED, "the committed fixture was frozen at the pinned registration");
+    assert(Array.isArray(f.registration) && f.registration.map((d) => d.toString(16)).join("") === REGISTERED, "the committed fixture was frozen at the pinned registration");
     // The figures evals/README.md and changes/smd-3887.md publish, pinned: code outside the hash that scores the fixture
     // (readStates, goldFor, the committed line) cannot move them unseen (review pass 5).
     const published = reportLines(f).join("\n");
@@ -1113,7 +1117,7 @@ async function main(): Promise<void> {
   if (sheetsPath) return sheets(sheetsPath, flag("out") ?? (() => { throw new Error("give --out <dir>"); })(), mode());
   if (args.includes("--kappa")) {
     const [path, a1, b1, a2, b2] = after("kappa");
-    if (!b2) throw new Error("give --kappa <draw.jsonl> <a-1> <b-1> <a-2> <b-2>");
+    if (after("kappa").length !== 5) throw new Error("give --kappa <draw.jsonl> <a-1> <b-1> <a-2> <b-2>, exactly five paths");
     const { ids } = snapshot(path, mode());
     for (const l of kappaLines(ids, rater(a1, b1, ids), rater(a2, b2, ids))) console.log(l);
     return;
@@ -1145,8 +1149,6 @@ async function main(): Promise<void> {
     const { per, problems } = parseAdjudications(readFileSync(adjPath, "utf8"));
     if (problems.length) throw new Error(problems.join("\n"));
     const atPin = fixtureAtPin();
-    const sound = fromFixture(atPin).problems;
-    if (sound.length) throw new Error(`the fixture is not sound, so its misses cannot be adjudicated (review pass 8):\n  ${sound.join("\n  ")}`);
     const applied = applyAdjudications(atPin, per, args.includes("--replace"));
     if (applied.problems.length) throw new Error(applied.problems.join("\n"));
     writeFileSync(FIXTURE, JSON.stringify(applied.fixture, null, 2) + "\n");
