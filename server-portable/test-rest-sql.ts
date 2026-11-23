@@ -1227,6 +1227,12 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   // A read key lists, every claim of the ticket, no token or hash; it may not claim. A capture-only key does neither.
   const l = await rest("GET", "/v1/claims?ticket=smd-9301", undefined, KEYS.reader);
   const listed = (l.body.claims ?? []) as Claim[];
+  // Migration 152 (SMD-4540): each renewal that landed counts, by either door; the refused two count nothing. The
+  // claim's own answers and the listing (143's columns, renewals joined on its ids) say the same count.
+  const countOf = (c: unknown) => (c as { renewals?: unknown } | undefined)?.renewals;
+  const writerListed = listed.find((c) => c.id === mine?.id), rivalListed = listed.find((c) => c.id === rivals?.id);
+  assert(countOf(mine) === 0 && countOf(rn.body.claim) === 1 && countOf(renewedMcp.sc.claim) === 2 && countOf(writerListed) === 2 && countOf(rivalListed) === 0,
+    `renewals: the writer's claim at 0, 1 after its REST renewal and 2 after its MCP one, the refused two counting nothing, and the listing says 2, the rival's 0 (${JSON.stringify([countOf(mine), countOf(rn.body.claim), countOf(renewedMcp.sc.claim), countOf(writerListed), countOf(rivalListed)])})`);
   const otherTicket = await rest("GET", "/v1/claims?ticket=SMD-9399", undefined, KEYS.reader);
   assert(otherTicket.status === 200 && (otherTicket.body.claims as unknown[]).length === 0, `…and a ticket nobody claimed lists nothing: the filter is the ticket's (${(otherTicket.body.claims as unknown[]).length})`);
   const readerClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9302" }, KEYS.reader);

@@ -3234,8 +3234,16 @@ if (configFailed) {
           } else if (tc.missing.length) {
             // 115 added all four claim functions; 143 redefined list_work_claims with its keyset cursor (a new, eight-argument signature). A brain missing that signature alone is behind 143, not 115.
             const only143 = tc.missing.every((f) => f.startsWith("list_work_claims"));
+            // 152 (SMD-4540) in the by-hand remedy unless the ledger reads it not applied yet: the migrator applies it then.
+            const with152 = !(ledgerRead && !ledger.has("152"));
             add("ticket claims", "fail", `${tc.missing.join(", ")} missing under ${only143 ? "143's" : "115's"} signature; claim_work, renew_claim, release_claim and list_claims call them`,
-                only143 ? ledgerRemedy("143", "Apply db/migrations/143_work_claims_cursor.sql.") : ledgerRemedy("115", "Apply db/migrations/115_work_claims.sql."));
+                only143 ? ledgerRemedy("143", "Apply db/migrations/143_work_claims_cursor.sql.")
+                  // 115 by hand puts its claim_work, renew_work_claim and ob1_work_claim_json back over their last definers'
+                  // (140's cap, 152's renewal count, SMD-4540) and 143's list beside its own: the files after it name them. 152
+                  // is left to the migrator on a brain whose ledger reads it not applied yet (its guard needs 140 first).
+                  : ledgerRemedy("115", with152
+                    ? "Apply db/migrations/115_work_claims.sql, then 140_work_claim_cap.sql, 143_work_claims_cursor.sql and 152_claim_renewals.sql (152 the last definer of claim_work, renew_work_claim and ob1_work_claim_json, 143 of list_work_claims)."
+                    : "Apply db/migrations/115_work_claims.sql, then 140_work_claim_cap.sql and 143_work_claims_cursor.sql (140 the last definer of claim_work, 143 of list_work_claims)."));
           } else if (tc.ungranted?.length) {
             // INSERT is claim_work's alone; UPDATE claim_work's (a renewal or a takeover), renew's and release's; SELECT every call's.
             const failing = tc.ungranted.includes("SELECT") ? "claim_work, renew_claim, release_claim and list_claims"
