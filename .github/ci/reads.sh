@@ -32,19 +32,22 @@
 # `reads.sh mark --watch` also watches (PR 3c-1), for a job whose containers
 # are given the checkout: a read through a read-only bind mount moves no
 # access time, since the mount may write nothing. The watch is one inotify
-# watch on each tracked folder, which the kernel tells of every open of the
-# folder or of a file in it, through whatever mount and by whatever process.
-# list ends the watch and adds what it saw: a tracked file opened is an f
-# row, a tracked folder opened a d row, whether or not its time moved. The
-# header then ends watch=ok; watch=lost where the watch ended early, was
-# not heard from again, lost events (the kernel's queue filled) or was
-# refused a watch on a folder, and watch=none where none began in time (no
-# inotify, as off Linux, no python3, or one ten seconds in starting): the
-# rows are then those the access times give, and whoever reads the list
-# knows it may say less than the job read. The watch sees an open, not a
-# read, so it also holds a file opened and only asked after; and a file
-# opened and then deleted is both an f row and a g row, where by access
-# times it was a g row alone.
+# watch on each tracked folder, which the kernel tells of each open, to read
+# or to write, of the folder or of a file in it, through whatever mount and
+# by whatever process. list ends the watch and adds what it saw: a tracked
+# file opened is an f row, a tracked folder opened a d row, whether or not
+# its time moved; and where a tracked folder is another folder by the end
+# (removed and made again), every tracked file under it is an f row, since
+# the watch stayed with the first. The header then ends watch=ok; watch=lost
+# where the watch ended early, was not heard from again, lost events (the
+# kernel's queue filled), could not read all that was queued in five seconds
+# or was refused a watch on a folder, and watch=none where none began in
+# time (no inotify, as off Linux, no python3, or one ten seconds in
+# starting): the rows are then those the access times give, and whoever
+# reads the list knows it may say less than the job read. The watch sees an
+# open, not a read, so it also holds a file opened and only asked after; and
+# a file opened and then deleted is both an f row and a g row, where by
+# access times it was a g row alone.
 #
 # What a list does not hold:
 # - a read through a container's read-only bind mount, which moves no access
@@ -54,6 +57,12 @@
 #   or a mode read): no access time moves, so a path added, removed or made
 #   executable can matter to a job whose list has neither it nor its folder;
 # - a second read, which relatime leaves alone, so only "read at all";
+# - through a read-only mount, where no time moves and so beyond the watch
+#   too: a tracked symbolic link that is followed (the kernel tells of the
+#   file it leads to; whoever reads the lists runs every job when a link
+#   changes); a file read by a descriptor opened before the marker, which no
+#   step is; and one opened by its handle with no name (open_by_handle_at),
+#   which asks a capability no container is given unasked;
 # - a file copied where the filesystem makes the copy as a clone (btrfs, xfs,
 #   APFS by `cp -c` and Bun.write): no byte is read and no time moves. A
 #   runner's ext4 clones nothing: on one, cp, `cat a > b`, dd and Bun's
@@ -64,7 +73,10 @@
 #   its own first, and says sight=blind when that read does not show. That
 #   file is in the git directory, so the test sees for its filesystem: a
 #   checkout whose files are on another (a linked worktree on another volume,
-#   a --separate-git-dir) is not tested, here or by the self-check.
+#   a --separate-git-dir) is not tested, here or by the self-check;
+# - anything at all, when a command that names the paths or writes the rows
+#   failed (git, a full disk): the list then says sight=broken and holds no
+#   row, since a list short of rows is the one worse than none.
 # What it holds beyond the job's own reads: every file git read back to
 # compare (a `git diff` or `git status` re-reads a file written in the same
 # second as the index), which only adds.
@@ -119,20 +131,29 @@ if not hasattr(libc, 'inotify_init1'):
 fd = libc.inotify_init1(IN_NONBLOCK)
 if fd < 0:
     sys.exit('inotify_init1: ' + os.strerror(ctypes.get_errno()))
-lost, folder = b'', {}
+def inode(d):
+    try:
+        st = os.stat(os.path.join(top, d))
+        return st.st_dev, st.st_ino
+    except OSError:
+        return None
+
+
+lost, folder, first = b'', {}, {}
 with open(at(b'watch.want'), 'rb') as f:
     want = [d for d in f.read().split(b'\0') if d]
 for d in want:
     wd = libc.inotify_add_watch(fd, os.path.join(top, d), IN_OPEN)
     if wd >= 0:
-        folder[wd] = d
+        folder[wd], first[d] = d, inode(d)
     elif ctypes.get_errno() not in (errno.ENOENT, errno.ENOTDIR):
         # A folder not in the checkout is read by no one; any other refusal (the user's limit on watches) leaves one unwatched.
         lost = b'lost: no watch on ' + d + b': ' + os.strerror(ctypes.get_errno()).encode()
 watched, files, dirs = set(folder.values()), set(), set()
 if not mine():
-    sys.exit(0)
-write(b'watch.ready', str(len(folder)).encode() + b'\n')
+    sys.exit('ended before it began: its name is not in watch.asked')
+# With its name: a marker takes only its own watch's word that it has begun.
+write(b'watch.ready', str(len(folder)).encode() + b' ' + me + b'\n')
 born, stop, looked = time.monotonic(), None, 0.0
 while True:
     quiet = not select.select([fd], [], [], 0.2)[0]
@@ -161,17 +182,24 @@ while True:
     if now - looked >= 0.2:
         looked = now
         if not mine() or now - born > 6 * 3600:
-            sys.exit(0)
+            sys.exit('ended: its name is gone from watch.asked, or six hours have passed')
     if stop is None:
         # Seen now, acted on at the next turn: only a wait begun after the stop was seen says nothing more is queued.
         if os.path.exists(at(b'watch.stop')):
             stop = now
-    elif quiet or now - stop > 5:
-        # Asked to stop: once nothing is queued, or five seconds on if opens never pause.
+    elif quiet:
         break
+    elif now - stop > 5:
+        # Five seconds on with opens still queued, or itself held up: it cannot say it has read them all.
+        lost = b'lost: opens were still queued five seconds after the stop'
+        break
+# A watched folder that is another folder now, or gone: the watch stayed with the first, and what was opened in
+# the second it never saw. Every tracked file under such a folder is taken as opened, and the folder as listed.
+under = sorted(d for d in first if inode(d) != first[d])
 if mine():
     write(b'watch.files', b''.join(p + b'\0' for p in sorted(files)))
-    write(b'watch.dirs', b''.join(p + b'\0' for p in sorted(dirs)))
+    write(b'watch.dirs', b''.join(p + b'\0' for p in sorted(dirs | set(under))))
+    write(b'watch.under', b''.join(p + b'\0' for p in under))
     write(b'watch.status', (lost or b'ok ' + me) + b'\n')
 PY
 
@@ -189,51 +217,64 @@ running() {
   return 0
 }
 
-# watch_start: the watch, begun under a name of its own (in watch.asked) and
-# heard from before mark returns, so the step after it is watched. It never
-# fails the mark. A watch not heard from in ten seconds (READS_WATCH_WAIT
-# tenths of one, for the cases) may yet begin, with steps already run
-# unwatched: its name is taken from it, so it ends itself when it looks, and
-# with no watch.heard the list says none began (watch=none), its rows the
-# access times'.
-watch_start() {
-  local pid id wait=${READS_WATCH_WAIT:-100}
+# watch_wait: how long mark waits to hear from a watch, and list to hear from
+# it again, in tenths of a second: a hundred, or READS_WATCH_WAIT's for the
+# cases, read as a decimal number whatever zeros it opens with.
+watch_wait() {
+  local wait=${READS_WATCH_WAIT:-100}
   case "$wait" in '' | *[!0-9]*) wait=100 ;; esac
+  echo "$((10#$wait))"
+}
+
+# watch_start: the watch, begun under a name of its own (in watch.asked) and
+# heard from, by that name, before mark returns, so the step after it is
+# watched. It never fails the mark. A watch not heard from in ten seconds may
+# yet begin, with steps already run unwatched: its name is taken from it, so
+# it ends itself when it looks, and with no watch.heard the list says none
+# began (watch=none), its rows the access times'.
+watch_start() {
+  local pid id said wait
+  wait=$(watch_wait)
   id="$$.$RANDOM.$(date +%s)"
-  echo "$id" > "$state/watch.asked" || return 0
+  if ! echo "$id" > "$state/watch.asked"; then echo "::warning title=reads.sh::no watch: its name could not be written, so the list will hold what access times show and will not say a watch was asked for"; return 0; fi
   if ! command -v python3 > /dev/null 2>&1; then echo "::warning title=reads.sh::no python3 here, so no watch: the list will hold what access times show alone"; return 0; fi
-  { printf '.\0'; git -C "$top" ls-tree -r -d --name-only -z HEAD 2> /dev/null; } > "$state/watch.want" || return 0
+  if ! { printf '.\0'; git -C "$top" ls-tree -r -d --name-only -z HEAD 2> /dev/null; } > "$state/watch.want"; then echo "::warning title=reads.sh::the tracked folders could not be named, so no watch: the list will hold what access times show alone"; return 0; fi
   # Its output to a file and its input from nowhere: a step waits on whatever still holds its pipes. -I, so
   # python looks for no module in the folder it is started in: it would list the checkout's top, which is then
   # a row of every watched job's, and load a file of the checkout's named as a module is.
   nohup python3 -I -c "$WATCH" "$state" "$top" "$id" < /dev/null > "$state/watch.log" 2>&1 &
   pid=$!
   echo "$pid" > "$state/watch.pid"
-  # A watch that ended (no inotify) is not waited for.
+  # A watch that ended (no inotify) is not waited for. Only its own watch's word counts: watch.ready ends with
+  # the name of the watch that wrote it, and an earlier marker's watch may write one as it ends.
   for _ in $(seq 1 "$wait"); do
-    if [ -e "$state/watch.ready" ] || ! running "$pid"; then break; fi
+    said=$(cat "$state/watch.ready" 2> /dev/null || true)
+    if [ "${said#* }" = "$id" ] || ! running "$pid"; then break; fi
     sleep 0.1
   done
-  if [ -e "$state/watch.ready" ]; then
+  said=$(cat "$state/watch.ready" 2> /dev/null || true)
+  if [ "${said#* }" = "$id" ]; then
     : > "$state/watch.heard"
-    echo "reads.sh: watching $(tr -d '\n' < "$state/watch.ready") folders for opens"
+    echo "reads.sh: watching ${said%% *} folders for opens"
   else
     echo "$id unheard" > "$state/watch.asked"
     echo "::warning title=reads.sh::the watch did not start ($(tail -n 1 "$state/watch.log" 2> /dev/null | grep . || echo "not heard from in $((wait / 10)).$((wait % 10)) s")): the list will hold what access times show alone"
   fi
 }
 
-# watch_stop: ends the watch and says how it stood: ok, with what it saw in
-# watch.files and watch.dirs, when its status is ok under its own name; lost,
-# when it was heard from and then ended early, lost events, could not watch a
-# folder or is not heard from again in ten seconds, with why in watch.why;
-# none, when it was not heard from as mark made it.
+# watch_stop: ends the watch and says how it stood, in one line: ok, with
+# what it saw in watch.files, watch.dirs and watch.under, when its status is
+# ok under its own name; "lost: " and why, when it was heard from and then
+# ended early, lost events, could not watch a folder, could not read all that
+# was queued or is not heard from again in ten seconds; none, when it was not
+# heard from as mark made it.
 watch_stop() {
-  local pid said
+  local pid said wait
+  wait=$(watch_wait)
   if [ ! -e "$state/watch.heard" ]; then echo none; return 0; fi
   : > "$state/watch.stop"
   pid=$(cat "$state/watch.pid" 2> /dev/null || true)
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 "$wait"); do
     [ ! -e "$state/watch.status" ] || break
     # Gone with no status written, the watch is lost now and not in ten seconds. Were the number another's by
     # now, the wait would only be the full ten.
@@ -243,11 +284,13 @@ watch_stop() {
   said=$(cat "$state/watch.status" 2> /dev/null || true)
   if [ -n "$said" ] && [ "$said" = "ok $(cat "$state/watch.asked" 2> /dev/null || true)" ]; then echo ok; return 0; fi
   case "$said" in
-    lost:*) echo "${said#lost: }" ;;
-    '') echo "it ended with no status: $(tail -n 1 "$state/watch.log" 2> /dev/null | grep . || echo 'it said nothing')" ;;
-    *) echo "its status is another watch's" ;;
-  esac > "$state/watch.why"
-  echo lost
+    lost:*) echo "$said" ;;
+    '')
+      if [ -n "$pid" ] && running "$pid"; then echo "lost: not heard from again in $((wait / 10)).$((wait % 10)) s"
+      else echo "lost: it ended with no status: $(tail -n 1 "$state/watch.log" 2> /dev/null | grep . || echo 'it said nothing')"; fi
+      ;;
+    *) echo "lost: its status is another watch's" ;;
+  esac
 }
 mark() {
   local watch=${1:-}
@@ -290,14 +333,19 @@ gone_now() {
 # character in JOB or CELL that is not a letter, a digit, -, _ or . is
 # written _, so a matrix value cannot leave the file's name or its header.
 list() {
-  local job=${1:-} cell=${2:-} dir out sight=ok files=0 dirs=0 odd=0 gone=0 tmp own='' more='' watch='' alone=0
+  local job=${1:-} cell=${2:-} dir out sight=ok files=0 dirs=0 odd=0 gone=0 tmp own='' more='' watch='' why='' alone=0 bad='' f
   if [ -z "$job" ]; then echo "usage: reads.sh list JOB [CELL]" >&2; return 2; fi
   job=${job//[^A-Za-z0-9_.-]/_} cell=${cell//[^A-Za-z0-9_.-]/_}
   dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/reads
   out="$dir/$job${cell:+.$cell}.txt"
   if ! mkdir -p "$dir" || ! tmp=$(mktemp "$dir/.list.XXXXXX"); then echo "reads.sh: no scratch file under $dir" >&2; return 0; fi
   # The watch ends first: what this step opens is none of the job's.
-  if [ -e "$state/watch.asked" ]; then watch=$(watch_stop); fi
+  # A watch asked for that says nothing of itself is lost, not left out of the header as if none were asked for.
+  if [ -e "$state/watch.asked" ]; then
+    watch=$(watch_stop)
+    why=${watch#lost: } watch=${watch%%:*}
+    case "$watch" in ok | none | lost) ;; *) watch=lost why='it could not be asked how it stood' ;; esac
+  fi
   if [ ! -e "$state/marker" ]; then
     sight=unmarked
   else
@@ -310,50 +358,60 @@ list() {
   # rows KIND FILE: the NUL-separated paths on stdin, each with or without a
   # leading ./, as KIND's rows on FILE; one with a tab or a newline in it goes
   # to $tmp.o, NUL-ended, and into no row. Two witnesses can name one path, so
-  # rows and odd paths are counted once sorted, each once.
+  # rows and odd paths are counted once sorted, each once. It fails when a row
+  # could not be written, and under pipefail so does the pipeline it ends when
+  # git could not name the paths: a list short of rows it should hold is the
+  # one list worse than none, so either makes the list a broken one, empty.
   rows() {
-    local p
+    local p rc=0
     while IFS= read -r -d '' p; do
       p=${p#./}
       case "$1:$p" in
-        *$'\n'* | *$'\t'*) printf '%s\0' "$p" >> "$tmp.o" ;;
-        d:.) printf 'd\t./\n' ;;
-        d:*) printf 'd\t%s/\n' "$p" ;;
-        *) printf '%s\t%s\n' "$1" "$p" ;;
+        *$'\n'* | *$'\t'*) printf '%s\0' "$p" >> "$tmp.o" || rc=1 ;;
+        d:.) printf 'd\t./\n' || rc=1 ;;
+        d:*) printf 'd\t%s/\n' "$p" || rc=1 ;;
+        *) printf '%s\t%s\n' "$1" "$p" || rc=1 ;;
       esac
-    done >> "$2"
+    done >> "$2" || rc=1
+    return "$rc"
   }
   : > "$tmp.a"; : > "$tmp.w"; : > "$tmp.o"
   if [ "$sight" = ok ]; then
     # By access time. This file first, when the checkout tracks it: read before the marker, so by rule and not by its time.
     case "$SELF" in "$top"/*) own=${SELF#"$top"/} ;; esac
-    if [ -n "$own" ] && git -C "$top" ls-files --error-unmatch -- "$own" > /dev/null 2>&1; then printf '%s\0' "$own" | rows f "$tmp.a"; fi
-    git -C "$top" ls-files -z | later_than_marker | rows f "$tmp.a"
-    { printf '.\0'; git -C "$top" ls-tree -r -d --name-only -z HEAD 2> /dev/null; } | later_than_marker | rows d "$tmp.a"
-    git -C "$top" ls-files -z | gone_now | rows g "$tmp.a"
-    # By the watch: of the names it saw opened, those git tracks, each asked after as the one path it is; and the
-    # tracked folders it saw opened. xargs is given nothing to run on no names: with none, ls-files would name every file.
+    if [ -n "$own" ] && git -C "$top" ls-files --error-unmatch -- "$own" > /dev/null 2>&1; then printf '%s\0' "$own" | rows f "$tmp.a" || bad=1; fi
+    git -C "$top" ls-files -z | later_than_marker | rows f "$tmp.a" || bad=1
+    { printf '.\0'; git -C "$top" ls-tree -r -d --name-only -z HEAD 2> /dev/null || true; } | later_than_marker | rows d "$tmp.a" || bad=1
+    git -C "$top" ls-files -z | gone_now | rows g "$tmp.a" || bad=1
+    # By the watch: of the names it saw opened, those git tracks, each asked after as the one path it is; every
+    # tracked file under a folder that was another by the watch's end, which ls-files names for the folder; and
+    # the tracked folders it saw opened. xargs is given nothing to run on no names: with none, ls-files would
+    # name every file.
     if [ "$watch" = ok ]; then
-      if [ -s "$state/watch.files" ]; then (cd "$top" && xargs -0 git --literal-pathspecs ls-files -z -- < "$state/watch.files") | rows f "$tmp.w"; fi
-      rows d "$tmp.w" < "$state/watch.dirs"
+      for f in "$state/watch.files" "$state/watch.under"; do
+        if [ -s "$f" ]; then (cd "$top" && xargs -0 git --literal-pathspecs ls-files -z -- < "$f") | rows f "$tmp.w" || bad=1; fi
+      done
+      rows d "$tmp.w" < "$state/watch.dirs" || bad=1
     fi
   fi
-  LC_ALL=C sort -u "$tmp.a" "$tmp.w" > "$tmp.s"
+  LC_ALL=C sort -u "$tmp.a" "$tmp.w" > "$tmp.s" || bad=1
+  if [ -n "$bad" ]; then sight=broken; : > "$tmp.s"; : > "$tmp.w"; : > "$tmp.o"; fi
   files=$(grep -c "^f$(printf '\t')" "$tmp.s"); dirs=$(grep -c "^d$(printf '\t')" "$tmp.s"); gone=$(grep -c "^g$(printf '\t')" "$tmp.s")
   odd=$(LC_ALL=C sort -zu "$tmp.o" | tr -cd '\0' | wc -c | tr -d ' ')
   # What the watch alone saw: the rows no access time gave.
   alone=$(LC_ALL=C sort -u "$tmp.w" | LC_ALL=C comm -13 <(LC_ALL=C sort -u "$tmp.a") - | tee "$tmp.x" | wc -l | tr -d ' ')
   {
     printf '# reads v1 job=%s cell=%s commit=%s status=%s sight=%s files=%s dirs=%s gone=%s odd=%s%s\n' \
-      "$job" "${cell:--}" "$(git -C "$top" rev-parse HEAD 2> /dev/null || echo -)" "${JOB_STATUS:--}" "$sight" "$files" "$dirs" "$gone" "$odd" "${watch:+ watch=$watch}"
-    cat "$tmp.s"
+      "$job" "${cell:--}" "$(git -C "$top" rev-parse HEAD 2> /dev/null || echo -)" "${JOB_STATUS:--}" "$sight" "$files" "$dirs" "$gone" "$odd" "${watch:+ watch=$watch}" \
+      && cat "$tmp.s"
   } > "$tmp" && mv "$tmp" "$out"
   case "$sight" in
     blind) echo "::warning title=reads.sh::this filesystem recorded no access time for a file just read, so $job${cell:+ ($cell)}'s list is empty" ;;
     unmarked) echo "::warning title=reads.sh::no marker was made after the checkout, so $job${cell:+ ($cell)}'s list is empty" ;;
+    broken) echo "::warning title=reads.sh::a command that names the paths or writes the rows failed, so $job${cell:+ ($cell)}'s list is empty, not short" ;;
   esac
   case "$watch" in
-    lost) echo "::warning title=reads.sh::the watch was lost ($({ tr -d '\n' < "$state/watch.why"; } 2> /dev/null)), so $job${cell:+ ($cell)}'s list holds what access times show alone" ;;
+    lost) echo "::warning title=reads.sh::the watch was lost ($why), so $job${cell:+ ($cell)}'s list holds what access times show alone" ;;
     none) echo "::warning title=reads.sh::no watch began, so $job${cell:+ ($cell)}'s list holds what access times show alone" ;;
   esac
   if [ "$gone" -gt 0 ]; then more=", $gone gone by the end"; fi
@@ -458,50 +516,54 @@ self_check() {
     if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "reads.sh: a file copied is not in the list: the checkout's filesystem makes a copy as a clone, so every job's copies would be missing" >&2; fails=$((fails + 1))
     else echo "reads.sh: this filesystem makes a copy as a clone, which reads nothing; the case for a file copied is not run here"; fi
   fi
-  # The watch (mark --watch). A file read and a folder listed before the marker, then again after it: no access
-  # time moves for the second, and the watch has both. An untracked file opened in a tracked folder is no row.
-  # The first read is a tick after the clone wrote the file: in the same tick it would leave the time where the
-  # write put it, and the second read would move it.
-  fresh
-  out="$dir/reads/job.watched.txt"
-  (cd "$dir/work" && sleep 0.05 && cat top.txt > /dev/null && ls walked > /dev/null && sleep 0.05 && bash tool/reads.sh mark --watch > "$dir/said" 2>&1 && cat top.txt read/a.txt > /dev/null && ls walked > /dev/null \
-    && echo u > read/untracked.txt && cat read/untracked.txt > /dev/null && mkdir read/made && ls read/made > /dev/null \
-    && JOB_STATUS=success RUNNER_TEMP="$dir" bash tool/reads.sh list job watched >> "$dir/said" 2>&1) \
-    || { echo "reads.sh: mark --watch, reads and list did not all exit 0" >&2; fails=$((fails + 1)); }
-  case "$(head -1 "$out" 2> /dev/null)" in
-    *' sight=ok '*' watch=ok')
-      watched=yes
-      has "$(printf 'f\ttop.txt')" "a file read a second time, under the watch"
-      has "$(printf 'f\tread/a.txt')" "a file read, under the watch"
-      has "$(printf 'f\ttool/reads.sh')" "this file's copy, under the watch"
-      has "$(printf 'd\twalked/')" "a folder listed a second time, under the watch"
-      hasnt "$(printf 'f\tread/untracked.txt')" "an untracked file opened"
-      hasnt "$(printf 'd\tread/made/')" "an untracked folder listed"
-      hasnt "$(printf 'f\twalked/c.txt')" "a file in a folder listed, itself unopened, under the watch"
-      hasnt "$(printf 'f\tleft/b.txt')" "a file never opened, under the watch"
-      hasnt "$(printf 'd\t./')" "the top, which only the watch's own start could have listed"
-      [ "$(sed 1d "$out" | LC_ALL=C sort -u)" = "$(sed 1d "$out")" ] || { echo "reads.sh: a watched list is not sorted, or holds a row twice" >&2; fails=$((fails + 1)); }
-      [ "$(sed 1d "$out" | grep -c "^f$(printf '\t')")" = "$(sed -n '1s/.* files=\([0-9]*\) .*/\1/p' "$out")" ] || { echo "reads.sh: a watched list's file rows are not as many as its header counts" >&2; fails=$((fails + 1)); }
-      # Where a second read moves no time (relatime, a runner's), the watch alone gave that row, and the list says so.
-      if ! grep -qxF -- "$(printf '    f\ttop.txt')" "$dir/said"; then
-        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "reads.sh: a second read moved the file's access time, so the case for the watch shows nothing on this runner" >&2; fails=$((fails + 1))
-        else echo "reads.sh: this filesystem moves a file's access time on every read; the watch's case shows nothing more here"; fi
-      fi
-      # The watch is over once its list is written.
-      gone_soon "$(cat "$dir/work/.git/ob1-reads/watch.pid" 2> /dev/null)"
-      if running "$(cat "$dir/work/.git/ob1-reads/watch.pid" 2> /dev/null)"; then echo "reads.sh: the watch is still running after its list" >&2; fails=$((fails + 1)); fi
-      ;;
-    *' sight=blind '*' watch='*) ;;
-    *' watch=none')
-      # No inotify (off Linux) or no python3. On a runner that is the news: the watched jobs' lists would say less than they read.
-      if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "reads.sh: no watch began on this runner: $(grep -m 1 'title=reads.sh' "$dir/said")" >&2; fails=$((fails + 1))
-      else echo "reads.sh: no watch can run here (no inotify, or no python3); its cases are not run"; fi
-      gone_soon "$(cat "$dir/work/.git/ob1-reads/watch.pid" 2> /dev/null)"
-      [ "$(grep -c '^::warning title=reads.sh::' "$dir/said")" = 2 ] || { echo "reads.sh: with no watch, mark and list did not each warn" >&2; fails=$((fails + 1)); }
-      has "$(printf 'f\tread/a.txt')" "a file read, with no watch"
-      ;;
-    *) echo "reads.sh: after mark --watch the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)) ;;
-  esac
+  # The watch's cases, once: not again in the second run of these cases, under an exported GIT_DIR, which is
+  # there for what git's environment could reach and would only double the time the watch's take.
+  if [ -z "$under" ]; then
+    # The watch (mark --watch). A file read and a folder listed before the marker, then again after it: no access
+    # time moves for the second, and the watch has both. An untracked file opened in a tracked folder is no row.
+    # The first read is a tick after the clone wrote the file: in the same tick it would leave the time where the
+    # write put it, and the second read would move it.
+    fresh
+    out="$dir/reads/job.watched.txt"
+    (cd "$dir/work" && sleep 0.05 && cat top.txt > /dev/null && ls walked > /dev/null && sleep 0.05 && bash tool/reads.sh mark --watch > "$dir/said" 2>&1 && cat top.txt read/a.txt > /dev/null && ls walked > /dev/null \
+      && echo u > read/untracked.txt && cat read/untracked.txt > /dev/null && mkdir read/made && ls read/made > /dev/null \
+      && JOB_STATUS=success RUNNER_TEMP="$dir" bash tool/reads.sh list job watched >> "$dir/said" 2>&1) \
+      || { echo "reads.sh: mark --watch, reads and list did not all exit 0" >&2; fails=$((fails + 1)); }
+    case "$(head -1 "$out" 2> /dev/null)" in
+      *' sight=ok '*' watch=ok')
+        watched=yes
+        has "$(printf 'f\ttop.txt')" "a file read a second time, under the watch"
+        has "$(printf 'f\tread/a.txt')" "a file read, under the watch"
+        has "$(printf 'f\ttool/reads.sh')" "this file's copy, under the watch"
+        has "$(printf 'd\twalked/')" "a folder listed a second time, under the watch"
+        hasnt "$(printf 'f\tread/untracked.txt')" "an untracked file opened"
+        hasnt "$(printf 'd\tread/made/')" "an untracked folder listed"
+        hasnt "$(printf 'f\twalked/c.txt')" "a file in a folder listed, itself unopened, under the watch"
+        hasnt "$(printf 'f\tleft/b.txt')" "a file never opened, under the watch"
+        hasnt "$(printf 'd\t./')" "the top, which only the watch's own start could have listed"
+        [ "$(sed 1d "$out" | LC_ALL=C sort -u)" = "$(sed 1d "$out")" ] || { echo "reads.sh: a watched list is not sorted, or holds a row twice" >&2; fails=$((fails + 1)); }
+        [ "$(sed 1d "$out" | grep -c "^f$(printf '\t')")" = "$(sed -n '1s/.* files=\([0-9]*\) .*/\1/p' "$out")" ] || { echo "reads.sh: a watched list's file rows are not as many as its header counts" >&2; fails=$((fails + 1)); }
+        # Where a second read moves no time (relatime, a runner's), the watch alone gave that row, and the list says so.
+        if ! grep -qxF -- "$(printf '    f\ttop.txt')" "$dir/said"; then
+          if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "reads.sh: a second read moved the file's access time, so the case for the watch shows nothing on this runner" >&2; fails=$((fails + 1))
+          else echo "reads.sh: this filesystem moves a file's access time on every read; the watch's case shows nothing more here"; fi
+        fi
+        # The watch is over once its list is written.
+        gone_soon "$(cat "$dir/work/.git/ob1-reads/watch.pid" 2> /dev/null)"
+        if running "$(cat "$dir/work/.git/ob1-reads/watch.pid" 2> /dev/null)"; then echo "reads.sh: the watch is still running after its list" >&2; fails=$((fails + 1)); fi
+        ;;
+      *' sight=blind '*' watch='*) ;;
+      *' watch=none')
+        # No inotify (off Linux) or no python3. On a runner that is the news: the watched jobs' lists would say less than they read.
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "reads.sh: no watch began on this runner: $(grep -m 1 'title=reads.sh' "$dir/said")" >&2; fails=$((fails + 1))
+        else echo "reads.sh: no watch can run here (no inotify, or no python3); its cases are not run"; fi
+        gone_soon "$(cat "$dir/work/.git/ob1-reads/watch.pid" 2> /dev/null)"
+        [ "$(grep -c '^::warning title=reads.sh::' "$dir/said")" = 2 ] || { echo "reads.sh: with no watch, mark and list did not each warn" >&2; fails=$((fails + 1)); }
+        has "$(printf 'f\tread/a.txt')" "a file read, with no watch"
+        ;;
+      *) echo "reads.sh: after mark --watch the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)) ;;
+    esac
+  fi
   if [ -n "$watched" ]; then
     # Through a read-only bind mount in a mount namespace of its own, as a container is handed a path: the file's
     # time cannot move, and the watch has it. Where mounting is allowed: as root, or by sudo with no password, a runner's.
@@ -519,7 +581,7 @@ self_check() {
     elif [ -n "${GITHUB_ACTIONS:-}" ]; then echo "reads.sh: could not read a file through a read-only bind mount on this runner, the case the watch is for" >&2; fails=$((fails + 1))
     else
       (cd "$dir/work" && RUNNER_TEMP="$dir" bash tool/reads.sh list job mounted) > /dev/null 2>&1
-      echo "reads.sh: no mount can be made here (not root, and no sudo without a password); the case for a read through a read-only bind mount is not run"
+      echo "reads.sh: no mount can be made here (not root and no sudo without a password, or no unshare); the case for a read through a read-only bind mount is not run"
     fi
     # A watch that ended early is lost: the list says so, holds what the access times give, warns and exits 0.
     fresh
@@ -540,6 +602,7 @@ self_check() {
     # So is one whose events the kernel dropped: held still while more opens than the kernel queues go by, two
     # files by turns, since the same open twice running is queued once. Where the queue is very long, not tried, and said.
     v=$(cat /proc/sys/fs/inotify/max_queued_events 2> /dev/null || echo 0)
+    case "$v" in '' | *[!0-9]*) v=0 ;; esac
     if [ "$v" -gt 0 ] && [ "$v" -le 600000 ]; then
       fresh
       out="$dir/reads/job.dropped.txt"
@@ -548,7 +611,7 @@ self_check() {
         && RUNNER_TEMP="$dir" bash tool/reads.sh list job dropped > "$dir/said" 2>&1) || { echo "reads.sh: a list whose watch dropped events did not exit 0" >&2; fails=$((fails + 1)); }
       grep -q '^# reads v1 job=job cell=dropped .* odd=0 watch=lost$' "$out" 2> /dev/null || { echo "reads.sh: with more opens than the kernel queues the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
       grep -q '^::warning title=reads.sh::the watch was lost (the kernel dropped events' "$dir/said" || { echo "reads.sh: a watch that dropped events did not say so: $(grep -m 1 'title=reads.sh' "$dir/said")" >&2; fails=$((fails + 1)); }
-    else echo "reads.sh: the kernel queues $v opens here; the case for a watch whose events it dropped is not run"; fi
+    else echo "reads.sh: the kernel's queue of opens is $v long here, or cannot be read; the case for a watch whose events it dropped is not run"; fi
     # What is still queued when the watch is told to stop is read to the end: held still, five thousand opens, more
     # than two reads of the queue take, then one of a file read before the marker, which only the watch can show.
     if [ "$v" -ge 6000 ]; then
@@ -559,7 +622,7 @@ self_check() {
         && RUNNER_TEMP="$dir" bash tool/reads.sh list job queued > /dev/null 2>&1) || { echo "reads.sh: a list whose watch had opens queued at its stop did not exit 0" >&2; fails=$((fails + 1)); }
       grep -q ' odd=0 watch=ok$' "$out" 2> /dev/null || { echo "reads.sh: with opens queued at the stop the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
       has "$(printf 'f\twalked/c.txt')" "the last open queued when the watch was told to stop"
-    fi
+    else echo "reads.sh: the kernel's queue of opens is $v long here, or cannot be read; the case for opens queued at the stop is not run"; fi
     # With a python3 that cannot watch, as off Linux: no watch begins, mark says so and exits 0, and the list says watch=none.
     fresh
     out="$dir/reads/job.none.txt"
@@ -573,13 +636,49 @@ self_check() {
     # A python3 two seconds in starting, a wait of half a second: mark says so, the late watch ends itself, and
     # the list says watch=none, though the watch did come up before it.
     fresh
-    out="$dir/reads/job.late.txt"
+    out="$dir/reads/job.tardy.txt"
     printf '#!/bin/sh\nsleep 2\nexec "%s" "$@"\n' "$(command -v python3)" > "$dir/stub/python3"
     (cd "$dir/work" && PATH="$dir/stub:$PATH" READS_WATCH_WAIT=5 bash tool/reads.sh mark --watch > "$dir/said" 2>&1 && v=$(cat .git/ob1-reads/watch.pid) \
       && cat top.txt > /dev/null && sleep 2 && gone_soon "$v" && { ! running "$v" || { echo "reads.sh: a watch that began too late is still running" >&2; exit 1; }; } \
-      && RUNNER_TEMP="$dir" bash tool/reads.sh list job late >> "$dir/said" 2>&1) || { echo "reads.sh: mark --watch with a watch late to start, and its list, did not hold" >&2; fails=$((fails + 1)); }
-    grep -q '^# reads v1 job=job cell=late .* sight=ok .* odd=0 watch=none$' "$out" 2> /dev/null || { echo "reads.sh: with a watch late to start the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
+      && RUNNER_TEMP="$dir" bash tool/reads.sh list job tardy >> "$dir/said" 2>&1) || { echo "reads.sh: mark --watch with a watch late to start, and its list, did not hold" >&2; fails=$((fails + 1)); }
+    grep -q '^# reads v1 job=job cell=tardy .* sight=ok .* odd=0 watch=none$' "$out" 2> /dev/null || { echo "reads.sh: with a watch late to start the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
     grep -q '^::warning title=reads.sh::the watch did not start (not heard from in 0.5 s)' "$dir/said" || { echo "reads.sh: mark did not say its watch was late: $(grep -m 1 'title=reads.sh' "$dir/said")" >&2; fails=$((fails + 1)); }
+    # Word that a watch has begun, under another watch's name, as the watch of a marker before this one could
+    # leave as it ends: not this watch's word, so none began.
+    fresh
+    out="$dir/reads/job.others.txt"
+    # shellcheck disable=SC2016 # the stub's sh expands "$4", not this shell
+    printf '#!/bin/sh\nprintf "5 another\\n" > "$4/watch.ready"\nsleep 2\n' > "$dir/stub/python3"
+    (cd "$dir/work" && PATH="$dir/stub:$PATH" READS_WATCH_WAIT=08 bash tool/reads.sh mark --watch > "$dir/said" 2>&1 \
+      && RUNNER_TEMP="$dir" bash tool/reads.sh list job others >> "$dir/said" 2>&1) || { echo "reads.sh: mark --watch beside another watch's word, and its list, did not exit 0" >&2; fails=$((fails + 1)); }
+    grep -q ' odd=0 watch=none$' "$out" 2> /dev/null || { echo "reads.sh: with another watch's word that it had begun the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
+    # The wait was written 08, a decimal number and no octal one: mark waited its eight tenths and said so.
+    grep -q '^::warning title=reads.sh::the watch did not start (not heard from in 0.8 s)' "$dir/said" || { echo "reads.sh: a wait written 08 was not read as eight tenths of a second: $(head -1 "$dir/said")" >&2; fails=$((fails + 1)); }
+    # A watch refused on a tracked folder (here one that is a link to itself; on a runner, the user's limit on
+    # watches) is lost: what was opened in that folder it could not see.
+    fresh
+    out="$dir/reads/job.refused.txt"
+    (cd "$dir/work" && rm -rf left && ln -s left left && bash tool/reads.sh mark --watch > /dev/null 2>&1 \
+      && RUNNER_TEMP="$dir" bash tool/reads.sh list job refused > "$dir/said" 2>&1) || { echo "reads.sh: a list whose watch was refused a folder did not exit 0" >&2; fails=$((fails + 1)); }
+    grep -q ' odd=0 watch=lost$' "$out" 2> /dev/null || { echo "reads.sh: with a watch refused a folder the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
+    grep -q '^::warning title=reads.sh::the watch was lost (no watch on left: ' "$dir/said" || { echo "reads.sh: a watch refused a folder did not say so: $(grep -m 1 'title=reads.sh' "$dir/said")" >&2; fails=$((fails + 1)); }
+    # A watch still there and saying nothing when its list asks is lost, and said to be unheard, not ended.
+    fresh
+    out="$dir/reads/job.silent.txt"
+    (cd "$dir/work" && bash tool/reads.sh mark --watch > /dev/null 2>&1 && v=$(cat .git/ob1-reads/watch.pid) && kill -STOP "$v" \
+      && READS_WATCH_WAIT=5 RUNNER_TEMP="$dir" bash tool/reads.sh list job silent > "$dir/said" 2>&1; rc=$?; kill -CONT "$v" 2> /dev/null; exit "$rc") \
+      || { echo "reads.sh: a list whose watch said nothing did not exit 0" >&2; fails=$((fails + 1)); }
+    grep -q ' odd=0 watch=lost$' "$out" 2> /dev/null || { echo "reads.sh: with a watch that said nothing the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
+    grep -q '^::warning title=reads.sh::the watch was lost (not heard from again in 0.5 s)' "$dir/said" || { echo "reads.sh: a watch that said nothing was not called unheard: $(grep -m 1 'title=reads.sh' "$dir/said")" >&2; fails=$((fails + 1)); }
+    # A tracked folder that is another folder by the job's end, here one holding the same file by a second link,
+    # so with its old access time: the watch stayed with the first, and every tracked file under it is taken as opened.
+    fresh
+    out="$dir/reads/job.swapped.txt"
+    (cd "$dir/work" && bash tool/reads.sh mark --watch > /dev/null 2>&1 && mkdir swap && ln walked/c.txt swap/c.txt && rm -rf walked && mv swap walked \
+      && : < walked/c.txt && RUNNER_TEMP="$dir" bash tool/reads.sh list job swapped > "$dir/said" 2>&1) || { echo "reads.sh: a list after a folder was swapped for another did not exit 0" >&2; fails=$((fails + 1)); }
+    grep -q ' odd=0 watch=ok$' "$out" 2> /dev/null || { echo "reads.sh: after a folder was swapped for another the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
+    has "$(printf 'f\twalked/c.txt')" "a file opened in a folder swapped for another under the watch"
+    has "$(printf 'd\twalked/')" "a folder swapped for another under the watch"
     # A marker without --watch over a live watch is of a job that does not watch: the watch ends itself, and the
     # list's header names none.
     fresh
@@ -596,6 +695,19 @@ self_check() {
     grep -q ' odd=0 watch=ok$' "$out" 2> /dev/null || { echo "reads.sh: after two watched marks the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
     has "$(printf 'f\ttop.txt')" "a file read a second time, under the second of two watches"
     if grep -v -E '^(::warning|reads\.sh: |  )' "$dir/said" | grep . > /dev/null; then echo "reads.sh: the list after two watched marks said more than its lines: $(grep -v -E '^(::warning|reads\.sh: |  )' "$dir/said" | head -1)" >&2; fails=$((fails + 1)); fi
+  fi
+  # A list whose paths git could not name, here by a git that fails to list the files: broken, empty and not
+  # short, and exit 0. A list short of rows it should hold is the one list worse than none.
+  fresh
+  out="$dir/reads/job.broken.txt"
+  mkdir -p "$dir/stub2" && printf '#!/bin/sh\ncase " $* " in *" ls-files -z "*) exit 1 ;; esac\nexec "%s" "$@"\n' "$(command -v git)" > "$dir/stub2/git" && chmod +x "$dir/stub2/git"
+  (cd "$dir/work" && bash tool/reads.sh mark > /dev/null 2>&1 && cat top.txt > /dev/null && PATH="$dir/stub2:$PATH" RUNNER_TEMP="$dir" bash tool/reads.sh list job broken > "$dir/said" 2>&1) \
+    || { echo "reads.sh: a list whose paths git could not name did not exit 0" >&2; fails=$((fails + 1)); }
+  if grep -q 'sight=blind' "$out" 2> /dev/null; then :
+  else
+    grep -q '^# reads v1 job=job cell=broken commit=[0-9a-f]\{40\} status=- sight=broken files=0 dirs=0 gone=0 odd=0$' "$out" 2> /dev/null || { echo "reads.sh: with paths git could not name the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
+    [ "$(wc -l < "$out" 2> /dev/null | tr -d ' ')" = 1 ] || { echo "reads.sh: a broken list holds rows" >&2; fails=$((fails + 1)); }
+    grep -q '^::warning title=reads.sh::a command that names the paths or writes the rows failed' "$dir/said" || { echo "reads.sh: a broken list gave no warning" >&2; fails=$((fails + 1)); }
   fi
   # mark takes --watch and nothing else.
   if (cd "$dir/work" && bash tool/reads.sh mark --wach) > /dev/null 2>&1; then echo "reads.sh: mark took a word that is not --watch" >&2; fails=$((fails + 1)); fi
