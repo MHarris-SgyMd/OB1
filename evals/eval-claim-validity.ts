@@ -109,7 +109,7 @@ export type ItemLine = {
 export type ReadLine = { kind: "read"; id: string; answer: { id: string; found: boolean; validity?: { state: string }; review?: { state: string }; freshness?: { state: string; kinds: { kind: string; state: string }[] } } | null };
 type Line = PopLine | ItemLine | ReadLine;
 
-/** The snapshot's lines split by kind, and what is wrong with them: an id twice, an item or read line outside the population, an item without its read. */
+/** The snapshot's lines split by kind, and what is wrong with them: an id twice, an item or read line outside the population, an item without its read, a failed read or one answering for another item, and a stratum off the list or off its population line. */
 export function splitLines(lines: readonly Line[]): { pop: PopLine[]; items: ItemLine[]; reads: Map<string, ReadLine>; problems: string[] } {
   const pop = lines.filter((l): l is PopLine => l.kind === "population");
   const items = lines.filter((l): l is ItemLine => l.kind === "item");
@@ -136,7 +136,7 @@ export function splitLines(lines: readonly Line[]): { pop: PopLine[]; items: Ite
   return { pop, items, reads, problems };
 }
 
-/** The draw's ids for a mode, re-drawn from the population: the pilot's, or the main draw's in sheet order. */
+/** The draw's ids for a mode, re-drawn from the population: pilot 1's, pilot 2's or the main draw's, in sheet order. */
 export function drawnIds(pop: readonly PopLine[], mode: Mode): string[] {
   const d = drawSample(pop, "salt" in mode ? mode.salt : DRAW.pilotSalt);
   return "salt" in mode ? d.main.map((m) => m.id) : mode.pilot === 1 ? d.pilot : d.pilot2;
@@ -171,9 +171,9 @@ export const day = (at: string) => {
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 };
 const n = (x: number) => x.toLocaleString("en-US");
-/** A line a sheet prints as its own structure: an item head, a section rule, a view line, another text's head. */
+/** A line a sheet prints as its own structure: an item head, the item's written line, a section rule, a view line, another text's head, the sheet's head. */
 const MARKER = /^(=== item \d{3} · |--- |\[\d+\] written |written \d{4}-|# SMD-3887|entities: |metadata: type |subjects: )/;
-/** A text as a sheet shows it: CRLF as LF, any line that reads as the page's own structure indented, so it is not (review pass 6). */
+/** A text as a sheet shows it: CRLF and a bare CR as LF, any line that reads as the page's own structure indented, so it is not (review passes 6 and 9). */
 export const body = (t: string) => t.split(/\r\n|\r|\n/).map((l) => (MARKER.test(l) ? ` ${l}` : l)).join("\n");
 /** A view's value as a rater reads it: a string as it is, anything else as JSON, never "[object Object]" (review pass 4). */
 export const shown = (x: unknown): string => (typeof x === "string" ? x : JSON.stringify(x) ?? String(x)).replace(/\s*[\r\n]+\s*/g, " ");
@@ -320,6 +320,8 @@ const toIdx = (axis: Axis, v: string | null) => (v === null ? -1 : (TRUTH[axis] 
 const fromIdx = (axis: Axis, i: number) => (i < 0 ? null : (TRUTH[axis][i] ?? null));
 const labelsTo = (l: Labels | null) => (l === null ? null : AXES.map((x) => toIdx(x, l[x])));
 const labelsFrom = (xs: number[] | null): Labels | null => (xs === null ? null : { validity: fromIdx("validity", xs[0]), review: fromIdx("review", xs[1]), freshness: fromIdx("freshness", xs[2]) });
+/** The registration a fixture was frozen at, as the hex hash its digits spell. */
+const registrationOf = (f: Fixture) => f.registration.map((d) => d.toString(16)).join("");
 
 /** Adjudication to and from its fixture form. */
 export const adjTo = (a: Adjudication): number[] => [CAUSES.indexOf(a.cause), a.cause === "rule" ? (a.row ?? 0) : a.cause === "read" ? (a.fixed ? 1 : 0) : 0];
@@ -332,7 +334,7 @@ export const adjFrom = (xs: number[]): Adjudication | null => {
 /** One frozen item, read back. */
 export type FrozenItem = { id: string; stratum: Stratum; read: { [A in Axis]: string }; a1: Labels; a2: Labels; m: Labels | null; s: Labels | null };
 
-/** The items of a fixture, and what is wrong with it: an id in two strata or none, an index off its list, a subset id outside the draw. */
+/** The items of a fixture, and what is wrong with it: a top-level list missing, an id in two strata or none, a stratum id with no item, a read or an agent's labels missing, an index off its list, a subset or adjudicated id that is no item, an adjudication that is no cause. */
 export function fromFixture(f: Fixture): { items: FrozenItem[]; adjudicated: Map<string, Partial<Record<Axis, Adjudication>>>; problems: string[] } {
   const problems: string[] = [], items: FrozenItem[] = [];
   // A fixture missing a top-level list is named, not thrown on (review pass 7).
@@ -347,7 +349,7 @@ export function fromFixture(f: Fixture): { items: FrozenItem[]; adjudicated: Map
   for (const [id, it] of Object.entries(f.items)) {
     const stratum = stratumOf.get(id);
     if (!stratum) { problems.push(`${id} is in no stratum`); continue; }
-    const bad = (xs: number[] | null, lists: readonly (readonly string[])[]) => xs !== null && (xs.length !== 3 || xs.some((v, k) => !Number.isInteger(v) || v < -1 || v >= lists[k].length));
+    const bad = (xs: number[] | null, allowed: readonly (readonly string[])[]) => xs !== null && (xs.length !== 3 || xs.some((v, k) => !Number.isInteger(v) || v < -1 || v >= allowed[k].length));
     const truthLists = AXES.map((x) => TRUTH[x]), readLists = AXES.map((x) => READ_STATES[x]);
     if (!Array.isArray(it.read) || !Array.isArray(it.a1) || !Array.isArray(it.a2)) { problems.push(`${id}: a read or an agent's labels missing`); continue; }
     if (bad(it.read, readLists) || it.read.includes(-1)) { problems.push(`${id}: a read state off its list`); continue; }
@@ -434,7 +436,7 @@ export function reportLines(f: Fixture, current: string = registrationHash(), pi
     }
     return [...by].map(([c, m]) => `${c} ${m}`).join(", ") || "none";
   };
-  const registered = f.registration.map((d) => d.toString(16)).join("");
+  const registered = registrationOf(f);
   const atPin = pinned !== null && registered === pinned && current === pinned;
   const pop = STRATA.map((st) => `${st} ${f.population[st]}`).join(", ");
   return [
@@ -514,7 +516,7 @@ export function mainSalt(mode: Mode): string {
   return mode.salt;
 }
 
-/** Refuse a step that reads the registration once it is not the pinned one (the main draw, the freeze). The pilot runs before the pin. */
+/** Refuse a main-draw step unless a registration is pinned and the rules file is at it (the main SQL and sheets, the splits, the freeze, the adjudication). The pilots run before the pin. */
 function refuseUnpinned(step: string): void {
   if (REGISTERED === null) throw new Error(`the registration is not pinned yet: ${step} only once it is (after the pilot)`);
   if (registrationHash() !== REGISTERED) throw new Error(`the registration is ${registrationHash()}, not the pinned ${REGISTERED}: ${step} only at the pinned registration`);
@@ -554,8 +556,8 @@ function sheets(path: string, out: string, mode: Mode): void {
   const dir = dirname(outsideRepo(join(out, "sheet-a.md"), "the sheets' directory"));
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const { pop, items } = snapshot(path, mode);
-  const short = drawSample(pop, "salt" in mode ? mode.salt : DRAW.pilotSalt).short;
-  if ("salt" in mode && short.length) console.log(`short strata, taken whole: ${short.join("; ")}`);
+  const d = drawSample(pop, "salt" in mode ? mode.salt : DRAW.pilotSalt);
+  if ("salt" in mode && d.short.length) console.log(`short strata, taken whole: ${d.short.join("; ")}`);
   console.log(`population ${pop.length}, by stratum and writer:`);
   for (const l of makeupLines(pop)) console.log(l);
   const write = (name: string, text: string) => writePrivate(join(dir, name), text, args.includes("--replace"));
@@ -565,7 +567,7 @@ function sheets(path: string, out: string, mode: Mode): void {
     write(`replies-${part.toLowerCase()}.txt`, r.replies);
   }
   if ("salt" in mode) {
-    const sub = new Set(drawSample(pop, mode.salt).subset), mine = items.filter((i) => sub.has(i.id));
+    const sub = new Set(d.subset), mine = items.filter((i) => sub.has(i.id));
     for (const part of ["A", "B"] as const) {
       const r = renderPart(part, mine);
       write(`maintainer-sheet-${part.toLowerCase()}.md`, r.sheet);
@@ -708,14 +710,15 @@ function fixtureAtPin(): Fixture {
   // The fixture is sound before its registration is read, so a malformed one is named, not thrown on (review pass 9).
   const sound = fromFixture(f).problems;
   if (sound.length) throw new Error(`the fixture is not sound:\n  ${sound.join("\n  ")}`);
-  const at = f.registration.map((d) => d.toString(16)).join("");
+  const at = registrationOf(f);
   if (at !== REGISTERED) throw new Error(`the fixture was frozen at registration ${at}, not the pinned ${REGISTERED}`);
   return f;
 }
 
 /**
  * Adjudications merged into a fixture, axis by axis: an earlier file's cause on another axis of the same item stays.
- * Refuses, naming each, an id that is no item and an axis the read does not miss on that item.
+ * Refuses, naming each, an id that is no item, an axis the read does not miss on that item, a rule row the read does
+ * not follow (READ_ROWS), and a change to a cause already recorded unless `replace`.
  */
 export function applyAdjudications(f: Fixture, per: ReadonlyMap<string, Partial<Record<Axis, Adjudication>>>, replace = false): { fixture: Fixture; problems: string[] } {
   const problems: string[] = [];
@@ -742,7 +745,6 @@ function selfCheck(): void {
   const { assert, report } = createAssert();
   const id = (k: number) => `10000000-0000-4000-8000-${String(k).padStart(12, "0")}`;
   const salt = "20000000-0000-4000-8000-000000000001";
-  let threw = false;
   const throws = (f: () => unknown) => { try { f(); return false; } catch { return true; } };
 
   // The registration.
@@ -783,7 +785,7 @@ function selfCheck(): void {
 
   // The draw.
   const strata: Stratum[] = ["pointer", "proposal", "neither"];
-  const pop: PopLine[] = Array.from({ length: 600 }, (_, i) => ({ kind: "population", id: id(i), stratum: strata[i % 3 === 0 ? 0 : i % 3 === 1 ? 1 : 2], writer: i % 2 ? "linear" : "claude-code" }));
+  const pop: PopLine[] = Array.from({ length: 600 }, (_, i) => ({ kind: "population", id: id(i), stratum: strata[i % 3], writer: i % 2 ? "linear" : "claude-code" }));
   const d1 = drawSample(pop, salt), d2 = drawSample([...pop].reverse(), salt);
   assert(d1.pilot.length === 10 && d1.main.length === 120 && d1.subset.length === 20 && d1.short.length === 0, "the draw takes a pilot of 10, 40 a stratum and a subset of 20");
   assert(JSON.stringify(d1) === JSON.stringify(d2), "the draw does not depend on the population's order");
@@ -1054,8 +1056,7 @@ function selfCheck(): void {
   const otherRepo = mkdtempSync(join(tmpdir(), "ob1-3887-other-repo-"));
   try {
     mkdirSync(join(otherRepo, ".git"));
-    threw = throws(() => outsideRepo(join(otherRepo, "deep", "sheet.md"), "the sheet"));
-    assert(threw, "a private file inside another git work tree is refused");
+    assert(throws(() => outsideRepo(join(otherRepo, "deep", "sheet.md"), "the sheet")), "a private file inside another git work tree is refused");
   } finally {
     rmSync(otherRepo, { recursive: true, force: true });
   }
@@ -1087,9 +1088,9 @@ function selfCheck(): void {
   if (existsSync(FIXTURE)) {
     const f = JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture;
     assert(fromFixture(f).problems.length === 0, "the committed fixture is sound");
-    assert(Array.isArray(f.registration) && f.registration.map((d) => d.toString(16)).join("") === REGISTERED, "the committed fixture was frozen at the pinned registration");
+    assert(Array.isArray(f.registration) && registrationOf(f) === REGISTERED, "the committed fixture was frozen at the pinned registration");
     // The figures evals/README.md and changes/smd-3887.md publish, pinned: code outside the hash that scores the fixture
-    // (readStates, goldFor, the committed line) cannot move them unseen (review pass 5).
+    // (fromFixture, goldFor, the committed line) cannot move them unseen (review pass 5).
     const published = reportLines(f).join("\n");
     assert(["validity  agrees on 88 of 120 scored (weighted 0.789); 32 misses: record 28, rule (row 2) 4",
       "on the reads that commit to a state: 86 of 118 (weighted 0.786)",
@@ -1116,8 +1117,9 @@ async function main(): Promise<void> {
   const sheetsPath = flag("sheets");
   if (sheetsPath) return sheets(sheetsPath, flag("out") ?? (() => { throw new Error("give --out <dir>"); })(), mode());
   if (args.includes("--kappa")) {
-    const [path, a1, b1, a2, b2] = after("kappa");
-    if (after("kappa").length !== 5) throw new Error("give --kappa <draw.jsonl> <a-1> <b-1> <a-2> <b-2>, exactly five paths");
+    const paths = after("kappa");
+    if (paths.length !== 5) throw new Error("give --kappa <draw.jsonl> <a-1> <b-1> <a-2> <b-2>, exactly five paths");
+    const [path, a1, b1, a2, b2] = paths;
     const { ids } = snapshot(path, mode());
     for (const l of kappaLines(ids, rater(a1, b1, ids), rater(a2, b2, ids))) console.log(l);
     return;

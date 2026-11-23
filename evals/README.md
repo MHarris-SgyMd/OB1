@@ -5072,7 +5072,7 @@ bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot 1 [--replace]
 bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> --pilot 1   # two raters' κ per axis, each disagreement
 bun eval-claim-validity.ts --splits $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out $D/splits.txt [--replace]
 bun eval-claim-validity.ts --freeze $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [$D/splits.txt] --salt <uuid> --note "…" [--replace]
-bun eval-claim-validity.ts --adjudicate $D/adjudication.txt   # each miss's cause, into the fixture
+bun eval-claim-validity.ts --adjudicate $D/adjudication.txt [--replace]   # each miss's cause, into the fixture
 bun eval-claim-validity.ts                              # the report and the verdict, from the fixture
 ```
 
@@ -5226,7 +5226,7 @@ The rule divergences:
   - the private-file guard follows a symlink before looking for a work tree.
 - **Declined:** the branch is `michaelharris/…`, not the `contrib/<github-username>/…` that CLAUDE.md asks of contributions. That is the maintainer's own convention for this ticket's PRs.
 - **Three pinned limits now enforced by the runner,** after review pass 6 found them again and the maintainer asked to fix the findings. The registered section is unchanged, since a change there would void this run's verdict, and this run meets each stricter rule:
-  - **Rows:** `--adjudicate` refuses a rule divergence naming a row the read does not follow. It takes only rows 1 to 7 and 9 to 11 (`READ_ROWS`), where the registered verdict takes any row from 1 to 13. This run's name rows 2 and 6.
+  - **Rows:** `--adjudicate` refuses a rule divergence naming a row the read does not follow. It takes only rows 1 to 7 and 9 to 11 (`READ_ROWS`), where the registered verdict takes any row from 1 to 13. This run's divergences name rows 2 and 6.
   - **The maintainer's check:** an axis the check measured on no item fails it (`checkWithEvidence`), in the gold, the freeze and the splits template alike. This run measured 20 items on every axis.
   - **The weighted figure:** when a stratum has nothing scored, the report says which strata the figure covers. Every stratum has scored items in this run.
 
