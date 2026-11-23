@@ -1008,8 +1008,8 @@ jobs:
 
       # claim-report.ts (SMD-4540 PR 2): how long work claims run, read from a
       # list_claims dump or work_claims — each ending read from its release, the
-      # merged PR from the reason, the quartiles, the tables and both inputs'
-      # shapes, on fixtures. No database.
+      # merged PRs from the reason, the quartiles, the tables, --now, and both
+      # inputs' shapes and pages, on fixtures. No database.
       - name: Claim report rules
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
