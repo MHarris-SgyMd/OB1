@@ -2839,9 +2839,9 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
 console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the rules read the ticket it is filed under, else a session summary's header ticket its prompts name; the model's question is the subject's own, pinned by hash; an answer is read into 111's key shapes, a ticket first and one PR alone; a subject is current under its rule's key or the current question");
 {
   // The key's shapes, as 111's subject_key_valid reads them.
-  for (const k of ["ticket:SMD-1", "ticket:A-1", "pr:502", "pr:0", "version:v1.9", "version:v1.9.0.1", "phrase:dolphin sleep", "phrase:ob1 fork: inventory — 2 & more", "phrase:σίσυφος", `phrase:${"a".repeat(200)}`])
+  for (const k of ["ticket:SMD-1", "ticket:A-1", "pr:502", "pr:0", "version:v1.9", "version:v1.9.0.1", "pr:mharris-sgymd/ob1#12", "pr:a/.x#1", "version:o-1/r_2.x@v1.4", "phrase:dolphin sleep", "phrase:ob1 fork: inventory — 2 & more", "phrase:σίσυφος", `phrase:${"a".repeat(200)}`])
     assert(subjectKeyValid(k), `a key: ${k.slice(0, 40)}`);
-  for (const k of ["ticket:smd-1", "ticket:SMD-", "pr:", "pr:1234567890", "version:1.9.0", "version:v1", "version:v1.2.3.4.5", "phrase:", "phrase:Dolphin", "phrase: x", "phrase:x  y", "phrase:x ", "phrase:a\nb", `phrase:${"a".repeat(201)}`, "topic:x", "SMD-1"])
+  for (const k of ["ticket:smd-1", "ticket:SMD-", "pr:", "pr:1234567890", "version:1.9.0", "version:v1", "version:v1.2.3.4.5", "pr:O/r#1", "pr:o/r#", "pr:-o/r#1", "pr:o-/r#1", `pr:${"o".repeat(40)}/r#1`, `pr:o/${"r".repeat(101)}#1`, "pr:o/..#1", "pr:o/.#1", "version:o/..@v1.2", "version:o/r@1.2", "version:o/r#v1.2", "phrase:", "phrase:Dolphin", "phrase: x", "phrase:x  y", "phrase:x ", "phrase:a\nb", `phrase:${"a".repeat(201)}`, "topic:x", "SMD-1"])
     assert(!subjectKeyValid(k), `not a key: ${JSON.stringify(k.slice(0, 40))}`);
 
   // An answer read into a key: a ticket first, then a PR, then a release, else a phrase.

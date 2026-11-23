@@ -77,13 +77,25 @@ const CONNECTIVES = /\b(?:and|or|plus|with|of|for|the|a|an|to|in|on|its)\b/giu;
 /** The most code points a phrase keeps: 111's 207 less `phrase:`. */
 const PHRASE_MAX = 200;
 
-/** 111's subject_key_valid, for the shapes this module writes: a key it refuses is never sent. */
+/** A repository as a scoped key names it, `<owner>/<repo>`, lowercase, as GitHub names them (152's ob1:subject-key-shapes). */
+const KEY_REPO = "[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9._-]{1,100}";
+const SCOPED_PR = new RegExp(`^pr:${KEY_REPO}#[0-9]{1,9}$`);
+const SCOPED_VERSION = new RegExp(`^version:${KEY_REPO}@v[0-9]+(\\.[0-9]+){1,3}$`);
+
+/**
+ * 152's subject_key_valid (111's, with a pull request's and a version's key scoped to its repository beside the bare
+ * ones, the repository not `.` or `..`): a key it refuses is never sent, and a scoped key the setter wrote is one the
+ * thread read takes (SMD-3887).
+ */
 export function subjectKeyValid(key: string): boolean {
   return [...key].length <= 207 && (
     /^ticket:[A-Z][A-Z0-9]*-[0-9]+$/.test(key) ||
     /^pr:[0-9]{1,9}$/.test(key) ||
+    SCOPED_PR.test(key) ||
     /^version:v[0-9]+(\.[0-9]+){1,3}$/.test(key) ||
-    /^phrase:[^\s\p{Lu}\p{Lt}]+( [^\s\p{Lu}\p{Lt}]+)*$/u.test(key));
+    SCOPED_VERSION.test(key) ||
+    /^phrase:[^\s\p{Lu}\p{Lt}]+( [^\s\p{Lu}\p{Lt}]+)*$/u.test(key)) &&
+    !/^(pr|version):[^/]*\/\.\.?[#@]/.test(key);
 }
 
 /**

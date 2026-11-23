@@ -803,7 +803,7 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]);
   // 152 redefines 111's subject_key_valid on its own signature and adds the
   // operator's subject-key repository setting and its setter, refusing by
-  // name without 046, 061, 111, 115, 120 or 130's index ([20co]) —
+  // name without 016, 046, 061, 111, 113, 115, 120 or 130's index ([20co]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
@@ -7629,10 +7629,12 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
     // Without any one thing it needs, the file is refused by name and makes nothing.
     const apply152 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 }).then(() => "applied", (e: Error) => e.message);
     const needs: [string, string, string][] = [
+      ["content_fingerprint_of", "text", "016 (content_fingerprint_of)"],
       ["ob1_registry_kind", "uuid, text", "046 (ob1_registry_kind)"],
       ["ob1_actor_agent_id", "", "061 (ob1_actor_agent_id)"],
       ["subject_key_valid", "text", "111 (subject_key_valid)"],
       ["ob1_record_derivation", "text, uuid, uuid[], text[], text, jsonb, uuid", "111 (ob1_record_derivation)"],
+      ["ob1_filed_ticket", "jsonb", "113 (ob1_filed_ticket)"],
       ["ob1_work_claim_actor", "jsonb, text", "115 (ob1_work_claim_actor)"],
       ["ob1_thread_relink_subject", "", "120 (ob1_thread_relink_subject)"],
     ];
@@ -7648,7 +7650,7 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
     await sql.unsafe(`ALTER INDEX thought_facets_subject_key_uniq_away RENAME TO thought_facets_subject_key_uniq`);
     if (!noIndex.startsWith(`migration ${NUM} needs 130 (thought_facets_subject_key_uniq`) || (await made())) unrefused.push(`the index: ${noIndex.slice(0, 80)}`);
     assert(unrefused.length === 0 && !(await made()) && (await keys()) === keysBefore,
-      `without any one of the six functions or 130's index it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the index tried`})`);
+      `without any one of the eight functions or 130's index it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the index tried`})`);
 
     await applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
     const scopedOk = (await sql`SELECT subject_key_valid('pr:mharris-sgymd/ob1#12') AS a, subject_key_valid('version:o/r@v1.4') AS b, subject_key_valid('pr:12') AS c`)[0] as { a: boolean; b: boolean; c: boolean };

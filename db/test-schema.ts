@@ -97,6 +97,7 @@ import {
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, NOT_SEARCH_KINDS, queryLabels, renderReport, SEARCH_KINDS, SEARCH_KINDS_LITERAL, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { refsOf, transitiveDemotion } from "../evals/transitive-freshness.ts";
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
+import { subjectKeyValid } from "../server-portable/subject.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName, TRIM_RE } from "../server-portable/entity-gate.ts";
 import { linearAdapter, SAMPLE_ISSUE } from "./ingest-linear.ts";
@@ -231,7 +232,7 @@ function definedIn(file: string): string[] {
  * 063 still last defines, record_supersession_proposal, is restored by name
  * wherever a section needs it.
  */
-const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"] };
+const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["130"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -18884,8 +18885,11 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
 
   // The shape: 130 the last definer of its six functions; one index per thought and key, 111's gone; statistics on a
   // facet's key; the sentinels; SECURITY INVOKER throughout; the comments.
+  // record_thought_subjects's last definer is the subject-repo file, which carries 130's body with a bare key scoped
+  // once a repository is set ([137]); by name.
   for (const fn of ["ob1_thread_lock_keys", "record_thought_subjects", "record_thought_subject", "close_thought_subjects", "close_thought_subject", "ob1_thread_relink_subject"]) {
-    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, ${file} its last definer (${lastDefinerOf(fn)})`);
+    const by = fn === "record_thought_subjects" ? (files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql") : file;
+    assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === by, `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const [idx] = await q<{ uniq: string | null; old: string | null }>(`SELECT
       (SELECT indexdef FROM pg_indexes WHERE indexname = 'thought_facets_subject_key_uniq') AS uniq,
@@ -19139,6 +19143,9 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   await reapply(file.slice(0, 4));
   const after = await census();
   assert(JSON.stringify(after) === JSON.stringify(before) && after.fns === 6 && after.old === 0, `130 applied again moves nothing: ${JSON.stringify(after)}`);
+  // 130 re-applied put its own record_thought_subjects back; the shipped one is the subject-repo file's, which scopes a
+  // bare key once a repository is set ([137]).
+  await restoreShipped("record_thought_subjects");
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
 }
@@ -23704,6 +23711,9 @@ console.log("\n[137] Migration 152: a pr: or version: subject key names its repo
     const goodOk = await Promise.all(good.map(valid)), badOk = await Promise.all(bad.map(valid));
     assert(goodOk.every(Boolean), `subject_key_valid admits 111's shapes and a key scoped to its repository (${good.filter((_, i) => !goodOk[i]).join(" | ") || "all"})`);
     assert(badOk.every((x) => !x), `…and refuses capitals, an empty part, an edge hyphen, an owner past 39 or a repository past 100, a bad number or version, a third path part, . or .., the wrong separator (${bad.filter((_, i) => badOk[i]).join(" | ") || "none admitted"})`);
+    // subject.ts's subjectKeyValid mirrors it (the sentinel's contract): the thread read and the extractor take the keys the setter writes.
+    const mirrorOff = [...good, ...bad].filter((k, i) => subjectKeyValid(k) !== (i < good.length));
+    assert(mirrorOff.length === 0, `subject.ts's subjectKeyValid agrees with subject_key_valid on every key above (${mirrorOff.join(" | ") || "all agree"})`);
 
     // The refusal at the shape's edges, and a bare key scoped.
     const refusal = async (r: string | null) => (await one<{ r: string | null }>(`SELECT ob1_subject_repo_refusal($1) AS r`, [r])).r;
@@ -23785,16 +23795,58 @@ console.log("\n[137] Migration 152: a pr: or version: subject key names its repo
     assert(threads.bare === "" && threads.scoped === before.pr12 && threads.other === before.other,
       `the threads re-link at the commit: the bare key's edges close, the scoped key's thread holds the same members in the same order, another repository's unmoved (${JSON.stringify(threads)})`);
 
-    // The one standing: nothing written. Another repository: keys scoped to the first stay, nothing to map. A new bare key, then the first again: it alone is mapped.
+    // The door scopes once a repository stands (review pass 1): a pass finding the bare key again keeps the scoped one,
+    // and a new thought's bare keys are written scoped, joining the thread.
+    const again = await subjects(t1, ["pr:12"]);
+    const t8 = await thought("t8");
+    await subjects(t8, ["pr:12", "version:v1.2"]);
+    assert(again.ok === true && again.action === "kept" && (await keysOf(t1)) === "pr:o/r#12" && (await keysOf(t8)) === "pr:o/r#12,version:o/r@v1.2"
+           && (await edges("pr:o/r#12")) === "t2→t1 t6→t2 t8→t6" && (await edges("pr:12")) === "",
+      `with a repository set the door writes a bare key scoped: a pass finding pr:12 again keeps the mapped key, and a new thought joins the scoped thread, none bare (${again.action}; ${await keysOf(t8)}; ${await edges("pr:o/r#12")})`);
+
+    // The locks: the door takes the repository lock shared, the setter exclusive, so neither interleaves with the other.
+    type Tx = { query: <T>(s: string, p?: unknown[]) => Promise<{ rows: T[] }> };
+    // No pid filter: PGlite is one backend, and its pg_locks gives pid null against a pg_backend_pid() of 0.
+    const repoLock = async (tx: Tx) => (await tx.query<{ m: string }>(`SELECT string_agg(l.mode, ',') AS m FROM pg_locks l
+        WHERE l.locktype = 'advisory' AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended('ob1:subject-repo', 0)`)).rows[0].m;
+    let doorMode: string | null = null, setterMode: string | null = null;
+    const t2fp = await fp(t2);  // read before: PGlite's one connection waits on the transaction for a read through db inside it
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT record_thought_subjects($1::uuid, '{pr:12}'::text[], 'model', $2, NULL::uuid, $3, NULL::jsonb)`, [t2, K, t2fp]);
+      doorMode = await repoLock(tx);
+    });
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT set_subject_repo('o/r', $1::jsonb)`, [JSON.stringify(OP)]);
+      setterMode = await repoLock(tx);
+    });
+    assert(doorMode === "ShareLock" && setterMode === "ExclusiveLock",
+      `record_thought_subjects holds the ob1:subject-repo lock shared, set_subject_repo exclusive (${doorMode}; ${setterMode})`);
+
+    // The one standing: nothing written, in the changed reply's shape. Another repository: keys scoped to the first stay, nothing
+    // to map, and a bare key written under it is scoped to it. Cleared, a bare key is written bare; the first set again maps
+    // it, and a version too long once scoped stands bare, counted.
     const same = await setRepo("o/r", OP);
     const other = await setRepo("o3/x", OP);
     const t7 = await thought("t7");
     await subjects(t7, ["pr:99"]);
+    await setRepo(null, OP);
+    const t9 = await thought("t9"), t10 = await thought("t10");
+    const LONG = `version:v1.${"7".repeat(196)}`;  // 207 characters bare, 211 scoped to o/r
+    await subjects(t9, ["pr:98"]);
+    await subjects(t10, [LONG]);
     const back = await setRepo("o/r", OP);
-    assert(same.ok === true && same.changed === false && same.mapped === 0
+    const t11 = await thought("t11");
+    await subjects(t11, [LONG]);
+    assert(same.ok === true && same.changed === false && same.mapped === 0 && same.closed_alone === 0 && same.unscopable === 0 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(String(same.set_at))
            && other.changed === true && other.repo === "o3/x" && other.previous === "o/r" && other.mapped === 0 && (await keysOf(t1)) === "pr:o/r#12"
-           && back.changed === true && back.previous === "o3/x" && back.mapped === 1 && (await keysOf(t7)) === "pr:o/r#99",
-      `the repository standing writes nothing; another maps nothing scoped already, the first's keys staying; a bare key written since is mapped when one is set again (${same.changed}; ${other.mapped}; ${back.mapped})`);
+           && (await keysOf(t7)) === "pr:o3/x#99"
+           && back.changed === true && back.previous === null && back.mapped === 1 && back.unscopable === 1 && (await keysOf(t9)) === "pr:o/r#98" && (await keysOf(t10)) === LONG
+           && (await keysOf(t11)) === LONG && (await keysOf(t7)) === "pr:o3/x#99",
+      `the repository standing writes nothing, its reply in the changed one's shape; another maps nothing scoped already, and scopes a key written under it to itself; cleared, a bare key is written bare and mapped when one is set again, while a version too long once scoped stands bare, counted, in the setter and the door alike (${JSON.stringify(same).slice(0, 90)}; ${other.mapped}; ${JSON.stringify(back).slice(0, 120)})`);
+
+    // A clear is a NULL passed on purpose: a call naming the actor alone matches no function (review pass 1).
+    const actorOnly = await failure(`SELECT set_subject_repo(p_actor => $1::jsonb)`, [JSON.stringify(OP)]);
+    assert(/^42883 /.test(actorOnly) && (await repoNow()) === "o/r", `a call naming the actor alone is refused, the repository standing (${actorOnly.slice(0, 80)})`);
 
     // A clear: the setting ends, scoped keys stay, and there is no repository again.
     const clear = await setRepo(null, OP);

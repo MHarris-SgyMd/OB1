@@ -1094,8 +1094,8 @@ export function renderRelations(o: Outcome<RelationsResult>): Reply {
       : unknownRefusal(r), safeRelations);
 }
 
-/** A subject key a structured value may carry: a ticket's, a pull request's or a version's, each a shape with no sentence in it — a phrase key, the judge model's words, rides the text alone. */
-const SHAPED_KEY = /^(?:ticket:[A-Z][A-Z0-9]*-[0-9]+|pr:[0-9]{1,9}|version:v[0-9]+(?:\.[0-9]+){1,3})$/;
+/** A subject key a structured value may carry: a ticket's, a pull request's or a version's, bare or scoped to its repository (152, SMD-3887), each a shape with no sentence in it — a phrase key, the judge model's words, rides the text alone. */
+const SHAPED_KEY = /^(?:ticket:[A-Z][A-Z0-9]*-[0-9]+|pr:(?:[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9._-]{1,100}#)?[0-9]{1,9}|version:(?:[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9._-]{1,100}@)?v[0-9]+(?:\.[0-9]+){1,3})$/;
 /** thread (SMD-3306 PR 7a-2a): per thread its key (a shaped one), size, place, page bounds and cursor, each member's id, time, place, superseding thought and ticket, and its linked threads. */
 const safeThread: Safe<ThreadResult> = (v) => ({
   id: v.id,
