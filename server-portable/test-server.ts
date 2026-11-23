@@ -5791,7 +5791,7 @@ console.log("\n[24] update_thought's kept stamp keys: the patch against the stam
 
 console.log("\n[25] Each request a point on the request-duration histogram and a log record (SMD-1849 PR 2c), a fault's kind and code on its span and never its message, and each signal said by itself when it is not sent");
 {
-  const { beginRequest, cutOpenRequests, flushTelemetry, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, withToolSpan } = await import("./telemetry.ts");
+  const { beginRequest, cutOpenRequests, endListenStream, flushTelemetry, listenEndLine, openRequestCount, planTelemetry, requestLine, startTelemetry, stopTelemetry, useRequestLog, withToolSpan } = await import("./telemetry.ts");
   const { faultOf } = await import("./spans.ts");
   const { batchOptions, batchSizes, exportDeadlineFrom, exportTimeoutFrom, flushesResult, flushSignal, logDrops, metricTimes, partialBuckets, partialRejections, setUpTelemetry, watchExporter } = await import("./otel-setup.ts");
   const { ROOT_CONTEXT, metrics: metricsApi, trace: traceApi } = await import("@opentelemetry/api");
@@ -5880,6 +5880,65 @@ console.log("\n[25] Each request a point on the request-duration histogram and a
       `a key's refusal labels no tool; a refusal's 503 is labelled by its outcome, not its code (${JSON.stringify([keylessPoint?.attributes, hookPoint?.attributes])})`);
     assert(records.map((r) => r.severityNumber).join() === "9,17,13" && Math.abs(msOf(slowRecord?.hrTime) - msOf(slowSpan?.endTime)) < 30 && msOf(slowRecord?.hrTime) - msOf(slowSpan?.startTime) > 80,
       `each record's severity number (INFO 9, ERROR 17, WARN 13), its time its request's end (${records.map((r) => r.severityNumber).join()}; ${Math.round(msOf(slowRecord?.hrTime) - msOf(slowSpan?.endTime))} ms from the span's end)`);
+    // A listen stream's end (SMD-4459): a line of its own kind where request lines go, a point on a histogram of its
+    // own, and a log record of its own name. Each field is held to its rule, as a request's are, and nothing of it is
+    // a request's: no `outcome`, and no point on the request-duration histogram.
+    const TRACE = "ab".repeat(16);
+    const requestPointsNow = () => durationPoints(measured).reduce((n, pt) => n + pt.value.count, 0);
+    const requestRecordsNow = () => logged.getFinishedLogRecords().filter((r) => r.eventName === "ob1.request").length;
+    await flushTelemetry();
+    const [requestPointsBefore, requestRecordsBefore] = [requestPointsNow(), requestRecordsNow()];
+    const endLines: string[] = [];
+    const sinkBefore = useRequestLog((l) => endLines.push(l));
+    let endThrew = "";
+    // By the clock a record's time is taken from, so that each record's is held to the calls that made it.
+    const endsFrom = performance.timeOrigin + performance.now();
+    try {
+      endListenStream({ agent: "desk", end: "client", heldMs: 4_250.4, trace: TRACE });
+      endListenStream({ agent: "a\nb", end: "nonsense" as never, heldMs: -5, trace: "not-a-trace" });
+      endListenStream({ end: "stop", heldMs: 90_000 });
+      try {
+        // A name that is no string is `?`, a number's or a null's alike; a record that is null is left unsaid, with
+        // no line, no point and no log record, and nothing is thrown for any of them.
+        endListenStream({ agent: 7 as never, end: "client", heldMs: 1 });
+        endListenStream({ agent: null as never, end: "stop", heldMs: 2 });
+        endListenStream(null as never);
+        // A sink that throws loses the line and nothing else: nothing is thrown at a stream's end, and the point and the record still go.
+        useRequestLog(() => { throw new Error("the sink threw"); });
+        endListenStream({ agent: "desk", end: "server", heldMs: 2 });
+      } catch (e) {
+        endThrew = (e as Error).message;
+      }
+    } finally {
+      useRequestLog(sinkBefore);
+    }
+    const endsTo = performance.timeOrigin + performance.now();
+    const endsSaid = endLines.map((l) => JSON.parse(l) as Record<string, unknown>);
+    const endsWithoutTs = endsSaid.map((e) => { const { ts: _ts, ...rest } = e; return rest; });
+    assert(endsSaid.length === 5 && endsSaid.every((e) => typeof e.ts === "string" && Object.keys(e)[0] === "ts")
+      && endsWithoutTs.map((e) => JSON.stringify(e)).join(" ") === [
+        JSON.stringify({ door: "mcp", event: "listen_end", agent: "desk", end: "client", held_ms: 4250, trace: TRACE }),
+        JSON.stringify({ door: "mcp", event: "listen_end", agent: "a?b", end: "?", held_ms: 0 }),
+        JSON.stringify({ door: "mcp", event: "listen_end", end: "stop", held_ms: 90000 }),
+        JSON.stringify({ door: "mcp", event: "listen_end", agent: "?", end: "client", held_ms: 1 }),
+        JSON.stringify({ door: "mcp", event: "listen_end", agent: "?", end: "stop", held_ms: 2 }),
+      ].join(" ")
+      && listenEndLine({ agent: "desk", end: "stop", heldMs: 1 }, new Date(0)) === JSON.stringify({ ts: "1970-01-01T00:00:00.000Z", door: "mcp", event: "listen_end", agent: "desk", end: "stop", held_ms: 1 }),
+      `a listen stream's end, on its line: its door, \`listen_end\`, the caller's name, how it ended, the milliseconds held and its opening's trace id, each held to its rule (a name that is no string \`?\`, a number's or a null's), and no outcome, method or status; a record that is null has no line (${JSON.stringify(endsWithoutTs)})`);
+    await flushTelemetry();
+    const metricsNow = measured.getMetrics().at(-1)?.scopeMetrics.flatMap((s) => s.metrics) ?? [];
+    const heldHistograms = metricsNow.filter((m) => m.descriptor.name === "ob1.mcp.listen_stream.duration");
+    const heldPoints = heldHistograms.flatMap((m) => m.dataPoints as unknown[]) as { attributes: Record<string, unknown>; value: { count: number; sum: number; buckets: { boundaries: number[] } } }[];
+    const heldBy = (end: string) => heldPoints.find((p) => p.attributes["ob1.end"] === end);
+    assert(heldHistograms.length === 1 && heldHistograms[0].descriptor.unit === "s" && heldPoints.length === 4 && heldPoints.every((p) => Object.keys(p.attributes).join() === "ob1.end")
+      && heldBy("client")?.value.count === 2 && Math.abs((heldBy("client")?.value.sum ?? 0) - 4.251) < 1e-9 && heldBy("stop")?.value.count === 2 && Math.abs((heldBy("stop")?.value.sum ?? 0) - 90.002) < 1e-9 && heldBy("?")?.value.count === 1 && heldBy("?")?.value.sum === 0 && heldBy("server")?.value.count === 1
+      && heldBy("client")?.value.buckets.boundaries.join() === "1,5,15,60,300,900,3600,14400,43200,86400" && requestPointsBefore > 0 && requestPointsNow() === requestPointsBefore,
+      `…and each end one point on ob1.mcp.listen_stream.duration, in seconds from one to a day, labelled with how it ended and nothing else, none for a record that is null; none on the request-duration histogram, which counts the requests it did (${JSON.stringify(heldPoints.map((p) => [p.attributes, p.value.count, p.value.sum]))}; ${requestPointsBefore} request point(s) before, ${requestPointsNow()} after)`);
+    const endRecords = logged.getFinishedLogRecords().filter((r) => r.eventName === "ob1.listen_end");
+    assert(endThrew === "" && endRecords.length === 6 && endRecords.every((r) => r.severityText === "INFO" && !traceApi.isSpanContextValid(r.spanContext ?? { traceId: "", spanId: "", traceFlags: 0 }) && msOf(r.hrTime) >= endsFrom - 1 && msOf(r.hrTime) <= endsTo + 1)
+      && JSON.stringify(endRecords.slice(0, 5).map((r) => r.body)) === JSON.stringify(endsWithoutTs) && (endRecords[5].body as Record<string, unknown>).end === "server"
+      && requestRecordsBefore > 0 && requestRecordsNow() === requestRecordsBefore,
+      `…and one log record, ob1.listen_end at INFO, its time inside the calls that made it, the one whose line was lost too, its body the line's fields, under no span, and no request's record more; a sink that throws loses its line alone, a record that is null has none, and nothing is thrown (threw ${JSON.stringify(endThrew)}; ${JSON.stringify(endRecords.map((r) => [r.eventName, r.severityText, r.body, Math.round((msOf(r.hrTime) - endsFrom) * 100) / 100]))} ms into ${Math.round((endsTo - endsFrom) * 100) / 100})`);
 
     // A fault on its span: the throw's kind and code, never its message (the webhook's, review on SMD-2310).
     spans.reset();
