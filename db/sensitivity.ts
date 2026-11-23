@@ -144,11 +144,11 @@ export const SECRET_SHAPES: readonly (readonly [string, RegExp])[] = [
   // `{`, `<` or `$` (`"{{ db_pass_2 }}"`, `"<pw 1>"`), which db/sensitivity.ts's own password rule skips too. Review
   // pass 3: a bare reference (`process.env.X`, `os.environ[…]`, `getenv(…)`) stays a value, as before. Excluding it
   // left `password = process.env.X || "<it>"` with no finding, so refuse sent it whole, the model's excerpt carried it,
-  // and the brain read `PGPASSWORD=process.env.X` standard. A getter's call whose default is already blanked is no value,
-  // though, or the second scan would find the call once the first had blanked its default; a call with an empty or
-  // short default is a value, as before. The getter's receiver is dotted names of letters (`os.`, `process.`), so a
+  // and the brain read `PGPASSWORD=process.env.X` standard. A getter's call whose default is already blanked — a whole
+  // marker, the argument's last (review pass 4) — is no value, though, or the second scan would find the call once the
+  // first had blanked its default; a call with an empty or short default, or more after its marker, is a value, as before. The getter's receiver is dotted names of letters (`os.`, `process.`), so a
   // password glued onto the getter (`<it>getenv(`) is not taken for one.
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*)?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*["'`‘“«]?\[redacted:)(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»{<$][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*)?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*["'`‘“«]?\[redacted:[^\]\n]*\]["'`’”»]?\s*[,)])(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»{<$][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
   // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
   // their digests — told apart only by where they sit: a digest follows
   // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key

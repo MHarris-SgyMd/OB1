@@ -1337,6 +1337,11 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     ['I changed it to password = os.environ.get("DB_PASSWORD", "Kp7mWq2zR9") so it falls back locally', "Kp7mWq2zR9"],
     ["PASSWORD = os.getenv('DB_PASS', 'Zx8vBn3mQw') for the local run", "Zx8vBn3mQw"],
     ['set password="Kp7m Wq2z R9x" in the vault', "Wq2z R9x"],
+    // Review pass 4: a value that only begins with a keyword is a value (the lookahead needs the keyword's `:` or `=`),
+    // and `env.get` and `ENV.fetch` are stepped over as `os.environ.get` is.
+    ["the db line reads password: Password-2024! now", "Password-2024!"],
+    ['const password = Deno.env.get("DB_PW", "Qw3rTy9Uio") ?? "";', "Qw3rTy9Uio"],
+    ['password = ENV.fetch("DB_PW", "Mn4bVc8Xzl")', "Mn4bVc8Xzl"],
   ];
   const pwBlanked = pwShapes.map(([text, secret]) => {
     const inPrompt = redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]);
@@ -1345,8 +1350,10 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   });
   // Unquoted words with digits and a quote later on the line: the quoted branch applies only after an opening quote.
   const pwKept = ['the password: ab12 cd34 "x" later', 'password: Kp7m Wq2z "x"'].map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text.includes(text));
+  // A quoted value stops at its line's end: run on, it would be a block the episode is refused for (SMD-4543's).
+  pwKept.push(scanForSecrets('password="Kp7m Wq2z\nlater "x"', { every: true }).length === 0);
   assert(pwBlanked.every((b) => b.prompt && b.outcome) && pwKept.every(Boolean),
-    `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; unquoted short words before a later quote are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
+    `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; unquoted short words before a later quote, and a quoted value cut by its line's end, are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
   // Review pass 3: a bare reference stays a value, as main read it, so a line naming one with a fallback after it is
   // found and refused under refuse (an exclusion of references sent these whole, and the model's excerpt with them).
   const pwRefs = ['const password = process.env.DB_PASSWORD || "Kp7mWq2zR9";', 'password = os.environ.get("DB_PASSWORD") or "Kp7mWq2zR9"', 'PGPASSWORD = os.environ.get("PGPASS") or "Kp7mWq2zR9"', 'const POSTGRESPASSWORD = process.env.PG_PW ?? "Kp7mWq2zR9";']
@@ -1356,6 +1363,14 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const pwGlued = redactEpisode(segment([{ t: "prompt", text: 'password=hunter22os.getenv("PW", "Kp7mWq2zR9")' }, { t: "outcome", text: "ok" }]).episodes[0]).text;
   assert(pwRefs.every(Boolean) && !/hunter22/.test(pwGlued),
     `a bare reference with a fallback after it is found and refused under refuse, as before, and a password glued onto a getter is blanked (SMD-4542 review pass 3) (${JSON.stringify([pwRefs, pwGlued])})`);
+  // Review pass 4: the second scan passes a getter's blanked default, quoted or not, and only a whole marker ending the
+  // argument: one with more after it, or unclosed, is found, as main found the call (a text that already carried one).
+  const pwSecond = ['PASSWORD = getenv("PW", Kp7mWq2zR9x)', "password = os.environ.get('PW', 'Kp7mWq2zR9')"]
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; const c = cleanEpisode(ep, "redact"); return gateFindings(c, c.text).length; });
+  const pwMarked = ['PGPASSWORD=os.getenv("X", "[redacted:x]Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", "[redacted:pw Kp7mWq2zR9")']
+    .map((text) => scanForSecrets(text, { every: true }).length);
+  assert(pwSecond.every((n) => n === 0) && pwMarked.every((n) => n > 0),
+    `the second scan passes a getter's blanked default, quoted or not; a marker with more after it, or unclosed, does not hide the call (SMD-4542 review pass 4) (${JSON.stringify([pwSecond, pwMarked])})`);
   // Review pass 1 (secrets adversary): a password given as a `${VAR:-<it>}` default is blanked, as main blanked it (an
   // exclusion of `${` sent it); and quoted prose or a placeholder is read as main read it, blanked nowhere and refusing
   // nothing under refuse (the quoted branch had widened to them).
