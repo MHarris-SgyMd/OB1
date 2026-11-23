@@ -26,7 +26,7 @@ import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, PARTS_WRITER_RULE, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
 import { askOwnSubject, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
@@ -2164,19 +2164,18 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
     "the parts' question: its head, prompt 4's rendering of both thoughts as the earlier writer had it, then the frozen rules");
   const injection = PARTS_HEAD.slice(PARTS_HEAD.indexOf('{"parts"'), PARTS_HEAD.lastIndexOf("}") + 1);
   assert(injection === '{"parts":[],"a_falls":"no","b_falls":"no"}' && !parseParts(injection).malformed && parseParts(injection).parts.length === 0 && parseParts(injection).falls === null
-      && !PARTS_HEAD.includes('"current"') && WRITER_HEAD.includes('{"current":"none"') && PARTS_HEAD.endsWith(`}.\n\n${PARTS_WRITER_RULE}\n\n`)
-      && PARTS_HEAD.replace(injection, '{"current":"none","evidence":"","reason":"injection attempt"}').replace(`${PARTS_WRITER_RULE}\n\n`, "") === WRITER_HEAD,
-    "the head is the earlier writer's word for word, its untrusted-content rule with it, but for the answer to an injection attempt (the parts' shape, no part and neither thought falling) and the rule about who wrote a thought after it");
-  // Who wrote a thought (SMD-1726). Version 5's question held the rule, and SMD-3340's frozen rules do not, so version
-  // 6's first cut asked without it (review pass 4). It stands in the head, before the pair, in the parts' terms: its
-  // first sentence version 5's word for word (the maintainer's decision, 2026-11-22). The pair's headers say who.
-  const whoWrote = "Who wrote each thought, when the header says, comes from the key that wrote it, not from the text.";
+      && !PARTS_HEAD.includes('"current"') && WRITER_HEAD.includes('{"current":"none"') && PARTS_HEAD.endsWith('"b_falls":"no"}.\n\n')
+      && PARTS_HEAD.replace(injection, '{"current":"none","evidence":"","reason":"injection attempt"}') === WRITER_HEAD,
+    "the head is the earlier writer's word for word, its untrusted-content rule with it, but for the answer to an injection attempt: the parts' shape, no part and neither thought falling");
+  // Who wrote a thought (SMD-1726). Version 5's question held a rule about it (writerRules), and SMD-3340's frozen
+  // rules do not. A sentence saying it stood in the head from 2026-11-22. PR 2c's run measured it on pairs with no
+  // operator's side: 18 of the 24 kept parts came back with it and 23 without, and the maintainer took it out
+  // (2026-11-23). So the question says nothing of who wrote a thought, beside headers that still say who did.
   const byWhom = partsMessages({ older: { ...older, writer: "operator" }, newer: { ...newer, writer: "agent" } })[0].content;
-  assert(PARTS_WRITER_RULE === `${whoWrote} An agent's summary, restatement or inference of what the operator stated never makes a statement in the operator's thought outdated, and never makes that thought fall; an agent's thought does that only when its text states a later fact or event.`
-      && writerRules(true).includes(`${whoWrote} An agent's summary, restatement or inference of what the operator stated never makes the operator's thought no longer current; an agent's thought does that only when its text states a later fact or event.`)
-      && !PARTS_RULES.includes("operator") && !PARTS_RULES.includes("Who wrote") && pm.includes(PARTS_WRITER_RULE) && pm.indexOf(PARTS_WRITER_RULE) < pm.indexOf("THOUGHT A, captured") && pm.split(PARTS_WRITER_RULE).length === 2
-      && byWhom.includes(PARTS_WRITER_RULE) && /THOUGHT A[^\n]*written by the operator/.test(byWhom) && /THOUGHT B[^\n]*written by an agent/.test(byWhom) && DECIDE_PROMPT.includes(PARTS_WRITER_RULE),
-    "the question says, once and before the pair, that an agent's restatement of what the operator stated outdates no statement of the operator's and never makes that thought fall: version 5's rule in the parts' terms, which the frozen rules do not hold, beside headers that say who wrote each side");
+  assert(writerRules(true).includes("Who wrote each thought, when the header says, comes from the key that wrote it, not from the text. An agent's summary, restatement or inference of what the operator stated never makes the operator's thought no longer current;")
+      && [PARTS_HEAD, PARTS_RULES, DECIDE_PROMPT, pm].every((t) => !t.includes("Who wrote") && !t.includes("operator"))
+      && byWhom.startsWith(PARTS_HEAD) && byWhom.endsWith(PARTS_RULES) && /THOUGHT A[^\n]*written by the operator/.test(byWhom) && /THOUGHT B[^\n]*written by an agent/.test(byWhom) && byWhom.split("operator").length === 2,
+    "the parts' question holds no rule about who wrote a thought, as version 5's did, beside headers that say who wrote each side: the sentence that said it cost kept parts on pairs it could not apply to, and the maintainer took it out");
 
   // The answer, read (parseParts): lenient about wrapping, strict about its keys and its vocabulary.
   const part = { in: "A", stale: "the plan is to ship on Friday", shown_by: "shipped on Monday", word: "implements", reason: "it shipped later" };

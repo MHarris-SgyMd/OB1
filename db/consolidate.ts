@@ -1901,10 +1901,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // (050), never a payload field — so "an agent's summary supersedes what
         // the operator typed" is a proposal it can decline on that ground.
         // In decide mode since version 6 the writer hears it too, in the pair's
-        // headers, and the rule that an agent's restatement never outdates
-        // what the operator stated stands in the question's head
-        // (PARTS_WRITER_RULE): SMD-3340's frozen rules do not hold it (review
-        // pass 4; the maintainer's decision, 2026-11-22).
+        // headers, but its question holds no rule that an agent's restatement
+        // never outdates what the operator stated, as version 5's did (review
+        // pass 4). A sentence saying so stood in the question's head for a day:
+        // measured on pairs with no operator's side it cost kept parts, and
+        // the maintainer took it out (2026-11-23; PARTS_HEAD). Nothing after
+        // the model reads who wrote a side.
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
         // The pair's bound counts its calls' own time: a wait for a slot on the model-call seam pauses it, told by

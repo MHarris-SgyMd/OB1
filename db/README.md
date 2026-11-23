@@ -4902,14 +4902,16 @@ tier gives each pair's verdict, not the judge:
     words and a reason; and for whether either thought falls whole, which the
     rules say is almost never. Its opening lines are the earlier writer's,
     with the answer to an injection attempt in the new shape: no part, and
-    neither thought falling. After them stands version 5's rule about who
-    wrote a thought (SMD-1726), in the parts' terms: an agent's summary,
-    restatement or inference of what the operator stated never makes a
-    statement in the operator's thought outdated, and never makes that
-    thought fall. The pair's headers say who wrote each thought. The frozen
-    rules do not hold the rule, so it stands before the pair, outside their
-    hash (the maintainer's decision, 2026-11-22); SMD-3340 measured the
-    rules without it, and nothing after the model reads who wrote a side.
+    neither thought falling. The pair's headers still say who wrote each
+    thought, and the question holds no rule about it: not version 5's, that
+    an agent's summary or restatement of what the operator stated never
+    outdates the operator's thought (SMD-1726). A sentence saying so, in the
+    parts' terms, stood in the opening lines from 2026-11-22. SMD-4446's
+    PR 2c then asked the 27B writer about version 5's 41 pairs, none with
+    an operator's side: of the 24 parts the maintainer kept whose quotes
+    pass, 18 came back with the sentence and 23 without it. The maintainer
+    took it out (2026-11-23). Nothing after the model reads who wrote a
+    side.
   - **The answer** is read leniently about its wrapping and strictly about
     its keys. An answer with no list, with no yes or no for either thought,
     or with both falling is unparsed as a whole: it names no part, the pair
