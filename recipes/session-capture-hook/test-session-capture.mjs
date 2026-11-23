@@ -1343,9 +1343,19 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     const inOutcome = redactEpisode(segment([{ t: "prompt", text: "tidy the vault notes" }, { t: "outcome", text }]).episodes[0]);
     return { secret, prompt: !inPrompt.text.includes(secret) && /\[redacted:password assignment/.test(inPrompt.text), outcome: !inOutcome.text.includes(secret) && /\[redacted:password assignment/.test(inOutcome.text) };
   });
-  const pwKept = ["password = os.environ['DB_PASSWORD'] here", "const password = process.env.DB_PASSWORD;", 'the password: abc then "x" later'].map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text.includes(text));
+  // Unquoted words with digits and a quote later on the line: the quoted branch applies only after an opening quote.
+  const pwKept = ['the password: ab12 cd34 "x" later', 'password: Kp7m Wq2z "x"'].map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text.includes(text));
   assert(pwBlanked.every((b) => b.prompt && b.outcome) && pwKept.every(Boolean),
-    `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; a bare reference and unquoted prose are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
+    `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; unquoted short words before a later quote are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
+  // Review pass 3: a bare reference stays a value, as main read it, so a line naming one with a fallback after it is
+  // found and refused under refuse (an exclusion of references sent these whole, and the model's excerpt with them).
+  const pwRefs = ['const password = process.env.DB_PASSWORD || "Kp7mWq2zR9";', 'password = os.environ.get("DB_PASSWORD") or "Kp7mWq2zR9"', 'PGPASSWORD = os.environ.get("PGPASS") or "Kp7mWq2zR9"', 'const POSTGRESPASSWORD = process.env.PG_PW ?? "Kp7mWq2zR9";']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0; });
+  // …and a getter whose default is blanked is not found again by the second scan (the end-to-end case below), while a
+  // password glued onto a getter's name is not read as its receiver: blanked, as before, with the default.
+  const pwGlued = redactEpisode(segment([{ t: "prompt", text: 'password=hunter22os.getenv("PW", "Kp7mWq2zR9")' }, { t: "outcome", text: "ok" }]).episodes[0]).text;
+  assert(pwRefs.every(Boolean) && !/hunter22/.test(pwGlued),
+    `a bare reference with a fallback after it is found and refused under refuse, as before, and a password glued onto a getter is blanked (SMD-4542 review pass 3) (${JSON.stringify([pwRefs, pwGlued])})`);
   // Review pass 1 (secrets adversary): a password given as a `${VAR:-<it>}` default is blanked, as main blanked it (an
   // exclusion of `${` sent it); and quoted prose or a placeholder is read as main read it, blanked nowhere and refusing
   // nothing under refuse (the quoted branch had widened to them).
