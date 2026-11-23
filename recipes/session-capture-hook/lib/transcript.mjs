@@ -60,7 +60,6 @@ function textOfBlocks(content) {
   return content.map((b) => (typeof b === "string" ? b : (b?.type === "text" || b?.type === "input_text" || b?.type === "output_text") ? String(b.text ?? "") : "")).filter(Boolean).join("\n");
 }
 
-
 /**
  * User lines that are not a human ask: the summary Claude Code writes in the
  * human's voice when it compacts a long session — an episode boundary
@@ -182,7 +181,6 @@ export function parseCodex(lines, s) {
   }
   return segment(events, s);
 }
-
 
 /** Read a transcript and return the summary structure. */
 export function summariseTranscript(path, harness) {
