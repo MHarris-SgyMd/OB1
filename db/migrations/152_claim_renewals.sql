@@ -10,8 +10,10 @@
 --   reads the same as one that ran two days untouched but for its last
 --   renewal. SMD-4540 reports how long claims run, by how they ended and by the
 --   work's size, so SMD-4541 can decide whether a claim should state when its
---   work will be done; the count tells a claim worked throughout from one left
---   waiting. The maintainer chose (2026-11-23) the counter first, so that it
+--   work will be done; the count says how often its holder renewed it, which
+--   reads within one kind of client (each renews at its own pace: Claude Code's
+--   session hook about hourly while tools run, the agent runner twice), not as
+--   a measure of work across them. The maintainer chose (2026-11-23) the counter first, so that it
 --   reaches a release, and the stable brain, before the report needs it.
 --
 -- WHAT

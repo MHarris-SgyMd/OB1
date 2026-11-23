@@ -7641,10 +7641,10 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
          && fresh.claim!.renewals === 0 && f1.claim!.renewals === 1 && f2.claim!.renewals === 2 && refused.code === "CLAIM_NOT_YOURS" && (await countOf(fresh.claim!.id)) === 2,
     `a claim standing at the upgrade stays uncounted through renewals by either path; one after starts at 0 and counts each, another key's refusal counting nothing (${JSON.stringify([oldAgain.claim?.renewals, oldByClaim.claim?.renewals, fresh.claim?.renewals, f1.claim?.renewals, f2.claim?.renewals, refused.code])})`);
 
-  // The server's listing: list_work_claims as 143 made it, renewals joined on its ids in its own order.
+  // The server's listing (store-sql.ts's expression): list_work_claims as 143 made it, each count read by the claim's id.
   const listed = (await sql`
-    SELECT l.issue, w.renewals FROM list_work_claims(ARRAY['SMD-7301', 'SMD-7302'], NULL, true, 10) WITH ORDINALITY AS l
-      LEFT JOIN work_claims w ON w.id = l.id ORDER BY l.ordinality`) as { issue: string; renewals: number | null }[];
+    SELECT l.issue, (SELECT (to_jsonb(w) ->> 'renewals')::int FROM work_claims w WHERE w.id = l.id) AS renewals
+      FROM list_work_claims(ARRAY['SMD-7301', 'SMD-7302'], NULL, true, 10) WITH ORDINALITY AS l ORDER BY l.ordinality`) as { issue: string; renewals: number | null }[];
   assert(JSON.stringify(listed.map((r) => [r.issue, r.renewals])) === JSON.stringify([["SMD-7301", null], ["SMD-7302", 2]]),
     `the server's listing carries each claim's count, NULL for the one from before (${JSON.stringify(listed)})`);
 

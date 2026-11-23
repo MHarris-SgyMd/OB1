@@ -229,7 +229,11 @@ function definedIn(file: string): string[] {
  * definer, needs no entry. It is 063's derivation_descendants
  * too, a part in its kind order, and does not carry 063: the one function
  * 063 still last defines, record_supersession_proposal, is restored by name
- * wherever a section needs it.
+ * wherever a section needs it. 152 carries 115's ob1_work_claim_json and
+ * renew_work_claim and 140's claim_work, each with the renewal count
+ * (SMD-4540), so it carries 115 and 140: their other functions (115's
+ * release_work_claim, 140's cap readers) a re-apply of either reverts with
+ * them.
  */
 const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
@@ -20655,7 +20659,7 @@ console.log("\n[125] Migration 138: a priority write names every statement it cl
     `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
 }
 
-console.log("\n[126] Migration 140: the per-holder cap on live work claims, operator-settable — work_claim_cap_settings one standing row at most, history after (an UPDATE but its end, a DELETE and a TRUNCATE refused); ob1_work_claim_cap_builtin() 50; ob1_work_claim_cap_refusal at the range's edges; ob1_work_claim_cap() the builtin under the standing setting; set_work_claim_cap an operator key's alone, by its agent id, refusing a bad cap, writing nothing for the cap standing, NULL clearing; claim_work refusing a NEW claim past the holder's cap CLAIM_LIMIT, counting live claims by agent id or by name, a renewal and a lapsed claim exempt, a release freeing a slot; a stored cap the refusal names failing every new claim 22000 while a renewal is still taken, work_claim_cap_setting() saying it without raising; claim_work 140's; a re-apply a no-op (SMD-3606)");
+console.log("\n[126] Migration 140: the per-holder cap on live work claims, operator-settable — work_claim_cap_settings one standing row at most, history after (an UPDATE but its end, a DELETE and a TRUNCATE refused); ob1_work_claim_cap_builtin() 50; ob1_work_claim_cap_refusal at the range's edges; ob1_work_claim_cap() the builtin under the standing setting; set_work_claim_cap an operator key's alone, by its agent id, refusing a bad cap, writing nothing for the cap standing, NULL clearing; claim_work refusing a NEW claim past the holder's cap CLAIM_LIMIT, counting live claims by agent id or by name, a renewal and a lapsed claim exempt, a release freeing a slot; a stored cap the refusal names failing every new claim 22000 while a renewal is still taken, work_claim_cap_setting() saying it without raising; claim_work 140's body, which 152 carries with the renewal count (SMD-4540); a re-apply a no-op (SMD-3606)");
 {
   const file = files.find((f) => /^\d{3}_work_claim_cap\.sql$/.test(f)) ?? "no NNN_work_claim_cap.sql";
   // [103] re-applies 115's claim_work for its idempotency check, then restores the last definer's (SMD-3778): 152, carrying
@@ -23726,12 +23730,12 @@ console.log("\n[137] Migration 152: a work claim counts its renewals — work_cl
     assert(r3.outcome === "renewed" && r3.claim!.renewals === null && r4.outcome === "renewed" && r4.claim!.renewals === null && (await countOf(c3.claim!.id)) === null,
       `a claim from before 152, uncounted, stays so through renewals by either path (${JSON.stringify(r3.claim?.renewals)}, ${JSON.stringify(r4.claim?.renewals)})`);
 
-    // The listing as the server reads it: 143's columns kept, renewals joined on the ids, the listing's order by its ordinality.
+    // The listing as the server reads it (store-sql.ts's expression): 143's columns kept, each count read by the claim's id, the listing's order by its ordinality.
     const listed = (await db.query<{ issue: string; renewals: number | null; holder: string }>(
-      `SELECT l.issue, l.holder, w.renewals FROM list_work_claims(ARRAY['SMD-8701', 'SMD-8702', 'SMD-8703'], NULL, true, 10) WITH ORDINALITY AS l LEFT JOIN work_claims w ON w.id = l.id ORDER BY l.ordinality`)).rows;
+      `SELECT l.issue, l.holder, (SELECT (to_jsonb(w) ->> 'renewals')::int FROM work_claims w WHERE w.id = l.id) AS renewals FROM list_work_claims(ARRAY['SMD-8701', 'SMD-8702', 'SMD-8703'], NULL, true, 10) WITH ORDINALITY AS l ORDER BY l.ordinality`)).rows;
     const outCols = (await db.query<{ out: string }>(`SELECT pg_get_function_result('list_work_claims(text[],text,boolean,integer,text,text,timestamptz,uuid)'::regprocedure) AS out`)).rows[0].out;
     assert(JSON.stringify(listed.map((r) => [r.issue, r.holder, r.renewals])) === JSON.stringify([["SMD-8701", "[137] a", 3], ["SMD-8701", "[137] b", 0], ["SMD-8702", "[137] a", 1], ["SMD-8703", "[137] a", null]]) && !/renewals/.test(outCols),
-      `the listing, joined on its ids in its own order, carries each claim's count, and list_work_claims keeps 143's columns, so a re-apply of 143 can make it again (${JSON.stringify(listed)})`);
+      `the listing, read as the server reads it in its own order, carries each claim's count, and list_work_claims keeps 143's columns, so a re-apply of 143 can make it again (${JSON.stringify(listed)})`);
 
     // The check: a count below 0 is refused.
     let refused = "";

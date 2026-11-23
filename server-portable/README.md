@@ -1342,7 +1342,11 @@ and MCP alike:
   `include_ended` (migration 143's keyset cursor), `remaining` counting how many
   follow. A cursor carries the filters it was made under, so one passed with others
   — or any string that is not this listing's cursor — is refused `REFUSED_CURSOR`
-  (400). Never a token.
+  (400). Never a token. Each claim carries `renewals`, how many of its renewals
+  landed (migration 152, SMD-4540): null for a claim made before the brain
+  counted them. A count, not a sign of activity: how often a client renews is its
+  own (Claude Code's session hook about hourly while tools run, the agent runner
+  twice), and a live claim is held whatever it reads.
 
 **The token** is a bearer secret to its key: anyone holding it under that key acts as
 the holder. It travels in a JSON body, never a URL, and as a bind parameter, never
