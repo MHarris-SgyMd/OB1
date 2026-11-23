@@ -231,9 +231,9 @@ function definedIn(file: string): string[] {
  * 063 still last defines, record_supersession_proposal, is restored by name
  * wherever a section needs it. 152 carries 115's ob1_work_claim_json and
  * renew_work_claim and 140's claim_work, each with the renewal count
- * (SMD-4540), so it carries 115 and 140: their other functions (115's
- * release_work_claim, 140's cap readers) a re-apply of either reverts with
- * them.
+ * (SMD-4540), so it carries 115 and 140: a restore of any of the three
+ * re-runs 115 and 140 first, putting back their other functions (115's
+ * release_work_claim, 140's cap readers), then 152.
  */
 const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
@@ -23742,7 +23742,7 @@ console.log("\n[137] Migration 152: a work claim counts its renewals — work_cl
     try { await db.query(`UPDATE work_claims SET renewals = -1 WHERE id = $1::uuid`, [c2.claim!.id]); } catch (e) { refused = (e as Error).message; }
     assert(/work_claims_renewals_counted/.test(refused), `a count below 0 is refused by the check (${refused.slice(0, 80) || "taken"})`);
 
-    // A re-apply keeps every count, the default and the check, and a new claim still starts at 0.
+    // A re-apply keeps every count, and a new claim still starts at 0.
     const before = (await db.query<{ id: string; n: number | null }>(`SELECT id::text AS id, renewals AS n FROM work_claims WHERE issue LIKE 'SMD-870%' ORDER BY id`)).rows;
     await reapply(file.slice(0, 4));
     const after = (await db.query<{ id: string; n: number | null }>(`SELECT id::text AS id, renewals AS n FROM work_claims WHERE issue LIKE 'SMD-870%' ORDER BY id`)).rows;

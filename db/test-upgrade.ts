@@ -7600,7 +7600,7 @@ console.log("\n[20cn] Migration 151: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20co] Migration 152: onto a populated brain at the file before it — refused by name without 140's ob1_work_claim_cap, nothing added; then applied: the claims standing keep NULL (uncounted) and stay so through renewals, a claim after it starts at 0 and counts each renewal by either path, a refusal counting nothing; the server's listing (143's columns, renewals joined on its ids) carries each count; a re-apply keeps them (SMD-4540)");
+console.log("\n[20co] Migration 152: onto a populated brain at the file before it — refused by name without 140's ob1_work_claim_cap, nothing added; then applied: the claims standing keep NULL (uncounted) and stay so through renewals, a claim after it starts at 0 and counts each renewal by either path, a refusal counting nothing; the server's listing (143's columns, renewals read by each claim's id) carries each count; a re-apply keeps them (SMD-4540)");
 {
   const the152 = MIGRATIONS.find((f) => /^\d{3}_claim_renewals\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);

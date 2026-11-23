@@ -1228,7 +1228,7 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   const l = await rest("GET", "/v1/claims?ticket=smd-9301", undefined, KEYS.reader);
   const listed = (l.body.claims ?? []) as Claim[];
   // Migration 152 (SMD-4540): each renewal that landed counts, by either door; the refused two count nothing. The
-  // claim's own answers and the listing (143's columns, renewals joined on its ids) say the same count.
+  // claim's own answers and the listing (143's columns, renewals read by each claim's id) say the same count.
   const countOf = (c: unknown) => (c as { renewals?: unknown } | undefined)?.renewals;
   const writerListed = listed.find((c) => c.id === mine?.id), rivalListed = listed.find((c) => c.id === rivals?.id);
   assert(countOf(mine) === 0 && countOf(rn.body.claim) === 1 && countOf(renewedMcp.sc.claim) === 2 && countOf(writerListed) === 2 && countOf(rivalListed) === 0,

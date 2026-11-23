@@ -5,16 +5,14 @@
 --
 -- WHY
 --   work_claims (115) keeps a claim's start, its last renewal and its end. A
---   renewal overwrites renewed_at, so nothing says how often a holder renewed:
---   a claim that ran two days renewed at every commit, push and long test run
---   reads the same as one that ran two days untouched but for its last
---   renewal. SMD-4540 reports how long claims run, by how they ended and by the
---   work's size, so SMD-4541 can decide whether a claim should state when its
---   work will be done; the count says how often its holder renewed it, which
---   reads within one kind of client (each renews at its own pace: Claude Code's
---   session hook about hourly while tools run, the agent runner twice), not as
---   a measure of work across them. The maintainer chose (2026-11-23) the counter first, so that it
---   reaches a release, and the stable brain, before the report needs it.
+--   renewal overwrites renewed_at, so nothing says how often a holder renewed.
+--   SMD-4540 reports how long claims run, by how they ended and by the work's
+--   size, so SMD-4541 can decide whether a claim should state when its work will
+--   be done. The count says how often a claim's holder renewed it, which reads
+--   within one kind of client, each renewing at its own pace (changes/
+--   smd-4540.md's limits), not as a measure of work across them. The maintainer
+--   chose (2026-11-23) the counter first, so that it reaches a release, and the
+--   stable brain, before the report needs it.
 --
 -- WHAT
 --   * work_claims.renewals: how many renewals of the claim landed. A claim made
@@ -34,8 +32,8 @@
 --     jsonb, and a RETURNS TABLE cannot gain one under CREATE OR REPLACE; made
 --     again here with one more, 143's own CREATE OR REPLACE would refuse it at a
 --     `migrate.ts --reapply`, which runs every file in order. The server reads
---     renewals beside it, joining work_claims on the listing's ids in its own
---     query (store-sql.ts).
+--     each claim's renewals beside it by the claim's id, a scalar subquery
+--     through the row's jsonb (store-sql.ts).
 --
 -- WHO READS
 --   No grant changes: the column is work_claims', and the `claims` group's

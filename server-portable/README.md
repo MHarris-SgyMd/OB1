@@ -1344,9 +1344,10 @@ and MCP alike:
   — or any string that is not this listing's cursor — is refused `REFUSED_CURSOR`
   (400). Never a token. Each claim carries `renewals`, how many of its renewals
   landed (migration 152, SMD-4540): null for a claim made before the brain
-  counted them. A count, not a sign of activity: how often a client renews is its
-  own (Claude Code's session hook about hourly while tools run, the agent runner
-  twice), and a live claim is held whatever it reads.
+  counted them. A count, not a sign of activity: how often a holder renews is its
+  client's (a Claude Code agent at each commit and push, and its session hook's
+  timer where the claims hook is pasted; the agent runner when it publishes),
+  and a live claim is held whatever it reads.
 
 **The token** is a bearer secret to its key: anyone holding it under that key acts as
 the holder. It travels in a JSON body, never a URL, and as a bind parameter, never
