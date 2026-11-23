@@ -325,7 +325,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   // its tags carry would leave every row it wrote behind the key it records, and the next run would re-tag them again.
   const writes = retagKey(cfg.metadataModel, METADATA_PROMPT_VERSION);
   if (JOB !== writes && !READ_ONLY) {
-    err(`retag.ts: --job ${JOB} names a recipe this run does not write: its tags carry ${writes}'s (OB1_METADATA_MODEL and this tree's prompt version ${METADATA_PROMPT_VERSION}), so every row it wrote would stay behind ${JOB}. Set OB1_METADATA_MODEL to the model instead, and leave --job out.`);
+    err(`retag.ts: --job ${JOB} names a recipe this run does not write: its tags carry ${writes}'s (OB1_METADATA_MODEL and this tree's prompt version ${METADATA_PROMPT_VERSION}), so every row it wrote would stay behind ${JOB}. Run under the model and prompt version it names instead — OB1_METADATA_MODEL for the model, the tree whose tag prompt is that version — and leave --job out.`);
     return 2;
   }
   out(`  job:    ${JOB}`);
@@ -385,7 +385,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
 
   /**
    * Whether thought `t`, beside its tags row `d`, is in the backlog: the
-   * header's four kinds, db/config.mjs's RETAG_DUE_SQL over its
+   * header's five kinds, db/config.mjs's RETAG_DUE_SQL over its
    * RETAG_TAGS_ROW_SQL — the definition preflight's `retag pass` row counts by
    * (SMD-2298 PR 3a).
    */

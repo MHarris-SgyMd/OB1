@@ -2542,8 +2542,8 @@ else {
   await claims`UPDATE ob1_config SET value = ${RT} WHERE key = 'retag_key'`;
   // Every row succeeded: none unfinished, and the backlog still behind its tags said, with the recorded key's run.
   await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${RT}`;
-  // Now a fourth tagged through update_thought under another model's recipe: its row is at its text, so with no key recorded
-  // there is no target and it is not behind (PR 3b); once a key is, it is.
+  // Now a fourth tagged through update_thought under another model's recipe: behind the recorded key by its recipe; with
+  // no key recorded, preflight counts as the first run will, which records this server's key first (PR 3b, review pass 2).
   await claims`SELECT update_thought(p_id := ${ids[3]}::uuid, p_metadata_patch := '{"type": "idea"}'::jsonb, p_lineage := ${{ metadata: { deterministic: false, model: "old-tag-model", prompt_version: METADATA_PROMPT_VERSION } }}::jsonb)`;
   const rtDone = await run(RENV);
   await claims`DELETE FROM ob1_config WHERE key = 'retag_key'`;
@@ -2568,6 +2568,17 @@ else {
   assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier key's pool`).test(rtDoneBeside.out)
       && /^\s*✓\s+retag pass\s+none unfinished; 4 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDoneBeside.out),
          `…an earlier key's pool beside it is no worker's, and hides the backlog no longer (review pass 1: it counted as unfinished, for good)`);
+  // An older version's key recorded, nothing unfinished: the line's remedy is a switch, so its count is the switch's,
+  // this server's key the target — a fifth thought tagged under the recorded key's own recipe is current for it but
+  // behind the switch (review pass 3: the recorded key's count, 4, stood beside it).
+  await claims`SELECT update_thought(p_id := ${ids[4]}::uuid, p_metadata_patch := '{"type": "idea"}'::jsonb, p_lineage := ${{ metadata: { deterministic: false, model: TAG_MODEL, prompt_version: METADATA_PROMPT_VERSION - 1 } }}::jsonb)`;
+  await claims`UPDATE ob1_config SET value = ${retagKey(TAG_MODEL, METADATA_PROMPT_VERSION - 1)} WHERE key = 'retag_key'`;
+  const rtSwitchCount = await run(RENV);
+  await claims`UPDATE ob1_config SET value = ${RT} WHERE key = 'retag_key'`;
+  await claims`UPDATE thoughts SET metadata = metadata - 'type' WHERE id = ${ids[4]}::uuid`;
+  await claims`DELETE FROM derivations WHERE artifact_kind = 'metadata' AND artifact_id = ${ids[4]}::uuid`;
+  assert(/^\s*✓\s+retag pass\s+none unfinished; 5 thought\(s\) behind their tags wait for a run — This tree's tag prompt is version \d+, so a run here re-tags under \S+, which needs --switch-key/m.test(rtSwitchCount.out),
+         `…under an older version's recorded key the none-unfinished count is the switch's it names, not the recorded key's (review pass 3; ${row(rtSwitchCount.out, "retag pass")})`);
   // Before 063's mark the backlog cannot be read: a skip saying why.
   await claims.unsafe("ALTER TABLE derivations RENAME COLUMN stale_since TO stale_since_away_rt");
   const rtPre063 = await run(RENV);

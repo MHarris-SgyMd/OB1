@@ -5262,16 +5262,16 @@ if (configFailed) {
             // run, refused, was named for it, and --switch-key for a newer tree's). `reclaims`: whether a pass claims
             // under the key again, so an expired lease's reclaim is true of it — the newer tree's does; no pass takes up
             // an older version's or a hand-set key's (review pass 2).
-            const runUnder = (key: string): { prefix: string } | { words: string; reclaims: boolean } => {
+            const runUnder = (key: string): { prefix: string } | { words: string; reclaims: boolean; target: string } => {
               const parsed = parseRetagKey(key);
               if (parsed === null) {
-                return { reclaims: false, words: `${key} is not a key db/retag.ts makes (retag:<model>@p<version>), so no run is under it: cd db && bun retag.ts --url $DATABASE_URL --switch-key records ${serverKey}, and the backlog is re-tagged under it.` };
+                return { reclaims: false, target: serverKey, words: `${key} is not a key db/retag.ts makes (retag:<model>@p<version>), so no run is under it: cd db && bun retag.ts --url $DATABASE_URL --switch-key records ${serverKey}, and the backlog is re-tagged under it.` };
               }
               if (parsed.promptVersion > METADATA_PROMPT_VERSION) {
-                return { reclaims: true, words: `${key} was recorded by a tree whose tag prompt is version ${parsed.promptVersion}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag.ts from that tree. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}.` };
+                return { reclaims: true, target: key, words: `${key} was recorded by a tree whose tag prompt is version ${parsed.promptVersion}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag.ts from that tree. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}.` };
               }
               if (parsed.promptVersion < METADATA_PROMPT_VERSION) {
-                return { reclaims: false, words: `This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${serverKey}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it.` };
+                return { reclaims: false, target: serverKey, words: `This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${serverKey}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it.` };
               }
               return { prefix: parsed.model !== metaModel ? `OB1_METADATA_MODEL=${shellWord(parsed.model)} ` : "" };
             };
@@ -5310,9 +5310,13 @@ if (configFailed) {
             }
             if (unfinished === 0) {
               const key = recorded ?? serverKey;
-              const b = await backlogOf(key);
-              const behind = Number(b.missing) + Number(b.marked) + Number(b.stale) + Number(b.recipe) + Number(b.fallback);
               const how = runUnder(key);
+              // The count is the run's the remedy names: a switch's records this server's key, so its backlog is the one
+              // with that key the target (PR 3b review pass 3: the recorded key's stood beside a switch).
+              const b = "words" in how && how.target !== key
+                ? ((await sql.unsafe(RETAG_BACKLOG_AS_KEY_SQL, [how.target])) as RetagBacklog[])[0]
+                : await backlogOf(key);
+              const behind = Number(b.missing) + Number(b.marked) + Number(b.stale) + Number(b.recipe) + Number(b.fallback);
               // With no key recorded the count is a first run's, this server's key the target (backlogOf), and the rows
               // behind it by their recipe alone are named (PR 3b review passes 1 and 2).
               const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? ` (none has run here: ob1_config.retag_key is unset${Number(b.recipe) > 0 ? `; a first run records ${serverKey}, ${b.recipe} of them behind it by their tags' recipe alone` : ""})` : ""}`;
