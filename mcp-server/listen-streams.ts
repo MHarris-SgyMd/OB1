@@ -43,9 +43,21 @@ export interface ListenStreams {
    * flush, or at its cut. It closes the SDK's handler with them, so no 2026-07-28 request is served after it.
    */
   close: () => Promise<void>;
+  /**
+   * Records the end of every stream still open, as ended by the stop (SMD-4459): the app's, for the entry's stop,
+   * which calls it as its drain ends. That is before its flush, so the records are sent, where the streams themselves
+   * are closed after it; each is counted until then, and its close records nothing more.
+   */
+  stopped: () => void;
+  /**
+   * How many streams are held whose end is not yet said: the app's. At rest it is `count` until the stop's word and
+   * 0 after it (a listen being opened has its place before it is held), and a suite holds it there, so that a stream
+   * whose end was said is not kept (SMD-4459, review pass 2).
+   */
+  unsaid: () => number;
 }
 
 /** An app's listen streams: the entry's with no argument, a suite's with what it tests. */
 export function createListenStreams(hold: boolean = HOLD_LISTEN_STREAMS, max: number = LISTEN_STREAMS_MAX, perCaller: number = LISTEN_STREAMS_PER_CALLER): ListenStreams {
-  return { hold, max, perCaller, count: 0, close: async () => {} };
+  return { hold, max, perCaller, count: 0, close: async () => {}, stopped: () => {}, unsaid: () => 0 };
 }

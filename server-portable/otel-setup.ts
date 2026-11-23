@@ -52,6 +52,8 @@ export type Signal = "traces" | "metrics" | "logs";
 
 /** One request's log record, as telemetry.ts hands it over: the line's checked fields, how bad its end was, its span's context and its end. */
 export interface RequestLog {
+  /** The record's event name where it is not a request's: a listen stream's end (SMD-4459). */
+  name?: "ob1.listen_end";
   body: Record<string, string | number>;
   severity: "INFO" | "WARN" | "ERROR";
   context: Context;
@@ -799,7 +801,7 @@ export function setUpTelemetry(serviceName: string, mode: InMemory | Collector):
       diag.disable();
     },
     emit: logger
-      ? ({ body, severity, context: within, at }) => logger!.emit({ eventName: "ob1.request", timestamp: at, severityNumber: SEVERITY[severity], severityText: severity, body, context: within })
+      ? ({ name, body, severity, context: within, at }) => logger!.emit({ eventName: name ?? "ob1.request", timestamp: at, severityNumber: SEVERITY[severity], severityText: severity, body, context: within })
       : () => {},
   };
 }
