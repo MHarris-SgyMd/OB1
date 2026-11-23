@@ -800,11 +800,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 067's rebuild_derived on its own body, refusing by name without 063, 067
   // or 016's requeue_thought_work ([20cm]); 151 adds the settled parts' table
   // beside the proposals', with its lineage kind and rebuild_derived's arm for
-  // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]) —
+  // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]);
+  // 152 redefines 111's subject_key_valid on its own signature and adds the
+  // operator's subject-key repository setting and its setter, refusing by
+  // name without 046, 061, 111, 115, 120 or 130's index ([20co]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 122, `030 is among the last one hundred and twenty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 123, `030 is among the last one hundred and twenty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7595,6 +7598,89 @@ console.log("\n[20cn] Migration 151: onto a populated brain at the file before i
 
   for (const role of [REVIEWER, PASS, READER, UPD_ONLY, INS_ONLY]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
   await sql.close();
+}
+
+console.log("\n[20co] Migration 152: onto a populated brain at the file before it — refused without each function it needs and 130's index, by name, nothing made; then applied: the bare pr: and version: subjects and their thread as they were, nothing mapped until an operator names a repository; a key scoped to its repository admitted; the setting's grants carried from thought_facets' (a reader SELECT, a subject writer SELECT, INSERT and UPDATE); an operator's setting maps the standing keys, the thread kept under the scoped key; a re-apply with a setting standing a no-op (SMD-3887)");
+{
+  const the152 = MIGRATIONS.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the152.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the152 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const K = "subject:upgrade-152@p1";
+    const thought = async (content: string, mins: number) =>
+      String((await sql`INSERT INTO thoughts (content, content_fingerprint, created_at) VALUES (${content}, content_fingerprint_of(${content}), '2027-07-01T00:00:00Z'::timestamptz + make_interval(mins => ${mins}::int)) RETURNING id`)[0].id);
+    const subjects = async (id: string, keys: string[]) =>
+      // An array literal: Bun's client sends a JS array as no Postgres array here (these keys hold no comma or quote).
+      sql`SELECT record_thought_subjects(${id}::uuid, ${`{${keys.join(",")}}`}::text[], 'model', ${K}, NULL::uuid, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${id}::uuid), '{"deterministic": false}'::jsonb)`;
+    const a = await thought("upgrade 152: PR 12 opened", 1), b = await thought("upgrade 152: PR 12 reviewed", 2), c = await thought("upgrade 152: v1.4 cut", 3);
+    await subjects(a, ["pr:12"]);
+    await subjects(b, ["pr:12"]);
+    await subjects(c, ["version:v1.4"]);
+    const READER = "ob1_upgrade_152_reader", WRITER = "ob1_upgrade_152_writer", NONE = "ob1_upgrade_152_none";
+    await sql.unsafe(`CREATE ROLE ${READER} NOLOGIN; CREATE ROLE ${WRITER} NOLOGIN; CREATE ROLE ${NONE} NOLOGIN;
+                      GRANT SELECT ON thought_facets TO ${READER}; GRANT SELECT, INSERT ON thought_facets TO ${WRITER}`);
+    const keys = async () => ((await sql`SELECT payload->>'key' AS k FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL ORDER BY 1`) as unknown as { k: string }[]).map((r) => r.k).join(",");
+    const edges = async (key: string) => ((await sql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${key}`)[0] as { n: number }).n;
+    const made = async () => (await sql`SELECT to_regclass('subject_repo_settings') IS NOT NULL AS m`)[0].m as boolean;
+    const keysBefore = await keys(), edgesBefore = await edges("pr:12");
+
+    // Without any one thing it needs, the file is refused by name and makes nothing.
+    const apply152 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 }).then(() => "applied", (e: Error) => e.message);
+    const needs: [string, string, string][] = [
+      ["ob1_registry_kind", "uuid, text", "046 (ob1_registry_kind)"],
+      ["ob1_actor_agent_id", "", "061 (ob1_actor_agent_id)"],
+      ["subject_key_valid", "text", "111 (subject_key_valid)"],
+      ["ob1_record_derivation", "text, uuid, uuid[], text[], text, jsonb, uuid", "111 (ob1_record_derivation)"],
+      ["ob1_work_claim_actor", "jsonb, text", "115 (ob1_work_claim_actor)"],
+      ["ob1_thread_relink_subject", "", "120 (ob1_thread_relink_subject)"],
+    ];
+    const unrefused: string[] = [];
+    for (const [name, args, says] of needs) {
+      await sql.unsafe(`ALTER FUNCTION ${name}(${args}) RENAME TO ${name}_away`);
+      const got = await apply152();
+      await sql.unsafe(`ALTER FUNCTION ${name}_away(${args}) RENAME TO ${name}`).catch((e: Error) => unrefused.push(`${name} could not be put back: ${e.message.slice(0, 60)}`));
+      if (!got.startsWith(`migration ${NUM} needs ${says}; this schema lacks it`) || (await made())) unrefused.push(`${name}: ${got.slice(0, 80)}`);
+    }
+    await sql.unsafe(`ALTER INDEX thought_facets_subject_key_uniq RENAME TO thought_facets_subject_key_uniq_away`);
+    const noIndex = await apply152();
+    await sql.unsafe(`ALTER INDEX thought_facets_subject_key_uniq_away RENAME TO thought_facets_subject_key_uniq`);
+    if (!noIndex.startsWith(`migration ${NUM} needs 130 (thought_facets_subject_key_uniq`) || (await made())) unrefused.push(`the index: ${noIndex.slice(0, 80)}`);
+    assert(unrefused.length === 0 && !(await made()) && (await keys()) === keysBefore,
+      `without any one of the six functions or 130's index it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the index tried`})`);
+
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
+    const scopedOk = (await sql`SELECT subject_key_valid('pr:mharris-sgymd/ob1#12') AS a, subject_key_valid('version:o/r@v1.4') AS b, subject_key_valid('pr:12') AS c`)[0] as { a: boolean; b: boolean; c: boolean };
+    assert((await made()) && (await keys()) === keysBefore && keysBefore === "pr:12,pr:12,version:v1.4" && (await edges("pr:12")) === edgesBefore && edgesBefore === 1
+           && scopedOk.a && scopedOk.b && scopedOk.c && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === null,
+      `applied: the table made, the bare keys and their thread as they were, nothing mapped, no repository; a key scoped to its repository admitted beside the bare one (${await keys()}; ${edgesBefore} edge)`);
+
+    // The setting's grants, carried from thought_facets'.
+    const may = async (role: string) => ((await sql`SELECT p, has_table_privilege(${role}, 'subject_repo_settings', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p`) as unknown as { p: string; y: boolean }[]).filter((r) => r.y).map((r) => r.p).join();
+    const grants = async () => `${await may(READER)} | ${await may(WRITER)} | ${await may(NONE)}`;
+    assert((await grants()) === "SELECT | SELECT,INSERT,UPDATE | ",
+      `a reader of thought_facets reads the setting, a subject writer also inserts and updates it, a role with neither gains nothing (${await grants()})`);
+
+    // An operator names the repository: the standing keys mapped, the thread kept under the scoped key.
+    await sql`SELECT set_agent_kind('upgrade-152-op', 'operator')`;
+    const op = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'upgrade-152-op'`)[0].id);
+    // Through text: Bun's client sends a string cast straight to jsonb as a jsonb string, not the object.
+    const set = (await sql`SELECT set_subject_repo('o/r', (${JSON.stringify({ name: "upgrade-152-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; mapped: number; keys: number };
+    assert(set.ok === true && set.mapped === 3 && set.keys === 2 && (await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await edges("pr:12")) === 0 && (await edges("pr:o/r#12")) === 1,
+      `an operator's setting maps the three standing keys to two scoped ones, and the thread's edge closes under the bare key and stands under the scoped one (${JSON.stringify(set)}; ${await keys()})`);
+
+    // A re-apply with a setting standing is a no-op.
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
+    assert((await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r" && (await grants()) === "SELECT | SELECT,INSERT,UPDATE | ",
+      `a re-apply with a setting standing is a no-op: the keys, the repository and the grants as they were (${await keys()})`);
+
+    for (const role of [READER, WRITER, NONE]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+  } catch (e) {
+    assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
+  } finally {
+    await sql.close();
+  }
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of Daemonic Brain's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
