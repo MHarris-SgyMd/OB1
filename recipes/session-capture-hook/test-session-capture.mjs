@@ -1351,7 +1351,7 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   // nothing under refuse (the quoted branch had widened to them).
   const pwDefaults = ["POSTGRES_PASSWORD: ${POSTGRES_PW:-Kp7mWq2zR9}", "export PGPASSWORD=${PGPASS:-Kp7mWq2zR9}", 'password: "${DB_PASS:-Kp7mWq2zR9}"', "password=${PW:-hunter22} now"]
     .map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text);
-  const pwProse = ['errors = { password: "is too short (minimum is 8 characters)" }', 'password: "Enter your password"', 'password: "<your password>"', 'POSTGRES_PASSWORD: "set me"', 'the error said password: "too weak" so I changed it', 'password: "*** ***"', 'password = "xx yy zz"']
+  const pwProse = ['errors = { password: "is too short (minimum is 8 characters)" }', 'password: "Enter your password"', 'password: "<your password>"', 'POSTGRES_PASSWORD: "set me"', 'the error said password: "too weak" so I changed it', 'password: "*** ***"', 'password = "xx yy zz"', 'password: "{{ db_pass_2 }}"', 'password: "<pw 1>"', 'password: "${ PW1 }"']
     .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return { kept: redactEpisode(ep).text.includes(text), refused: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0 }; });
   assert(pwDefaults.every((t) => !/Kp7mWq2zR9|hunter22/.test(t) && /\[redacted:password assignment/.test(t)) && pwProse.every((p) => p.kept && !p.refused),
     `a password as a \${VAR:-…} default is blanked as before; quoted prose and a placeholder are not blanked, and refuse nothing (SMD-4542 review pass 1) (${JSON.stringify(pwProse)})`);

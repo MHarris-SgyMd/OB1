@@ -119,8 +119,9 @@ export const SECRET_PATTERNS = [
   // no whole word of three letters or more — runs to its closing quote on the line, spaces and all, though its first
   // word is short (`password="Kp7m Wq2z R9x"`). Review pass 1: `${…}` stays a value, as before, since an exclusion sent
   // `${PG_PW:-<it>}`'s default; and quoted prose or a placeholder (`"Enter your password"`, `"<your password>"`) is read
-  // as before, not blanked.
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:[\w.]*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*)?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|process\.env\b|os\.environ\b|os\.getenv\b|getenv\b|Deno\.env\b|import\.meta\.env\b)(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
+  // as before, not blanked. Review pass 2: nor does it start a value at a placeholder's `{`, `<` or `$` (`"{{ db_pass_2 }}"`,
+  // `"<pw 1>"`), which db/sensitivity.ts's own password rule skips too.
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:[\w.]*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*)?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|process\.env\b|os\.environ\b|os\.getenv\b|getenv\b|Deno\.env\b|import\.meta\.env\b)(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»{<$][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
   // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
   // their digests — told apart only by where they sit: a digest follows
   // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key
