@@ -26306,11 +26306,14 @@ if (want("37b")) {
  */
 const CONSOLIDATION_JOINED = /^ {2}extraction (?:drained|has done the thoughts captured before the period began) — consolidating beside it/;
 /**
- * The same moment as six of [38]'s waits read it, more loosely: "extraction drained" anywhere in a line, which takes in
- * the drained line said with consolidation held, and now SMD-4468's line too (SMD-4545). Each waits for extraction to
- * be over before its next step; on the drained line alone it waited out its whole bound when the other was printed.
+ * Either join line as six of [38]'s waits read it, more loosely: "extraction drained" anywhere in a line, which takes
+ * in the drained line said with consolidation held, and now SMD-4468's line too (SMD-4545). On the drained line alone
+ * a wait ran out its whole bound when the other was printed. SMD-4468's line does not say extraction is over: it is
+ * also printed while a note of today's is still being extracted. So a wait whose next step acts on extraction asks
+ * that no extraction claim is pending or in hand as well (review pass 1): on the drained line that was so when it
+ * was printed, and running out its bound it was so by then.
  */
-const EXTRACTION_OVER = /extraction (?:drained|has done the thoughts captured before the period began)/;
+const JOIN_SAID = /extraction (?:drained|has done the thoughts captured before the period began)/;
 
 const liveWrite = (sql: SQL, note: string) =>
   sql`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (gen_random_uuid(), 'update', 'op-sleep', ${{ note }}::jsonb)`;
@@ -26969,7 +26972,7 @@ if (want("38")) {
     // one drained, the next, begun for that note at once — a sync write gates
     // none (SMD-3379 PR 1c-4b).
     sw.slow = 0;
-    await pollUntil(async () => (await claims(EX)).succeeded === 6 && lines.some((l) => EXTRACTION_OVER.test(l)), 30_000);
+    await pollUntil(async () => (await claims(EX)).succeeded === 6 && lines.some((l) => JOIN_SAID.test(l)), 30_000);
     const wakesBefore = lines.filter((l) => /paused: a live/.test(l)).length;
     sw.slow = 6000;
     const synced = await capture("A ticket the sync copied in.", "sync-sleep", 0, 3);
@@ -27894,7 +27897,7 @@ if (want("38")) {
     // the next pause's runs on (SMD-3379 PR 1c-3b). The pause that reaches the cap says so within about 2 s of the
     // write, a second inside the capture.
     const retrying = sleepRun({ follow: true, captureMs: 3000, pollMs: 500, stallFloorMs: 1000, abortAfterMs: 1000, consolidateAborts: 1, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
-    await pollUntil(async () => lines.some((l) => EXTRACTION_OVER.test(l)), 20_000);
+    await pollUntil(async () => lines.some((l) => JOIN_SAID.test(l)), 20_000);
     // The claim read once its judge call is held, not at the first claim seen:
     // under load that was a thought with no pair (finished at once), or one
     // whose call had not begun when the model went, so the wake had nothing in
@@ -27966,7 +27969,7 @@ if (want("38")) {
     const stillRunning = !retryDone;
     sw.missing = false;
     const at = lines.length;
-    const recovered = await pollUntil(async () => lines.slice(at).some((l) => EXTRACTION_OVER.test(l)) && (await beat())?.outcome === "ok", 40_000);
+    const recovered = await pollUntil(async () => lines.slice(at).some((l) => JOIN_SAID.test(l)) && (await beat())?.outcome === "ok", 40_000);
     const holdsRecovered = (await beat())?.holds;
     assert(retryHold?.why === "model" && typeof retryHold.until === "string" && retryHold.until > nowIso && Date.parse(retryHold.until) - Date.parse(nowIso) <= 2600
         && secondHold?.why === "model" && secondLeft > 2600 && secondLeft <= 5100 && carriedHold?.until === secondHold.until && holdsRecovered === undefined,
@@ -27985,7 +27988,7 @@ if (want("38")) {
     const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in [\d.]+ s/.test(l))?.match(/in ([\d.]+) s/)?.[1];
     sw.missing = false;
     const at3 = lines.length;
-    const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => EXTRACTION_OVER.test(l)) && (await beat())?.outcome === "ok", 30_000);
+    const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => JOIN_SAID.test(l)) && (await beat())?.outcome === "ok", 30_000);
     // Failed once in a full run under PR 3 (no retry line in 20 s) and passed in the harness since: the scheduler's lines say why next time.
     // The 2.5 s schedule restored first, so the section's own restore puts back the shipped one, not 2.5 s.
     restoreOutage();
@@ -28036,7 +28039,8 @@ if (want("38")) {
     const retryHeldRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acRetryHeld.signal });
     let heldWaited = false;
     try {
-      await pollUntil(async () => lines.some((l) => EXTRACTION_OVER.test(l)), 20_000);
+      // The model goes missing next: with extraction's claims settled, so it is consolidation's start that is refused.
+      await pollUntil(async () => lines.some((l) => JOIN_SAID.test(l)) && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
       sw.missing = true;
       if (await nextPeriod("a live write that ends the sleep before the refusal")) {
         heldWaited = await pollUntil(async () => lines.some((l) => /tries it again in 2\.5 s/.test(l)), 20_000);
@@ -28407,7 +28411,7 @@ if (want("38")) {
       // (SMD-3379 PR 1c-4b), so the rescan is 2 s here.
       await capture("A note the switch follows.", "sync-sleep", 0, 11);
       const switchRun = followRun({ rescanMs: 2000 });
-      await pollUntil(async () => count(EXTRACTION_OVER) >= 1, 20_000);
+      await pollUntil(async () => count(JOIN_SAID) >= 1 && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
       await setKey("extract:another-model@p2");
       await nextPeriod("A note captured under the switched key");
       const switchCode = await switchRun.settle();
