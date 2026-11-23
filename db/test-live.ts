@@ -26786,10 +26786,11 @@ if (want("38")) {
     // Either way extraction is over. Measured: asking for the drained line alone the row failed three times, twice
     // in about 11 runs of ci-parity and once in CI, the first judge call 1.5 s after the last extraction began each
     // time; and it failed the one run made with each claim's finish held a second, at 1.7 s.
-    // That holds only while a backlog note is the last extracted. The period's first pool takes the three notes in
-    // one statement, so their claims' order is a tie, and today's note is no backlog: were it last, consolidation
-    // would join beside it as the older two ended, by design ([38c]'s cases), and judge 25 ms into its extraction
-    // (measured, put last by hand). So at the first extraction call the older notes still to claim are dated after it.
+    // Taking either line is safe only while a backlog note is the last extracted. The period's first pool takes the
+    // three notes in one statement, so their claims' order is a tie, and today's note is no backlog: were it last,
+    // consolidation would join beside it as the older two ended, by design ([38c]'s cases), and judge 25 ms into its
+    // extraction (measured, put last by hand). So at the first extraction call the older notes still to claim are
+    // dated after it.
     // How many it dated: none would mean the claims were no longer pending at that call (a worker that takes them in
     // one batch), the tie standing again with nothing to say so, so the row holds it (review pass 1).
     let datedLast = -1;
