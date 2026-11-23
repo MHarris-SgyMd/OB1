@@ -42,7 +42,7 @@ One machine, an idle stack. The attempt that lands is the client's second, at 8 
 - **A tool call made during a restart.** It fails as it does today, for about twice as long as the MCP server is away, the REST core being replaced first.
 - **2025-era clients,** which have no stream on a server that keeps no sessions.
 - **Clients not measured:** Claude Desktop, the claude.ai connector, the ChatGPT connector (SMD-4376). Where one of those speaks 2026-07-28, declaring `true` changes what it is told, with no run of any.
-- **A client behind the quick tunnel `docs/01-getting-started.md` recommends.** Its vendor's page says: "Quick Tunnels do not support Server-Sent Events (SSE)." What a client does with a listen that is never answered through one was not run. (Run since, with a probe client, SMD-4493: through a quick tunnel a listen was answered in 0.36 s and its comment arrived every 15 s, for the minute or less each stream was read. An hour's hold, and the real client, were not run.)
+- **A client behind the quick tunnel `docs/01-getting-started.md` recommends.** Its vendor's page says: "Quick Tunnels do not support Server-Sent Events (SSE)." What a client does with a listen that is never answered through one was not run. (Run since, with a probe client, SMD-4493: four streams through a quick tunnel were answered, the first in 0.36 s, and had their comment every 15 s for the 40 s at most each was read. The vendor's page still says what it says; an hour's hold, and the real client, were not run.)
 
 `ttlMs` (SMD-4346) stays its own ticket. Claude Code ignored it in three runs.
 
@@ -121,7 +121,7 @@ Amended in the build: as merged the rule set the server's cap where the handler 
 
 - Upgrading: the migrator first, then the servers, where the steps now say one `up -d`.
 - Editing keys: what a scope edit needs for connected clients to see it. Four places give a command that replaces the REST core alone (`deploy/README.md`, `deploy/.env.example`, `deploy/orchestration/provision.ts`'s own words, `scripts/agent-runner/README.md`), and two say `up -d` recreates both servers, which it does not (`docs/01-getting-started.md`, `primitives/remote-mcp/README.md`).
-- A tunnel or TLS proxy in front (`SETUP.md`, `docs/01-getting-started.md`): it must carry an event stream without buffering or cutting it, and the quick tunnel does not.
+- A tunnel or TLS proxy in front (`SETUP.md`, `docs/01-getting-started.md`): it must carry an event stream without buffering or cutting it, and the quick tunnel's vendor says it does not. Four probe streams were carried through one for under a minute each (SMD-4493); an hour's hold and the real client were not run. Say both.
 - The statements that no stream is held: the comment above `buildServer`, `docs/mcp-sdk-v2-migration.md`, `mcp-server/README.md`, the rows in `test-mcp.ts` [9b].
 - What the operator is told of a line, which is true today and false of a held stream (found by a reader on the operator's side, in the build's third review):
   - `deploy/README.md`, "What the servers log": a stream's line "at the stream's end"; `ms` "to its end"; what `stalled`, `abandoned` and `cut` mean; where a `code` comes from (the two new ones are named there since SMD-4458).
@@ -134,7 +134,7 @@ Amended in the build: as merged the rule set the server's cap where the handler 
 - The dashboard step in `.github/workflows/brain-checks.yml` ("The observability profile's dashboard reads every series it names") passes the listen streams' panel on the 0 its own query makes, since no server there sends the series. Open a listen in that step's traffic: until then no running stack on CI holds the count's name, which check 37 holds from the code, and nothing holds its sum, or more of a matcher's value than that a variable in it is one the dashboard has. A holding server then always sends the series, so take the panel's `or vector(0)` out, and the witness with it, which then does nothing: the step then asks the panel for a number above 0, as it asks every query with no 0 of its own (were the 0 kept, the panel's row would have to be made required, as the store's refusals are); 0 is then a server's own word; and a count that stops arriving shows as no data where today, under All, it reads the same 0 as none open. And measure an upgrade that changes the dashboard, with the profile on: its one `up -d` recreates `lgtm` and `mcp` with nothing ordering them, so the old server's last export may meet no collector and its count stand for five minutes beside the new one's.
 - The workflow's own reading of the MCP server's stop: `.github/workflows/brain-checks.yml` matches its last line whole, and a stream open at that stop adds to it.
 
-**The path.** A held stream is never idle on the wire: the SDK writes a comment on it every 15 seconds, under the proxy's idle limit of 180. No stream has been held through the stack's own forwarder and proxy: every one measured ran from the client to the probe on loopback, for about a minute at most. (Held since, SMD-4493: through the forwarder and proxy for 22 minutes, its client frozen for 21 of them and reading again after; and through a quick tunnel in front of them. None for an hour.)
+**The path.** A held stream is never idle on the wire: the SDK writes a comment on it every 15 seconds, under the proxy's idle limit of 180. No stream has been held through the stack's own forwarder and proxy: every one measured ran from the client to the probe on loopback, for about a minute at most. (Held since, SMD-4493: from a container on the forwarder's network, through the forwarder and proxy, for 22 minutes, its client frozen for 21 of them and reading again after; from the stack's own machine through the published port for a minute; and through a quick tunnel for under one. None for an hour.)
 
 **A stream that outlives its credential.** A key can be revoked, and a token can expire, while a stream opened under it stays open until the next restart. Nothing but keepalives is ever sent on it. As merged this ended "This is accepted". It was accepted before the bounds were counted against it: such a stream holds a place a client that is there may need. Decided since (SMD-4493): "A stream whose client or key is gone", below.
 
@@ -142,7 +142,7 @@ Amended in the build: as merged the rule set the server's cap where the handler 
 
 1. **PR 1.** The measurements, the probe's modes, this page. Nothing served changes.
 2. **PR 2a: the server can hold a stream, and does not yet.** The stop, the record, the caps, with the capability still `false`. Its tests need a held stream, so the suite turns the capability on for itself, with no switch an operator could set. "As built" says how, and that where the capability is off the stop is as it was.
-3. **PR 2b: it holds them.** The capability, the documents, and the real client against a scratch stack through each row of the table under "What it buys". Decided 2026-11-19, after 2a's reviews: not before a running server can say how many streams it holds (SMD-4458) and a stream's end is recorded (SMD-4459). Both are built. Decided 2026-11-21: nor before SMD-4493, a stream nobody reads keeping its place.
+3. **PR 2b: it holds them.** The capability, the documents, and the real client against a scratch stack through each row of the table under "What it buys". Decided 2026-11-19, after 2a's reviews: not before a running server can say how many streams it holds (SMD-4458) and a stream's end is recorded (SMD-4459). Both are built. Decided 2026-11-21: nor before SMD-4493, a stream nobody reads keeping its place. (SMD-4493 has since decided that a frozen and a vanished client's streams do keep their places, and builds the end of a revoked caller's streams and an operator's lever: "A stream whose client or key is gone".)
 
 ## As built in PR 2a
 
@@ -189,33 +189,45 @@ SMD-4459, decided by the maintainer on 2026-11-21 and built in one PR, with the 
 
 ## A stream whose client or key is gone
 
-SMD-4493. Measured and decided on 2026-11-23. Its first PR has the measurements and the first decision; the other two are not built.
+SMD-4493. Measured and decided on 2026-11-23, in that ticket's first PR, which changes nothing the stack runs. Decisions 3 and 4 are for its second and third.
 
 **The question.** A stream keeps its place under the two bounds until its connection ends or the server stops. Nothing else ended one, and nothing asked whether its client was still there or its key still stood. So a server at a bound could refuse clients that are there for ones that are not.
 
-**Measured.** On a scratch stack on one Mac, its MCP server started holding streams, each client a container of its own, each case once. The times are from what the client did to the server's line for the stream's end.
+**Measured.** On a scratch stack on one Mac (a podman machine), its MCP server started holding streams, with a probe client, each case once. The times are from what the client did to the server's line for the stream's end. There were four paths. A process on the Mac through the stack's published port is a local session's path: the engine's own port relay, then the forwarder and the proxy. A container on the forwarder's own network, and one on the MCP server's, are no real client's path, and show which kernel gives up. A container reaching a quick tunnel in front of the forwarder went out over the internet.
 
-| What the client did | Through the forwarder and proxy | Direct to the MCP server | Through a quick tunnel in front |
-| --- | --- | --- | --- |
-| Closed its stream | 7 ms | 1 ms | 40 ms |
-| Was killed | within 0.2 s | within 0.2 s | within 0.2 s |
-| Vanished: its network taken away, with no close | 16 min 0 s | 16 min 4 s | 13 min 28 s |
-| Vanished, the forwarder's kernel retransmitting 8 times and not 15 | 1 min 55 s | | |
-| Was frozen | still held after 21 min, and read again when it thawed | the same | |
+| What the client did | From the Mac, the published port | A container at the forwarder | A container at the MCP server | Through a quick tunnel |
+| --- | --- | --- | --- | --- |
+| Closed its stream | within 0.2 s | 7 ms | 1 ms | 40 ms |
+| Was killed | within 0.2 s | within 0.2 s | within 0.2 s | within 0.2 s |
+| Was frozen | held for the minute it was frozen | still held after 21 min, and read again when it thawed | the same | not run |
+| Vanished: its network taken away, with no close | cannot, on one machine | 16 min 0 s | 16 min 4 s | 13 min 28 s, the VM's proxy and not the tunnel (below) |
 
-- **The stack's forwarder and proxy pass a client's leaving on at once.** The picture with no end at all, a caller climbing to its bound in 22 s, was a relay's that kept the server's side open (SMD-4459's third review). It is not the stack's.
-- **A vanished client is ended by the kernel that faces it,** when it gives up retransmitting what the client does not acknowledge: the forwarder's, for a client that reaches the stack's port; the front's, for a TLS proxy or a tunnel. The SDK writes a comment on each stream every 15 seconds, so there is always something unacknowledged within that.
+- **Nothing in the path hid a client's close or its kill:** a podman machine's port relay, the forwarder, the proxy and the quick tunnel, each tried once. The picture with no end at all, a caller at its bound in 22 s, was a relay's that kept the server's side open (SMD-4459's third review).
+- **A vanished client is ended by whatever faces it,** when that gives up retransmitting what the client does not acknowledge. The SDK writes a comment on each stream every 15 seconds, so something is always unacknowledged within that. A Linux kernel at its default (`net.ipv4.tcp_retries2`, 15) took 16 minutes; the kernel's documentation gives 924.6 s as that setting's floor.
+- **The 13 min 28 s is not the tunnel's.** The client was a container in the Mac's VM, and what it sends to the internet leaves through the VM's own network proxy. That proxy faced the client; the tunnel's edge saw a peer that went on acknowledging until the proxy gave up. By the proxy's source, as a reviewer read it, 15 retransmissions come to 804.6 s, and the end came 805.0 s after the first frame the client did not acknowledge. What a tunnel vendor's edge does with a client that vanishes was not measured.
+- **What faces a real client is seldom the stack.** The port is published on loopback. A client on the stack's machine cannot vanish apart from it. A remote one comes through a TLS proxy or a tunnel on that machine, or a proxy on another; and under Docker Desktop, a podman machine or a rootless engine the forwarder's own peer is the engine's port relay.
 - **A frozen client still acknowledges.** A listen stream carries nothing from its client to the server, so nothing the server can read tells a frozen client from a live one that is idle.
-- **The quick tunnel carried the stream:** answered in 0.36 s, a comment every 15 seconds. Taken down with a stream held, it ended that stream at the server at once, and at the client 4 s later with no closing frame.
+- **The quick tunnel carried four probe streams:** each was answered, the first in 0.36 s, and had its comment every 15 seconds for the 40 s at most it was read. Its vendor's page says quick tunnels do not support event streams, allows 200 requests in flight, of which a held stream is one, and promises no uptime. Taken down with a stream held, it ended that stream at the server as it went, and at the client about 5 s later with no closing frame.
+- The two probe clients that vanished gave their own streams up 59 s and 61 s after their network went: the probe's runtime, which says nothing of the real client.
 
 **Decided.**
 
-1. **A vanished client: the forwarder's kernel gives up after 8 retransmissions,** about 100 s after the first frame the client does not acknowledge (`net.ipv4.tcp_retries2` on the forwarder's container, `deploy/compose.yaml`; built in this ticket's first PR). Every connection through the stack's port is given up on as soon, an answer its client does not acknowledge for that long among them. It reaches clients that reach the forwarder. Behind an operator's own TLS proxy or tunnel that front's timeout decides, and is the operator's.
-2. **A frozen client is accepted.** Its place is kept until it thaws, is killed, or the server restarts: at most a caller's 32.
-3. **A revoked key's streams are ended.** The server asks again, every few minutes, whether each caller that holds streams still stands, and ends the streams of one that does not. Not built: this ticket's second PR.
-4. **A lever short of a restart:** an operator's action that ends one caller's streams, each with its closing frame. Not built: this ticket's third PR.
+1. **A vanished client is accepted,** as a frozen one is: its stream ends when whatever faces it gives up, a quarter of an hour as measured. This was first decided otherwise, and built: the forwarder's kernel at 8 retransmissions, which ended a vanished client's stream in 1 min 55 s where that client was a container on the forwarder's network. The review of that PR found no client these documents describe that the forwarder's kernel faces, and the maintainer took it back the same day.
+2. **A frozen client is accepted.** Its place is kept until it thaws, is killed, or the server restarts: at most 32 for each caller's name, and the server's 256 across names. The sign is a caller's count on keyed `/health` that does not fall, and until decision 4 is built the lever is restarting `mcp`, which ends every stream.
+3. **A revoked key's streams are ended.** The server asks again, every few minutes, whether each caller that holds streams still stands, and ends the streams of one that does not. Not built: this ticket's second PR. To settle in its build:
+   - what the server keeps to ask with, a held stream keeping nothing of its request;
+   - what counts as not standing: revoked in the registry, its line gone from the key list, a key rotated under its name;
+   - a token caller, whose token lapses in minutes by design: the paragraph this replaces accepted an expired token's stream, and no decision says otherwise yet;
+   - how often, and what no answer means (the REST core away at a key edit, the registry busy);
+   - how one caller's streams are ended and the rest left, the SDK's one way closing all;
+   - what such an end is recorded as.
+4. **A lever short of a restart:** an operator's action that ends one caller's streams, each with its closing frame. Not built: this ticket's third PR. To settle in its build:
+   - where it lives, the MCP server holding the streams and no key list, and who may use it;
+   - how a caller is named, a line's `agent` being its name's first 64 characters;
+   - whether that caller may ask again at once;
+   - that it ends the caller's live streams with the dead ones, each a reopen for its client.
 
-Not taken: ending every stream at a set age, which costs each live client a reopen for the frozen few (and is under "Considered and not taken" for its own reasons); and closing a caller's oldest stream when it asks at its bound, which a key with more than 32 live sessions would turn into each reopening closing another live stream.
+Not taken: a shorter timeout anywhere in the stack (decision 1); ending every stream at a set age, which costs each live client a reopen for the frozen few (and is under "Considered and not taken" for its own reasons); and closing a caller's oldest stream when it asks at its bound, which a key with more than 32 live sessions would turn into each reopening closing another live stream.
 
 ## Considered and not taken
 
@@ -232,7 +244,7 @@ Not taken: ending every stream at a set age, which costs each live client a reop
 - An upgrade with a real migration, done the way the documents will say, and a stack with a collector, through the real client.
 - A stream held for an hour through the forwarder, the proxy and a tunnel; and the proxy's own stop with one open.
 - An interactive session through a closure longer than 60 seconds, with what its `/mcp` panel shows meanwhile; and the real client when its own path drops: what it does when its machine sleeps and wakes, with a stream the server still holds for it. (A probe client whose path dropped was measured in SMD-4493.)
-- A stream's end through the stack's proxy, with the real client (SMD-4459). Measured since with a probe client (SMD-4493, "A stream whose client or key is gone"): its leaving reaches the server in milliseconds, and the stack's forwarder and proxy hide none. The real client's own is still to run.
+- A stream's end through the stack's proxy, with the real client (SMD-4459). Measured since with a probe client (SMD-4493, "A stream whose client or key is gone"): nothing in the path hid a close or a kill, each tried once. The real client's own is still to run, and so are what a tunnel vendor's edge does with a client that vanishes, and a stream held for an hour through one.
 - What Claude Code does with a refusal at a cap, and whether a refused attempt counts toward five reopens an hour.
 
 ## Verify, for the build

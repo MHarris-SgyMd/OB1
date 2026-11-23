@@ -1312,18 +1312,6 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     command: ["bun", "/forwarder.ts"]
-    # A client that vanishes with no close (its machine asleep, its network
-    # gone) acknowledges nothing, and this container's kernel is what gives
-    # up on it: after 8 retransmissions, about 100 s, where its default 15
-    # is about 16 minutes (SMD-4493). Until it does, a listen stream the MCP
-    # server holds for that client keeps its place under that server's
-    # bounds. Measured on a scratch stack: such a client's place came back
-    # 16 min 0 s after it vanished, and 1 min 55 s with this. Every
-    # connection through the stack's port is given up on as soon, an answer
-    # its client does not acknowledge for that long among them. The
-    # break-glass listener carries no stream and keeps the default.
-    sysctls:
-      net.ipv4.tcp_retries2: "8"
     # Bun as PID 1 ignores SIGTERM, which the script does not handle, so
     # without init each stop, recreate and `down` would wait out the 10 s
     # grace (SMD-3193); under it bun takes the signal's default and exits.
