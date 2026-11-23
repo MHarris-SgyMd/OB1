@@ -182,7 +182,7 @@ if (!URL_) {
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["5d", "10g", "26", "37b", "38"],
+  sleep: ["5d", "10g", "26", "37b", "38", "38c", "38y"],
   long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
   sweep: ["38s", "50", "51", "38p"],
@@ -19591,8 +19591,9 @@ if (want("16")) {
     // and judge's door, each carrying the one before it (SMD-3306 PR 6b-2: [38s], after this section in the rest shard,
     // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
     // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 134's validator, which
-    // carries 120's with the deliverable kind (SMD-1715).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) });
+    // carries 120's with the deliverable kind (SMD-1715), and the settled parts' file, whose lineage writer carries
+    // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an
@@ -23750,9 +23751,18 @@ if (want("29")) {
     const SPECIAL = new Map<string, number | "prose" | "slow" | "partial">();
     let raced = false;
     let raceId = "";
+    /** A thought whose text a session moves and rebuilds while its call is out (SMD-2298 PR 2, review pass 1). */
+    let rebuiltId = "";
+    let rebuiltDone = false;
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
       const body = await req.text();
       bodies.push(body);
+      if (!rebuiltDone && rebuiltId && body.includes("[29] rebuilt")) {
+        rebuiltDone = true;
+        const edited = "[29] rebuilt, its text moved while the call was out";
+        await sql`UPDATE thoughts SET content = ${edited}, content_fingerprint = content_fingerprint_of(${edited}) WHERE id = ${rebuiltId}::uuid`;
+        await sql`SELECT rebuild_derived(${rebuiltId}::uuid, 'live: rebuilt while its call was out')`;
+      }
       if (!raced && raceId && body.includes("[29] race")) {
         raced = true;
         const edited = `[29] race, edited meanwhile ${raceId.slice(0, 8)}`;
@@ -23885,21 +23895,27 @@ if (want("29")) {
       assert(![C, U].some((id) => byId.has(id)) && !bodies.some((b) => /\[29\] (C|U),/.test(b)),
         "a current thought and one with no tags are never pooled nor sent");
 
-      // --status after: R alone in the backlog, failed (its row listed); then A moved again and marked, due again.
+      // --status after: R alone in the backlog, failed (its row listed). Then A moved again and rebuilt: under 150
+      // rebuild_derived requeues it under the recorded key (SMD-2298 PR 2, the pool's feed). And M moved raw with no
+      // rebuild: re-tagged before and due again, which the worker's own run puts back.
       const status1 = await cli("--status");
       await move(A, "[29] A, moved a second time");
-      await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move again')`;
+      const [{ r: fed }] = (await sql`SELECT rebuild_derived(${A}::uuid, 'live: raw move again') AS r`) as { r: { enqueued: number; unqueued: number; pools: string[] } }[];
+      const aFed = (await claims()).find((c) => c.id === A)?.status;
+      await move(M, "[29] M, moved with no rebuild");
       const status2 = await cli("--status");
       assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
-          && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && status2.out.includes("backlog: 2 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again"),
-        `--status after: seven re-tagged, R failed and listed, R alone in the backlog; A moved and marked again reads as re-tagged before and due again (${line(status1.out, "backlog:")} | ${line(status2.out, "backlog:")})`);
+          && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && fed.enqueued === 1 && fed.unqueued === 0 && fed.pools.includes(JOB) && aFed === "pending" && drainer(JOB) === "bun db/retag.ts --url <url>"
+          && status2.out.includes("backlog: 3 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale, 1 with the row at other text") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again")
+          && status2.out.includes("status: 6 re-tagged, 1 failed, 0 in flight, 1 pending"),
+        `--status after: seven re-tagged, R failed and listed, R alone in the backlog; A moved and rebuilt is requeued under ${JOB} by rebuild_derived (150), pending; M moved raw reads as re-tagged before and due again (${JSON.stringify(fed)}; ${line(status1.out, "backlog:")} | ${line(status2.out, "backlog:")})`);
 
-      // --retry-failed with the policy lifted: R re-tagged, and A put back in the pool and re-tagged at its newest text.
+      // --retry-failed with the policy lifted: R re-tagged; A, pooled by the rebuild, re-tagged; M put back by the run and re-tagged.
       const mark = bodies.length;
       const retry = await retag({ retryFailed: true });
-      assert(retry.code === 0 && retry.out.includes("--retry-failed: 1 failed row(s) returned to the pool") && retry.out.includes("pool: 0 thought(s) added, 1 re-tagged before and put back") && bodies.length - mark === 2 && bodies.slice(mark).some((b) => b.includes("secret-29"))
-          && settled(await tagsRow(R)) && settled(await tagsRow(A)) && (await claims()).every((c) => c.status === "succeeded"),
-        `--retry-failed returns R, re-tagged once the policy lets its text go; A, re-tagged before and marked again, is put back and settled at its newest text; exit 0 (${retry.code}: ${bodies.length - mark} call(s))`);
+      assert(retry.code === 0 && retry.out.includes("--retry-failed: 1 failed row(s) returned to the pool") && retry.out.includes("pool: 0 thought(s) added, 1 re-tagged before and put back") && bodies.length - mark === 3 && bodies.slice(mark).some((b) => b.includes("secret-29"))
+          && settled(await tagsRow(R)) && settled(await tagsRow(A)) && settled(await tagsRow(M)) && (await claims()).every((c) => c.status === "succeeded"),
+        `--retry-failed returns R, re-tagged once the policy lets its text go; A, pooled by the rebuild, and M, put back by the run, settled at their newest texts; exit 0 (${retry.code}: ${bodies.length - mark} call(s))`);
 
       // Review pass 1. The provider's answers: a 408 is paused for, then answered; a 413 and an answer in prose are the
       // thought's, failed with nothing written. A thought whose metadata is SQL NULL is failed before any call. Old tags
@@ -24021,6 +24037,18 @@ if (want("29")) {
       const jClaims = (await claims()).filter((c) => order2.includes(c.id));
       assert(proseBetween.code === 1 && !/in a row/.test(proseBetween.err) && jClaims.length === 5 && jClaims.every((c) => c.status === "failed"),
         `a 400, then an answer in prose, three times: the prose was an answer, so no three in a row; the run goes on, every one failed as its own, exit 1 (${proseBetween.code}: ${jClaims.map((c) => c.status).join(",")})`);
+
+      // SMD-2298 PR 2 review pass 1: a session moves a thought's text and rebuilds it while the worker's call is out —
+      // 150 requeues it, revoking the worker's lease. The worker's write meets STALE_READ, it finds the claim pending
+      // (a rebuild's requeue, not another run's lease), and re-tags it from the new text in the same run, under --limit 1.
+      const RB = await tagged("[29] rebuilt, the text the tags were made from");
+      await move(RB, "[29] rebuilt, moved before the run");
+      rebuiltId = RB;
+      const rbFrom = bodies.length;
+      const rbRun = await retag({ limit: 1, pausesMs: [10] });
+      assert(rebuiltDone && settled(await tagsRow(RB)) && bodies.slice(rbFrom).filter((b) => b.includes("[29] rebuilt")).length === 2
+          && (await claims()).find((c) => c.id === RB)?.status === "succeeded" && /1 changed while re-tagged/.test(rbRun.out) && !/no longer this worker's/.test(rbRun.out + rbRun.err),
+        `a text moved and rebuilt while the call is out: requeued by 150, the worker re-tags it from the new text in the same run, counted changed, not lost (${line(rbRun.out, "re-tagged (")})`);
 
       // A 401 is the request's: the run stops, exit 2, nothing marked failed, the thought pending for the next run.
       const P401 = await plant("[29] P401 tagged, the key refused", { topics: ["t"], type: "idea" });
@@ -24308,6 +24336,44 @@ if (want("31")) {
   } finally {
     await cA.close();
     await cB.close();
+  }
+
+  // SMD-4446 (151): settled parts through the door. A text moved under a pending part is reported set stale beside
+  // the proposals' clause and a person's accept is kept; a leaving thought's parts are counted for the cascade.
+  {
+    const cap151 = async (content: string, at: number) =>
+      (await sql`SELECT upsert_thought(${content}, ${{ metadata: { source: "mcp" }, actor: ACTOR, embedding_model: MODEL }}::jsonb, ${unit(at)}::vector) AS r`)[0].r as { id: string; fingerprint: string };
+    const po = await cap151("151 live: the plan is to ship the importer by Friday", 4);
+    const pn = await cap151("151 live: the importer shipped on Thursday", 5);
+    const partOf = async (statement: string, shown: string) =>
+      String(((await sql`SELECT record_settled_part(${po.id}::uuid, ${pn.id}::uuid, 'older', ${statement}, ${shown}, 'implements', 'the later note reports it done', ${JUDGE}::text, ${po.fingerprint}, ${pn.fingerprint}, '{"deterministic": false}'::jsonb) AS r`)[0].r as { action: string; id: string }).id);
+    const partStatus = async (id: string) => String((await sql`SELECT status FROM settled_parts WHERE id = ${id}::uuid`)[0]?.status);
+    const pendingPart = await partOf("ship the importer by Friday", "the importer shipped on Thursday");
+    const acceptedPart = await partOf("the plan is to ship", "shipped on Thursday");
+    const accept = (await sql`SELECT review_settled_part(${acceptedPart}::uuid, 'accept', 'right', ${JSON.stringify(ACTOR)}::text::jsonb) AS r`)[0].r as { ok: boolean };
+    await sql`UPDATE thoughts SET content = '151 live: the importer shipped on Wednesday', content_fingerprint = content_fingerprint_of('151 live: the importer shipped on Wednesday') WHERE id = ${pn.id}::uuid`;
+    const movedPart = await rebuildTs("--input", pn.id, "--reason", "live: a part's text moved");
+    // The counts are read whole: "; 1 settled" is not the end of 11 or 21, and the kept line's number is the one
+    // accepted part, which the line's fixed words alone would not say.
+    assert(accept.ok === true && movedPart.code === 0 && /marked:[^\n]*; 1 settled part\(s\) set stale, as a proposal is \(151\)/.test(movedPart.out)
+        && /kept:\s+1 \(a structured pass reads its source, not the text; a person's decision on a proposal or a settled part stands\)/.test(movedPart.out)
+        && (await partStatus(pendingPart)) === "stale" && (await partStatus(acceptedPart)) === "accepted",
+      `the door reports a pending part set stale by a moved text, and counts a person's accept kept (exit ${movedPart.code}: ${movedPart.out.split("\n").find((l) => /marked:/.test(l))?.trim().slice(0, 200)}; ${movedPart.out.split("\n").find((l) => /kept:/.test(l))?.trim().slice(0, 60)}; ${await partStatus(pendingPart)}, ${await partStatus(acceptedPart)})`);
+    const leavingPart = await rebuildTs("--input", pn.id, "--gone", "--dry-run");
+    assert(leavingPart.code === 0 && /cascade:\s+0 proposal\(s\), 2 settled part\(s\) and \d+ lineage row\(s\) go with the row delete \(029's, 151's and 061's triggers\)/.test(leavingPart.out)
+        && (await partStatus(pendingPart)) === "stale" && (await partStatus(acceptedPart)) === "accepted",
+      `a leaving thought's two parts are counted for the cascade under their file's trigger, and both stand after the dry run (exit ${leavingPart.code}: ${leavingPart.out.split("\n").find((l) => /cascade:/.test(l))?.trim()})`);
+    // The census (--status) counts a lineage row whose first input's text moved. A part's row is left out, as a
+    // proposal's is: once a rebuild has run its status is its mark, and a decided part keeps the fingerprints it was judged at. The
+    // older thought is the first input of both parts' rows, so its text moving adds its own rows to the count and neither part's.
+    const staleCount = async () => Number(/stale:\s+(\d+) row\(s\)/.exec((await rebuildTs("--status")).out)?.[1] ?? NaN);
+    const staleBefore = await staleCount();
+    await sql`UPDATE thoughts SET content = '151 live: the plan was to ship the importer by Friday', content_fingerprint = content_fingerprint_of('151 live: the plan was to ship the importer by Friday') WHERE id = ${po.id}::uuid`;
+    const own = (await sql`SELECT count(*) FILTER (WHERE artifact_kind = 'part')::int AS parts, count(*) FILTER (WHERE artifact_kind NOT IN ('part', 'proposal'))::int AS others
+                             FROM derivations WHERE input_ids[1] = ${po.id}::uuid`)[0] as { parts: number; others: number };
+    const staleAfter = await staleCount();
+    assert(own.parts === 2 && own.others >= 1 && staleAfter - staleBefore === own.others,
+      `the census counts the moved thought's own lineage rows stale and neither of its two parts' (${staleBefore} before, ${staleAfter} after; ${own.others} of its own, ${own.parts} parts')`);
   }
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM derivations`;
@@ -26252,8 +26318,8 @@ async function sleepScaffold(sql: SQL) {
   const MODEL = "stub-sleep";
   const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
   await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
-  /** Each model call, in order: an extraction, a judgement or the subject sweep's question ([38s]), and when it arrived. */
-  const modelCalls: { kind: "extract" | "judge" | "subject"; at: number }[] = [];
+  /** Each model call, in order: an extraction, a judgement or the subject sweep's question ([38s]), when it arrived and, for an extraction once answered, when ([38y]). */
+  const modelCalls: { kind: "extract" | "judge" | "subject"; at: number; end?: number }[] = [];
   /** Each embedding's input but the probe's, in order (SMD-2679 PR 4b: re-embed first). */
   const embedCalls: { input: string; at: number }[] = [];
   /** What the stub reads at each request, which a case sets and puts back, and the counters it bumps (judgesHeld, probes, embedProbes). */
@@ -26335,12 +26401,14 @@ async function sleepScaffold(sql: SQL) {
     hangs: 0,
     /** A probe the hang holds answered after this long instead, unless its client aborts it first: a model server of one slot ending its call in hand. */
     hungProbeMs: 0,
+    /** Models the stub serves besides the scaffold's own: a judge model of its own ([38y], SMD-4495). */
+    alsoServed: [] as string[],
   };
   const stub = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
-      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
+      if (req.method === "GET") return Response.json({ object: "list", data: [MODEL, ...sw.alsoServed].map((id) => ({ id })) });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; input?: string };
       // Embeddings, apart from the chat switches below (SMD-2679 PR 4b: the scheduler runs re-embed): a vector on the
       // input's axis, unless a case says the embedding provider is down (503) or refuses the key (401).
@@ -26413,7 +26481,8 @@ async function sleepScaffold(sql: SQL) {
       }
       const judging = /<thought_a>/.test(prompt);
       if (sw.badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
-      modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
+      const call: { kind: "judge" | "extract"; at: number; end?: number } = { kind: judging ? "judge" : "extract", at: Date.now() };
+      modelCalls.push(call);
       if (sw.slow) await Bun.sleep(sw.slow);
       if (!judging && sw.onExtract) {
         const first = sw.onExtract;
@@ -26444,6 +26513,7 @@ async function sleepScaffold(sql: SQL) {
           : { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
       }
+      call.end = Date.now();
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
@@ -30124,6 +30194,359 @@ if (want("38p")) await (async () => {
   }
 })();
 
+// Consolidation under a steady inflow (SMD-4468): extraction's pool, which 016's trigger fills as each capture is
+// written, never drains while captures keep coming faster than extraction takes them, and consolidation joined only
+// once it did — never while the inflow lasted (SMD-4384's review measured a judgement 158 s late at the median, 306 s
+// at most, at the shipped settings). It now joins once the thoughts captured before the period began are extracted,
+// a write since dated today aside: a thought captured since is judged against neighbours captured on an earlier UTC
+// date (029). Its body a function's, as [38p]'s: the module body is at TS2563's limit for control-flow analysis.
+if (want("38c")) await (async () => {
+  console.log("\n[38c] db/sleep.ts: consolidation under a steady inflow of writes that pause nothing (SMD-4468) — extraction's pool never drains while they come faster than it takes them, and consolidation joins once the thoughts captured before the period began are extracted, judging the inflow's notes while it goes on, none claimed before that backlog is extracted, the subject sweep waiting for the whole pool; writes since dated today and edits of thoughts already extracted hold nothing back (board-sync's); a backlog thought a pause has taken holds the join while the writes outpace extraction, a limit named, and no join past comes meanwhile; after an extraction model's switch, thoughts carrying only the old key's entities hold it too");
+  const sql = new SQL({ url: URL_, max: 4 });
+  const { EX, CO, sw, env, capture, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
+  const unpoolSubjects = async () => {
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'subjects:%'`;
+  };
+  /** Of `ids`, those consolidation has judged: their claims under its key finished. */
+  const judgedOf = async (ids: string[]) => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${CO} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...ids], "TEXT")}::uuid[])`)[0].c);
+  /** Extraction's claim on `id`: its status, undefined when it has none. */
+  const exStatus = async (id: string) => ((await sql`SELECT status FROM thought_work_claims WHERE thought_id = ${id}::uuid AND work_type = ${EX}`)[0] as { status: string } | undefined)?.status;
+  const JOINED = /^ {2}extraction has done the thoughts captured before the period began — consolidating beside it while it extracts the writes since$/;
+  const DRAINED = /^ {2}extraction drained — consolidating beside it$/;
+  const ANY_JOIN = /consolidating beside it|consolidating first/;
+  const SWEEP = /^ {2}the subject sweep starts beside consolidation/;
+  /**
+   * One --follow run (poll 250 ms, one extraction worker at 400 ms a call) under a capture every 300 ms on `axis`, each
+   * passed to `stamp` once written. The inflow begins before the run, its first two notes written, so no poll finds the
+   * pool drained and joins on it; `during` runs while the inflow goes on, then it stops, every note is waited to be
+   * judged (60 s) and `after` runs before the run is stopped.
+   */
+  const underInflow = async (label: string, axis: number, during: (inflow: string[]) => Promise<void>, o: { subjects?: boolean; stamp?: (id: string) => Promise<void>; after?: () => Promise<void> } = {}) => {
+    sw.slowExtract = 400;
+    lines.length = 0;
+    const inflow: string[] = [];
+    let flowing = true;
+    const flow = (async () => {
+      for (let i = 0; flowing; i++) {
+        const id = await capture(`An inflow note on the ${label}, number ${i}.`, "sync-sleep", 0, axis);
+        await o.stamp?.(id);
+        inflow.push(id);
+        await Bun.sleep(300);
+      }
+    })();
+    await pollUntil(async () => inflow.length >= 2, 10_000);
+    const ac = new AbortController();
+    const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, workers: 1, signal: ac.signal, ...(o.subjects ? { subjects: true } : {}) });
+    let allJudged = false, code = -9;
+    try {
+      try {
+        await during(inflow);
+      } finally {
+        flowing = false;
+        await flow;
+      }
+      allJudged = await pollUntil(async () => (await judgedOf(inflow)) === inflow.length, 60_000);
+      await o.after?.();
+    } finally {
+      sw.slowExtract = 0;
+      ac.abort();
+      code = await bounded(run, ac);
+    }
+    return { inflow, allJudged, code };
+  };
+  const lastLines = () => `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`;
+  try {
+    // The backlog: six older notes on one axis, two to seven days old, each a neighbour a capture today is judged
+    // against (one entity, the stub's, and one vector), written by the sync key, which pauses nothing; the subject
+    // sweep on, its pool unnamed, as at a first period.
+    await unpoolSubjects();
+    const backlog: string[] = [];
+    for (let i = 0; i < 6; i++) backlog.push(await capture(`An older note on the ledger, number ${i}.`, "sync-sleep", 2 + i, 63));
+    const startedAt = new Date((await sql`SELECT now() AS now`)[0].now as string);
+    let joined = false, judgedInFlow = 0, pendingAtJudge = 0, drainedInFlow = true, sweptInFlow = true, sweptAfter = false;
+    const a = await underInflow("ledger", 63, async (inflow) => {
+      joined = await pollUntil(async () => lines.some((l) => JOINED.test(l)), 30_000);
+      if (joined && await pollUntil(async () => (judgedInFlow = await judgedOf(inflow)) > 0, 30_000)) {
+        // Extraction's pool still not drained as the note is judged: the old rule would not have joined yet.
+        pendingAtJudge = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EX} AND status IN ('pending', 'claimed')`)[0].c);
+      }
+      drainedInFlow = lines.some((l) => DRAINED.test(l));
+      sweptInFlow = lines.some((l) => SWEEP.test(l));
+    }, { subjects: true, after: async () => { sweptAfter = await pollUntil(async () => lines.some((l) => SWEEP.test(l)), 30_000); } });
+    // None judged before its neighbours were extracted: consolidation's first claim of the run after the backlog's last
+    // extraction finished.
+    const [order] = (await sql`
+      SELECT (SELECT max(finished_at) FROM thought_work_claims WHERE work_type = ${EX} AND thought_id = ANY(${sql.array(backlog, "TEXT")}::uuid[])) AS extracted,
+             (SELECT min(claimed_at) FROM thought_work_claims WHERE work_type = ${CO} AND claimed_at >= ${startedAt}::timestamptz) AS judged,
+             (SELECT count(*)::int FROM thought_work_claims WHERE work_type = ${EX} AND status = 'succeeded' AND thought_id = ANY(${sql.array(backlog, "TEXT")}::uuid[])) AS done`) as { extracted: Date | null; judged: Date | null; done: number }[];
+    const inOrder = order.extracted !== null && order.judged !== null && order.done === backlog.length && new Date(order.judged) >= new Date(order.extracted);
+    assert(joined && judgedInFlow > 0 && pendingAtJudge > 0 && !drainedInFlow && inOrder && a.allJudged && a.code === 0,
+      `a capture every 300 ms, extraction's pool never drained while it lasted: consolidation joins once the thoughts captured before the period began are extracted, said so, and judges an inflow note while the inflow goes on — its first claim after the backlog's last extraction (joined ${joined}; ${judgedInFlow} inflow note(s) judged during it, ${pendingAtJudge} pending or in hand for extraction then; drained during it ${drainedInFlow}; backlog ${order.done} of ${backlog.length} extracted, the last at ${order.extracted ? new Date(order.extracted).toISOString() : "never"}, the first judgement claimed at ${order.judged ? new Date(order.judged).toISOString() : "never"}; ${a.inflow.length} captured, all judged once it ended ${a.allJudged}; exit ${a.code}${joined && judgedInFlow > 0 ? "" : lastLines()})`);
+    assert(!sweptInFlow && sweptAfter,
+      `…and the subject sweep waits for extraction's whole pool, not the backlog's join, starting here once the inflow has ended (review pass 2, the maintainer's choice) (started during it ${sweptInFlow}; after ${sweptAfter}${sweptAfter ? "" : lastLines()})`);
+    await unpoolSubjects();
+
+    // A limit the maintainer chose to name (review passes 1 and 2): a backlog thought a pause has taken — one stalled
+    // by three long stops with no window gained, and one a single pause stopped — is dated behind the captures since,
+    // so while they come faster than extraction takes them it is not reached, and the join waits for it, as before.
+    // No join past meanwhile: past a stalled backlog thought it cut the capture in hand and set the inflow aside for
+    // consolidation's whole drain (review pass 2, run-it: 215 s). Once the inflow ends, consolidation joins.
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
+    const { resolveEmbedConfig: resolveC } = await import("../server-portable/embed.ts");
+    const { windowingFor: windowingC } = await import("../server-portable/entities.ts");
+    const sigC = JSON.stringify(windowingC(resolveC(env as Record<string, string>)));
+    const older: string[] = [];
+    for (let i = 0; i < 4; i++) older.push(await capture(`An older note on the journal, number ${i}.`, "sync-sleep", 2 + i, 62));
+    const held: string[] = [];
+    for (const [text, stops, stalled] of [["A held note on the journal, one window the model never finishes between stops.", 3, 3], ["A stopped note on the journal, one pause took it once.", 1, 0]] as const) {
+      const id = await capture(text, "sync-sleep", 9, 62);
+      const [{ fp }] = await sql`SELECT content_fingerprint AS fp FROM thoughts WHERE id = ${id}::uuid`;
+      await sql`INSERT INTO extraction_progress (thought_id, work_type, fingerprint, windowing, stops, stalled) VALUES (${id}::uuid, ${EX}, ${fp}, ${sigC}, ${stops}, ${stalled})`;
+      held.push(id);
+    }
+    let begun = false, joinedInFlowB = true, heldAtEnd: (string | undefined)[] = [];
+    const b = await underInflow("journal", 62, async () => {
+      begun = await pollUntil(async () => lines.some((l) => /^ {2}working:/.test(l)), 20_000);
+      await Bun.sleep(8000);
+      joinedInFlowB = lines.some((l) => ANY_JOIN.test(l));
+      heldAtEnd = await Promise.all(held.map((id) => exStatus(id)));
+    });
+    assert(begun && !joinedInFlowB && heldAtEnd.every((st) => st === "pending") && b.allJudged && b.code === 0,
+      `…and backlog thoughts a pause has taken, one stalled and one stopped once, dated behind the captures since, hold the join while they come faster than extraction takes them — no join past meanwhile — and consolidation judges every note once the inflow ends (joined during it ${joinedInFlowB}; held thoughts ${heldAtEnd.join(",")} at its end; ${b.inflow.length} captured, all judged after ${b.allJudged}; exit ${b.code}${!joinedInFlowB && b.allJudged ? "" : lastLines()})`);
+
+    // Board-sync's writes (review pass 2): it dates an observation at 00:00 UTC of its day, and re-renders a ticket in
+    // place, which 016 pools again. Both were backlog, and held the join as before: now a write during the period
+    // dated today is none, and a thought already extracted that an edit pools again during the period keeps
+    // its entities, no backlog either. The journal's notes, all extracted above, are this case's older thoughts;
+    // once the period has begun one is edited every 2 s under the sync key, which pauses nothing (review pass 3: a
+    // raw UPDATE, no actor, read as a live write and paused the period), while the inflow goes on, each edit pooling
+    // it again behind the captures; four older notes not yet extracted are the backlog the join waits for meanwhile.
+    // The held thoughts out, which would hold this join as above.
+    await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(held, "TEXT")}::uuid[])`;
+    for (let i = 0; i < 4; i++) await capture(`An older note on the register, number ${i}.`, "sync-sleep", 2 + i, 62);
+    const edited = older[0];
+    let editing = true, edits = 0, joinedD = false, judgedD = 0, editsAtJoin = 0, heldBack = "", editedAtJoin: string | undefined;
+    const startedD = new Date((await sql`SELECT now() AS now`)[0].now as string);
+    let editor: Promise<void> = Promise.resolve();
+    const d = await underInflow("register", 62, async (inflow) => {
+      try {
+        await pollUntil(async () => lines.some((l) => /^ {2}working:/.test(l)), 20_000);
+        editor = (async () => {
+          while (editing) {
+            await sql`SELECT update_thought(p_id := ${edited}::uuid, p_content := ${`An older note on the journal, number 0, re-rendered ${edits}.`}, p_embedding := ${unit(62)}::vector, p_embedding_model := 'stub-embed', p_actor := ${{ name: "sync-sleep", via: "test-live" }}::jsonb)`;
+            edits++;
+            await Bun.sleep(2000);
+          }
+        })();
+        joinedD = await pollUntil(async () => lines.some((l) => JOINED.test(l)), 30_000);
+        editsAtJoin = edits;
+        editedAtJoin = await exStatus(edited);
+        if (!joinedD) heldBack = ((await sql`SELECT t.content, c.status, (SELECT count(*)::int FROM thought_entities te WHERE te.thought_id = t.id) AS ents, t.created_at FROM thought_work_claims c JOIN thoughts t ON t.id = c.thought_id WHERE c.work_type = ${EX} AND c.status IN ('pending', 'claimed') AND t.created_at < ${startedD}::timestamptz`) as { content: string; status: string; ents: number; created_at: Date }[]).map((r) => `${r.content.slice(0, 40)} ${r.status} ${r.ents} ${new Date(r.created_at).toISOString()}`).join(" / ");
+        if (joinedD) await pollUntil(async () => (judgedD = await judgedOf(inflow)) > 0, 30_000);
+      } finally {
+        editing = false;
+        await editor;
+      }
+    }, { stamp: async (id) => { await sql`UPDATE thoughts SET created_at = date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' WHERE id = ${id}::uuid`; } });
+    assert(joinedD && judgedD > 0 && editsAtJoin > 0 && editedAtJoin !== "succeeded" && d.allJudged && d.code === 0,
+      `…and writes dated 00:00 UTC today, as board-sync's observations, beside an older thought already extracted that an edit pools again every 2 s, as a re-rendered ticket: neither holds the join, and an inflow note is judged while the writes go on (joined ${joinedD}; ${judgedD} judged during it; ${editsAtJoin} edit(s) before the join, ${edits} in all, the edited thought ${editedAtJoin ?? "unclaimed"} at it; older ones pending or in hand then: ${heldBack || "none"}; its joins: ${lines.filter((l) => ANY_JOIN.test(l)).map((l) => l.trim().slice(0, 120)).join(" | ") || "none"}; ${d.inflow.length} captured, all judged after ${d.allJudged}; exit ${d.code}${joinedD ? "" : lastLines()})`);
+
+    // An extraction model's switch (review pass 4): every thought keeps the old key's entities until re-extracted,
+    // which consolidate.ts asks to drain before consolidating. Sixteen older notes carry only a retired key's entity;
+    // once the period has begun they are pooled again, as a switch's first pool leaves them, and dated a day ahead so
+    // that extraction leaves them while the inflow lasts. They hold the join meanwhile: read by any entity, they were
+    // extracted already, and the join came at once, judging inflow notes against the old model's.
+    const archive: string[] = [];
+    for (let i = 0; i < 16; i++) archive.push(await capture(`An older note on the archive, number ${i}.`, "sync-sleep", 2 + (i % 5), 62));
+    const [{ entity }] = (await sql`SELECT entity_id::text AS entity FROM thought_entities LIMIT 1`) as { entity: string }[];
+    for (const id of archive) await sql`INSERT INTO thought_entities (thought_id, entity_id, confidence, extraction_key) VALUES (${id}::uuid, ${entity}::uuid, 0.9, 'extract:retired-model@p1')`;
+    let begunE = false, joinedInFlowE = true, leftE = -1;
+    const e = await underInflow("archive", 62, async () => {
+      begunE = await pollUntil(async () => lines.some((l) => /^ {2}working:/.test(l)), 20_000);
+      for (const id of archive) await sql`SELECT requeue_thought_work(${EX}, ${id}::uuid)`;
+      await sql`UPDATE thought_work_claims SET enqueued_at = now() + interval '1 day' WHERE work_type = ${EX} AND thought_id = ANY(${sql.array(archive, "TEXT")}::uuid[])`;
+      await Bun.sleep(8000);
+      joinedInFlowE = lines.some((l) => ANY_JOIN.test(l));
+      leftE = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${EX} AND status <> 'succeeded' AND thought_id = ANY(${sql.array(archive, "TEXT")}::uuid[])`)[0].c);
+    });
+    const retiredE = Number((await sql`SELECT count(*)::int AS c FROM thought_entities WHERE extraction_key = 'extract:retired-model@p1'`)[0].c);
+    assert(begunE && !joinedInFlowE && leftE === archive.length && retiredE === 0 && e.allJudged && e.code === 0,
+      `…and after an extraction model's switch, thoughts carrying only the old key's entities are backlog: sixteen pooled again behind the inflow hold the join through 8 s of it, all sixteen still to extract, and once it ends they are extracted under the current key and every note is judged (joined during it ${joinedInFlowE}; ${leftE} of ${archive.length} still to extract at its end; ${retiredE} retired row(s) left; ${e.inflow.length} captured, all judged after ${e.allJudged}; exit ${e.code}${!joinedInFlowE && e.allJudged ? "" : lastLines()})`);
+  } finally {
+    await unpoolSubjects().catch(() => {});
+    await done();
+  }
+})();
+
+if (want("38y")) await (async () => {
+  console.log("\n[38y] db/sleep.ts: the judge model's passes yield to extraction where they share a model server's slot or load another model on it (SMD-4495, the maintainer's rule) — with a judge model of its own on a local model server, or extraction's background share one slot, consolidation and the subject sweep wait between calls while an extraction call is asked for or running, from consolidation's start to the period's end, a drain between captures ending nothing; a stretch of extraction's calls holds them --max-wait at most; with one model and slots to spare, the judge runs beside extraction as SMD-4468 made it");
+  const sql = new SQL({ url: URL_, max: 4 });
+  const { EX, CO, modelCalls, sw, env, capture, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
+  const JUDGE = "stub-judge";
+  const CO2 = consolidateKey(JUDGE);
+  /** The brain emptied of this section's thoughts and claims, the subject sweep's pool and window too, between cases. */
+  const reset = async () => {
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO}, ${CO2})`;
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'subjects:%'`;
+  };
+  /** Of `ids`, those judged under `co`. */
+  const judgedOf = async (co: string, ids: string[]) => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${co} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...ids], "TEXT")}::uuid[])`)[0].c);
+  /**
+   * The judge model's calls from `from` on that arrived while an extraction call had been running 250 ms or more: each
+   * passed the gate with extraction's call in flight. A call admitted just before extraction's next began arrives within
+   * a few ms of it, inside the margin.
+   */
+  const beside = (from: number) => {
+    const ex = modelCalls.filter((c) => c.kind === "extract" && c.at >= from);
+    return modelCalls.filter((c) => c.kind !== "extract" && c.at >= from && ex.some((e) => c.at > e.at + 250 && c.at < (e.end ?? Infinity))).length;
+  };
+  const YIELD_START = /^ {2}yield: {2}/;
+  const YIELDING = /^ {2}consolidation and a model subject sweep now yield to extraction's calls, for the rest of the period$/;
+  const lastLines = () => `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`;
+  /**
+   * One --follow run (poll 250 ms, the yield's grace 200 ms, one worker a pass unless `o.workers`) on six older notes on
+   * axis 63, two to seven days old, each a neighbour of every capture today, under `runEnv`; `phase` runs while it goes
+   * on — writing captures every `everyMs` through `flow` — then each capture is waited to be judged under `co` (60 s)
+   * and the run stopped.
+   */
+  const withRun = async (runEnv: Record<string, string | undefined>, co: string, o: { subjects?: boolean; yieldCapMs?: number; workers?: number }, phase: (flow: (label: string, everyMs: number, forMs: number) => Promise<string[]>) => Promise<void>) => {
+    lines.length = 0;
+    await reset();
+    for (let i = 0; i < 6; i++) await capture(`An older note on the ledger, number ${i}.`, "sync-sleep", 2 + i, 63);
+    const written: string[] = [];
+    const flow = async (label: string, everyMs: number, forMs: number) => {
+      const mine: string[] = [];
+      const until = Date.now() + forMs;
+      for (let i = 0; Date.now() < until; i++) {
+        mine.push(await capture(`A capture on the ${label}, number ${i}.`, "sync-sleep", 0, 63));
+        await Bun.sleep(everyMs);
+      }
+      written.push(...mine);
+      return mine;
+    };
+    const ac = new AbortController();
+    const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, workers: o.workers ?? 1, signal: ac.signal, env: runEnv, yieldGraceMs: 200, ...(o.yieldCapMs ? { yieldCapMs: o.yieldCapMs } : {}), ...(o.subjects ? { subjects: true } : {}) });
+    let allJudged = false, code = -9;
+    try {
+      await phase(flow);
+      allJudged = await pollUntil(async () => (await judgedOf(co, written)) === written.length, 60_000);
+    } finally {
+      ac.abort();
+      code = await bounded(run, ac);
+      sw.slowExtract = 0;
+      sw.slowJudge = 0;
+      sw.slowSubject = 0;
+    }
+    return { allJudged, code, written };
+  };
+  try {
+    // The rule, read at the start (a dry run says it): a judge model of its own on a local endpoint, or extraction's
+    // background share one slot, whether OB1_MODEL_SLOTS leaves it so or OB1_BACKGROUND_SLOTS' override for its model
+    // says so; not on a hosted endpoint, where nothing loads in turn (review pass 1), and not under `off`.
+    await reset();
+    const startOf = async (runEnv: Record<string, string | undefined>) => {
+      lines.length = 0;
+      await sleepRun({ dryRun: true, env: runEnv });
+      return lines.find((l) => YIELD_START.test(l)) ?? null;
+    };
+    const plain = { ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: undefined, OB1_CHAT_LOCAL: undefined };
+    sw.alsoServed = [JUDGE];
+    const cells = {
+      twoLocal: await startOf({ ...plain, OB1_JUDGE_MODEL: JUDGE }),
+      twoHosted: await startOf({ ...plain, OB1_JUDGE_MODEL: JUDGE, OB1_LLM_LOCAL: undefined }),
+      override: await startOf({ ...plain, OB1_BACKGROUND_SLOTS: "chat:stub-sleep=1" }),
+      off: await startOf({ ...plain, OB1_BACKGROUND_SLOTS: "off", OB1_MODEL_SLOTS: "1" }),
+      spare: await startOf({ ...plain }),
+    };
+    assert(cells.twoLocal?.includes(`the judge's model, ${JUDGE}, is not extraction's, stub-sleep, on one local model server`) === true && cells.twoHosted === null
+        && cells.override?.includes("extraction's background share of stub-sleep is one slot") === true && cells.off === null && cells.spare === null,
+      `the rule as the start says it: a judge model of its own on a local endpoint yields, on a hosted one not; extraction's share one slot by OB1_BACKGROUND_SLOTS' override for its model yields; under \`off\`, or one model with slots to spare, nothing (${JSON.stringify(cells)})`);
+
+    // A judge model of its own, the canary's shape (a 7B extracting, a 27B judging, on one Ollama): each turn between the
+    // two can load the other (stub runs: 141 loads in 300 s of captures, 18 of 74 extracted by its end). Four captures
+    // drained first, so consolidation joins and the subject sweep starts on the drain — then captures every 1.2 s for
+    // 10 s, extraction 500 ms a call: no judgement or subject question passes the gate while an extraction call runs,
+    // the drain having ended no yield, and both go on in the gaps.
+    sw.alsoServed = [JUDGE];
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    sw.slowSubject = 200;
+    let joinedA = false, judgedGapsA = 0, besideA = -1, yieldSaidA = false, startSaidA = false, askedA = 0;
+    const a = await withRun({ ...env, OB1_JUDGE_MODEL: JUDGE }, CO2, { subjects: true }, async (flow) => {
+      await flow("drain", 100, 400);
+      joinedA = await pollUntil(async () => lines.some((l) => /consolidating beside it/.test(l)) && lines.some((l) => /^ {2}the subject sweep starts beside consolidation/.test(l)), 30_000);
+      const from = Date.now();
+      await flow("ledger", 1200, 10_000);
+      startSaidA = lines.some((l) => YIELD_START.test(l) && l.includes(`the judge's model, ${JUDGE}, is not extraction's`));
+      yieldSaidA = lines.some((l) => YIELDING.test(l));
+      besideA = beside(from);
+      judgedGapsA = modelCalls.filter((c) => c.kind !== "extract" && c.at >= from).length;
+      askedA = modelCalls.filter((c) => c.kind === "subject" && c.at >= from).length;
+    });
+    assert(joinedA && startSaidA && yieldSaidA && besideA === 0 && judgedGapsA > 0 && askedA >= 5 && a.allJudged && a.code === 0,
+      `a judge model of its own: said at the start and as the yield first holds consolidation back, the subject sweep started on a drain, and from then to the period's end no judgement or subject question passes the gate while an extraction call runs, under captures every 1.2 s, both going on in its gaps (joined and swept ${joinedA}; start line ${startSaidA}, yield line ${yieldSaidA}; ${besideA} call(s) beside one, ${judgedGapsA} of the judge model's during the captures, ${askedA} of them subject questions (5 or more, so the sweep's own yield is tried); ${a.written.length} captured, all judged ${a.allJudged}; exit ${a.code}${joinedA && besideA === 0 && judgedGapsA > 0 ? "" : lastLines()})`);
+
+    // One model, extraction's background share one slot (OB1_MODEL_SLOTS=2, one left for live calls): each judge call
+    // takes extraction's turn. Captures every 1.2 s from before the run, so consolidation joins on the backlog alone.
+    sw.alsoServed = [];
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    let startSaidB = false, besideB = -1, judgedB = 0;
+    const b = await withRun({ ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: "2" }, CO, {}, async (flow) => {
+      const from = Date.now();
+      await flow("register", 1200, 12_000);
+      startSaidB = lines.some((l) => YIELD_START.test(l) && l.includes("extraction's background share of stub-sleep is one slot"));
+      besideB = beside(from);
+      judgedB = modelCalls.filter((c) => c.kind === "judge" && c.at >= from).length;
+    });
+    assert(startSaidB && besideB === 0 && judgedB > 0 && b.allJudged && b.code === 0,
+      `…one model with extraction's background share one slot (OB1_MODEL_SLOTS=2): said at the start, and no judgement passes the gate while an extraction call runs, judging in its gaps (start line ${startSaidB}; ${besideB} beside one, ${judgedB} judged during the captures; ${b.written.length} captured, all judged ${b.allJudged}; exit ${b.code}${startSaidB && besideB === 0 ? "" : lastLines()})`);
+
+    // One model and slots to spare (the defaults' three of four): no yield, the judge beside extraction (SMD-4468).
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    let besideC = -1, saidC = true;
+    const c = await withRun({ ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: undefined }, CO, {}, async (flow) => {
+      const from = Date.now();
+      await flow("journal", 1200, 12_000);
+      besideC = beside(from);
+      saidC = lines.some((l) => YIELD_START.test(l) || YIELDING.test(l));
+    });
+    assert(!saidC && besideC > 0 && c.allJudged && c.code === 0,
+      `…one model with slots to spare: no yield said, and the judge runs beside extraction's calls (said ${saidC}; ${besideC} judgement(s) beside one; ${c.written.length} captured, all judged ${c.allJudged}; exit ${c.code}${!saidC && besideC > 0 ? "" : lastLines()})`);
+
+    // Captures faster than extraction takes them, under a judge model of its own: two workers a pass at 500 ms a call
+    // take 4 a second against 5 captured, so extraction's calls never all end, no grace opens the gate, and the yield's
+    // cap (1.5 s here, --max-wait's 60 s shipped) is what lets judgements through, a turn of the grace (200 ms here) each
+    // cap, the gate closing again after (review pass 1: open from the first cap until the count reached 0, under two
+    // workers it stayed open for the rest of the period, the judge beside extraction throughout: 100 judgements in this
+    // window). Each worker fits two 150 ms calls in a 200 ms turn; eight a turn bounds it with room for a turn timer
+    // firing late under load (review pass 2).
+    sw.alsoServed = [JUDGE];
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    let judgedD = 0, joinedD = false, turnsD = 0;
+    const d = await withRun({ ...env, OB1_JUDGE_MODEL: JUDGE }, CO2, { yieldCapMs: 1500, workers: 2 }, async (flow) => {
+      const flowing = flow("archive", 200, 14_000);
+      joinedD = await pollUntil(async () => lines.some((l) => YIELDING.test(l)), 12_000);
+      const from = Date.now();
+      await flowing;
+      turnsD = Math.floor((Date.now() - from) / 1700) + 1;
+      judgedD = modelCalls.filter((c) => c.kind === "judge" && c.at >= from).length;
+    });
+    assert(joinedD && judgedD > 0 && judgedD <= 8 * (turnsD + 1) && d.allJudged && d.code === 0,
+      `…and captures faster than two extraction workers take them: their calls never all end, and the yield's cap lets judgements through a turn at a time, the gate closing again after each (yielding ${joinedD}; ${judgedD} judged during the captures after, at most ${8 * (turnsD + 1)} for ${turnsD} turn(s); ${d.written.length} captured, all judged ${d.allJudged}; exit ${d.code}${joinedD && judgedD > 0 && judgedD <= 8 * (turnsD + 1) ? "" : lastLines()})`);
+  } finally {
+    sw.alsoServed = [];
+    await reset().catch(() => {});
+    await done();
+  }
+})();
+
 if (want("38b")) {
   console.log("\n[38b] db/sleep.ts: a thought longer than every run between pauses, the brain live 2.45 s into each working period, pausing it (SMD-3379 PR 1c-3b) — a long document advances by its windows and is finished, the pool behind it drains and consolidation joins; a single window longer than every run between pauses is joined past after three stalled stops and named on the row (SMD-2694); a capture made during a period goes ahead of the stalled thought, a restart taking it from hand, and the join follows in the same period; while consolidation waits for its judge, extraction takes the newer work and the stalled thought waits (SMD-3008); the scheduler's own cuts counted apart from the stops, which say the pauses' aborts and order the held word (SMD-3060)");
   const sql = new SQL({ url: URL_, max: 4 });
@@ -31011,8 +31434,8 @@ if (want("38b")) {
     lines.length = 0;
     const dry = await runSleep({ url: URL_!, subjects: false, env, capture: 1, poll: 1, dryRun: true, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } })
       .finally(() => sql`ALTER TABLE extraction_progress_away RENAME TO extraction_progress`);
-    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 093 not applied\) — consolidation joins only once extraction is drained/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
-      `without the table the start says consolidation joins only once extraction drains, and the dry run reads the pools (exit ${dry})`);
+    assert(dry === 0 && lines.some((l) => /extraction_progress: no such table \(migration 093 not applied\) — consolidation joins only once the thoughts captured before the period began are extracted, never past a stalled one/.test(l)) && lines.some((l) => /extract \(.*\): .* pending/.test(l)) && !lines.some((l) => /held back/.test(l)),
+      `without the table the start says consolidation joins only once the period's backlog is extracted, and the dry run reads the pools (exit ${dry})`);
     // With it, the dry run beside the scheduler named the held thought and the pool it joins past.
     assert(dryHeld === 0 && dryLines.some((l) => new RegExp(`held back across stops \\(1 of 1\\): ${stuck}, no window kept over \\d+ stop\\(s\\), the last \\d+ with none gained`).test(l)) && dryLines.some((l) => /only 1 stalled thought\(s\), which consolidation would join past/.test(l)),
       `the dry run names the held thought and says consolidation would join past it (${dryLines.filter((l) => /held|stalled/.test(l)).join(" | ").trim()})`);

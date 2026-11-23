@@ -30,8 +30,9 @@ import { applyMigrations, createAssert, dropSchema, trackSections, migrationFile
 import { POSTGREST_RETIRED } from "./store.ts";
 import { consolidateKey } from "./consolidate.ts";
 import { consolidatePassKey } from "./consolidate-decide.ts";
+import { METADATA_PROMPT_VERSION } from "./metadata.ts";
 import { pathFix, searchPathSchemas, withPublic, withPublicInOptions } from "./search-path.ts";
-import { ACCEPTED_CAVEAT_PREFIX, apply039, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, apply039, bytesText, MATCH_THOUGHTS_SIGNATURE, MATCH_THOUGHTS_SIGNATURE_6, SEARCH_THOUGHTS_HYBRID_SIGNATURE, SEARCH_THOUGHTS_HYBRID_SIGNATURE_7, SEARCH_THOUGHTS_KEYWORD_SIGNATURE, retagKey, UPDATE_THOUGHT_SIGNATURE } from "../db/config.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const LIVE = process.env.DATABASE_URL;
@@ -1571,6 +1572,27 @@ else {
   assert(reRecorded.action === "added" && /✓  lineage\s+every derived row has its lineage row/.test((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out),
          "…and following the remedy — the facet closed, the subject recorded again — the check is ok again");
   await ctx.unsafe(`SELECT delete_thought('${subA}'::uuid)`);
+  // 151's kind (SMD-4446): a settled part's lineage row is no stale row for the coverage to count. Once a rebuild has
+  // run its status is its mark, as a proposal's is, and a decided part keeps the fingerprints it was judged at for good. The older thought
+  // is the first input of the part's row: its text moved raw, the count grows by its own rows and not by the part's.
+  // It is given a row of its own to count, its tags' (a census that counted nothing would otherwise pass this row).
+  // The two thoughts are removed after, so the counts below are as they were.
+  const staleIn = (out: string) => Number(/(\d+) stale \(the input's text moved since/.exec(out)?.[1] ?? NaN);
+  const partO = ((await ctx.unsafe(`SELECT upsert_thought('preflight-151 older: the plan is to ship by Friday', '{"metadata": {"type": "note", "topics": ["preflight"]}}'::jsonb) AS r`))[0].r as { id: string }).id;
+  await ctx.unsafe(`SELECT ob1_record_derivation('metadata', '${partO}'::uuid, ARRAY['${partO}'::uuid], ARRAY[(SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partO}'::uuid)], 'metadata:preflight-part@p1', '{"deterministic": false}'::jsonb)`);
+  const partN = ((await ctx.unsafe(`SELECT upsert_thought('preflight-151 newer: it shipped on Thursday', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const part151 = (await ctx.unsafe(`SELECT record_settled_part('${partO}'::uuid, '${partN}'::uuid, 'older', 'ship by Friday', 'shipped on Thursday', 'implements', 'the later note reports it done', 'consolidate:t@p4',
+      (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partO}'::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partN}'::uuid), '{"deterministic": false}'::jsonb) AS r`))[0].r as { action: string; id: string };
+  await ctx.unsafe(`SELECT review_settled_part('${part151.id}'::uuid, 'accept', 'right')`);
+  const staleBefore151 = staleIn((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out);
+  await ctx.unsafe(`UPDATE thoughts SET content = 'preflight-151 older: the plan was to ship by Friday', content_fingerprint = content_fingerprint_of('preflight-151 older: the plan was to ship by Friday') WHERE id = '${partO}'::uuid`);
+  const rows151 = (await ctx.unsafe(`SELECT count(*) FILTER (WHERE artifact_kind = 'part')::int AS parts, count(*) FILTER (WHERE artifact_kind NOT IN ('part', 'proposal', 'relation', 'subject'))::int AS own
+                                       FROM derivations WHERE input_ids[1] = '${partO}'::uuid`))[0] as { parts: number; own: number };
+  const staleAfter151 = staleIn((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out);
+  assert(part151.action === "recorded" && rows151.parts === 1 && rows151.own >= 1 && staleAfter151 - staleBefore151 === rows151.own,
+         `a settled part's lineage row is not counted stale when its thought's text moves: the coverage's count grows by the thought's own rows, of which it has one, and not by the part's (${staleBefore151} before, ${staleAfter151} after; ${rows151.own} of its own, ${rows151.parts} part's)`);
+  await ctx.unsafe(`SELECT delete_thought('${partN}'::uuid)`);
+  await ctx.unsafe(`SELECT delete_thought('${partO}'::uuid)`);
   // 120's edge (SMD-3306): a work thread's standing edge without its lineage
   // row is refused the same way, counted apart from a judged relation, and the
   // remedy is the thread's own: close the edge and re-link its key, which
@@ -2402,6 +2424,127 @@ else {
   const consDone = await run(SQL_ENV);
   assert(/consolidate pass\s+none unfinished\s*$/m.test(consDone.out) && !/consolidate pass\s+consolidate:/.test(consDone.out) && /^\s*✓\s+proposals\s+1 pending review/m.test(consDone.out),
          "a finished pass with a proposal waiting is ok — the queue is a reviewer's, not a defect, and the proposals row's — and the thought never pooled is not a signal");
+
+  /**
+   * An unfinished re-tag pass (SMD-2298 PR 3a). db/retag.ts pools the thoughts
+   * behind their tags under retag:<metadata model>@p<prompt version>, records
+   * that key in ob1_config.retag_key, and rebuild_derived feeds it (150). The
+   * re-embed and consolidate rows' rule; "not yet in the pool" is the worker's
+   * own backlog, db/config.mjs's RETAG_BACKLOG_SQL. No follower or sleep pass
+   * runs it yet (PR 4): a live lease is a run going, and pending rows wait for
+   * a run, one that stopped or a rebuild's requeue; an earlier key's pool is
+   * no worker's. With nothing unfinished, a backlog waiting is said.
+   */
+  const TAG_MODEL = "tag-model";
+  const RENV = { ...SQL_ENV, OB1_METADATA_MODEL: TAG_MODEL };
+  const RT = retagKey(TAG_MODEL, METADATA_PROMPT_VERSION);
+  const rtNone = await run(RENV);
+  assert(/^\s*✓\s+retag pass\s+none unfinished\s*$/m.test(rtNone.out), `nothing behind its tags and nothing pooled reads none unfinished (${row(rtNone.out, "retag pass")})`);
+  // Two tagged with no tags row (before 061) and one capture that fell back: the backlog, with no run yet.
+  await claims`UPDATE thoughts SET metadata = metadata || '{"type": "idea"}'::jsonb WHERE id IN (${ids[0]}::uuid, ${ids[1]}::uuid)`;
+  await claims`UPDATE thoughts SET metadata = metadata || '{"metadata_extraction_failed": "stub: the provider fell back"}'::jsonb WHERE id = ${ids[2]}::uuid`;
+  const rtWaiting = await run(RENV);
+  assert(/^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run \(none has run here: ob1_config\.retag_key is unset\) — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtWaiting.out),
+         `a backlog with no run yet is ok, counted, with the run that takes it (${row(rtWaiting.out, "retag pass")})`);
+  // A run under the recorded key stopped: one re-tagged (still behind its text: due again), one pending, the fallback never pooled.
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('retag_key', ${RT})`;
+  await claims.unsafe(`SELECT enqueue_thoughts('${RT}', ARRAY['${ids[0]}', '${ids[1]}']::uuid[])`);
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${RT} AND thought_id = ${ids[0]}::uuid`;
+  const rtStopped = await run(RENV);
+  const rtOther = await run({ ...SQL_ENV, OB1_METADATA_MODEL: "another-tag-model" });
+  assert(rtStopped.code === 0 && new RegExp(`^\\s*!\\s+retag pass\\s+${rx(RT)}: 3 thoughts pooled or behind their tags — 1 succeeded, 0 failed, 0 in flight, 1 pending, 1 not yet in the pool — 1 pending row\\(s\\) wait for a run under this key: one that stopped, or a text move's rebuild requeued them\\s*$`, "m").test(rtStopped.out)
+      && /^\s*→ Finish it: cd db && bun retag\.ts --url \$DATABASE_URL; bun retag\.ts --url \$DATABASE_URL --status shows where it stands\.\s*$/.test(fix(rtStopped.out, "retag pass")),
+         `pending rows warn with the counts, a stop or a rebuild's requeue named, and the command that finishes them (${row(rtStopped.out, "retag pass")} | ${fix(rtStopped.out, "retag pass").trim()})`);
+  assert(/Finish it: cd db && OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL --status/.test(fix(rtOther.out, "retag pass")),
+         `…under the key's own model where the server's knob names another, since a run under that one is refused (${fix(rtOther.out, "retag pass").trim()})`);
+  // A live lease: a run going, ok, no remedy; expired: a worker that died, the reclaim before the finish.
+  await claims`SELECT claim_thoughts(${RT}, 'preflight-live', 1)`;
+  const rtLive = await run(RENV);
+  assert(new RegExp(`^\\s*✓\\s+retag pass\\s+${rx(RT)}: 3 thoughts pooled or behind their tags — 1 succeeded, 0 failed, 1 in flight, 0 pending, 1 not yet in the pool — a pass under this key is running: 1 in flight \\(leases live until \\d\\d:\\d\\d UTC\\), 0 pending\\s*$`, "m").test(rtLive.out)
+      && !/Finish it/.test(fix(rtLive.out, "retag pass")) && (rtLive.out.match(/^\s*[✓✗!·]\s+retag pass\s/gm) ?? []).length === 1,
+         `a live lease reads running, ok, one row, no remedy (${row(rtLive.out, "retag pass")})`);
+  await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${RT} AND status = 'claimed'`;
+  const rtDied = await run(RENV);
+  assert(/!\s+retag pass\s+\S+: .* — a worker died holding 1 of the claim\(s\) in flight, their leases expired\s*$/m.test(rtDied.out)
+      && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool \(work_type \S+\) returns them now\. Finish it: cd db && bun retag\.ts/.test(fix(rtDied.out, "retag pass")),
+         `an expired lease reads as a worker that died holding it, the reclaim before the finish (${row(rtDied.out, "retag pass")} | ${fix(rtDied.out, "retag pass").trim()})`);
+  // A failed row: what the run left, and --retry-failed beside the finish.
+  await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL, ttl_expires_at = NULL, finished_at = now(), last_error = 'stub: 422' WHERE work_type = ${RT} AND status = 'claimed'`;
+  const rtFailed = await run(RENV);
+  assert(/retag pass\s+\S+: .* 1 succeeded, 1 failed, 0 in flight, 0 pending, 1 not yet in the pool — a run under this key left 1 failed row\(s\)\s*$/m.test(rtFailed.out)
+      && /^\s*→ Finish it: cd db && bun retag\.ts --url \$DATABASE_URL; bun retag\.ts --url \$DATABASE_URL --status shows where it stands\. Once their cause is fixed, --retry-failed returns the 1 failed row\(s\) to the pool first\.\s*$/.test(fix(rtFailed.out, "retag pass")),
+         `…a failed row: what the run left, and --retry-failed in a sentence of its own, so the command pastes as it is (review pass 1; ${fix(rtFailed.out, "retag pass").trim()})`);
+  // A pool under a key other than the recorded one (a --switch-key left it): no worker runs it, ok, nothing to finish.
+  const RT_OLD = retagKey("old-tag-model", METADATA_PROMPT_VERSION);
+  await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);
+  const rtEarlier = await run(RENV);
+  const earlierRow = rtEarlier.out.split("\n").find((l) => /retag pass/.test(l) && l.includes(`${RT_OLD}:`)) ?? "";
+  assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier key's pool, which no worker runs any more: db/retag\\.ts and rebuild_derived re-tag under ${rx(RT)} \\(ob1_config\\.retag_key\\), nothing here to finish or retry$`).test(earlierRow.trim())
+      && !rtEarlier.out.includes("OB1_METADATA_MODEL=old-tag-model"),
+         `…a key other than the recorded one is an earlier pool no worker runs, with no finish that would switch back (${earlierRow.trim()})`);
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT_OLD}`;
+  // The recorded key at another prompt version than this tree's: a newer one is a newer tree's to finish, an older one
+  // needs --switch-key; with an expired lease, the reclaim is promised only for the newer tree's key.
+  const RT_NEXT = retagKey(TAG_MODEL, METADATA_PROMPT_VERSION + 1);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_NEXT} WHERE work_type = ${RT}`;
+  await claims`UPDATE ob1_config SET value = ${RT_NEXT} WHERE key = 'retag_key'`;
+  const rtNewer = await run(RENV);
+  const RT_PREV = retagKey(TAG_MODEL, METADATA_PROMPT_VERSION - 1);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_PREV} WHERE work_type = ${RT_NEXT}`;
+  await claims`UPDATE ob1_config SET value = ${RT_PREV} WHERE key = 'retag_key'`;
+  const rtOlder = await run(RENV);
+  await claims`UPDATE thought_work_claims SET status = 'claimed', worker_id = 'preflight-dead', ttl_expires_at = now() - interval '1 minute', finished_at = NULL WHERE work_type = ${RT_PREV} AND status = 'failed'`;
+  const rtOlderDied = await run(RENV);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_NEXT} WHERE work_type = ${RT_PREV}`;
+  await claims`UPDATE ob1_config SET value = ${RT_NEXT} WHERE key = 'retag_key'`;
+  const rtNewerDied = await run(RENV);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_PREV} WHERE work_type = ${RT_NEXT}`;
+  await claims`UPDATE ob1_config SET value = ${RT_PREV} WHERE key = 'retag_key'`;
+  await claims`UPDATE thought_work_claims SET status = 'failed', worker_id = NULL, ttl_expires_at = NULL, finished_at = now() WHERE work_type = ${RT_PREV} AND status = 'claimed'`;
+  assert(/a worker died holding 1 of the claim\(s\) in flight/.test(row(rtOlderDied.out, "retag pass")) && /^\s*→ This tree's tag prompt is version/.test(fix(rtOlderDied.out, "retag pass"))
+      && /^\s*→ The next pass reclaims the expired claims .* was recorded by a tree whose tag prompt is version/.test(fix(rtNewerDied.out, "retag pass")),
+         `…an expired lease under an older version's key promises no reclaim, no pass claiming there again; under a newer tree's, whose pass does, it does (review pass 2; ${fix(rtOlderDied.out, "retag pass").trim().slice(0, 80)} | ${fix(rtNewerDied.out, "retag pass").trim().slice(0, 80)})`);
+  // A key db/retag.ts never makes (hand-set: --job refuses the shape): no run is under it.
+  await claims`UPDATE thought_work_claims SET work_type = 'retag:hand-set' WHERE work_type = ${RT_PREV}`;
+  await claims`UPDATE ob1_config SET value = 'retag:hand-set' WHERE key = 'retag_key'`;
+  const rtHand = await run(RENV);
+  // A model a shell would split: quoted in the finish.
+  const RT_SPACE = retagKey("tag model", METADATA_PROMPT_VERSION);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT_SPACE} WHERE work_type = 'retag:hand-set'`;
+  await claims`UPDATE ob1_config SET value = ${RT_SPACE} WHERE key = 'retag_key'`;
+  const rtSpace = await run(RENV);
+  assert(new RegExp(`^\\s*→ ${rx(RT_NEXT)} was recorded by a tree whose tag prompt is version ${METADATA_PROMPT_VERSION + 1}, newer than this tree's ${METADATA_PROMPT_VERSION}: run db/retag\\.ts from that tree\\. A --switch-key here would re-tag the backlog back at version ${METADATA_PROMPT_VERSION}\\.\\s*$`).test(fix(rtNewer.out, "retag pass"))
+      && !/Finish it/.test(fix(rtNewer.out, "retag pass")),
+         `…a newer tree's key is that tree's to finish, and a switch here would take it back (review pass 1; ${fix(rtNewer.out, "retag pass").trim()})`);
+  assert(new RegExp(`^\\s*→ This tree's tag prompt is version ${METADATA_PROMPT_VERSION}, so a run here re-tags under ${rx(RT)}, which needs --switch-key: it records the new key, and the backlog is re-tagged under it\\.\\s*$`).test(fix(rtOlder.out, "retag pass"))
+      && !/Finish it/.test(fix(rtOlder.out, "retag pass")),
+         `…an older version's key is not this tree's to finish: the switch is named instead (${fix(rtOlder.out, "retag pass").trim()})`);
+  assert(new RegExp(`^\\s*→ retag:hand-set is not a key db/retag\\.ts makes \\(retag:<model>@p<version>\\), so no run is under it: cd db && bun retag\\.ts --url \\$DATABASE_URL --switch-key records ${rx(RT)}, and the backlog is re-tagged under it\\.\\s*$`).test(fix(rtHand.out, "retag pass")),
+         `…a key no run makes names the switch, not a plain run it would refuse (review pass 1; ${fix(rtHand.out, "retag pass").trim()})`);
+  assert(/Finish it: cd db && OB1_METADATA_MODEL='tag model' bun retag\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL='tag model' bun retag\.ts/.test(fix(rtSpace.out, "retag pass")),
+         `…and a model a shell would split is quoted (review pass 1; ${fix(rtSpace.out, "retag pass").trim()})`);
+  await claims`UPDATE thought_work_claims SET work_type = ${RT} WHERE work_type = ${RT_SPACE}`;
+  await claims`UPDATE ob1_config SET value = ${RT} WHERE key = 'retag_key'`;
+  // Every row succeeded: none unfinished, and the backlog still behind its tags said, with the recorded key's run.
+  await claims`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now(), last_error = NULL WHERE work_type = ${RT}`;
+  const rtDone = await run(RENV);
+  assert(/^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDone.out),
+         `a finished pool with thoughts behind their tags again is ok, the backlog said without "none has run here" (${row(rtDone.out, "retag pass")})`);
+  await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);
+  const rtDoneBeside = await run(RENV);
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT_OLD}`;
+  assert(new RegExp(`✓\\s+retag pass\\s+${rx(RT_OLD)}: .* — an earlier key's pool`).test(rtDoneBeside.out)
+      && /^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDoneBeside.out),
+         `…an earlier key's pool beside it is no worker's, and hides the backlog no longer (review pass 1: it counted as unfinished, for good)`);
+  // Before 063's mark the backlog cannot be read: a skip saying why.
+  await claims.unsafe("ALTER TABLE derivations RENAME COLUMN stale_since TO stale_since_away_rt");
+  const rtPre063 = await run(RENV);
+  await claims.unsafe("ALTER TABLE derivations RENAME COLUMN stale_since_away_rt TO stale_since");
+  assert(/^\s*·\s+retag pass\s+not checked — derivations\.stale_since does not exist \(migration 063 not applied\)\s*$/m.test(rtPre063.out),
+         `before 063 the row is a skip saying why (${row(rtPre063.out, "retag pass")})`);
+  await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT}`;
+  await claims`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+  await claims`UPDATE thoughts SET metadata = metadata - 'type' - 'metadata_extraction_failed' WHERE id IN (${ids[0]}::uuid, ${ids[1]}::uuid, ${ids[2]}::uuid)`;
   // 070 (SMD-2313): the pending proposal set on a lineage pair — the newer
   // thought's derived_from naming the older, raw, as a page names its
   // evidence — is counted by the lineage check with its id, and the remedy is
@@ -2970,9 +3113,34 @@ else {
   // 067's settle function stands and warns naming 067 — 063's own lesson
   // about 061 over 063, applied to the file after it.
   const pre067 = await run(SQL_ENV);
-  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql\./.test(fix(pre067.out, "lineage")),
-         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 as the remedy (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)})`);
+  // The remedy where the settled parts' table stands (SMD-4446, review pass 5): 067, then the parts' file, which last
+  // defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, all
+  // three put back by 063 re-applied by hand. It stands in 150's place in the remedy: it carries 150's body.
+  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql, then db\/migrations\/151_settled_parts\.sql — 151 last defines rebuild_derived \(on 150's body, and so 067's\), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused \(bun migrate\.ts --reapply runs every file in order\)\./.test(fix(pre067.out, "lineage")),
+         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 then the settled parts' file as the remedy, the last definer of the three bodies 063 put back (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)}; ${fix(pre067.out, "lineage").trim().slice(0, 240)})`);
+  // On a brain from before the parts' file, where the migrator applies it in its turn, the remedy is 067 then 150,
+  // which last defines rebuild_derived there (SMD-2298).
+  const parts067 = new SQL({ url: LIVE, max: 1 });
+  await parts067.unsafe(`ALTER TABLE settled_parts RENAME TO settled_parts_away`);
+  const pre067NoParts = await run(SQL_ENV);
+  await parts067.unsafe(`ALTER TABLE settled_parts_away RENAME TO settled_parts`);
+  assert(pre067NoParts.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067/.test(pre067NoParts.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql, then db\/migrations\/150_rebuild_requeues_tags\.sql — 150 last defines rebuild_derived/.test(fix(pre067NoParts.out, "lineage")) && !/settled_parts/.test(fix(pre067NoParts.out, "lineage")),
+         `…and 067 then 150 on a brain with no parts' table (${fix(pre067NoParts.out, "lineage").trim().slice(0, 240)})`);
+  // The remedy followed, a file at a time: 067 alone leaves rebuild_derived with no arm for a part and none that
+  // requeues a tags row, the walk with no part in its order and the lineage writer, 063's, refusing the kind; the
+  // parts' file after it puts all of them back, 150's arm with its own.
+  const knowsParts = async () => (await parts067.unsafe(`
+    SELECT (SELECT w.prosrc LIKE '%ob1:a-moved-text-stales-its-parts%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS arm,
+           (SELECT w.prosrc LIKE '%ob1:tags-requeued-under-retag-key%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS tags,
+           (SELECT w.prosrc LIKE '%''subject'', ''part'')%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.ob1_record_derivation(text, uuid, uuid[], text[], text, jsonb, uuid)')) AS kind,
+           (SELECT w.prosrc LIKE '%''proposal'', ''part'', ''metadata''%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.derivation_descendants(uuid, integer, integer)')) AS walk`))[0] as { arm: boolean; tags: boolean; kind: boolean; walk: boolean };
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("067_") });
+  const alone067 = await knowsParts();
+  await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => /^\d{3}_settled_parts\.sql$/.test(f) });
+  const after067 = await knowsParts();
+  await parts067.close();
+  assert(alone067.arm === false && alone067.tags === false && alone067.kind === false && alone067.walk === false && after067.arm === true && after067.tags === true && after067.kind === true && after067.walk === true,
+         `067 alone leaves the three bodies knowing no part and rebuild_derived requeueing no tags row; the settled parts' file after it puts them back, the tags' arm with the part's (${JSON.stringify(alone067)} then ${JSON.stringify(after067)})`);
   // 029 re-applied by hand over 110 (SMD-2313, SMD-3248, SMD-3249) — this
   // ladder's own state since the queue section re-applied 029 alone: 029's
   // two-argument listing stands BESIDE 110's seven-argument one, and a call
@@ -3265,6 +3433,8 @@ else {
          "…while the claim functions, which outlive the table, still read as 015's");
   assert(/consolidate pass\s+not checked — thought_work_claims does not exist/.test(pre015.out),
          "…and the consolidate pass check, which reads the same table, says so too");
+  assert(/retag pass\s+not checked — thought_work_claims does not exist \(migration 015 not applied\)/.test(pre015.out),
+         "…and the retag pass check too (SMD-2298 PR 3a)");
   await applyMigrations(LIVE, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("015") || f.endsWith("_extraction_progress.sql") });
 
   // SMD-2880's Verify: the walk index remedy followed literally. A ledger

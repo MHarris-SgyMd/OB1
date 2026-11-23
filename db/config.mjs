@@ -1274,6 +1274,46 @@ export function parseRetagKey(key) {
 }
 
 /**
+ * The re-tag backlog (SMD-2298), defined once: db/retag.ts pools by it and
+ * preflight's `retag pass` row counts by it, so the two cannot disagree on
+ * what is behind its tags (PR 3a: the predicate had lived in the worker
+ * alone). Plain SQL over a thought `t` and its tags row `d`, unqualified as
+ * the pass rows' reads are.
+ *
+ * RETAG_TAGS_ROW_SQL joins the row: artifact_kind and produced_by `metadata`,
+ * one row by 061's unique key. RETAG_DUE_SQL is the backlog: the row marked
+ * (063's stale_since), or at a fingerprint other than the thought's text;
+ * tagged (`type` or `topics`) with no row and no failure marker, preflight's
+ * lineage row's "tags with no tag lineage"; or a capture that fell back
+ * (metadata_extraction_failed set, the egress refusal's marker included).
+ */
+export const RETAG_TAGS_ROW_SQL =
+  "LEFT JOIN derivations d ON d.artifact_kind = 'metadata' AND d.artifact_id = t.id AND d.produced_by = 'metadata'";
+export const RETAG_DUE_SQL =
+  "(d.stale_since IS NOT NULL" +
+  " OR (d.id IS NOT NULL AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)))" +
+  " OR (d.id IS NULL AND COALESCE(t.metadata ? 'type' OR t.metadata ? 'topics', false) AND t.metadata->>'metadata_extraction_failed' IS NULL)" +
+  " OR t.metadata->>'metadata_extraction_failed' IS NOT NULL)";
+
+/**
+ * The backlog counted for the pool keyed $1: by kind, the first that applies,
+ * the row's side first (marked, stale, fallback, missing), and against the
+ * key's claim rows — `unpooled` with none under it, `due` re-tagged once
+ * (succeeded) and behind its text again, which a run puts back. One row; run
+ * with `unsafe(RETAG_BACKLOG_SQL, [key])`.
+ */
+export const RETAG_BACKLOG_SQL =
+  "WITH b AS (" +
+  " SELECT t.id, CASE WHEN d.stale_since IS NOT NULL THEN 'marked'" +
+  " WHEN d.id IS NOT NULL AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) THEN 'stale'" +
+  " WHEN t.metadata->>'metadata_extraction_failed' IS NOT NULL THEN 'fallback' ELSE 'missing' END AS why" +
+  ` FROM thoughts t ${RETAG_TAGS_ROW_SQL} WHERE ${RETAG_DUE_SQL})` +
+  " SELECT count(*) FILTER (WHERE why = 'missing')::int AS missing, count(*) FILTER (WHERE why = 'marked')::int AS marked," +
+  " count(*) FILTER (WHERE why = 'stale')::int AS stale, count(*) FILTER (WHERE why = 'fallback')::int AS fallback," +
+  " count(*) FILTER (WHERE c.thought_id IS NULL)::int AS unpooled, count(*) FILTER (WHERE c.status = 'succeeded')::int AS due" +
+  " FROM b LEFT JOIN thought_work_claims c ON c.thought_id = b.id AND c.work_type = $1";
+
+/**
  * The corpus by the model its vectors carry (migration 021): one row per
  * label, NULL for unknown, vectorless rows left out — what preflight's
  * `vector models` check and reembed.ts's corpus line both read. Plain SQL with
@@ -2527,6 +2567,16 @@ export const ROLE_GRANTS = Object.freeze({
     // every other read go on. Recording a proposal
     // stays the worker group's (INSERT).
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "UPDATE"]), since: "029" }),
+    // A settled part (SMD-4446) is listed and decided as a proposal is, by
+    // 151's SECURITY INVOKER review_settled_part, which updates the row as
+    // the caller. No server code reads the table yet: the listing and the
+    // decision arrive with the ticket's review surfaces, and 151 carries
+    // this grant to the roles that hold the proposals' (SELECT and UPDATE
+    // both) so those surfaces need no grant of their own. An accept reads both thoughts' texts, which is
+    // the capture group's SELECT on `thoughts`: with this group alone a
+    // reject is made and an accept refused there. Recording a part stays the
+    // worker group's (INSERT, DELETE).
+    Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "UPDATE"]), since: "151" }),
     // brain_info reads what became of the findings board-sync posted to the
     // board (SMD-2682). Soft as the rest: without it the Findings row says
     // the table is not readable by this role, and nothing else changes.
@@ -2557,6 +2607,14 @@ export const ROLE_GRANTS = Object.freeze({
     // SELECT too: reembed reads the model and its job keys before it writes them, which the server group's SELECT used to cover — and a role given the worker group for that alone would take the server group's key writes with it (SMD-2289 review pass 1).
     Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),           since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
+    // The pass's settled parts (SMD-4446; consolidate.ts does not write them
+    // yet): 151's record_settled_part and review_settled_part run as the
+    // caller, as 029's do, and rebuild_derived sets a part stale as it does
+    // a proposal. DELETE, which the proposals' row above lacks: a part's row
+    // is one judgement, so the write deletes an undecided row that is stale
+    // or pending at other texts and records the new judgement as another
+    // row, where 063 rewrites a stale proposal in place.
+    Object.freeze({ table: "settled_parts",          privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "151" }),
     // 063's rebuild_derived (SMD-1732), run by db/rebuild.ts or by SMD-1723's
     // forget: the forget arm removes the snapshot rows at a leaving thought's
     // fingerprints — the one DELETE on 060's table, and this file's arm of the

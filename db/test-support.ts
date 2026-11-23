@@ -49,6 +49,8 @@ const TABLES = [
   "extraction_progress",
   "thought_work_claims",
   "supersession_proposals",
+  // 151's settled parts (SMD-4446): two foreign keys to `thoughts`, so before it.
+  "settled_parts",
   "ob1_entity_edges",
   "thought_entities",
   "ob1_entities",
@@ -401,7 +403,8 @@ const FUNCTIONS = [
   "close_thought_subject(uuid, uuid, text)",
   "ob1_filed_ticket(jsonb)",
   "ob1_js_space()",
-  // 114 (SMD-2608): the reviewer on a proposal — the trigger function; the trigger, the columns and the CHECKs go with supersession_proposals.
+  // 114 (SMD-2608): the reviewer on a proposal — the trigger function; the trigger, the columns and the CHECKs go with supersession_proposals
+  // (and since SMD-4446 a second trigger runs it on settled_parts, which goes before it too).
   "ob1_stamp_proposal_reviewer()",
   // 115 (SMD-3597): work claims — the four calls and their ten helpers (the
   // two taking work_claims' row type go with its CASCADE, and are named anyway).
@@ -584,6 +587,12 @@ const FUNCTIONS = [
   "ob1_text_forgotten_at(text)",
   "ob1_forget_leftovers()",
   "ob1_forget_thought_body(uuid, jsonb, boolean)",
+  // 151 (SMD-4446): settled parts — the pass's write, the reviewer's decision, the guard on a part's judgement and
+  // the lineage row's drop.
+  "record_settled_part(uuid, uuid, text, text, text, text, text, text, text, text, jsonb, uuid)",
+  "review_settled_part(uuid, text, text, jsonb, boolean, text)",
+  "ob1_keep_part_judgement()",
+  "ob1_drop_part_derivation()",
 ];
 
 /**

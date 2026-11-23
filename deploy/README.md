@@ -2812,12 +2812,50 @@ until its pool drains, or for `OB1_SLEEP_REEMBED_SHARE` seconds while
 extraction or consolidation has work (unset, 120; SMD-4384), the two then
 taking turns in the period as long each — then
 extraction, and
-consolidation beside it once extraction's pool is drained, so the backlog
-order above is built in. Beside consolidation runs the subject sweep
+consolidation beside it once the thoughts captured before the period began are
+extracted, so the backlog order above is built in: a thought captured since is
+judged against neighbours captured on an earlier UTC date, and every one of
+them not yet extracted is in that backlog, except across 00:00 UTC. Writes
+that pause nothing (an `ingested` key's, board-sync's among them) no longer
+keep consolidation out of a period for as long as they come, as they did while
+it waited for extraction's whole pool to drain (SMD-4468). Board-sync's
+observation of the day, dated 00:00 UTC, and a ticket it re-renders (which
+keeps its entities until it is extracted again) hold nothing back. A ticket
+created on an earlier day that it first writes during the period is backlog
+until extracted, as it should be — if it lands before consolidation joins; one
+landing after is judged without a wait, and a thought judged before it misses
+its pair with it. A backlog thought a pause has taken goes behind the newer
+writes, and the join waits until extraction reaches it, which, while writes
+outpace extraction, comes only once they slow, as before. A thought whose
+entities are only an older extraction key's, after a model's switch, holds the
+join too, until extraction re-extracts it. Consolidation's judge calls now run
+while such writes arrive. Where they would take extraction's turn — on a local
+model server the judge's model (`OB1_JUDGE_MODEL`) is not extraction's, so
+each turn between them can load the other model, or extraction's background
+share of its model is one slot (on a local server `OB1_MODEL_SLOTS` 1 or 2;
+on any, `OB1_BACKGROUND_SLOTS`'s `chat=1` or an override for its model) —
+consolidation and a model subject sweep yield to extraction from the start of
+either to the period's end (SMD-4495): they wait between calls while an
+extraction call is asked for or running, and a second after,
+`OB1_SLEEP_MAX_WAIT` at most in one stretch of extraction's calls (calls less
+than a second apart), then go on for a second before waiting again. The start
+says `yield:` and why, and the period says so as the yield first holds them
+back. On one Ollama, a 7B extracting and a 27B judging under a capture every
+6 s: extraction's median wait 23 s against 122 s without it, consolidation's
+599 s against 394 s. There is no switch of its own: one judge model with
+extraction's and a share of two or more turns it off. With one model, or on a
+hosted provider, and slots to spare, the judge runs beside extraction. The
+rule reads the brain's own count: an Ollama on the host answering one call at
+a time per model (its `OLLAMA_NUM_PARALLEL` unset) while the brain counts four
+is not seen — raise the host's to `OB1_MODEL_SLOTS`, 2 or more, as above.
+Under a steady inflow the period can run on until the writes stop.
+Beside consolidation runs the subject sweep
 (`extract-entities.ts --subjects`'s following run, SMD-3306 PR 6b-2), each
 thought in the subject pool given its own subject, the rules' or the judge
-model's: started once a period, its claims bounded by the period's start plus
-30 days, so a thought it sets back waits for a later period. On a brain with
+model's: started once a period, once extraction's whole pool has drained or
+been joined past (not the backlog consolidation joins on, SMD-4468), its
+claims bounded by the period's start plus 30 days, so a thought it sets back
+waits for a later period. On a brain with
 no pool named, the first period names one and pools every thought with no
 current subject, the rules keying what they can and the judge model asked the
 rest, one call at a time — a median of 71 s for the 27B with its reasoning
@@ -2915,8 +2953,13 @@ podman compose -f deploy/compose.yaml logs -f coordinator
 ```
 
 The log says `working:` when a period begins, `extraction drained — consolidating
-beside it`, `paused:` with the live call that paused it and `resumed:` once
-the capture has passed, and `the pools drained — the period ends`; `share:`
+beside it` (or `extraction has done the thoughts captured before the period
+began — consolidating beside it while it extracts the writes since` while
+newer writes keep coming, SMD-4468), `consolidation and a model subject sweep
+now yield to extraction's calls, for the rest of the period` as the yield first
+holds them back (SMD-4495), `paused:` with the live call that paused
+it and `resumed:` once the capture has passed, and
+`the pools drained — the period ends`; `share:`
 at its start names the turns, `re-embed has had its share — 120 s alone — N
 thought(s) left for its next turn …` when re-embed gives way to extraction,
 and `the claim passes have had their turn — 120 s — with N thought(s) waiting
@@ -2929,7 +2972,13 @@ at its start names the session settings in force, and a statement past its
 timeout says `<pass>: a statement passed the pass's statement_timeout (300 s)`
 and `<pass> held until a restart`. Each period begins with the re-derive
 sweep, which says `re-derive: N orphaned lineage row(s) swept` when it deletes
-any.
+any. A period that says `working:` and no consolidating line while writes keep
+arriving still has backlog to extract: a thought captured before the period
+began that extraction has not reached, such as one a pause took, behind the
+newer writes. `extract-entities.ts --status` counts extraction's whole pool,
+not that backlog: while writes arrive faster than extraction takes them it
+grows, and the join waits until they slow (the limit above). `sleep.ts
+--dry-run` names a thought held back across stops.
 The settings go out as startup parameters, which a transaction pooler
 (PgBouncer, a managed host's pooled endpoint) refuses: the scheduler connects to
 Postgres directly, as the stack's own does. `extract-entities.ts
@@ -2999,7 +3048,10 @@ SMD-3379 PR 2c-2. Where the host's slot broker reads a model server's loaded
 models (its registry's `ps`, PR 3c-1) it also decides when one of these calls
 for a model that isn't loaded is due a drain of the server: sooner where the
 server is idle, later while another model's stay runs, and a higher value
-leaves the loaded models to other brains for longer),
+leaves the loaded models to other brains for longer. It is also the most one
+stretch of extraction's calls holds consolidation and a model subject sweep
+back where they yield to it, SMD-4495: there a lower value gives the judge
+more turns, at extraction's expense),
 `OB1_SLEEP_POLL` (1–60, the most a pass goes on claiming beside a live call
 before it pauses; a call in hand runs on, to that bound once paused) and
 `OB1_SLEEP_WORKERS` (each claim pass's workers, unset 1; the subject sweep

@@ -194,6 +194,9 @@ export async function selfCheck(): Promise<number> {
     ok(b.includes("**Gate:** passed"), "names the gate result");
     ok(b.includes("scripts/check-consistency.ts") && b.includes("CI runs the branch's own copy"), "names CI-relevant files");
     ok(b.includes("worker: 42 turns, $1.84"), "lists the sessions");
+    ok(!b.includes("was not reviewed"), "a review that finished draws no line about the review");
+    const unreviewed = buildPrBody(body({ sessions: [SESSIONS[0], { role: "review", turns: 1, costUsd: 0, ended: "api-error" }] }), clean);
+    ok(unreviewed.includes("review: 1 turns, $0.00 (ended api-error)") && unreviewed.includes("this branch was not reviewed by the runner"), "a review that did not finish is said plainly: the branch was not reviewed (SMD-4490)");
     ok(b.includes("2 files changed"), "includes the diff stat");
   });
 
