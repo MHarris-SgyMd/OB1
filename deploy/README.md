@@ -1928,9 +1928,12 @@ turns them on; none does yet) says how many are open, in two places (SMD-4458).
 A server that holds none sends no such series and has no such field. A stream
 is open from the answer that holds it until its connection ends or the server
 stops. Whether its client still reads it, and whether its key still stands, are
-not asked: a client that is frozen keeps its place, and so does a key revoked
-since; one that has vanished keeps it until whatever faces it gives up on it,
-a quarter of an hour as measured (below).
+not asked. A client that is frozen keeps its place. A client that has vanished
+keeps it until whatever faces it gives up on it: a quarter of an hour where
+that was a Linux kernel or a podman machine's network proxy, and not measured
+for a tunnel or a TLS proxy (below). A key revoked since keeps the places of
+the streams opened under it: its name stays among `listen`'s callers until its
+clients go or `mcp` restarts.
 
 As a metric, `ob1.mcp.listen_streams`: the total, with no label of its own, an
 up-down counter, `ob1_mcp_listen_streams` in the profile's Prometheus (measured
@@ -2010,7 +2013,7 @@ from the stream's opening to its end. `end` says how it ended.
 
 | `end` | What ended the stream |
 | -- | -- |
-| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one kind here. That was measured with the client at the server. Through the stack's published port from the machine it runs on (the engine's own port relay, a podman machine's, then the forwarder and the proxy), a client's close and a killed client's leaving each reached the server within 0.2 s; from a container on the forwarder's own network, 7 ms and within 0.2 s; through a quick tunnel in front, 40 ms and within 0.2 s (measured, each once, SMD-4493). The proxy's access log, which writes a line for a request at `/mcp`, was not measured: what that line holds for a stream held open, and of how it ended |
+| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one kind here. That was measured with the client at the server. Through the stack's published port from the machine it runs on (the engine's own port relay, a podman machine's, then the forwarder and the proxy), a client's close and a killed client's leaving each reached the server within 0.2 s; from a container on the forwarder's own network, 7 ms and within 0.2 s; through a quick tunnel, 40 ms and within 0.2 s (measured, each once, SMD-4493). That tunnel ran as a container on the forwarder's network; on the host, as `docs/01-getting-started.md` runs it, it dials the published port, and that path whole was not run. The proxy's access log, which writes a line for a request at `/mcp`, was not measured: what that line holds for a stream held open, and of how it ended |
 | `stop` | The server's stop closed it, or was about to: a stream still open as the stop's drain ends is the stop's, though its client may leave in the moment before it is closed. The line is written as the stop's drain ends, before its flush, so that a collector has it; the stream itself is closed after that flush where the drain finished. So `held_ms` is short of the real close by the flush: milliseconds as a rule, and up to 5 s where a collector is slow to answer |
 | `server` | The server ended it itself: a listen that asks for nothing this server sends is acknowledged and closed at once |
 
@@ -2021,7 +2024,8 @@ connection dropped alike, and what follows it tells which.
 A stream that keeps dropping (a tunnel that cuts streams, a proxy's timeout, a
 client that reopens in a loop) is `client` ends under one name, each a short
 `held_ms` after an `ok` line, for as long as its client asks again, where the
-drop reaches the server (measured, above); a healthy
+drop reaches the server (a client's close and its kill do, above, and so did
+a quick tunnel taken down, once; a proxy's timeout was not measured); a healthy
 stream is held until its client goes or the server restarts. Sessions that
 come and go on one key are `client` ends under one name too, and a line has no
 session to tell them by. What marks a cut on a timer is `held_ms` near one
@@ -2042,22 +2046,25 @@ seldom the stack: a client on the stack's machine cannot vanish apart from
 it, and a remote one is faced by the TLS proxy or the tunnel in front, whose
 own time decides. A tunnel vendor's was not measured. Nothing in the stack
 shortens it: a vanished client is accepted, as a frozen one is. A client that
-is frozen still acknowledges what it is sent, and has no end until it thaws
-or is killed: one was still held after 21 min, and read its stream again
-when it thawed.
+is frozen still acknowledges what it is sent, and has no end while it is
+frozen: one was still held after 21 min, and thawed it read its stream again,
+still held.
 
 Until such a stream ends it keeps its place: at most 32 for each caller's
 name, and the server's 256 across names. Nothing on the server tells it from
-a live stream that is idle: the sign is a caller's count in `listen` that
-does not fall. A caller whose sessions vanish and ask again by another path
+a live stream that is idle, and a healthy caller's count in `listen` does not
+fall either while its sessions are open. What tells is a count above the
+sessions that key is known to have, or the climb that follows. A caller whose
+sessions vanish and ask again by another path
 holds an old stream's place beside each new one, and at its bound is
 refused: `ok` lines under one name with no end between them, `listen`'s
 count for that name climbing, then a `LISTEN_CALLER_FULL` for each further
 ask. With a relay that hid a client's leaving from the server altogether, a
-caller reached its bound of 32 in 22 s; a close and a kill were hidden by
+caller reached its bound of 32 in 22 s (SMD-4459's third review); a close and a kill were hidden by
 none of a podman machine's port relay, the stack's forwarder, its proxy and
-a quick tunnel, each tried once. The lever is restarting `mcp`, which ends
-every stream.
+a quick tunnel, each tried once. The one lever is restarting `mcp`, which
+ends every stream: every session's client then reopens, and it is no lever to
+pull twice (above).
 
 A client that has stopped asking (above) leaves a `client` end with no
 `subscriptions/listen` line after it under its name, where its key has one
