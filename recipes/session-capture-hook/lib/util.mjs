@@ -1,7 +1,8 @@
 /**
  * lib/util.mjs — the session hook's small helpers (SMD-4338): a digest, a
- * clip, a line's white space collapsed, a uuid's pattern, and a url as the
- * hook prints it. Nothing here reads the environment or the disk.
+ * clip, a line's white space collapsed, a uuid's pattern, a url as the hook
+ * prints it, and a path as a shell word. Nothing here reads the environment
+ * or the disk.
  */
 
 import { createHash } from "node:crypto";
@@ -24,6 +25,11 @@ export function shownUrl(url, base) {
     const q = [...new Set(u.searchParams.keys())].map((k) => `${encodeURIComponent(k)}=…`).join("&");
     return `${u.host ? `${u.protocol}//${u.host}` : u.protocol}${u.pathname}${q ? `?${q}` : ""}`;
   } catch { return "(a url that does not parse)"; }
+}
+
+/** A path as a shell word: quoted when it carries anything the shell would split or expand. */
+export function shellWord(p) {
+  return /^[A-Za-z0-9_./+:@%,=-]+$/.test(p) ? p : `'${String(p).replace(/'/g, `'\\''`)}'`;
 }
 
 export { UUID, clip, oneLine, sha256 };
