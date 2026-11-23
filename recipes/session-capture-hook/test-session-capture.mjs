@@ -1365,12 +1365,13 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     `a bare reference with a fallback after it is found and refused under refuse, as before, and a password glued onto a getter is blanked (SMD-4542 review pass 3) (${JSON.stringify([pwRefs, pwGlued])})`);
   // Review pass 4: the second scan passes a getter's blanked default, quoted or not, and only a whole marker ending the
   // argument: one with more after it, or unclosed, is found, as main found the call (a text that already carried one).
-  const pwSecond = ['PASSWORD = getenv("PW", Kp7mWq2zR9x)', "password = os.environ.get('PW', 'Kp7mWq2zR9')"]
+  // Review pass 5: a nested or expression default is read as main read it, so a secret-free line is not refused.
+  const pwSecond = ['PASSWORD = getenv("PW", Kp7mWq2zR9x)', "password = os.environ.get('PW', 'Kp7mWq2zR9')", 'password = os.getenv("DB_PASSWORD", os.getenv("PGPASSWORD", ""))', 'password = os.getenv("DB_PASSWORD", "changeme" if DEBUG else None)', 'password = os.getenv("DB_PASSWORD", DEFAULTS["password"])']
     .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; const c = cleanEpisode(ep, "redact"); return gateFindings(c, c.text).length; });
   const pwMarked = ['PGPASSWORD=os.getenv("X", "[redacted:x]Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", "[redacted:pw Kp7mWq2zR9")']
     .map((text) => scanForSecrets(text, { every: true }).length);
   assert(pwSecond.every((n) => n === 0) && pwMarked.every((n) => n > 0),
-    `the second scan passes a getter's blanked default, quoted or not; a marker with more after it, or unclosed, does not hide the call (SMD-4542 review pass 4) (${JSON.stringify([pwSecond, pwMarked])})`);
+    `the second scan passes a getter's blanked default, quoted or not, and a nested or expression default; a marker with more after it, or unclosed, does not hide the call (SMD-4542 review passes 4 and 5) (${JSON.stringify([pwSecond, pwMarked])})`);
   // Review pass 1 (secrets adversary): a password given as a `${VAR:-<it>}` default is blanked, as main blanked it (an
   // exclusion of `${` sent it); and quoted prose or a placeholder is read as main read it, blanked nowhere and refusing
   // nothing under refuse (the quoted branch had widened to them).
