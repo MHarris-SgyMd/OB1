@@ -177,16 +177,21 @@ if (!URL_) {
  * 44588332017) sweep was ~435 s of sections, the longest cell once the rest
  * was cut, so [26] runs in sleep, ~292 s without it: sleep ~364 s, sweep
  * ~363, the rest ~303.
+ * SMD-4495's [38y], the judge model's passes yielding to extraction (90 s on
+ * CI: the rule's cells by dry run and four runs under captures), went to sleep
+ * beside [38c] at first, which took sleep's cell to 547 s on main's run for
+ * 529f836e, the run's longest against sweep's 516. It runs in claims beside
+ * [38b], the other scheduler section, claims 378 s on that run (SMD-4538).
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
  */
 const SHARDS: Readonly<Record<string, readonly string[]>> = {
-  sleep: ["5d", "10g", "26", "37b", "38", "38c", "38y"],
+  sleep: ["5d", "10g", "26", "37b", "38", "38c"],
   long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
   sweep: ["38s", "50", "51", "38p"],
-  claims: ["10", "38b"],
+  claims: ["10", "38b", "38y"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
