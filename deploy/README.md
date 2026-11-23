@@ -556,36 +556,56 @@ free:
   - Without `ps`, two of the 40 searches were answered by exact matches
     alone, the embedder not answering in time.
 
-  Two brains backlogged at once, on the same Mac (SMD-3379 PR 3c-3), each
-  run again made once: each brain's share `chat=1,embed=1` with no broker,
-  or both on the broker with `ps`. For 12 minutes nothing wrote to either
-  brain, since a live write pauses its own brain's sleep. A probe sent
-  each brain a search every 30 s, and the model server a capture's
-  metadata call:
+  Two brains backlogged at once, on the same Mac (SMD-3379 PR 3c-3). Each
+  run below was made once; the two on one model were made a second time,
+  the first pair disturbed, and the second is shown. Each brain had the
+  share `chat=1,embed=1` with no broker, or both were on the broker with
+  `ps`. A run is 20 minutes. For its first 12 no live write reached
+  either brain, since a live write pauses its own brain's sleep. In those
+  12 minutes a probe sent each brain a search every 30 s, and sent the
+  model server, from outside any brain and any broker, the metadata call
+  a capture makes. From minute 12 timed captures ran on both brains. The
+  table is of the first 12 minutes:
 
   | Background asks for | Shares | Search, median | Metadata call, median | Judge model listed, of 720 s | Thoughts extracted, the two brains |
   |---|---|---|---|---|---|
   | one model | fixed | 0.1 s | 3.2 s | not asked for | 68 |
-  | one model | broker | 0.1 s | 3.2 s | not asked for | 89 |
-  | two models | fixed | none answered by its embedding | 3.2 s | 0 | 72 |
-  | two models | broker | 21.5 s | 16.1 s | 438 | 21 |
+  | one model | broker | 0.1 s | 3.2 s | not asked for | 104 |
+  | two models | fixed | 46 of 48 not answered by their embedding | 3.2 s | 0 | 72 |
+  | two models | broker | 18.9 s | 15.0 s | 438 | 27 |
 
-  - **On one model the two ways are alike for a live call.** Each brain's
-    background held one slot and a live call found the third: the
-    metadata call took 2.5 s with no backlog. Why the broker's brains
+  - **On one model the two ways were alike for those calls.** Each
+    brain's background held one of the server's three slots and the
+    calls found another: the metadata call took 1.9 s with no background
+    at work. No capture was timed beside a backlog at work, since from
+    minute 12 the captures paused both sleeps. Why the broker's brains
     extracted more was not established.
-  - **On two models, fixed shares starved one.** A share is per model, so
-    both brains kept the metadata model busy while the judge model
-    waited: its load began 19 minutes after Ollama decided it, two
-    minutes after live captures had paused both sleeps. The embedder
-    left Ollama's list as that load was decided and was not loaded again
-    meanwhile, so every search for those 12 minutes waited 120 s and was
-    answered by exact matches alone.
-  - **On two models the broker kept all three in turn.** The judge model
-    loaded four times in the 12 minutes, three of them on asks granted
-    63 to 74 s after they were made, and no call failed. Live calls
-    waited for a model a turn had put out: 18 of 46 searches took over
-    30 s.
+  - **On two models, fixed shares left two models unloaded.** A share is
+    per model, so both brains kept the metadata model busy while each
+    also asked for the judge model. Ollama decided the judge model's
+    load 21 s in and began it 19 minutes later, two minutes after the
+    first timed capture's write paused both sleeps; what released it was
+    not established. The embedder left Ollama's list as that load was
+    decided and was not loaded again meanwhile, so every search sent
+    after that waited 120 s and was answered by exact matches alone. The
+    notes' own load before the run took three times as long as on the
+    broker, and 16 of each brain's 150 notes were saved without a vector
+    or without tags.
+  - **On two models the broker kept all three in turn, at a price.** The
+    judge model loaded four times in the 12 minutes and every call the
+    probe sent was answered, after a wait for a model a turn had put
+    out: 18 of 48 searches took over 30 s. Extraction did 27 thoughts
+    where fixed shares did 72. From minute 12, four of 30 timed captures
+    were saved without tags after 120 s. The probe's metadata call is
+    not a brain's: the broker grants a brain's live call at once and
+    holds other background while its model loads, which it could not do
+    for a call it never saw.
+  - **On these single runs,** fixed shares bound the slots a brain's
+    background takes, not which models stay loaded: brains whose
+    background asks for more models than the server keeps loaded belong
+    on the broker with `ps`. A raised `OB1_SLEEP_MAX_WAIT`, the row above
+    that cost live calls least with one brain backlogged, was not tried
+    with two.
 
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
