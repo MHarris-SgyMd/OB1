@@ -565,12 +565,12 @@ free:
   sleep. In those 12 minutes a probe sent each brain a search every
   30 s, and sent the model server, from outside any brain and any
   broker, the metadata call a capture makes. From minute 12 a harness
-  timed captures on both brains at once. These runs were made on the
-  build before a sleep's judge-model passes yielded to extraction
+  timed captures on both brains at once. The first four rows were made
+  on the build before a sleep's judge-model passes yielded to extraction
   (SMD-4495, the sleep's `yield:` line), a rule that applies to brains
-  set up as these were. With it a backlogged brain asks for the judge
-  model less while extraction has work, and the runs on two models were
-  not made again. The table is of the first 12 minutes:
+  set up as these were. The runs on two models were made again with it
+  (SMD-3379 PR 3c-4), the one on the broker twice. The table is of the
+  first 12 minutes:
 
   | Background asks for | Shares | Search, median | Metadata call, median | Judge model listed, of 720 s | Thoughts extracted, the two brains |
   |---|---|---|---|---|---|
@@ -578,6 +578,8 @@ free:
   | one model | broker | 0.1 s | 3.2 s | not asked for | 104 |
   | two models | fixed | 46 of 48 not answered by their embedding | 3.2 s | 0 | 72 |
   | two models | broker | 18.9 s | 15.0 s | 438 | 27 |
+  | two models, with the yield | fixed | 46 of 48 not answered by their embedding | 3.5 s | 0 | 92 |
+  | two models, with the yield | broker, two runs | 51.2 and 22.4 s; 12 and 4 of 48 not answered by their embedding | 65.3 and 30.3 s | 454 and 380 | 16 and 39 |
 
   - **On one model, fixed shares and the broker were alike.** Each
     brain's background held one of the server's three slots
@@ -614,6 +616,17 @@ free:
     never saw it, and it was itself a third caller asking for the
     metadata model every 30 s, so neither its 15.0 s nor its part in the
     other figures is a brain's own.
+  - **The yield changed neither result.** Under fixed shares the run
+    with it repeated the one before: the judge model's load began 18
+    minutes after Ollama decided it, and the embedder was off Ollama's
+    list meanwhile. On the broker the two runs with it differ from each
+    other as much as from the run before it, on a machine busier than
+    the day before, so no gain or loss in what a live call met is shown.
+    In all three runs the first 30 notes took five to nine times as
+    long to load as before, Ollama beginning five to seven loads of the
+    judge model during them; whether that owes to the build or to what
+    the model server held loaded as the brains started was not
+    established.
   - **Fixed shares bound the slots a brain's background takes, not which
     models stay loaded.** Three models were in use here, the embedder
     with the two the background asked for, on a server that keeps two
