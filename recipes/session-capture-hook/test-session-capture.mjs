@@ -1346,6 +1346,15 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const pwKept = ["password = os.environ['DB_PASSWORD'] here", "const password = process.env.DB_PASSWORD;", 'the password: abc then "x" later'].map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text.includes(text));
   assert(pwBlanked.every((b) => b.prompt && b.outcome) && pwKept.every(Boolean),
     `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; a bare reference and unquoted prose are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
+  // Review pass 1 (secrets adversary): a password given as a `${VAR:-<it>}` default is blanked, as main blanked it (an
+  // exclusion of `${` sent it); and quoted prose or a placeholder is read as main read it, blanked nowhere and refusing
+  // nothing under refuse (the quoted branch had widened to them).
+  const pwDefaults = ["POSTGRES_PASSWORD: ${POSTGRES_PW:-Kp7mWq2zR9}", "export PGPASSWORD=${PGPASS:-Kp7mWq2zR9}", 'password: "${DB_PASS:-Kp7mWq2zR9}"', "password=${PW:-hunter22} now"]
+    .map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text);
+  const pwProse = ['errors = { password: "is too short (minimum is 8 characters)" }', 'password: "Enter your password"', 'password: "<your password>"', 'POSTGRES_PASSWORD: "set me"', 'the error said password: "too weak" so I changed it', 'password: "*** ***"', 'password = "xx yy zz"']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return { kept: redactEpisode(ep).text.includes(text), refused: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0 }; });
+  assert(pwDefaults.every((t) => !/Kp7mWq2zR9|hunter22/.test(t) && /\[redacted:password assignment/.test(t)) && pwProse.every((p) => p.kept && !p.refused),
+    `a password as a \${VAR:-…} default is blanked as before; quoted prose and a placeholder are not blanked, and refuse nothing (SMD-4542 review pass 1) (${JSON.stringify(pwProse)})`);
   writeFileSync(join(TMP, "pw-shapes.jsonl"), [user(pwShapes[0][0], { origin: { kind: "human" } }), user(pwShapes[1][0], { origin: { kind: "human" } }), user(pwShapes[3][0], { origin: { kind: "human" } }), assistant([{ type: "text", text: pwShapes[2][0] }])].join("\n"));
   const shapePrep = prepare({ ...base, session_id: "s-pw-shapes", transcript_path: join(TMP, "pw-shapes.jsonl") });
   const shapePayload = shapePrep.payloadPath ? readFileSync(shapePrep.payloadPath, "utf8") : "";
