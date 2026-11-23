@@ -532,7 +532,8 @@ export function renderSummary(s) {
  * title's source, judged that run uncut; read cut, two rules can judge it otherwise — the entropy rule's ratio and bar
  * on a shorter run, and the Google key's `\b` at the `…` — so it was blanked in the line while the header, read from
  * the whole prompt, named a ticket in it. The rendered text's scan leaves these runs to the whole prompt's verdict;
- * the rest of each line it still reads, so what a blanking exposed (a digest in an un-URL'd path) is still blanked.
+ * the rest of each line it still reads, so what a blanking exposed (a digest in an un-URL'd path) is still blanked, or,
+ * where the clip cut the run it sits in, refused by the gate's scan of the whole prompt.
  * Read at the places renderSummary writes the lines — the title just after the header's line, the prompts just after
  * `Asked (…):` — never searched for; a line the text's own cap cut is left to the text's scan.
  */
@@ -598,19 +599,27 @@ export function provenanceOf(s) {
  * assistant itself wrote. `{ text }`, empty when the episode has no assistant
  * text; or `{ withheld }`, why there is none to send.
  *
- * Scanned whole before the clip (SMD-3656): a clip through a secret's prefix
- * (`w|c_` and 64 hex, `sk-a|nt-…`) left a body no rule matched, and
- * modelSummary's scan of the clipped excerpt passed it to the model. A hit
- * anywhere in the messages withholds them, as modelSummary's scan always did:
- * they are not blanked and sent, since a blanking's residue (a quoted value's
- * second line, a value after a second keyword) would reach the model where none
- * did before (review pass 1, secrets adversary).
+ * Each message the clip reaches is scanned whole before the clip (SMD-3656): a
+ * clip through a secret's prefix (`w|c_` and 64 hex, `sk-a|nt-…`) left a body
+ * no rule matched, and modelSummary's scan of the clipped excerpt passed it to
+ * the model. A hit in one withholds them all, as modelSummary's scan did a hit
+ * in the excerpt: they are not blanked and sent, since a blanking's residue (a
+ * quoted value's second line, a value after a second keyword) would reach the
+ * model where none did before (review pass 1, secrets adversary). A message the
+ * clip leaves out whole sends nothing, so a hit there withholds nothing (review
+ * pass 2: a digest quoted early in a long episode cost it its model summary).
  */
 export function assistantExcerpt(ep) {
-  const joined = (ep.assistant ?? []).map((t) => String(t).trim()).filter(Boolean).join("\n\n----\n\n");
-  const hit = scanForSecrets(joined)[0];
-  if (hit) return { withheld: `${hit.reason} at char ${hit.at} in the assistant messages` };
-  return { text: joined.length > LIMITS.modelInputChars ? joined.slice(-LIMITS.modelInputChars) : joined };
+  const SEP = "\n\n----\n\n";
+  const messages = (ep.assistant ?? []).map((t) => String(t).trim()).filter(Boolean);
+  const joined = messages.join(SEP);
+  const from = Math.max(0, joined.length - LIMITS.modelInputChars);
+  // Where the first message the clip reaches begins: the scan reads it whole, and every message after it.
+  let reached = 0;
+  for (let i = 0, at = 0; i < messages.length; at += messages[i].length + SEP.length, i++) if (at + messages[i].length > from) { reached = at; break; }
+  const hit = scanForSecrets(joined.slice(reached))[0];
+  if (hit) return { withheld: `${hit.reason} at char ${reached + hit.at} in the assistant messages` };
+  return { text: joined.slice(from) };
 }
 
 /**

@@ -2923,7 +2923,18 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   };
   const cuts = [cutExcerpt(`wc_${hexBody}`, 1), cutExcerpt(`wc_${hexBody}`, 2), cutExcerpt(`sk-ant-${hexBody}`, 4)];
   assert(cuts.every((c) => c.text === undefined && /(?:work-claim token|anthropic key) at char \d+ in the assistant messages/.test(c.withheld ?? "")),
-    `an excerpt whose clip would cut a secret at w|c_, wc|_ or inside sk-ant- is withheld, the secret found in the whole messages before the clip (SMD-3656) (${cuts.map((c) => c.withheld ?? c.text?.slice(0, 30)).join(" | ")})`);
+    `an excerpt whose clip would cut a secret at w|c_, wc|_ or inside sk-ant- is withheld, the secret found in its whole message before the clip (SMD-3656) (${cuts.map((c) => c.withheld ?? c.text?.slice(0, 30)).join(" | ")})`);
+  // Review pass 2: the scan reads whole each message the cut reaches, and no other. A digest quoted in an early message
+  // the cut leaves out withholds nothing (main sent that episode to the model); a password before the cut in a message
+  // the cut reaches withholds the excerpt, since the rest of that message is sent.
+  const fillerMsg = "we read the parser, changed one branch and ran the tests again; ".repeat(13);
+  const earlyDigest = assistantExcerpt({ assistant: [`the file hash I computed is ${hexBody} — recorded.`, ...Array(20).fill(fillerMsg)] });
+  const reachedMsg = 'password = "correct horse battery staple 42" in the vault. ' + fillerMsg.repeat(3);
+  const reachedPw = assistantExcerpt({ assistant: [reachedMsg, ...Array(14).fill(fillerMsg)] });
+  const reachedFrom = [reachedMsg, ...Array(14).fill(fillerMsg)].join("\n\n----\n\n").length - LIMITS.modelInputChars;
+  assert(typeof earlyDigest.text === "string" && !earlyDigest.withheld && !earlyDigest.text.includes(hexBody) && earlyDigest.text.length === LIMITS.modelInputChars
+      && reachedFrom > 0 && reachedFrom < reachedMsg.length && /password assignment at char \d+ in the assistant messages/.test(reachedPw.withheld ?? ""),
+    `a secret in a message the cut leaves out withholds nothing; one before the cut in a message the cut reaches withholds the excerpt (SMD-3656 review pass 2) (${JSON.stringify([earlyDigest.withheld ?? "sent", reachedFrom, reachedPw.withheld ?? "sent"])})`);
   // Any secret withholds the messages, a key block or one line alike: they are not blanked and sent, since a blanking's
   // residue reached the model where nothing did before (review pass 1, secrets adversary: a quoted passphrase's second
   // line, a password after a second keyword or in `os.environ.get(…, "…")`, a `> `-quoted key block's short lines).
@@ -2938,7 +2949,7 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const cleanExc = assistantExcerpt({ assistant: ["we renamed the parser and the tests pass", "see a11d2acf"] });
   assert(blockExc.text === undefined && /private key block/.test(blockExc.withheld ?? "") && oneLineExc.text === undefined && /anthropic key/.test(oneLineExc.withheld ?? "")
       && residues.every((r) => r.text === undefined && /in the assistant messages$/.test(r.withheld ?? "")) && cleanExc.text === "we renamed the parser and the tests pass\n\n----\n\nsee a11d2acf" && !cleanExc.withheld,
-    `a secret anywhere in the assistant messages withholds them, a key block, one line, and each blanking residue the review found; clean messages are sent as they are (SMD-3656) (${JSON.stringify([blockExc.withheld, oneLineExc.withheld, ...residues.map((r) => r.withheld)])})`);
+    `a secret in the messages the cut reaches withholds them, a key block, one line, and each blanking residue the review found; clean messages are sent as they are (SMD-3656) (${JSON.stringify([blockExc.withheld, oneLineExc.withheld, ...residues.map((r) => r.withheld)])})`);
   const windowed = segment([{ t: "prompt", text: "do it" }, ...Array.from({ length: LIMITS.modelMsgs + 5 }, (_, i) => ({ t: "outcome", text: `m${i}` }))]);
   assert(windowed.episodes[0].assistant.length === LIMITS.modelMsgs && windowed.episodes[0].assistant.at(-1) === `m${LIMITS.modelMsgs + 4}` && windowed.episodes[0].assistant[0] === "m5", "the assistant window keeps the most recent LIMITS.modelMsgs messages per episode");
   assert(/summary: model at .*llama3\.1:8b/.test(modelStatusLine(mc)) && /no model_url\/model/.test(modelStatusLine({ summary: "model" })), "the status line names a configured model, and says so when model mode is on but unconfigured");
