@@ -5218,7 +5218,7 @@ if (configFailed) {
          * plain run here refused, the switch the way forward).
          */
         try {
-          const { RETAG_BACKLOG_SQL, RETAG_KEY_PREFIX, RETAG_RECIPE_BEHIND_SQL, formatPassCounts, parseRetagKey, passUnfinished, retagKey } = await import("../db/config.mjs");
+          const { RETAG_BACKLOG_AS_KEY_SQL, RETAG_BACKLOG_SQL, RETAG_KEY_PREFIX, formatPassCounts, parseRetagKey, passUnfinished, retagKey } = await import("../db/config.mjs");
           const { METADATA_PROMPT_VERSION } = await import("./metadata.ts");
           const [{ claimsPresent, marksPresent, configPresent }] = await sql`
             SELECT to_regclass('thought_work_claims') IS NOT NULL AS "claimsPresent",
@@ -5252,7 +5252,9 @@ if (configFailed) {
               byKey.set(r.work_type, c);
             }
             type RetagBacklog = { missing: number; marked: number; stale: number; recipe: number; fallback: number; unpooled: number; due: number };
-            const backlogOf = async (key: string) => ((await sql.unsafe(RETAG_BACKLOG_SQL, [key])) as RetagBacklog[])[0];
+            // With no key recorded, a run under `key` records it before it pools: its backlog is the one with `key` the
+            // target (PR 3b review pass 2: the recorded key's, none, had stood in for it, the run's recipe rows left out).
+            const backlogOf = async (key: string) => ((await sql.unsafe(recorded === null ? RETAG_BACKLOG_AS_KEY_SQL : RETAG_BACKLOG_SQL, [key])) as RetagBacklog[])[0];
             // How a run reaches a key from this tree: under the key's own model, which the server's knob may name
             // otherwise. A key at another prompt version is not this tree's to run, its extractor writing its own: an
             // older one is left by --switch-key, a newer one is a newer tree's, which a switch here would take back. A
@@ -5311,12 +5313,10 @@ if (configFailed) {
               const b = await backlogOf(key);
               const behind = Number(b.missing) + Number(b.marked) + Number(b.stale) + Number(b.recipe) + Number(b.fallback);
               const how = runUnder(key);
-              // With no key recorded no row is behind by its recipe, but the run named below records this server's key
-              // before it pools: the rows under another model or prompt version join it, some perhaps counted already,
-              // so an upper bound (PR 3b review pass 1: the line understated the run it named, and read none unfinished).
-              const firstRun = recorded === null ? Number(((await sql.unsafe(RETAG_RECIPE_BEHIND_SQL, [serverKey])) as { n: number }[])[0].n) : 0;
-              const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? ` (none has run here: ob1_config.retag_key is unset)${firstRun > 0 ? `, and a first run records ${serverKey}, putting up to ${firstRun} more, tagged under another model or prompt version, in the backlog` : ""}` : ""}`;
-              if (behind === 0 && firstRun === 0) add("retag pass", "ok", "none unfinished");
+              // With no key recorded the count is a first run's, this server's key the target (backlogOf), and the rows
+              // behind it by their recipe alone are named (PR 3b review passes 1 and 2).
+              const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? ` (none has run here: ob1_config.retag_key is unset${Number(b.recipe) > 0 ? `; a first run records ${serverKey}, ${b.recipe} of them behind it by their tags' recipe alone` : ""})` : ""}`;
+              if (behind === 0) add("retag pass", "ok", "none unfinished");
               else if ("words" in how) add("retag pass", "ok", `${words} — ${how.words}`);
               else add("retag pass", "ok", `${words} — cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL re-tags them`);
             }

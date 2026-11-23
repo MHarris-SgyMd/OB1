@@ -6457,7 +6457,7 @@ tags row made under another model or prompt version is behind it, so a first
 run, or a `--switch-key` to a new model or prompt version, re-tags the corpus
 under its key, and a switch cut short finishes with a plain run. A run under a
 key other than the recorded one needs `--switch-key`, and `--status`,
-`--dry-run` and the refusal count the thoughts recording it would add; a
+`--dry-run` and the refusal count the backlog as recording it finds it; a
 writing run's `--job` must name the recipe it writes. `--status` and
 `--dry-run` write nothing. `rebuild_derived` requeues a tags row it marks
 under the recorded key since migration 150 (PR 2). Preflight's `retag pass`

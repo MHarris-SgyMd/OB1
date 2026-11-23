@@ -23851,7 +23851,7 @@ if (want("29")) {
       const dry = await retag({ dryRun: true });
       const backlog0 = "backlog: 6 thought(s) — 1 tagged with no tags row (before 061), 2 with the row marked stale, 1 with the row at other text, 0 with the row under another model or prompt version, 2 whose capture fell back; 6 not yet in the pool, 0 re-tagged before and due again";
       assert(status0.code === 0 && status0.out.includes(`job:    ${JOB}`) && status0.out.includes(backlog0) && status0.out.includes("status: 0 re-tagged, 0 failed, 0 in flight, 0 pending") && status0.out.includes("ob1_config.retag_key is not set")
-          && dry.code === 0 && dry.out.includes(`would: record ${JOB} in ob1_config.retag_key, putting the 0 thought(s) whose tags another recipe made in the backlog; add 6 thought(s) to the pool and put 0 back; send up to 6 thought(s) to stub-meta`) && dry.out.includes("Nothing was written.")
+          && dry.code === 0 && dry.out.includes(`would: record ${JOB} in ob1_config.retag_key; add 6 thought(s) to the pool and put 0 back; send up to 6 thought(s) to stub-meta`) && dry.out.includes(`— as a run recording ${JOB} finds it`) && dry.out.includes("Nothing was written.")
           && (await configured()) === undefined && (await claims()).length === 0 && (await lineage()) === lineage0 && bodies.length === 0,
         `bun db/retag.ts --status names the key and the backlog by kind, six, none pooled; --dry-run says what it would do; neither records the key, pools, moves a tags row or calls the model (${status0.code}/${dry.code}: ${line(status0.out, "backlog:")}; ${bodies.length} call(s))`);
 
@@ -24069,8 +24069,14 @@ if (want("29")) {
       SPECIAL.clear(); // the stub answers every thought now: the cases above left 413, 400 and prose answers set
       const rowsUnder = async (key: string) => Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM derivations d WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND ${RETAG_RECIPE_KEY_SQL} = $1`, [key])) as { n: number }[])[0].n);
       const tagRows = Number(((await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'metadata' AND produced_by = 'metadata'`) as { n: number }[])[0].n);
+      // Behind the new key by recipe alone: every tags row at its text and unmarked, none being under the new key yet.
+      const recipeOnly = Number(((await sql`SELECT count(*)::int AS n FROM derivations d JOIN thoughts t ON t.id = d.artifact_id
+         WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND d.stale_since IS NULL
+           AND d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))`) as { n: number }[])[0].n);
       const dryOther = await retag({ dryRun: true }, envOther);
       const dryOtherSwitch = await retag({ dryRun: true, switchKey: true }, envOther);
+      const dryJob = await retag({ dryRun: true, switchKey: true, job: retagKey("stub-meta-3", METADATA_PROMPT_VERSION) }, envOther);
+      const asOther = new RegExp(`recording it finds (\\d+) thought\\(s\\) behind ${OTHER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, (\\d+) of them by their tags' recipe alone`).exec(dryOther.out);
       const refusedOther = await retag({ pausesMs: [10] }, envOther);
       const callsBefore = bodies.length;
       const switchedOne = await retag({ switchKey: true, limit: 1, pausesMs: [10] }, envOther);
@@ -24082,13 +24088,16 @@ if (want("29")) {
       const statusAfter = await retag({ status: true }, envOther);
       const callsThen = bodies.length;
       const again = await retag({ pausesMs: [10] }, envOther);
-      assert(tagRows > 2 && finished.code === 1 && failedOther.length === 1 && failedOther[0].id === N && dryOther.code === 0 && dryOther.out.includes(`${tagRows} thought(s) carry tags made under another model or prompt version than ${OTHER}`)
-          && dryOther.out.includes(`would: refuse this run without --switch-key; with it, record ${OTHER} in ob1_config.retag_key, putting the ${tagRows} thought(s) whose tags another recipe made in the backlog`)
-          && dryOtherSwitch.out.includes(`would: record ${OTHER} in ob1_config.retag_key, putting the ${tagRows}`)
-          && refusedOther.code === 2 && refusedOther.err.includes(`pass --switch-key: it records ${OTHER}, and the backlog — the ${tagRows} with them — is re-tagged under it`)
+      assert(tagRows > 2 && finished.code === 1 && failedOther.length === 1 && failedOther[0].id === N && dryOther.code === 0
+          && asOther !== null && Number(asOther[2]) === recipeOnly && recipeOnly > 0 && Number(asOther[1]) >= tagRows
+          && new RegExp(`backlog: ${asOther[1]} thought\\(s\\) — .*, ${recipeOnly} with the row under another model or prompt version, .* — as a run recording `).test(dryOther.out)
+          && dryOther.out.includes(`would: refuse this run without --switch-key; with it, record ${OTHER} in ob1_config.retag_key; add `)
+          && dryOtherSwitch.out.includes(`would: record ${OTHER} in ob1_config.retag_key; add `)
+          && dryJob.out.includes("would: refuse this run: --job retag:stub-meta-3@p") && !/would: record/.test(dryJob.out)
+          && refusedOther.code === 2 && refusedOther.err.includes(`pass --switch-key: it records ${OTHER} and re-tags what it finds behind it (${asOther[1]} thought(s) behind ${OTHER}, ${recipeOnly} of them`)
           && (await configured()) === OTHER && switchedOne.code !== 2 && afterOneSwitch === 1 && converged === rowsNow - 1 && rowsNow >= tagRows && callsThen - callsBefore >= tagRows - 1
           && /backlog: 1 thought\(s\)/.test(statusAfter.out) && again.code === 1 && /(^|\s)0 re-tagged \(/.test(again.out) && bodies.length === callsThen,
-        `a dry run under another model counts every tags row behind it (${tagRows}), a plain run is refused naming them, --switch-key --limit 1 records the key and re-tags one, a plain run finishes the rest — every tags row under the new key but N's, refused as before, N alone in the backlog — and a third run calls nothing (${afterOneSwitch}/${converged}/${rowsNow}; ${line(finished.out, "re-tagged (")}; ${line(again.out, "re-tagged (")})`);
+        `a dry run under another model counts the backlog as recording its key finds it, exact (${asOther?.[1]} behind, ${recipeOnly} by recipe alone, as SQL counts it), and says the run is refused without --switch-key, or with a --job recipe it doesn't write (review passes 1 and 2); a plain run is refused naming them, --switch-key --limit 1 records the key and re-tags one, a plain run finishes the rest — every tags row under the new key but N's, refused as before, N alone in the backlog — and a third run calls nothing (${afterOneSwitch}/${converged}/${rowsNow}; ${line(finished.out, "re-tagged (")}; ${line(again.out, "re-tagged (")})`);
       const late = await tagged("[29] late, tagged under the old recipe after the switch");
       const statusLate = await retag({ status: true }, envOther);
       const lateRun = await retag({ pausesMs: [10] }, envOther);

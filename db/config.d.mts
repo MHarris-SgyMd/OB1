@@ -255,8 +255,8 @@ export const RETAG_BACKLOG_SQL: string;
 export const RETAG_RECORDED_KEY_SQL: string;
 /** The retag: key tags row `d`'s recipe makes; NULL where it names no model or prompt version. */
 export const RETAG_RECIPE_KEY_SQL: string;
-/** The tags rows made under a recipe other than key $1's: one row, `n`. */
-export const RETAG_RECIPE_BEHIND_SQL: string;
+/** As RETAG_BACKLOG_SQL with key $1 the target too: what a run recording $1 finds behind it, counted before it records. */
+export const RETAG_BACKLOG_AS_KEY_SQL: string;
 /** `SELECT embedding_model AS model, count(*) AS c` over the rows with a vector, grouped (021). */
 export const CORPUS_BY_MODEL_SQL: string;
 /** Those rows read against one model: at it, unlabelled, and the other models with counts. */
