@@ -803,11 +803,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]);
   // 152 counts a work claim's renewals in a column on work_claims (115's
   // renew_work_claim and ob1_work_claim_json and 140's claim_work carried with
-  // the count), refusing by name without 115 or 140 ([20co]) —
+  // the count), refusing by name without 115 or 140 ([20co]); 153 adds
+  // settle_stale_part and carries 149's thought_validity with an arm for a
+  // settled part's row, refusing by name without what 149 reads or 151's
+  // settled_parts ([20cp]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 123, `030 is among the last one hundred and twenty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 124, `030 is among the last one hundred and twenty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7654,6 +7657,70 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
   const later = await claim("SMD-7303", H);
   assert((await countOf(old.claim!.id)) === null && (await countOf(fresh.claim!.id)) === 2 && later.claim!.renewals === 0,
     `a re-apply keeps every count, and a new claim still starts at 0 (${await countOf(fresh.claim!.id)}, ${later.claim?.renewals})`);
+
+  await sql.close();
+}
+
+console.log("\n[20cp] Migration 153: onto a populated brain at the file before it — refused by name without 151's settled_parts, no function made; then applied: the parts standing are kept as they are; an undecided one at a text that has since moved reads stale, is refused a settle that names the texts as they were and removed by one that names them as they stand; a decided one is kept by the settle and no longer read once the undecided one is gone, where the read before the file read it stale for good; applied again a no-op (SMD-4446)");
+{
+  const the153 = MIGRATIONS.find((f) => /^\d{3}_stale_parts\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the153.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the153 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+  const fp = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (o: string, n: string, statement: string, shown: string) =>
+    String(((await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, 'older', ${statement}, ${shown}, 'updates', 'made up for the upgrade', ${KEY}, ${await fp(o)}, ${await fp(n)}, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  type Settle = { ok: boolean; action?: string; error?: string; was?: string; status?: string };
+  const settle = async (id: string, o: string, n: string) => (await sql`SELECT settle_stale_part(${id}::uuid, ${o}, ${n}) AS r`)[0].r as Settle;
+  type V = { thoughts: { freshness: { kinds: { kind: string; state: string }[] } }[] };
+  const partKind = async (id: string) => ((await sql`SELECT thought_validity(${`{${id}}`}::uuid[]) AS r`)[0].r as V).thoughts[0].freshness.kinds.find((k) => k.kind === "part")?.state ?? "absent";
+  const made = async () => (await sql`SELECT to_regprocedure('settle_stale_part(uuid, text, text)') IS NOT NULL AS m`)[0].m as boolean;
+  const parts = async () => JSON.stringify(await sql`SELECT id::text AS id, status, older_fingerprint, newer_fingerprint FROM settled_parts ORDER BY id`);
+  const apply153 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 }).then(() => "applied", (e: Error) => e.message);
+
+  // A brain at the file before it: a pair with two parts, one accepted, and the older text edited since.
+  const O = await thought("upgrade 153: the count stands at 40; the review is open");
+  const N = await thought("upgrade 153: the count is 52 now; the review closed");
+  const undecided = await part(O, N, "the count stands at 40", "the count is 52 now");
+  const decided = await part(O, N, "the review is open", "the review closed");
+  await sql`SELECT review_settled_part(${decided}::uuid, 'accept')`;
+  const oJudged = await fp(O);
+  const movedText = "upgrade 153: the count was 40 in March; the review is open";
+  await sql`UPDATE thoughts SET content = ${movedText}, content_fingerprint = content_fingerprint_of(${movedText}) WHERE id = ${O}::uuid`;
+  const oNow = await fp(O), nNow = await fp(N);
+  const before = await parts();
+  // The read before the file has no arm for a part's row: both rows read as standing, at a moved text stale.
+  const kindBefore = await partKind(N);
+
+  // Without 151's settled_parts the file is refused by name, and makes no function.
+  await sql`ALTER TABLE settled_parts RENAME TO settled_parts_away`;
+  const without = await apply153();
+  await sql`ALTER TABLE settled_parts_away RENAME TO settled_parts`;
+  assert(new RegExp(`^migration ${NUM} needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134, 139, 149 and 151; this schema lacks settled_parts, settled_parts\\.older_fingerprint`).test(without) && !(await made()),
+    `without 151's settled_parts the file is refused by name, and settle_stale_part is not made (${without.slice(0, 120)})`);
+
+  const applied = await apply153();
+  const kept = await parts();
+  const kindAfter = await partKind(N);
+  // The settle on the parts the brain already held: by the texts as they were judged it is refused; by the texts as
+  // they stand it removes the undecided part and keeps the reviewer's.
+  const byOldRead = await settle(undecided, oJudged, nNow);
+  const removed = await settle(undecided, oNow, nNow);
+  const onDecided = await settle(decided, oNow, nNow);
+  const left = (await sql`SELECT id::text AS id, status FROM settled_parts ORDER BY id`) as { id: string; status: string }[];
+  const kindSettled = await partKind(N);
+  assert(applied === "applied" && (await made()) && kept === before && oNow !== oJudged && kindBefore === "stale" && kindAfter === "stale"
+         && byOldRead.error === "EDITED_SINCE" && removed.action === "removed" && removed.was === "pending" && onDecided.error === "DECIDED" && onDecided.status === "accepted"
+         && left.length === 1 && left[0].id === decided && left[0].status === "accepted" && kindSettled === "absent",
+    `applied, the parts standing are as they were; the undecided one at a moved text reads stale, is refused a settle by the texts as judged and removed by one at the texts as they stand; the accepted one is kept and no longer read, where the read before read it stale (${kindBefore} before, ${kindAfter} after, ${kindSettled} once settled; ${byOldRead.error}, ${removed.action}, ${onDecided.error}; ${left.length} left)`);
+
+  // A re-apply is a no-op: the part left as it is, the read and the settle answering as before.
+  const again = await apply153();
+  assert(again === "applied" && JSON.stringify(await sql`SELECT id::text AS id, status FROM settled_parts ORDER BY id`) === JSON.stringify(left) && (await partKind(N)) === "absent" && (await settle(decided, oNow, nNow)).error === "DECIDED",
+    `applied again is a no-op: the part left as it is, the read and the settle answering as before (${again})`);
 
   await sql.close();
 }

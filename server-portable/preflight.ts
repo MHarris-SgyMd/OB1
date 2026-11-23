@@ -633,6 +633,18 @@ const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
  */
 const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused (bun migrate.ts --reapply runs every file in order).";
 /**
+ * 149's thought_validity is last defined by the stale parts' file (SMD-4446),
+ * which carries it whole with an arm for a settled part's lineage row. 149
+ * applied by hand alone puts back a read with no such arm: a part's row reads
+ * as standing whatever its part's status, so a part a reviewer decided reads
+ * stale for good once its text moves. So where the parts' table stands, 149's
+ * remedy names that file after it. On a brain from before the parts' table the
+ * remedy is 149's alone, and the migrator applies the file in its turn: its
+ * guard would refuse a hand apply ahead of 151.
+ */
+const APPLY_149 = "Apply db/migrations/149_thought_validity.sql.";
+const APPLY_149_PARTS = "Apply db/migrations/149_thought_validity.sql, then db/migrations/153_stale_parts.sql — 153 last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.";
+/**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
  * and THAT body carries it (055). A trigger that calls the function it is
@@ -3386,27 +3398,30 @@ if (configFailed) {
          * tool calls, and which of the tables it reads the server's role may SELECT. A table it may not leaves the axes
          * resting on it unknown, named in each answer's `unread`; thoughts itself faults the tool. Before 149 a skip;
          * the function missing where the ledger records 149, a failure, and where the role cannot read the ledger, a warning.
+         * Since the stale parts' file (SMD-4446) the read reads a settled part's row by its part, so settled_parts is
+         * among the tables, where it stands; and a by-hand remedy for 149 names that file after it (APPLY_149_PARTS).
          */
         {
           const VALIDITY_TABLES = ["thoughts", "ob1_superseded_by", "supersession_proposals", "deliverable_events", "thought_facets", "derivations",
-            "thought_chunks", "thought_entities", "ob1_entity_edges", "thought_audit", "thought_forgotten"];
+            "thought_chunks", "thought_entities", "ob1_entity_edges", "thought_audit", "thought_forgotten", "settled_parts"];
           const vRows = await sql.unsafe(`
             SELECT to_regprocedure('public.thought_validity(uuid[])') IS NOT NULL AS has_fn,
+                   to_regclass('public.settled_parts') IS NOT NULL AS has_parts,
                    -- CASE, not OR: the text form raises for a table not there.
                    ARRAY(SELECT t FROM unnest(ARRAY[${VALIDITY_TABLES.map((t) => `'${t}'`).join(", ")}]) t
                           WHERE CASE WHEN to_regclass('public.' || t) IS NULL THEN false ELSE NOT has_table_privilege('public.' || t, 'SELECT') END) AS unreadable`)
-            .then((r) => r as { has_fn: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+            .then((r) => r as { has_fn: boolean; has_parts: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
           const vl = Array.isArray(vRows) ? vRows[0] : null;
           if (!vl) {
             add("validity", "warn", `could not verify: ${(vRows as Error).message}`, "The check reads thought_validity and the tables it reads in public; the message says why it failed.");
           } else if (!vl.has_fn && ledger.has("149")) {
             // Recorded and not there (a --baseline adoption, a dropped function): the tool faults on every call (review pass 1).
             add("validity", "fail", "migration 149's thought_validity(uuid[]) missing though the ledger records 149; the validity tool faults on every call",
-                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+                ledgerRemedy("149", vl.has_parts ? APPLY_149_PARTS : APPLY_149));
           } else if (!vl.has_fn && ledgerPresent && !ledgerRead) {
             // Missing, and this role cannot read whether the ledger records 149: a warning, the remedy naming both.
             add("validity", "warn", `thought_validity(uuid[]) missing, and ${whyUnread}, so whether migration 149 is recorded is unknown; the validity tool faults until it is there`,
-                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+                ledgerRemedy("149", vl.has_parts ? APPLY_149_PARTS : APPLY_149));
           } else if (!vl.has_fn) {
             add("validity", "skip", "not checked — thought_validity does not exist (migration 149 not applied); the validity tool faults until it is");
           } else if (vl.unreadable.includes("thoughts")) {
