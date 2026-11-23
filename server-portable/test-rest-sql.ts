@@ -1233,6 +1233,15 @@ console.log("\n[10] Work claims through both doors (migration 115, SMD-3598): a 
   const writerListed = listed.find((c) => c.id === mine?.id), rivalListed = listed.find((c) => c.id === rivals?.id);
   assert(countOf(mine) === 0 && countOf(rn.body.claim) === 1 && countOf(renewedMcp.sc.claim) === 2 && countOf(writerListed) === 2 && countOf(rivalListed) === 0,
     `renewals: the writer's claim at 0, 1 after its REST renewal and 2 after its MCP one, the refused two counting nothing, and the listing says 2, the rival's 0 (${JSON.stringify([countOf(mine), countOf(rn.body.claim), countOf(renewedMcp.sc.claim), countOf(writerListed), countOf(rivalListed)])})`);
+  // A server newer than its brain (at 151, no renewals column): the listing still answers, every count null (review
+  // pass 1: it answered 500 naming the missing column). The column is renamed away for the one call, then back.
+  await sql`ALTER TABLE work_claims RENAME COLUMN renewals TO renewals_away`;
+  let behind: Awaited<ReturnType<typeof rest>>;
+  try { behind = await rest("GET", "/v1/claims?ticket=smd-9301", undefined, KEYS.reader); }
+  finally { await sql`ALTER TABLE work_claims RENAME COLUMN renewals_away TO renewals`; }
+  const behindClaims = (behind.body.claims ?? []) as Claim[];
+  assert(behind.status === 200 && behindClaims.length === listed.length && behindClaims.every((c) => countOf(c) === null),
+    `…and on a brain before migration 152 the listing still answers, each claim's count null, not a missing column (${behind.status}; ${behindClaims.length} claims; ${JSON.stringify(behindClaims.map(countOf))})`);
   const otherTicket = await rest("GET", "/v1/claims?ticket=SMD-9399", undefined, KEYS.reader);
   assert(otherTicket.status === 200 && (otherTicket.body.claims as unknown[]).length === 0, `…and a ticket nobody claimed lists nothing: the filter is the ticket's (${(otherTicket.body.claims as unknown[]).length})`);
   const readerClaim = await rest("POST", "/v1/claims", { ticket: "SMD-9302" }, KEYS.reader);

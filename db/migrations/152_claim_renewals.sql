@@ -25,8 +25,9 @@
 --     it counts nothing; a lapsed claim its holder renews, nothing covering it,
 --     counts that renewal; a takeover's new claim is a new row and starts at 0.
 --   * ob1_work_claim_json adds `renewals`, so every function answering with a
---     claim's jsonb (claim_work, renew_work_claim, release_work_claim,
---     release_closed_ticket_claims, release_holder_claims) carries it.
+--     claim's jsonb built by it (claim_work, renew_work_claim,
+--     release_work_claim, release_closed_ticket_claims) carries it; 145's
+--     release_holder_claims names its claims by id, issue and piece alone.
 --   * list_work_claims is left as 143 made it. It returns columns, not the
 --     jsonb, and a RETURNS TABLE cannot gain one under CREATE OR REPLACE; made
 --     again here with one more, 143's own CREATE OR REPLACE would refuse it at a
@@ -43,8 +44,8 @@
 --   three functions redefined with their signatures unchanged, each carrying its
 --   last definer's body (115's ob1_work_claim_json and renew_work_claim, 140's
 --   claim_work) with the count its only change. No row is rewritten: existing
---   claims keep NULL. MINOR under FORK.md's version rules. test-schema [NNN],
---   test-upgrade [20NN].
+--   claims keep NULL. MINOR under MAINTAINING.md's versioning. test-schema [137],
+--   test-upgrade [20co].
 --
 -- Prerequisites
 --   115 (work_claims and its helpers) and 140 (claim_work's cap and its

@@ -20822,9 +20822,12 @@ console.log("\n[126] Migration 140: the per-holder cap on live work claims, oper
   // count (SMD-4540), so it is the last definer, and is restored after: [137] and later sections hold the counting body.
   await reapply(file.slice(0, 4));
   const renewalsFile = files.find((f) => /^\d{3}_claim_renewals\.sql$/.test(f)) ?? "no NNN_claim_renewals.sql";
-  assert((await capNow()) === 50 && lastDefinerOf("claim_work") === renewalsFile && (await claim("SMD-8621", H)).outcome === "claimed",
-    `a re-apply is a no-op: the built-in cap stands, 152 (carrying this file's body) is claim_work's last definer, and a claim is taken (${await capNow()}, ${lastDefinerOf("claim_work")})`);
+  const bodyCounts = async () => /renewals = renewals \+ 1/.test((await db.query<{ d: string }>(`SELECT pg_get_functiondef('claim_work(text,text,text,integer,text,jsonb)'::regprocedure) AS d`)).rows[0].d);
+  const reappliedCounts = await bodyCounts();
+  assert((await capNow()) === 50 && lastDefinerOf("claim_work") === renewalsFile && !reappliedCounts && (await claim("SMD-8621", H)).outcome === "claimed",
+    `a re-apply is a no-op: the built-in cap stands, the database holds this file's claim_work (no renewal count) while 152, carrying its body, is the last definer, and a claim is taken (${await capNow()}, ${lastDefinerOf("claim_work")}, counts ${reappliedCounts})`);
   await restoreShipped("claim_work");
+  assert(await bodyCounts(), "…and the restore puts 152's counting claim_work back for the sections after");
 }
 
 console.log("\n[127] Migration 141: an entity's priority statements follow it — the prunes (record_thought_entities, prune_orphan_entities) spare an entity with an open statement, or one an open statement takes its due time from, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE and a forgetting (rebuild_derived, unchanged) still close it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references, counting what stands; the shape; a re-apply a no-op (SMD-4241)");

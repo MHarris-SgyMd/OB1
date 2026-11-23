@@ -1099,7 +1099,9 @@ export class SqlStore implements ThoughtStore {
     try {
       rows = await this.sql`
         SELECT l.id, l.issue, l.piece, l.holder, l.holder_agent_id, l.holder_kind, l.label, l.claimed_at, l.renewed_at, l.expires_at,
-               l.released_at, l.released_by, l.released_by_kind, l.release_reason, l.state, l.page_key, l.remaining, w.renewals
+               l.released_at, l.released_by, l.released_by_kind, l.release_reason, l.state, l.page_key, l.remaining,
+               -- Read through the row's jsonb, so a brain before 152 lists with null, not a missing column (review pass 1).
+               (to_jsonb(w) ->> 'renewals')::int AS renewals
           FROM list_work_claims(${opts.issue === undefined ? null : this.sql.array([opts.issue], "TEXT")}::text[], ${opts.holder ?? null}::text,
                                 ${opts.includeEnded === true}::boolean, ${opts.limit ?? 100}::int,
                                 ${a?.issue ?? null}::text, ${a?.pieceKey ?? null}::text, ${a?.claimedAt ?? null}::timestamptz, ${a?.id ?? null}::uuid)
