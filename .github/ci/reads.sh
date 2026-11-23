@@ -136,6 +136,8 @@ if not hasattr(libc, 'inotify_init1'):
 fd = libc.inotify_init1(IN_NONBLOCK)
 if fd < 0:
     sys.exit('inotify_init1: ' + os.strerror(ctypes.get_errno()))
+
+
 def inode(d):
     try:
         st = os.stat(os.path.join(top, d))
@@ -369,7 +371,7 @@ gone_now() {
 # character in JOB or CELL that is not a letter, a digit, -, _ or . is
 # written _, so a matrix value cannot leave the file's name or its header.
 list() {
-  local job=${1:-} cell=${2:-} dir out sight=ok files=0 dirs=0 odd=0 gone=0 tmp own='' more='' watch='' why='' alone=0 bad='' f
+  local job=${1:-} cell=${2:-} dir out sight=ok files=0 dirs=0 odd=0 gone=0 tmp own='' more='' watch='' why='' alone=0 changed=0 bad='' f
   if [ -z "$job" ]; then echo "usage: reads.sh list JOB [CELL]" >&2; return 2; fi
   job=${job//[^A-Za-z0-9_.-]/_} cell=${cell//[^A-Za-z0-9_.-]/_}
   dir=${RUNNER_TEMP:-${TMPDIR:-/tmp}}/reads
@@ -411,7 +413,7 @@ list() {
     done >> "$2" || rc=1
     return "$rc"
   }
-  : > "$tmp.a"; : > "$tmp.w"; : > "$tmp.o"
+  : > "$tmp.a"; : > "$tmp.w"; : > "$tmp.c"; : > "$tmp.o"
   if [ "$sight" = ok ]; then
     # By access time. This file first, when the checkout tracks it: read before the marker, so by rule and not by its time.
     case "$SELF" in "$top"/*) own=${SELF#"$top"/} ;; esac
@@ -429,17 +431,19 @@ list() {
       done
       rows d "$tmp.w" < "$state/watch.dirs" || bad=1
       # And each tracked file whose name, links or mode changed since the marker: see changed_since_marker.
-      git -C "$top" ls-files -z | changed_since_marker | rows f "$tmp.w" || bad=1
+      git -C "$top" ls-files -z | changed_since_marker | rows f "$tmp.c" || bad=1
     fi
     # The marker gone while the list was made: every test against it failed as a path gone would.
     [ -e "$state/marker" ] || bad=1
   fi
-  LC_ALL=C sort -u "$tmp.a" "$tmp.w" > "$tmp.s" || bad=1
+  LC_ALL=C sort -u "$tmp.a" "$tmp.w" "$tmp.c" > "$tmp.s" || bad=1
   odd=$(LC_ALL=C sort -zu "$tmp.o" | tr -cd '\0' | wc -c | tr -d ' ') || bad=1
-  if [ -n "$bad" ]; then sight=broken odd=0; : > "$tmp.s"; : > "$tmp.w"; : > "$tmp.o"; fi
+  if [ -n "$bad" ]; then sight=broken odd=0; : > "$tmp.s"; : > "$tmp.w"; : > "$tmp.c"; : > "$tmp.o"; fi
   files=$(grep -c "^f$(printf '\t')" "$tmp.s"); dirs=$(grep -c "^d$(printf '\t')" "$tmp.s"); gone=$(grep -c "^g$(printf '\t')" "$tmp.s")
-  # What the watch alone saw: the rows no access time gave.
+  # What the watch alone saw: the rows no access time gave. And what a changed name, link or mode alone gave:
+  # the rows neither of the two did. Said apart, so a list that grows by either shows which.
   alone=$(LC_ALL=C sort -u "$tmp.w" | LC_ALL=C comm -13 <(LC_ALL=C sort -u "$tmp.a") - | tee "$tmp.x" | wc -l | tr -d ' ')
+  changed=$(LC_ALL=C sort -u "$tmp.c" | LC_ALL=C comm -13 <(LC_ALL=C sort -u "$tmp.a" "$tmp.w") - | tee "$tmp.y" | wc -l | tr -d ' ')
   {
     printf '# reads v1 job=%s cell=%s commit=%s status=%s sight=%s files=%s dirs=%s gone=%s odd=%s%s\n' \
       "$job" "${cell:--}" "$(git -C "$top" rev-parse HEAD 2> /dev/null || echo -)" "${JOB_STATUS:--}" "$sight" "$files" "$dirs" "$gone" "$odd" "${watch:+ watch=$watch}" \
@@ -457,13 +461,14 @@ list() {
   if [ "$gone" -gt 0 ]; then more=", $gone gone by the end"; fi
   if [ "$odd" -gt 0 ]; then more="$more, $odd path(s) with a tab or a newline left out"; fi
   if [ -n "$watch" ]; then more="$more, watch $watch"; fi
-  if [ "$watch" = ok ]; then more="$more: $alone row(s) by the watch alone"; fi
+  if [ "$watch" = ok ]; then more="$more: $alone row(s) by the watch alone, $changed by a changed name alone"; fi
   echo "reads.sh: $job${cell:+ ($cell)} opened $files of $(git -C "$top" ls-files | wc -l | tr -d ' ') tracked files and listed $dirs folders (sight $sight$more), digest $(sed 1d "$out" | git hash-object --stdin | cut -c1-12)"
   # Where they are, by top-level folder, most first: a list that grows shows where.
   grep '^f' "$out" | cut -f2- | awk -F/ '{ n[(NF > 1) ? $1 : "(top)"]++ } END { for (d in n) printf "  %5d %s\n", n[d], d }' | LC_ALL=C sort -k1,1nr -k2
   # The rows the watch alone gave, the first forty: what a list by access times would have lacked.
   if [ "$alone" -gt 0 ]; then echo "  by the watch alone:"; head -n 40 "$tmp.x" | sed 's/^/    /'; if [ "$alone" -gt 40 ]; then echo "    … and $((alone - 40)) more"; fi; fi
-  rm -f "$tmp" "$tmp.a" "$tmp.w" "$tmp.o" "$tmp.s" "$tmp.x"
+  if [ "$changed" -gt 0 ]; then echo "  by a changed name, link or mode alone:"; head -n 40 "$tmp.y" | sed 's/^/    /'; if [ "$changed" -gt 40 ]; then echo "    … and $((changed - 40)) more"; fi; fi
+  rm -f "$tmp" "$tmp.a" "$tmp.w" "$tmp.c" "$tmp.o" "$tmp.s" "$tmp.x" "$tmp.y"
   return 0
 }
 
@@ -745,6 +750,7 @@ self_check() {
       && RUNNER_TEMP="$dir" bash tool/reads.sh list job linked > "$dir/said" 2>&1) || { echo "reads.sh: a list after a file was given a second name did not exit 0" >&2; fails=$((fails + 1)); }
     grep -q ' odd=0 watch=ok$' "$out" 2> /dev/null || { echo "reads.sh: after a file was given a second name the header is '$(head -1 "$out" 2> /dev/null)'" >&2; fails=$((fails + 1)); }
     has "$(printf 'f\twalked/c.txt')" "a file opened by a second name in a folder no watch is on"
+    grep -q ' by the watch alone, 1 by a changed name alone)' "$dir/said" || { echo "reads.sh: a file given a second name was not said to be a row by its changed name alone: $(grep -m 1 '^reads.sh: ' "$dir/said")" >&2; fails=$((fails + 1)); }
     hasnt "$(printf 'f\tleft/b.txt')" "a file whose name, links and mode did not change"
     # Opens that go on while the list is made do not lose the watch: it reads what was queued when it was told to
     # stop, and does not wait for a pause.
