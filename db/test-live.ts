@@ -26636,6 +26636,8 @@ if (want("38")) {
   // The suite's client closed at [24]; each section since opens its own.
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, CO, modelCalls, sw, env, capture, claims, auditRows, beat, lines, ONE_SHOT, sleepRun, bounded, intercept, around, nextPeriod, done } = await sleepScaffold(sql);
+  /** No extraction claim pending or in hand, in one read: what a wait on JOIN_SAID asks besides when its next step acts on extraction (SMD-4545). */
+  const extractionSettled = async () => { const c = await claims(EX); return !c.pending && !c.claimed; };
   // The outage schedule starts at 1 s in this section (SMD-3048), but for
   // the refusal retried and its reset, which read 2.5 s and 5 s: long enough
   // to see the row re-stamped through a wait, and the schedule still doubling
@@ -28040,7 +28042,7 @@ if (want("38")) {
     let heldWaited = false;
     try {
       // The model goes missing next: with extraction's claims settled, so it is consolidation's start that is refused.
-      await pollUntil(async () => lines.some((l) => JOIN_SAID.test(l)) && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
+      await pollUntil(async () => lines.some((l) => JOIN_SAID.test(l)) && (await extractionSettled()), 20_000);
       sw.missing = true;
       if (await nextPeriod("a live write that ends the sleep before the refusal")) {
         heldWaited = await pollUntil(async () => lines.some((l) => /tries it again in 2\.5 s/.test(l)), 20_000);
@@ -28411,7 +28413,7 @@ if (want("38")) {
       // (SMD-3379 PR 1c-4b), so the rescan is 2 s here.
       await capture("A note the switch follows.", "sync-sleep", 0, 11);
       const switchRun = followRun({ rescanMs: 2000 });
-      await pollUntil(async () => count(JOIN_SAID) >= 1 && !(await claims(EX)).pending && !(await claims(EX)).claimed, 20_000);
+      await pollUntil(async () => count(JOIN_SAID) >= 1 && (await extractionSettled()), 20_000);
       await setKey("extract:another-model@p2");
       await nextPeriod("A note captured under the switched key");
       const switchCode = await switchRun.settle();
