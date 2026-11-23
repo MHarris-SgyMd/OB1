@@ -142,7 +142,7 @@ Amended in the build: as merged the rule set the server's cap where the handler 
 
 1. **PR 1.** The measurements, the probe's modes, this page. Nothing served changes.
 2. **PR 2a: the server can hold a stream, and does not yet.** The stop, the record, the caps, with the capability still `false`. Its tests need a held stream, so the suite turns the capability on for itself, with no switch an operator could set. "As built" says how, and that where the capability is off the stop is as it was.
-3. **PR 2b: it holds them.** The capability, the documents, and the real client against a scratch stack through each row of the table under "What it buys". Decided 2026-11-19, after 2a's reviews: not before a running server can say how many streams it holds (SMD-4458) and a stream's end is recorded (SMD-4459). Both are built. Decided 2026-11-21: nor before SMD-4493, a stream nobody reads keeping its place. (SMD-4493 has since decided that a frozen and a vanished client's streams do keep their places, and builds the end of a revoked caller's streams and an operator's lever: "A stream whose client or key is gone".)
+3. **PR 2b: it holds them.** The capability, the documents, and the real client against a scratch stack through each row of the table under "What it buys". Decided 2026-11-19, after 2a's reviews: not before a running server can say how many streams it holds (SMD-4458) and a stream's end is recorded (SMD-4459). Both are built. Decided 2026-11-21: nor before SMD-4493, a stream nobody reads keeping its place. (SMD-4493 has since decided that a frozen and a vanished client's streams do keep their places, and builds the end of a revoked caller's streams and an operator's lever: "A stream whose client or key is gone". Decided 2026-11-23: PR 2b waits on all three of that ticket's PRs, the two that build among them.)
 
 ## As built in PR 2a
 
@@ -189,7 +189,7 @@ SMD-4459, decided by the maintainer on 2026-11-21 and built in one PR, with the 
 
 ## A stream whose client or key is gone
 
-SMD-4493. Measured and decided on 2026-11-23, in that ticket's first PR, which changes nothing the stack runs. Decisions 3 and 4 are for its second and third.
+SMD-4493. Measured and decided on 2026-11-23, in that ticket's first PR, which changes nothing the stack runs. Decisions 3 and 4 are for its second and third, and SMD-4347's PR 2b, which turns streams on, waits on all three.
 
 **The question.** A stream keeps its place under the two bounds until its connection ends or the server stops. Nothing else ended one, and nothing asked whether its client was still there or its key still stood. So a server at a bound could refuse clients that are there for ones that are not.
 
