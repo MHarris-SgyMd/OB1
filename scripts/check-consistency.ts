@@ -8524,13 +8524,14 @@ const PROXY_SERVICE = {
 };
 /** The forwarder's script (SMD-2583), deploy/forwarder.ts: compose.yaml carries it inline as x-forwarder, in its `forwarder` config and its label, each held to this byte for byte — the file CI runs --self-check on. It holds no `$`, which compose would read as a variable from deploy/.env or the shell, so the copy compose runs is this file (review pass 1: `${X:-…}` steered the script and passed). */
 const FORWARDER_SCRIPT = readFileSync(join(ROOT, "deploy", "forwarder.ts"), "utf8");
-/** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy, under an init so a stop ends it at once (SMD-3193). */
+/** compose.yaml's forwarder (SMD-2583), whole but for its label (the script's, held below) and its logging (check 29's): the stack's published port, on `edge` and `front` alone, in front of the proxy, under an init so a stop ends it at once (SMD-3193), its kernel giving up on a peer that acknowledges nothing after 8 retransmissions and not the default 15 (SMD-4493: a client that has vanished, whose listen stream the MCP server would hold for 16 minutes more). */
 const FORWARDER_SERVICE = {
   image: "docker.io/oven/bun:1.4.3-alpine@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373",
   user: "65534:65534",
   cap_drop: ["ALL"],
   security_opt: ["no-new-privileges:true"],
   command: ["bun", "/forwarder.ts"],
+  sysctls: { "net.ipv4.tcp_retries2": "8" },
   init: true,
   configs: [{ source: "forwarder", target: "/forwarder.ts" }],
   ports: ["${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-8000}:8000"],
@@ -8545,10 +8546,12 @@ const FORWARDER_SERVICE = {
  * forwarder's) and its logging: the forwarder's script and confinement on `--port 8001`, the proxy's `breakglass`
  * entrypoint, which routes the GUI alone and marks it; under the auth profile alone, published on a literal
  * 127.0.0.1 (check 13's LOOPBACK_MAPPINGS), on `edge` and `front` alone. A key sign-in reaches the GUI through it
- * while the stack is configured, so a change to it is made here too, on purpose.
+ * while the stack is configured, so a change to it is made here too, on purpose. It keeps the kernel's own
+ * retransmissions: it carries the GUI and no listen stream (SMD-4493).
  */
+const { sysctls: _forwardersAlone, ...FORWARDER_BUT_ITS_KERNEL } = FORWARDER_SERVICE;
 const BREAKGLASS_SERVICE = {
-  ...FORWARDER_SERVICE,
+  ...FORWARDER_BUT_ITS_KERNEL,
   profiles: ["auth"],
   command: ["bun", "/forwarder.ts", "--port", "8001"],
   ports: ["127.0.0.1:${BREAKGLASS_PORT:-8001}:8001"],

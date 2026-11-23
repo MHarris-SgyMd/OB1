@@ -2415,7 +2415,10 @@ jobs:
       # forwarder nor itself. And with the proxy stopped, a decoy answering to
       # the proxy's name on `edge` is what the forwarder resolves, and gets
       # nothing: the forwarder dials only an address on `front`, refuses, and
-      # says so.
+      # says so. And the forwarder's kernel gives up on a peer that
+      # acknowledges nothing after 8 retransmissions (SMD-4493): read in its
+      # container, since an engine that did not take compose.yaml's setting
+      # would leave the default, 15, with nothing else to show for it.
       - name: The proxy asks nothing outside the stack, and the forwarder dials it alone
         working-directory: deploy
         run: |
@@ -2441,6 +2444,8 @@ jobs:
           trap - EXIT
           cat "$RUNNER_TEMP/forwarder-self-check"
           [ "$rc" = 0 ] || { echo "the forwarder's self-check, in its container, exited $rc" >&2; exit 1; }
+          retries=$(docker compose -f compose.yaml exec -T forwarder cat /proc/sys/net/ipv4/tcp_retries2)
+          [ "$retries" = 8 ] || { echo "the forwarder's kernel retransmits $retries times to a peer that acknowledges nothing, not the 8 compose.yaml sets (net.ipv4.tcp_retries2, SMD-4493)" >&2; exit 1; }
           fwd=$(docker inspect -f '{{(index .NetworkSettings.Networks "open-brain_front").IPAddress}}' "$(docker compose -f compose.yaml ps -q forwarder)")
           [ -n "$fwd" ] || { echo "the forwarder has no address on open-brain_front" >&2; exit 1; }
           for _ in 1 2 3 4 5; do [ "$(curl -s --max-time 10 http://127.0.0.1:8010/health)" = ok ] && break; sleep 2; done

@@ -827,7 +827,7 @@ network of its own, `postgres-port`, for its loopback port, and
 
 | Service | On the stack's networks | On the host | From another machine |
 | --- | --- | --- | --- |
-| `forwarder` | Listens on 8000, on `edge`, and dials the proxy alone, as `proxy.ob1.internal` on `front`, at an address on `front` and no other; it opens each connection with the PROXY protocol's line naming the client (SMD-2583) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port but the break-glass port under the `auth` profile and n8n's under `--profile orchestration`; the MCP server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
+| `forwarder` | Listens on 8000, on `edge`, and dials the proxy alone, as `proxy.ob1.internal` on `front`, at an address on `front` and no other; it opens each connection with the PROXY protocol's line naming the client (SMD-2583). Its kernel gives up on a peer that acknowledges nothing after 8 retransmissions, about 100 s, not the default 15 (`net.ipv4.tcp_retries2` on its container, SMD-4493) | `127.0.0.1:${SERVER_PORT:-8000}` — the stack's only published port but the break-glass port under the `auth` profile and n8n's under `--profile orchestration`; the MCP server is `/mcp` on it ("One origin" below) | Through a TLS proxy or tunnel. One on this host dials `127.0.0.1` and needs no knob; only a proxy on another machine needs `SERVER_BIND=0.0.0.0` in `deploy/.env`, and then the key rides every request in clear until the proxy |
 | `breakglass` (`--profile auth`) | Listens on 8001, on `edge`, and dials the proxy's `breakglass` entrypoint alone, `proxy.ob1.internal:8001` on `front`, as the forwarder dials `web` — the forwarder's script, `--port 8001`. That entrypoint routes `/dashboard` alone, marked `X-OB1-Listener: breakglass`, which the `web` entrypoint deletes from every request on the origin (SMD-3307) | `127.0.0.1:${BREAKGLASS_PORT:-8001}`, a literal loopback with no `_BIND` knob: the operator GUI's key sign-in while the stack is configured, the authorization server up or down (`dashboard/README.md`, "Signing in") | Never: no tunnel or proxy points at it, and the operator signs in on the brain's machine |
 | `proxy` | `proxy.ob1.internal:8000` on `front`, which the forwarder dials, and `proxy:8000` on `mesh`; its break-glass entrypoint listens on 8001 on both, which the break-glass listener dials on `front` (the mesh's servers reach it too, as they reach the GUI itself); it dials every backend on the `mesh` network, by a name resolved with no search domains: the MCP server (`mcp`) as `mcp.ob1.internal:8000`, the operator GUI (`app`) as `app.ob1.internal:8000`, `auth.ob1.internal:3000`, and — with `compose.api-public.yaml` named — `api.ob1.internal:8000`, and with `compose.grafana-public.yaml` `lgtm.ob1.internal:3000` | Nothing of its own: the forwarder's port, and under the `auth` profile the break-glass port | Through the forwarder, or on this machine the break-glass listener |
 | `mcp` | `mcp.ob1.internal:8000` on the `mesh` network alone — the proxy. It dials the REST core as `api.ob1.internal:8000` and, on a stack configured with the authorization server, `auth.ob1.internal:3000` to trade a token, both on the mesh: no Postgres, no model provider, nothing outward (SMD-2287) | Nothing of its own: `/mcp`, `/health` and the protected-resource document on the proxy's port | Through the proxy |
@@ -1928,8 +1928,8 @@ turns them on; none does yet) says how many are open, in two places (SMD-4458).
 A server that holds none sends no such series and has no such field. A stream
 is open from the answer that holds it until its connection ends or the server
 stops. Whether its client still reads it, and whether its key still stands, are
-not asked: a client that has gone quiet without closing keeps its place, and so
-does a key revoked since.
+not asked: a client that is frozen keeps its place, one that has vanished
+keeps it for about two minutes (below), and so does a key revoked since.
 
 As a metric, `ob1.mcp.listen_streams`: the total, with no label of its own, an
 up-down counter, `ob1_mcp_listen_streams` in the profile's Prometheus (measured
@@ -2009,7 +2009,7 @@ from the stream's opening to its end. `end` says how it ended.
 
 | `end` | What ended the stream |
 | -- | -- |
-| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one kind here. That was measured with the client at the server; behind the proxy the server's peer is the proxy, and what it passes on of a client's leaving, and how soon, was not measured. Nor was the proxy's access log, which writes a line for a request at `/mcp`: what that line holds for a stream held open, and of how it ended |
+| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one kind here. That was measured with the client at the server. Through the stack's forwarder and proxy a client's close reached the server 7 ms later and a killed client's leaving within 0.2 s; through a quick tunnel in front of them, 40 ms and within 0.2 s (measured, SMD-4493). The proxy's access log, which writes a line for a request at `/mcp`, was not measured: what that line holds for a stream held open, and of how it ended |
 | `stop` | The server's stop closed it, or was about to: a stream still open as the stop's drain ends is the stop's, though its client may leave in the moment before it is closed. The line is written as the stop's drain ends, before its flush, so that a collector has it; the stream itself is closed after that flush where the drain finished. So `held_ms` is short of the real close by the flush: milliseconds as a rule, and up to 5 s where a collector is slow to answer |
 | `server` | The server ended it itself: a listen that asks for nothing this server sends is acknowledged and closed at once |
 
@@ -2030,17 +2030,24 @@ every 1.5 s read 1471, 1499 and 1504 where two sessions opening and closing
 by hand read 517, 3959 and 7078. A drop that keeps no rhythm cannot be told
 from sessions ending.
 
-A connection that goes silent, with no close and no reset, may end late: a
-client frozen for 2 s, and one for 20, had no end until it was killed
-(measured; a path that drops in silence was not, SMD-4493), so an end's
-`held_ms` can run past its client's leaving. And where a client's leaving
-never reaches the server and the client asks again, there is no end at all:
-`ok` lines under one name with none between them, `listen`'s count for that
-name climbing, and at its bound a `LISTEN_CALLER_FULL` for each further ask,
-until a stop writes them all as `stop`. That was seen with a relay that
-dropped the client's side and kept the server's; whether the stack's proxy
-does so is the thing not measured, and it decides which of the two pictures
-an operator sees.
+A connection that goes silent, with no close and no reset, ends late, so an
+end's `held_ms` can run past its client's leaving (measured, SMD-4493). A
+client that vanishes (its machine asleep, its network gone) acknowledges
+nothing, and its stream ends when the kernel that faces it gives up: the
+forwarder's, after 8 retransmissions, 1 min 55 s after the client went, where
+the kernel's default left it 16 min. Behind a TLS proxy or a tunnel in front
+of the stack that front faces the client, and its own timeout decides:
+through a quick tunnel, 13 min 28 s. A client that is frozen still
+acknowledges what it is sent, and has no end until it thaws or is killed: one
+was still held after 21 min, and read its stream again when it thawed.
+
+Until such a stream ends it keeps its place. A caller whose sessions vanish
+and ask again by another path holds an old stream's place beside each new
+one, and at its bound is refused: `ok` lines under one name with no end
+between them, `listen`'s count for that name climbing, then a
+`LISTEN_CALLER_FULL` for each further ask. With a relay that hid a client's
+leaving from the server altogether, a caller reached its bound of 32 in
+22 s; the stack's own forwarder and proxy hide none.
 
 A client that has stopped asking (above) leaves a `client` end with no
 `subscriptions/listen` line after it under its name, where its key has one
