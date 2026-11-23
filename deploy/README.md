@@ -565,8 +565,12 @@ free:
   sleep. In those 12 minutes a probe sent each brain a search every
   30 s, and sent the model server, from outside any brain and any
   broker, the metadata call a capture makes. From minute 12 a harness
-  timed captures on both brains at once. The table is of the first 12
-  minutes:
+  timed captures on both brains at once. These runs were made on the
+  build before a sleep's judge-model passes yielded to extraction
+  (SMD-4495, the sleep's `yield:` line), a rule that applies to brains
+  set up as these were. With it a backlogged brain asks for the judge
+  model less while extraction has work, and the runs on two models were
+  not made again. The table is of the first 12 minutes:
 
   | Background asks for | Shares | Search, median | Metadata call, median | Judge model listed, of 720 s | Thoughts extracted, the two brains |
   |---|---|---|---|---|---|
