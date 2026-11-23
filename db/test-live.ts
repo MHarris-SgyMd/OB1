@@ -26829,6 +26829,24 @@ if (want("38")) {
     const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`)[0].c);
     const sessionsBefore = await sessions();
     sw.slowExtract = 1500;
+    // Consolidation joins on one of two lines here, and the row takes either (SMD-4515). A thought's entities are
+    // written a moment before its claim is marked finished. A poll in that moment on the last thought reads no
+    // backlog left (SMD-4468, backlogCut: a thought with entities is extracted whatever its claim says) and a pool
+    // not drained, so the scheduler joins on SMD-4468's line where a poll a moment later reads the pool drained.
+    // Either way extraction is over. Measured: asking for the drained line alone the row failed three times, twice
+    // in about 11 runs of ci-parity and once in CI, the first judge call 1.5 s after the last extraction began each
+    // time; and it failed the one run made with each claim's finish held a second, at 1.7 s.
+    // Taking either line is safe only while a backlog note is the last extracted. The period's first pool takes the
+    // three notes in one statement, so their claims' order is a tie, and today's note is no backlog: were it last,
+    // consolidation would join beside it as the older two ended, by design ([38c]'s cases), and judge 25 ms into its
+    // extraction (measured, put last by hand). So at the first extraction call the older notes still to claim are
+    // dated after it.
+    // How many it dated: none would mean the claims were no longer pending at that call (a worker that takes them in
+    // one batch), the tie standing again with nothing to say so, so the row holds it (review pass 1).
+    let datedLast = -1;
+    sw.onExtract = async () => {
+      datedLast = (await sql`UPDATE thought_work_claims SET enqueued_at = clock_timestamp() WHERE work_type = ${EX} AND status = 'pending' AND thought_id IN (${older}::uuid, ${deploy}::uuid) RETURNING 1`).length;
+    };
     // Bounded: a period that never finds both pools drained would wait for ever.
     const acOnce = new AbortController();
     // With --dump-dir (SMD-3203): the period's consolidation pass writes every verdict there too.
@@ -26849,6 +26867,7 @@ if (want("38")) {
     }
     const once = onceRace === "hung" ? -1 : onceRace;
     sw.slowExtract = 0;
+    sw.onExtract = null;
     await pollUntil(async () => (await sessions()) === sessionsBefore, 3_000);
     const sessionsAfter = await sessions();
     const onceText = lines.join("\n");
@@ -26857,8 +26876,9 @@ if (want("38")) {
     const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
     assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
       `one period extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}${hungAt}`})`);
-    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText),
-      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it)`);
+    const joinedAt = Math.max(onceText.indexOf("extraction drained — consolidating beside it"), onceText.indexOf("extraction has done the thoughts captured before the period began — consolidating beside it"));
+    assert(firstJudge > lastExtract && joinedAt > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText) && datedLast >= 1,
+      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it; consolidation joined on "${lines.find((l) => /consolidating beside it|consolidating first/.test(l))?.trim() ?? "no line"}"; ${datedLast} older note(s) dated after today's at the first call)`);
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
     assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
       `…writing nothing to thoughts.supersedes and no audit row — its own work cannot pause it — and, without --follow, no heartbeat (${supersedes} superseding, ${(await auditRows()) - auditBefore} audit row(s), heartbeat ${JSON.stringify(await beat())})`);
