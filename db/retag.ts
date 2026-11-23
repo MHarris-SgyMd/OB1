@@ -389,9 +389,11 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   let actorName: string | undefined;
   if (!READ_ONLY) {
     if (stoppedEarly()) return 130;
+    // The agent line and the no-key warning are the banner's; a lookup that could not resolve is warned of whatever
+    // the banner (SMD-2752, as consolidate's; PR 4a-1 review pass 1).
     const id = await workerIdentity(opts.url ?? "", env, {
-      noKeyWarning: "  ⚠  OB1_WORKER_KEY is not set: the re-tags carry the actor `retag` and no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
-      write: out,
+      noKeyWarning: opts.banner === false ? "" : "  ⚠  OB1_WORKER_KEY is not set: the re-tags carry the actor `retag` and no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
+      write: say,
       warn: (l) => { if (l) err(l); },
     });
     if (!id.ok) return refuse("identity", id.message);
@@ -591,15 +593,20 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     const gate = mayLeaveBox(subject, cfg.chat, cfg.egress);
     if (!gate.allowed) return { outcome: "failed", refused: true, error: `the egress policy refused it: ${gate.reason}; --retry-failed revisits it` };
     calls++;
-    const call = inCall.get(workerId);
+    // The call in hand is the model call alone: begun here and ended as it returns, so abortInHand counts and aborts no
+    // worker that is writing, probing or recording a failure — those it could not set back (review pass 1). Nothing
+    // awaits between the answer and the finally, so no abort lands in between.
+    const call = inCall.begin(workerId);
     let answer: Record<string, unknown>;
     try {
-      answer = await extractMetadata(row.content, subject, cfg, AbortSignal.any([onHardStop.signal, ...(call ? [call.abort.signal] : [])]));
+      answer = await extractMetadata(row.content, subject, cfg, AbortSignal.any([onHardStop.signal, call.abort.signal]));
     } catch (e) {
       // The hard stop aborted it: abandoned, not failed. The pass's caller did (abortInHand): the worker sets it back.
       if (hardStopped) return { outcome: "abandoned" };
-      if (call?.aborted) throw new AbortedInHand();
+      if (call.aborted) throw new AbortedInHand();
       throw e;
+    } finally {
+      inCall.end(workerId);
     }
     const mark = answer.metadata_extraction_failed;
     if (typeof mark === "string") {
@@ -692,7 +699,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     };
     await claimWorker<Row>({
       sql, job: JOB, prefix: "retag", n, ttlS: TTL, heartbeatS: HEARTBEAT, batch: BATCH, limit: LIMIT, follow: false, admit: ADMIT,
-      gate: () => onStop.signal, err, errAside, outage, taken, claiming, limitReached, activeWorkers, unreturned, inCall,
+      // A worker waiting at the admit gate is woken by the run stopping for a reason of its own — another worker's
+      // fatal refusal, the shape streak, a throw — which abort halt beside setting stopping, not onStop (review pass 1:
+      // it waited for the gate to open, and the run with it).
+      gate: () => AbortSignal.any([onStop.signal, halt.signal]), err, errAside, outage, taken, claiming, limitReached, activeWorkers, unreturned, inCall,
       stopping: () => stopping, hardStopped: () => hardStopped, isolated: () => false, pollNow: () => {},
       count: { lost: () => { lost++; }, vanished: () => { vanished++; }, beats: (k) => { beats += k; } },
       readRows: async (ids) => (await sql`
@@ -706,7 +716,6 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
         } else {
           let stopAfter = false;
           const streak = { suspect: false };
-          inCall.begin(workerId);
           for (let attempt = 0; outcome === null; attempt++) {
             try {
               // A wait for a slot on the model-call seam is no call to abort (SMD-3379 PR 2a, review pass 3).
@@ -736,10 +745,13 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
             return "stop";
           }
         }
-        inCall.end(workerId);
         if (outcome.outcome === "abandoned") return "stop";
-        // Set back by the caller's abort: setBackAborted released it and said so.
-        if (outcome.outcome === "setBack") return "next";
+        // Set back by the caller's abort; one deleted or no longer this worker's meanwhile is counted so (review pass 1).
+        if (outcome.outcome === "setBack") {
+          if (outcome.gone === "deleted") vanished++;
+          else if (outcome.gone === "lost") lost++;
+          return "next";
+        }
         hb.held.delete(b.thought_id);
         if (outcome.outcome === "vanished") {
           vanished++;
@@ -850,6 +862,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     tellErr(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
   }
   if (configError) {
+    if (!SUMMARY && after.failed > before.failed) {
+      err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}):`);
+      await printFailures();
+    }
     err(`\n  The provider refused the request itself: ${configError.slice(0, 400)}\n` +
       "  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider. " +
       (shapeStopped ? "The thoughts it answered so are failed (listed above): once it is fixed, re-run with --retry-failed."

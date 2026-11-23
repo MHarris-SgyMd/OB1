@@ -23758,10 +23758,19 @@ if (want("29")) {
     let raceId = "";
     /** A thought whose text a session moves and rebuilds while its call is out (SMD-2298 PR 2, review pass 1). */
     let rebuiltId = "";
+    /** A thought whose answer waits on the test (PR 4a-1 review pass 1): seen, then answered once `writeHeld` resolves. */
+    let heldMarker = "";
+    let heldSeen: () => void = () => {};
+    let writeHeld: Promise<void> = Promise.resolve();
     let rebuiltDone = false;
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
       const body = await req.text();
       bodies.push(body);
+      if (heldMarker && body.includes(heldMarker)) {
+        heldMarker = "";
+        heldSeen();
+        await writeHeld;
+      }
       if (!rebuiltDone && rebuiltId && body.includes("[29] rebuilt")) {
         rebuiltDone = true;
         const edited = "[29] rebuilt, its text moved while the call was out";
@@ -24081,7 +24090,7 @@ if (want("29")) {
       const abClaim = (await claims()).find((c) => c.id === AB);
       assert(abortedN === 1 && bodies.filter((b) => b.includes("[29] AB")).length === 2 && settled(await tagsRow(AB)) && abClaim?.status === "succeeded"
           && abDone.code !== 2 && starts.length === 1 && starts[0].ok === true && sessions > 0
-          && !/job: {4}/.test(abDone.out) && !/re-tagged \(/.test(abDone.out),
+          && !/job: {4}/.test(abDone.out) && !/OB1_WORKER_KEY is not set/.test(abDone.out + abDone.err) && !/re-tagged \(/.test(abDone.out),
         `abortInHand aborts the call in hand: the thought set back, re-tagged after from its text, settled; onStart heard once, through; banner and summary left out; the session's settings on its connections (${abortedN} aborted; ${sessions} session(s); ${JSON.stringify(starts)})`);
       // The admit gate: nothing pooled or sent while it is shut; opened, the run goes on.
       const G = await tagged("[29] G, behind the admit gate");
@@ -24095,13 +24104,53 @@ if (want("29")) {
         signal.addEventListener("abort", () => reject(new Error("stopped at the gate")), { once: true });
       });
       const gRun = retag({ pausesMs: [10], admit });
-      await Bun.sleep(400);
+      // The first ask is the pool's: until it is answered nothing is pooled (review pass 1: a fixed sleep proved less).
+      for (let i = 0; i < 200 && admitAsks < 1; i++) await Bun.sleep(25);
+      await Bun.sleep(200);
+      const asksShut = admitAsks;
       const gPooledShut = (await claims()).some((c) => c.id === G);
       const gSentShut = bodies.some((b) => b.includes("[29] G"));
       openGate();
       const gDone = await gRun;
-      assert(!gPooledShut && !gSentShut && admitAsks >= 2 && gDone.code !== 2 && settled(await tagsRow(G)) && (await claims()).find((c) => c.id === G)?.status === "succeeded",
+      assert(!gPooledShut && !gSentShut && asksShut === 1 && admitAsks === 3 && gDone.code !== 2 && settled(await tagsRow(G)) && (await claims()).find((c) => c.id === G)?.status === "succeeded",
         `the admit gate shut: nothing pooled or sent; opened, the run pools and re-tags, the gate asked before the pool and each claim (${gPooledShut}/${gSentShut}; ${admitAsks} ask(s); ${line(gDone.out, "re-tagged (")})`);
+      // abortInHand counts only a call that is out (review pass 1): a worker writing — its update_thought held behind a
+      // row lock the test takes as the answer goes back — has no call to abort, and the thought is written, not set back.
+      const W = await tagged("[29] W, written while abortInHand is asked");
+      await move(W, "[29] W, written while abortInHand is asked, moved");
+      let releaseAnswer: () => void = () => {};
+      writeHeld = new Promise<void>((r) => { releaseAnswer = r; });
+      const seen = new Promise<void>((r) => { heldSeen = r; });
+      heldMarker = "[29] W";
+      let wAbort: InHandAbort | null = null;
+      const wRun = retag({ pausesMs: [10], onPass: (_stop, abort) => { wAbort = abort; } });
+      await seen;
+      const locker = new SQL({ url: URL_!, max: 1 });
+      await locker.unsafe("BEGIN");
+      await locker.unsafe("SELECT 1 FROM thoughts WHERE id = $1::uuid FOR UPDATE", [W]);
+      releaseAnswer();
+      await Bun.sleep(300);
+      const midWrite = wAbort ? (wAbort as InHandAbort)() : -1;
+      await locker.unsafe("COMMIT");
+      await locker.close();
+      const wDone = await wRun;
+      assert(midWrite === 0 && wDone.code !== 2 && settled(await tagsRow(W)) && (await claims()).find((c) => c.id === W)?.status === "succeeded",
+        `abortInHand asked while the worker writes — no call out — aborts and counts nothing, and the thought is written (${midWrite}; ${line(wDone.out, "re-tagged (")})`);
+      // A worker waiting at a shut admit gate is woken when the run stops of its own accord (review pass 1): two
+      // workers, the gate shut after the pool's ask and one claim's; the worker through meets a 401, the run's fatal
+      // refusal, and the run returns, not waiting for the gate.
+      const X = await plant("[29] X401, the key refused while another waits at the gate", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] X401", 401);
+      let xAsks = 0;
+      const xGate: Admit = (signal) => new Promise<void>((resolve, reject) => {
+        if (++xAsks <= 2) { resolve(); return; }
+        signal.addEventListener("abort", () => reject(new Error("stopped at the gate")), { once: true });
+      });
+      const xRun = retag({ workers: 2, pausesMs: [10], admit: xGate });
+      const xDone = await Promise.race([xRun, Bun.sleep(15_000).then(() => null)]);
+      SPECIAL.delete("[29] X401");
+      assert(xDone !== null && xDone.code === 2 && /The provider refused the request itself/.test(xDone.err) && xAsks >= 3 && (await claims()).find((c) => c.id === X)?.status === "pending",
+        `a worker at a shut admit gate is woken by the run's own stop — another worker's fatal 401 — and the run returns 2, the thought pending (${xDone === null ? "it hung" : xDone.code}; ${xAsks} ask(s))`);
       // onStart hears a refusal by its kind: the key's, and the input's.
       const keyStarts: StartResult[] = [];
       const usageStarts: StartResult[] = [];
