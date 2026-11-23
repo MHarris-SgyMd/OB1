@@ -2549,8 +2549,17 @@ else {
   await claims`DELETE FROM ob1_config WHERE key = 'retag_key'`;
   const rtDoneNoKey = await run(RENV);
   await claims`INSERT INTO ob1_config (key, value) VALUES ('retag_key', ${RT})`;
-  assert(/^\s*✓\s+retag pass\s+none unfinished; 3 thought\(s\) behind their tags wait for a run \(none has run here: ob1_config\.retag_key is unset\)/m.test(rtDoneNoKey.out),
-         `…with no key recorded, a row under another model's recipe at its text is not behind: no target (PR 3b; ${row(rtDoneNoKey.out, "retag pass")})`);
+  assert(new RegExp(`^\\s*✓\\s+retag pass\\s+none unfinished; 3 thought\\(s\\) behind their tags wait for a run \\(none has run here: ob1_config\\.retag_key is unset\\), and a first run records ${rx(RT)}, putting up to 1 more, tagged under another model or prompt version, in the backlog — cd db && bun retag\\.ts`, "m").test(rtDoneNoKey.out),
+         `…with no key recorded, a row under another model's recipe at its text is not behind (no target), but the first run the line names records this server's key, and it is counted as joining (PR 3b, review pass 1; ${row(rtDoneNoKey.out, "retag pass")})`);
+  // Nothing else behind, no key: the first run's rows alone still say it, not "none unfinished".
+  await claims`UPDATE thoughts SET metadata = metadata - 'type' - 'metadata_extraction_failed' WHERE id IN (${ids[0]}::uuid, ${ids[1]}::uuid, ${ids[2]}::uuid)`;
+  await claims`DELETE FROM ob1_config WHERE key = 'retag_key'`;
+  const rtOnlyFirst = await run(RENV);
+  await claims`INSERT INTO ob1_config (key, value) VALUES ('retag_key', ${RT})`;
+  await claims`UPDATE thoughts SET metadata = metadata || '{"type": "idea"}'::jsonb WHERE id IN (${ids[0]}::uuid, ${ids[1]}::uuid)`;
+  await claims`UPDATE thoughts SET metadata = metadata || '{"metadata_extraction_failed": "stub: the provider fell back"}'::jsonb WHERE id = ${ids[2]}::uuid`;
+  assert(/^\s*✓\s+retag pass\s+none unfinished; 0 thought\(s\) behind their tags wait for a run \(none has run here: ob1_config\.retag_key is unset\), and a first run records \S+, putting up to 1 more/m.test(rtOnlyFirst.out),
+         `…and with nothing else behind, the first run's rows alone are said, not "none unfinished" (review pass 1; ${row(rtOnlyFirst.out, "retag pass")})`);
   assert(/^\s*✓\s+retag pass\s+none unfinished; 4 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDone.out),
          `a finished pool with thoughts behind their tags again is ok, the backlog said without "none has run here" — the row under another model's recipe among them now a key is recorded (PR 3b; ${row(rtDone.out, "retag pass")})`);
   await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);

@@ -24070,6 +24070,7 @@ if (want("29")) {
       const rowsUnder = async (key: string) => Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM derivations d WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND ${RETAG_RECIPE_KEY_SQL} = $1`, [key])) as { n: number }[])[0].n);
       const tagRows = Number(((await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'metadata' AND produced_by = 'metadata'`) as { n: number }[])[0].n);
       const dryOther = await retag({ dryRun: true }, envOther);
+      const dryOtherSwitch = await retag({ dryRun: true, switchKey: true }, envOther);
       const refusedOther = await retag({ pausesMs: [10] }, envOther);
       const callsBefore = bodies.length;
       const switchedOne = await retag({ switchKey: true, limit: 1, pausesMs: [10] }, envOther);
@@ -24082,7 +24083,8 @@ if (want("29")) {
       const callsThen = bodies.length;
       const again = await retag({ pausesMs: [10] }, envOther);
       assert(tagRows > 2 && finished.code === 1 && failedOther.length === 1 && failedOther[0].id === N && dryOther.code === 0 && dryOther.out.includes(`${tagRows} thought(s) carry tags made under another model or prompt version than ${OTHER}`)
-          && dryOther.out.includes(`putting the ${tagRows} thought(s) whose tags another recipe made in the backlog`)
+          && dryOther.out.includes(`would: refuse this run without --switch-key; with it, record ${OTHER} in ob1_config.retag_key, putting the ${tagRows} thought(s) whose tags another recipe made in the backlog`)
+          && dryOtherSwitch.out.includes(`would: record ${OTHER} in ob1_config.retag_key, putting the ${tagRows}`)
           && refusedOther.code === 2 && refusedOther.err.includes(`pass --switch-key: it records ${OTHER}, and the backlog — the ${tagRows} with them — is re-tagged under it`)
           && (await configured()) === OTHER && switchedOne.code !== 2 && afterOneSwitch === 1 && converged === rowsNow - 1 && rowsNow >= tagRows && callsThen - callsBefore >= tagRows - 1
           && /backlog: 1 thought\(s\)/.test(statusAfter.out) && again.code === 1 && /(^|\s)0 re-tagged \(/.test(again.out) && bodies.length === callsThen,

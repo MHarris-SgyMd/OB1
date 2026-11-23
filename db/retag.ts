@@ -450,7 +450,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     if (DRY_RUN) {
       // Recording a new key adds its recipe's rows, some of which the backlog above may already hold: an upper bound.
       const todo = c.pending + b.unpooled + b.due + (opts.retryFailed ? c.failed : 0) + recipeBehind;
-      out(`\n  would: ${recordedKey === JOB ? "" : `record ${JOB} in ob1_config.${RETAG_CONFIG_KEY}, putting the ${recipeBehind} thought(s) whose tags another recipe made in the backlog; `}` +
+      // Another key recorded: the run is refused without --switch-key, and what follows is what it does with it (PR 3b
+      // review pass 1: the line said what a refused run would do).
+      const refused = recordedKey !== undefined && recordedKey !== "" && recordedKey !== JOB && opts.switchKey !== true;
+      out(`\n  would: ${refused ? "refuse this run without --switch-key; with it, " : ""}${recordedKey === JOB ? "" : `record ${JOB} in ob1_config.${RETAG_CONFIG_KEY}, putting the ${recipeBehind} thought(s) whose tags another recipe made in the backlog; `}` +
         `${opts.retryFailed ? `return ${c.failed} failed row(s) to the pool; ` : ""}add ${b.unpooled} thought(s) to the pool and put ${b.due} back; ` +
         `send up to ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) to ${cfg.metadataModel} with ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`);
     }
