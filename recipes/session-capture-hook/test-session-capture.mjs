@@ -43,7 +43,7 @@ delete process.env.OB1_CAPTURE_KEY;
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, headerTickets, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, CaptureError, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
-  loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
+  loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl, gateFindings,
   loadBrains, useStateRoot, HOOK_VERSION, VERSION_RE,
 } = await import(SCRIPT);
 /** The version metadata.json gives the hook (SMD-4378): the hook's own (lib/hook.mjs, re-exported by the script) must equal it. */
@@ -485,6 +485,25 @@ let episodesLines;
   const longTitle = titledLong.text.split("\n").find((l) => l.startsWith("Title:")) ?? "";
   assert(/\[redacted:/.test(longTitle) && !/sk-ant|Ab1Ab1/.test(longTitle) && titledLong.redactions.some((r) => r.in === "the title"),
     `a key the title's clip would cut is blanked whole in the title, before the clip (${longTitle.slice(-40)})`);
+  // SMD-4502: the rendered text's scan re-judged a prompt the 200-character clip cuts (and the title's 120), so a run the
+  // whole prompt's scan cleared was blanked in the listed line while a ticket-shaped part of it headed the summary, and
+  // under refuse the clipped line refused the episode. One verdict per prompt: the listed lines are the whole prompt's.
+  const oneVerdict = (ask) => {
+    const ep = segment([CWD("/wt/ob1"), BR("main"), P(ask)]).episodes[0], r = redactEpisode(ep), lines = r.text.split("\n");
+    const line = (pre) => lines.find((l) => l.startsWith(pre)) ?? "";
+    return { head: /ABC-1234/.test(lines[0]), prompt: /\[redacted:/.test(line("- ")), title: /\[redacted:/.test(line("Title:")),
+      gate: gateFindings(r, r.text).length, refuse: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length };
+  };
+  const tailWords = "thequickbrownfoxjumpsoverthelazydogagainandagainandagain".repeat(2);
+  const cutEntropy = oneVerdict("here is the build id " + "x".repeat(134) + " Kx9QzR7mP2vL8nT4wY6bH3jF5cD1gA0eS-ABC-1234-" + tailWords + " ok");
+  const cutGoogle = oneVerdict("y".repeat(159) + " AIza-ABC-1234-" + "b".repeat(100) + " ok"); // the prompt's clip leaves AIza and 35 before its `…`
+  const cutTitle = oneVerdict("z".repeat(79) + " AIza-ABC-1234-" + "c".repeat(60) + " ok"); // the title's 120 does, the prompt is shown whole
+  assert([cutEntropy, cutGoogle, cutTitle].every((v) => v.head && !v.prompt && !v.title && v.gate === 0 && v.refuse === 0),
+    `a run the whole prompt's scan cleared is judged so in the listed line and the title too, as in the header, and refuses nothing under refuse: the entropy rule's cut run, the Google key's \\b at the clip, the title's clip (SMD-4502) (${JSON.stringify([cutEntropy, cutGoogle, cutTitle])})`);
+  // …and the whole prompt's verdict still blanks a key the clip cuts, whole, in the line and the title (SMD-2127's rule).
+  const cutKey = redactEpisode(segment([CWD("/wt/ob1"), BR("main"), P("w".repeat(170) + " sk-ant-api03-" + "Ab1".repeat(12) + " now")]).episodes[0]);
+  assert(/\[redacted:anthropic key\]/.test(cutKey.text.split("\n").find((l) => l.startsWith("- ")) ?? "") && !/sk-ant|Ab1Ab1/.test(cutKey.text),
+    `a key the prompt's clip cuts is still blanked whole by the whole prompt's scan (${cutKey.text.split("\n").find((l) => l.startsWith("- "))?.slice(-40)})`);
   // Review pass 2 (cold read, mutants): the move to a branch by its own ticket; the gate judged where the session moved to;
   // a cd within any of the episode's roots.
   assert(asks(CWD("/wt/ob1"), BR("main"), P("do SMD-700"), BR("me/node-22-smd-700-x"), P("go")) === "do SMD-700|go",
@@ -2891,8 +2910,27 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   // A joined excerpt over the cap keeps the recent TAIL, where decisions land,
   // not the head; and the per-episode window keeps the most recent messages,
   // bounding memory during the parse (review pass 2 teeth).
-  const longExc = assistantExcerpt({ assistant: ["HEAD_MARK" + "a".repeat(LIMITS.modelInputChars), "TAIL_MARK"] });
+  const longExc = assistantExcerpt({ assistant: ["HEAD_MARK" + "a".repeat(LIMITS.modelInputChars), "TAIL_MARK"] }).text;
   assert(longExc.length <= LIMITS.modelInputChars && longExc.includes("TAIL_MARK") && !longExc.includes("HEAD_MARK"), "assistantExcerpt keeps the recent tail when the joined excerpt exceeds the cap");
+  // SMD-3656: the excerpt is blanked whole, then clipped. Clipped first, a cut through a secret's prefix (`w|c_`, `wc|_`,
+  // inside `sk-ant-`) left a body no rule matched — the 64-hex rule refuses a run after `_` or `-`, the entropy rule hex —
+  // and it went to the model. The cut is placed `k` characters into the secret.
+  const hexBody = "3f9a".repeat(16);
+  const cutExcerpt = (secret, k) => {
+    const filler = " the tests pass and the work is done.";
+    const tail = filler.repeat(Math.ceil((LIMITS.modelInputChars + k) / filler.length)).slice(0, LIMITS.modelInputChars + k - secret.length);
+    return assistantExcerpt({ assistant: ["an earlier message. " + secret + tail] });
+  };
+  const cuts = [cutExcerpt(`wc_${hexBody}`, 1), cutExcerpt(`wc_${hexBody}`, 2), cutExcerpt(`sk-ant-${hexBody}`, 4)];
+  assert(cuts.every((c) => typeof c.text === "string" && c.text.length <= LIMITS.modelInputChars && !c.text.includes("3f9a3f9a")),
+    `an excerpt whose clip would cut a secret at w|c_, wc|_ or inside sk-ant- keeps no run of its body: blanked whole before the clip (SMD-3656) (${cuts.map((c) => (c.text ?? c.withheld).slice(0, 30)).join(" | ")})`);
+  // A pasted key block is withheld whole, as the summary refuses one; under refuse, any secret is.
+  const blockExc = assistantExcerpt({ assistant: ["here it is:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + "q8Zr2".repeat(8) + "\n" + "Pm4Kx".repeat(9) + "\n-----END RSA PRIVATE KEY-----\nthat one"] });
+  const refuseExc = assistantExcerpt({ assistant: [`we set the token to sk-ant-api03-${hexBody} and moved on`] }, "refuse");
+  const redactExc = assistantExcerpt({ assistant: [`we set the token to sk-ant-api03-${hexBody} and moved on`] });
+  assert(/multi-line key block/.test(blockExc.withheld ?? "") && blockExc.text === undefined && /OB1_CAPTURE_ON_SECRET=refuse/.test(refuseExc.withheld ?? "")
+      && /\[redacted:anthropic key\] and moved on/.test(redactExc.text ?? "") && !redactExc.text.includes("3f9a"),
+    `a key block in the assistant messages withholds the excerpt, as does any secret under refuse; under redact a one-line secret is blanked (SMD-3656) (${JSON.stringify([blockExc.withheld, refuseExc.withheld, redactExc.text])})`);
   const windowed = segment([{ t: "prompt", text: "do it" }, ...Array.from({ length: LIMITS.modelMsgs + 5 }, (_, i) => ({ t: "outcome", text: `m${i}` }))]);
   assert(windowed.episodes[0].assistant.length === LIMITS.modelMsgs && windowed.episodes[0].assistant.at(-1) === `m${LIMITS.modelMsgs + 4}` && windowed.episodes[0].assistant[0] === "m5", "the assistant window keeps the most recent LIMITS.modelMsgs messages per episode");
   assert(/summary: model at .*llama3\.1:8b/.test(modelStatusLine(mc)) && /no model_url\/model/.test(modelStatusLine({ summary: "model" })), "the status line names a configured model, and says so when model mode is on but unconfigured");
@@ -2910,7 +2948,7 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const modelCfg = (over = {}) => ({ summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny", ...over });
 
   const ep = summariseTranscript(CLAUDE_T);
-  const basePayload = { chain_id: "s-model", text: renderSummary(ep), assistant: assistantExcerpt(ep) };
+  const basePayload = { chain_id: "s-model", text: renderSummary(ep), assistant: assistantExcerpt(ep).text };
   const good = await modelSummary(modelCfg(), { ...basePayload });
   assert(good?.text === modelReply && good.model === "test-model", `modelSummary returns the model's text and the model that wrote it (${JSON.stringify(good).slice(0, 60)})`);
   assert(modelSeen?.messages?.length === 2 && modelSeen.messages[0].role === "system" && /Derived summary:/.test(modelSeen.messages[1].content) && /assistant's messages/.test(modelSeen.messages[1].content),
@@ -2961,9 +2999,9 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   // event) is the model's.
   modelReply = "the durable summary.";
   const beforeCp = modelCalls;
-  assert(await modelSummary(modelCfg(), { chain_id: "s-cp", event: "PreCompact", trigger: "auto", text: renderSummary(ep), assistant: assistantExcerpt(ep) }) === null && modelCalls === beforeCp,
+  assert(await modelSummary(modelCfg(), { chain_id: "s-cp", event: "PreCompact", trigger: "auto", text: renderSummary(ep), assistant: assistantExcerpt(ep).text }) === null && modelCalls === beforeCp,
     "a running checkpoint keeps its derived summary — the model is not called");
-  assert((await modelSummary(modelCfg(), { chain_id: "s-end", event: "SessionEnd", text: renderSummary(ep), assistant: assistantExcerpt(ep) }))?.text === "the durable summary.",
+  assert((await modelSummary(modelCfg(), { chain_id: "s-end", event: "SessionEnd", text: renderSummary(ep), assistant: assistantExcerpt(ep).text }))?.text === "the durable summary.",
     "…while the durable end-of-episode summary is written by the model");
 
   // A secret in the assistant messages themselves — a message that is not the
@@ -2973,6 +3011,9 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   assert(await modelSummary(modelCfg(), { chain_id: "s-leak", event: "SessionEnd", text: "a clean derived summary", assistant: "earlier we set the token to sk-ant-api03-abcdefabcdefabcdefabcdefabcdefabcdefabcdef and moved on" }) === null && modelCalls === beforeLeak,
     "a secret in the assistant messages keeps the derived summary — nothing is sent to the model");
 
+  // SMD-3656 end to end: the cut excerpt reaches the model with no run of the body.
+  const cutSent = await modelSummary(modelCfg(), { chain_id: "s-cut", event: "SessionEnd", text: "a clean derived summary", assistant: cuts[1].text });
+  assert(cutSent?.text && !JSON.stringify(modelSeen).includes("3f9a3f9a"), `the model is sent the blanked excerpt, never the cut secret's body (SMD-3656) (${modelCalls})`);
   // prepare attaches the excerpt only in model mode — off is byte-identical.
   const onPrep = prepare({ session_id: "s-prep-on", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { summary: "model" });
   const onPayload = JSON.parse(readFileSync(onPrep.payloadPath, "utf8"));
@@ -2986,6 +3027,16 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const cpPayload = JSON.parse(readFileSync(cpPrep.payloadPath, "utf8"));
   assert(cpPayload.event === "PreCompact" && !("assistant" in cpPayload), "a running-checkpoint payload carries no assistant excerpt at rest — only durable payloads do");
   unlinkSync(onPrep.payloadPath); unlinkSync(offPrep.payloadPath); unlinkSync(cpPrep.payloadPath); // not posted here: keep them out of the drain below
+  // SMD-3656: a key block in the assistant messages leaves the payload without an excerpt, and the log says why.
+  const blockT = join(TMP, "model-block.jsonl");
+  const ccLine = (type, content) => JSON.stringify({ type, sessionId: "s-prep-block", cwd: "/repo/proj", gitBranch: "main", timestamp: "2026-11-23T10:00:00.000Z", message: { role: type, content } });
+  writeFileSync(blockT, [ccLine("user", "rotate the deploy key"), ccLine("assistant", [{ type: "text", text: "here it is:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + "q8Zr2".repeat(8) + "\n" + "Pm4Kx".repeat(9) + "\n-----END RSA PRIVATE KEY-----" }]), ccLine("assistant", [{ type: "text", text: "rotated." }])].join("\n"));
+  const blockPrep = prepare({ session_id: "s-prep-block", transcript_path: blockT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { summary: "model" });
+  const blockPayload = blockPrep.payloadPath ? JSON.parse(readFileSync(blockPrep.payloadPath, "utf8")) : {};
+  const withheldLogged = (existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "").includes("model summary withheld for s-prep-block: a multi-line key block");
+  assert(blockPrep.payloadPath && !("assistant" in blockPayload) && withheldLogged && !JSON.stringify(blockPayload).includes("Pm4KxPm4Kx"),
+    `prepare in model mode leaves a key block's excerpt off the payload, logged, and the derived summary goes (SMD-3656) (${JSON.stringify(Object.keys(blockPayload))} ${withheldLogged})`);
+  if (blockPrep.payloadPath) unlinkSync(blockPrep.payloadPath);
 
   // End to end through the detached child, run synchronously: the posted content
   // is the model's, metadata.summary_model rides along, source stays the harness.

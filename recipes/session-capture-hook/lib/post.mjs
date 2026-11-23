@@ -208,7 +208,13 @@ export function prepare(hook, opts = {}) {
     // excerpt at rest unread (review pass 2). The fingerprint stays the DERIVED
     // text's, so an episode is asked of the model once — a re-end with the same
     // derived summary is skipped, not re-modelled.
-    if (opts.summary === "model" && !eventSpec(payload.event)?.checkpoint) payload.assistant = assistantExcerpt(ep);
+    // The excerpt is blanked whole before its clip (SMD-3656); one withheld — a key block, or a secret under refuse —
+    // leaves the payload without it, and the derived summary is sent, as modelSummary sends it for a payload with none.
+    if (opts.summary === "model" && !eventSpec(payload.event)?.checkpoint) {
+      const excerpt = assistantExcerpt(ep, onSecret);
+      if (excerpt.withheld) log(`model summary withheld for ${chain}: ${excerpt.withheld} — nothing will be sent to the model, derived summary sent`);
+      else payload.assistant = excerpt.text;
+    }
     ensureDirs();
     // The name orders the queue: the millisecond, then a per-process sequence
     // (two payloads one process prepares in one millisecond sort as made — third
