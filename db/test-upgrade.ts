@@ -800,11 +800,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 067's rebuild_derived on its own body, refusing by name without 063, 067
   // or 016's requeue_thought_work ([20cm]); 151 adds the settled parts' table
   // beside the proposals', with its lineage kind and rebuild_derived's arm for
-  // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]) —
+  // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]);
+  // 152 counts a work claim's renewals in a column on work_claims (115's
+  // renew_work_claim and ob1_work_claim_json and 140's claim_work carried with
+  // the count), refusing by name without 115 or 140 ([20co]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 122, `030 is among the last one hundred and twenty-two migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 123, `030 is among the last one hundred and twenty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7594,6 +7597,64 @@ console.log("\n[20cn] Migration 151: onto a populated brain at the file before i
     `writes go one at a time, and so do decisions: a second write waits on the supersession lock behind a first not yet committed, and a second decision, of another part, behind a first; each is made once the first commits (the write waited on ${secondWriteWaitedOn}, then ${afterSecondWrite.action ?? afterSecondWrite.error}; the decision waited on ${secondDecisionWaitedOn}, then ${afterSecondDecision.status ?? afterSecondDecision.error})`);
 
   for (const role of [REVIEWER, PASS, READER, UPD_ONLY, INS_ONLY]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+  await sql.close();
+}
+
+console.log("\n[20co] Migration 152: onto a populated brain at the file before it — refused by name without 140's ob1_work_claim_cap, nothing added; then applied: the claims standing keep NULL (uncounted) and stay so through renewals, a claim after it starts at 0 and counts each renewal by either path, a refusal counting nothing; the server's listing (143's columns, renewals read by each claim's id) carries each count; a re-apply keeps them (SMD-4540)");
+{
+  const the152 = MIGRATIONS.find((f) => /^\d{3}_claim_renewals\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the152 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('up-ren', 'agent')`;
+  await sql`SELECT set_agent_kind('up-ren-b', 'agent')`;
+  const H = JSON.stringify({ name: "up-ren" }), B = JSON.stringify({ name: "up-ren-b" });
+  type Answer = { outcome: string; code: string | null; claim: { id: string; renewals?: number | null } | null; token: string | null };
+  const claim = async (issue: string, actor: string, token: string | null = null) =>
+    (await sql`SELECT claim_work(${issue}, NULL, NULL, 14400, ${token}, (${actor}::text)::jsonb) AS r`)[0].r as Answer;
+  const renew = async (id: string, token: string, actor: string) =>
+    (await sql`SELECT renew_work_claim(${id}::uuid, ${token}, 14400, (${actor}::text)::jsonb) AS r`)[0].r as Answer;
+  const countOf = async (id: string) => ((await sql`SELECT renewals FROM work_claims WHERE id = ${id}::uuid`)[0] as { renewals: number | null }).renewals;
+  const column = async () => Number((await sql`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'work_claims' AND column_name = 'renewals'`)[0].n);
+  const apply152 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
+
+  // A claim made before 152, renewed once there.
+  const old = await claim("SMD-7301", H);
+  await renew(old.claim!.id, old.token!, H);
+
+  // Without 140's ob1_work_claim_cap (the carried claim_work calls it): refused by name, no column added.
+  await sql`ALTER FUNCTION ob1_work_claim_cap() RENAME TO ob1_work_claim_cap_away`;
+  const without = await apply152().then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_cap_away() RENAME TO ob1_work_claim_cap`;
+  assert(/^migration 152 needs 140 \(ob1_work_claim_cap\); this schema lacks it/.test(without) && (await column()) === 0,
+    `without 140's ob1_work_claim_cap the file is refused by name, and no renewals column is added (${without.slice(0, 80)})`);
+
+  await apply152();
+
+  // The claim from before stays uncounted, through a renewal by either path; one after starts at 0 and counts both.
+  const oldAgain = await renew(old.claim!.id, old.token!, H);
+  const oldByClaim = await claim("SMD-7301", H, old.token);
+  const fresh = await claim("SMD-7302", H);
+  const f1 = await renew(fresh.claim!.id, fresh.token!, H);
+  const f2 = await claim("SMD-7302", H, fresh.token);
+  const refused = await renew(fresh.claim!.id, fresh.token!, B);
+  assert((await column()) === 1 && oldAgain.claim!.renewals === null && oldByClaim.claim!.renewals === null && (await countOf(old.claim!.id)) === null
+         && fresh.claim!.renewals === 0 && f1.claim!.renewals === 1 && f2.claim!.renewals === 2 && refused.code === "CLAIM_NOT_YOURS" && (await countOf(fresh.claim!.id)) === 2,
+    `a claim standing at the upgrade stays uncounted through renewals by either path; one after starts at 0 and counts each, another key's refusal counting nothing (${JSON.stringify([oldAgain.claim?.renewals, oldByClaim.claim?.renewals, fresh.claim?.renewals, f1.claim?.renewals, f2.claim?.renewals, refused.code])})`);
+
+  // The server's listing (store-sql.ts's expression): list_work_claims as 143 made it, each count read by the claim's id.
+  const listed = (await sql`
+    SELECT l.issue, (SELECT (to_jsonb(w) ->> 'renewals')::int FROM work_claims w WHERE w.id = l.id) AS renewals
+      FROM list_work_claims(ARRAY['SMD-7301', 'SMD-7302'], NULL, true, 10) WITH ORDINALITY AS l ORDER BY l.ordinality`) as { issue: string; renewals: number | null }[];
+  assert(JSON.stringify(listed.map((r) => [r.issue, r.renewals])) === JSON.stringify([["SMD-7301", null], ["SMD-7302", 2]]),
+    `the server's listing carries each claim's count, NULL for the one from before (${JSON.stringify(listed)})`);
+
+  // A re-apply keeps every count, and a new claim still starts at 0.
+  await apply152();
+  const later = await claim("SMD-7303", H);
+  assert((await countOf(old.claim!.id)) === null && (await countOf(fresh.claim!.id)) === 2 && later.claim!.renewals === 0,
+    `a re-apply keeps every count, and a new claim still starts at 0 (${await countOf(fresh.claim!.id)}, ${later.claim?.renewals})`);
+
   await sql.close();
 }
 
