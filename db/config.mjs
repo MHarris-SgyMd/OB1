@@ -2640,8 +2640,8 @@ export const ROLE_GRANTS = Object.freeze({
     // SELECT too: reembed reads the model and its job keys before it writes them, which the server group's SELECT used to cover — and a role given the worker group for that alone would take the server group's key writes with it (SMD-2289 review pass 1).
     Object.freeze({ table: "ob1_config",             privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),           since: "006" }),
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),          since: "029" }),
-    // The pass's settled parts (SMD-4446; consolidate.ts does not write them
-    // yet): 151's record_settled_part and review_settled_part run as the
+    // The pass's settled parts (SMD-4446; consolidate.ts writes them since
+    // decide version 6): 151's record_settled_part and review_settled_part run as the
     // caller, as 029's do, and rebuild_derived sets a part stale as it does
     // a proposal. DELETE, which the proposals' row above lacks: a part's row
     // is one judgement, so the write deletes an undecided row that is stale
