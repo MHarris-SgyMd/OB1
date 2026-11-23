@@ -1605,7 +1605,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // Decide mode (SMD-3151): the writer's calls by what came back, and the tier's outdates under the floor it was not asked about.
     writerAsked: 0, writerStood: 0, writerDeclined: 0, writerQuotesFailed: 0, writerUnparsed: 0, gated: 0, linkAsked: 0, linkCapped: 0, linkUnparsed: 0,
     // Decide version 6 (SMD-4446). By pair: one whose writer named a part that stands, and one it said holds a thought
-    // that falls whole (writerStood: of those, the ones a part showed, an outdates). By part: every one named, the
+    // that falls whole (writerStood: of those, the ones proposed, an outdates; wholeAgainst: the ones held back by a
+    // part of the other thought that stands). By part: every one named, the
     // items of an answer's list that were no part, a quote that did not check out, a part whose words were not read
     // back in its thought's own characters (review pass 2: not recorded, where it had been kept in another form), a
     // statement named twice in one answer; then what its write came to: a new row (of them, one in place of an older
@@ -1614,7 +1615,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // Review pass 1: of the rows that already held a statement, the ones a reviewer had rejected; the items past the
     // twelve an answer is read to, apart from the items that were no part; and the parts whose write threw, or that
     // were still to write when one did.
-    writerParts: 0, wholeSaid: 0, partsNamed: 0, partsDropped: 0, partsOver: 0, partsRepeated: 0, partsQuotesFailed: 0, partsNotOwn: 0,
+    writerParts: 0, wholeSaid: 0, wholeAgainst: 0, partsNamed: 0, partsDropped: 0, partsOver: 0, partsRepeated: 0, partsQuotesFailed: 0, partsNotOwn: 0,
     partsRecorded: 0, partsReplaced: 0, partsStood: 0, partsStoodRejected: 0, partsGone: 0, partsMoved: 0, partsRefused: 0, partsThrew: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
     // settled after a judgement that proposes nothing, settled because the
@@ -1900,10 +1901,10 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         // (050), never a payload field — so "an agent's summary supersedes what
         // the operator typed" is a proposal it can decline on that ground.
         // In decide mode since version 6 the writer hears it too, in the pair's
-        // headers, but its question is SMD-3340's frozen rules, which do not
-        // hold the rule that an agent's restatement never outdates the
-        // operator's thought, as version 5's question did (review pass 4: put
-        // to the maintainer).
+        // headers, and the rule that an agent's restatement never outdates
+        // what the operator stated stands in the question's head
+        // (PARTS_WRITER_RULE): SMD-3340's frozen rules do not hold it (review
+        // pass 4; the maintainer's decision, 2026-11-22).
         const olderSide = { content: older.content, createdAt: older.created_at, metadata: older.metadata ?? undefined, writer: actorKindOf(older.metadata) };
         const newerSide = { content: row.content, createdAt: row.created_at, metadata: row.metadata ?? undefined, writer: actorKindOf(row.metadata) };
         // The pair's bound counts its calls' own time: a wait for a slot on the model-call seam pauses it, told by
@@ -1999,6 +2000,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           totals.partsQuotesFailed += named.filter((p) => !(p.stale_found && p.shown_found)).length;
           totals.partsNotOwn += named.filter((p) => p.stale_found && p.shown_found && !(p.own.statement && p.own.shown_by)).length;
           if (writer.falls === "older" || writer.falls === "newer") totals.wholeSaid++;
+          if (writer.against) totals.wholeAgainst++;
           if (j.verdict === "outdates") totals.writerStood++;
           if (writer.falls === "unparsed") totals.writerUnparsed++;
           else if (j.parts?.length) totals.writerParts++;
@@ -2771,7 +2773,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // time, in this line and the next (review pass 1: the line said "pair(s)", and read 7 for 4 pairs).
     out(
       `  decide: the writer asked ${totals.writerAsked} time(s), a pair judged again counted again — ${totals.writerParts} with a settled part, ${totals.writerDeclined} with no part named, ${totals.writerQuotesFailed} with parts named and none that stands, ` +
-        `${totals.writerUnparsed} unparsed; it said a thought falls whole on ${totals.wholeSaid}, ${totals.writerStood} of them shown by a part; ${totals.gated} outdates under the floor ${MIN_CONFIDENCE}, the writer not asked`
+        `${totals.writerUnparsed} unparsed; it said a thought falls whole on ${totals.wholeSaid}, ${totals.writerStood} of them proposed, shown by a part in it, and ${totals.wholeAgainst} held back by a part that stands the other way; ${totals.gated} outdates under the floor ${MIN_CONFIDENCE}, the writer not asked`
     );
     // Decide version 6 (SMD-4446): the parts read, by what became of each. A part recorded is a proposal for review.
     // The numbers after the dash add up to the parts read; an item of an answer that was no part, or that came after

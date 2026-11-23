@@ -4902,11 +4902,14 @@ tier gives each pair's verdict, not the judge:
     words and a reason; and for whether either thought falls whole, which the
     rules say is almost never. Its opening lines are the earlier writer's,
     with the answer to an injection attempt in the new shape: no part, and
-    neither thought falling. The pair's headers still say who wrote each
-    thought. The frozen rules do not hold version 5's rule that an agent's
-    summary or restatement of what the operator stated never outdates the
-    operator's thought (SMD-1726), and nothing after the model reads who
-    wrote a side: whether the rule goes back in is put to the maintainer.
+    neither thought falling. After them stands version 5's rule about who
+    wrote a thought (SMD-1726), in the parts' terms: an agent's summary,
+    restatement or inference of what the operator stated never makes a
+    statement in the operator's thought outdated, and never makes that
+    thought fall. The pair's headers say who wrote each thought. The frozen
+    rules do not hold the rule, so it stands before the pair, outside their
+    hash (the maintainer's decision, 2026-11-22); SMD-3340 measured the
+    rules without it, and nothing after the model reads who wrote a side.
   - **The answer** is read leniently about its wrapping and strictly about
     its keys. An answer with no list, with no yes or no for either thought,
     or with both falling is unparsed as a whole: it names no part, the pair
@@ -5064,11 +5067,13 @@ tier gives each pair's verdict, not the judge:
     before, at the tier's P(outdates). Its reason is that part's, said to be
     one part's. The parts are recorded beside it: a reviewer who rejects the
     whole can still accept them. A whole said with no such part proposes
-    nothing. A whole is still proposed when its only such part is one a
-    reviewer rejected before. And it is proposed whatever the answer's
-    other parts say: one held by the other thought, which shows that the
-    thought said to fall holds a statement the other lacks, does not hold
-    the whole back. Both are rules put to the maintainer.
+    nothing. Nor does one said against a part of the other thought that
+    stands: such a part shows that the thought said to fall holds a later
+    statement, which the rules' own test for a whole excludes. The whole is
+    held back, its parts are recorded all the same, each one's lineage says
+    so (`against`), and the summary counts it (the maintainer's decision,
+    2026-11-22). A whole is still proposed when its only such part is one a
+    reviewer rejected before: that rule is put to the maintainer.
   - **Otherwise** the pair takes the tier's best verdict that proposes
     nothing, as a declined proposal did, and its relation under the same
     floor.
@@ -5091,8 +5096,9 @@ tier gives each pair's verdict, not the judge:
   - **Reported:**
     - The summary has a line for the writer's calls: with a settled part,
       with no part named, with parts named and none that stands, unparsed,
-      and the wholes it said. It counts judgements: a pair judged again after
-      a put-back is counted again.
+      and the wholes it said: how many were proposed, and how many were held
+      back by a part that stands the other way. It counts judgements: a pair
+      judged again after a put-back is counted again.
     - A second line has the parts read, by what became of each: recorded
       (with those written in place of an earlier judgement, which leave one
       row for two writes), already held (with those a reviewer rejected), a
@@ -5222,8 +5228,9 @@ tier gives each pair's verdict, not the judge:
   the thought the writer said falls whole (`falls`), every part read, twelve
   an answer at most, with both quotes as typed and their checks (`parts`),
   and the counts of the items that were no part (`dropped`) or came past the
-  twelve (`over`); when a whole stands it also holds the earlier versions'
-  keys (`current`, `evidence`, `stale`), from the part that shows it. A
+  twelve (`over`); when a whole is proposed it also holds the earlier
+  versions' keys (`current`, `evidence`, `stale`), from the part that shows
+  it, and when one is held back by a part of the other thought, `against`. A
   part's own lineage row (kind `part`) carries the same recipe with the
   writer's answer cut to that part (`part`, beside `named` and `index`).
 

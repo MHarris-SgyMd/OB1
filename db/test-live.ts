@@ -19986,7 +19986,7 @@ if (want("16")) {
           : /gateway/.test(both) ? { unrelated: 0.02, related: 0.15, evolves: 0.1, duplicate: 0.03, outdates: 0.7 }
           : /pager/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.6, duplicate: 0.05, outdates: 0.1 }
           // Decide version 6's pairs (SMD-4446), each an outdates at the floor the writer names a part of.
-          : /audit export|rota|badge|locker|vault|kiosk|ferry|gazebo|harbor|marina|orchard|paddock|quarry|silo|jetty|grove|meadow|lagoon|canal|quay crane|slipway winch|pier lamp|wharf office|depot roof|hangar door|kiln vent|mill wheel|yard gate/.test(both) ? { unrelated: 0.03, related: 0.15, evolves: 0.1, duplicate: 0.02, outdates: 0.7 }
+          : /audit export|rota|badge|locker|vault|kiosk|ferry|gazebo|harbor|marina|orchard|paddock|quarry|silo|jetty|grove|meadow|lagoon|canal|quay crane|slipway winch|pier lamp|wharf office|depot roof|hangar door|kiln vent|mill wheel|yard gate|causeway/.test(both) ? { unrelated: 0.03, related: 0.15, evolves: 0.1, duplicate: 0.02, outdates: 0.7 }
           : { unrelated: 0.9, related: 0.05, evolves: 0.02, duplicate: 0.01, outdates: 0.02 };
         const probabilities: Record<string, number> = { ...Object.fromEntries(d.options.map((o) => [o.id, p[o.id] ?? 0])), __insufficient_evidence__: 0 };
         const ids = Object.keys(probabilities);
@@ -20112,6 +20112,12 @@ if (want("16")) {
           await move(parts6.depotNew, "[16d] The depot roof was sealed in May, twice.");
           await sql`UPDATE thought_work_claims SET worker_id = 'another-worker' WHERE work_type = ${DKEY} AND thought_id = ${parts6.depotNew}::uuid`;
           answer = { parts: [partOf("roof leaks", "roof was sealed in May", "resolves", "the roof was sealed")], a_falls: "no", b_falls: "no" };
+        } else if (/causeway/.test(both)) {
+          // A part in each thought, both standing, and the newer said to fall whole: the older's part shows that the
+          // newer holds the later statement, which stands against that whole.
+          called("causeway");
+          answer = { parts: [partOf("causeway is closed", "causeway reopened in May", "resolves", "the causeway reopened"),
+                             { in: "B", stale: "toll was one pound before", shown_by: "toll is two pounds", word: "updates", reason: "made up, the other way round" }], a_falls: "no", b_falls: "yes" };
         } else if (/hangar lamp is broken|kiln shelf is cracked|yard fence is broken|yard light is missing/.test(both)) {
           // A later pair of the hangar, kiln or yard thought: a call here is one made after the thought was read again
           // and found no longer this worker's, or its text moved.
@@ -20341,7 +20347,7 @@ if (want("16")) {
         .find((l) => l.newer === tenNew && l.older === tenOld);
       assert(tierCalls === 6 && writerCalls === 2 && linkCalls === 3 && writerModels.size === 1 && writerModels.has(WRITER) && writerPartsAsked === 2
           && /1 under confidence 0\.55 not recorded/.test(drun.out) && /^\s*12\/12 .* 6 pairs judged, 1 proposed, 1 settled part\(s\) recorded/m.test(drun.out)
-          && /decide: the writer asked 2 time\(s\), a pair judged again counted again — 1 with a settled part, 1 with no part named, 0 with parts named and none that stands, 0 unparsed; it said a thought falls whole on 1, 1 of them shown by a part; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)
+          && /decide: the writer asked 2 time\(s\), a pair judged again counted again — 1 with a settled part, 1 with no part named, 0 with parts named and none that stands, 0 unparsed; it said a thought falls whole on 1, 1 of them proposed, shown by a part in it, and 0 held back by a part that stands the other way; 1 outdates under the floor 0\.55, the writer not asked/.test(drun.out)
           && /decide: 1 settled part\(s\) read — 1 recorded for review, 0 already held, 0 with a quote that did not check out$/m.test(drun.out)
           && /decide: the writer's link step asked on 3 pair\(s\) — 1 capped at related with no proposal \(0 of them unparsed\), 2 direct or unlinked/.test(drun.out)
           && tenLine?.falls === "older" && tenLine.dropped === 0 && tenLine.parts?.length === 1 && tenLine.parts[0].result === "recorded" && tenLine.parts[0].id === tenParts[0]?.id && tenLine.parts[0].status === "pending" && tenLine.parts[0].stale === "runs 30 days",
@@ -20574,7 +20580,7 @@ if (want("16")) {
           // No worker ends holding a thought: each in hand ended judged, failed, put back or deleted. (A thought wrongly
           // ended as deleted keeps its claim until its worker's end, and whether the other worker then judges it is
           // timing's: the line a worker prints when it returns such a row is what tells, whichever way that goes.)
-          assert(prun.code === 1 && /decide: the writer asked 21 time\(s\), a pair judged again counted again — 18 with a settled part, 1 with no part named, 1 with parts named and none that stands, 1 unparsed; it said a thought falls whole on 4, 3 of them shown by a part; 0 outdates under the floor 0\.5, the writer not asked$/m.test(prun.out)
+          assert(prun.code === 1 && /decide: the writer asked 21 time\(s\), a pair judged again counted again — 18 with a settled part, 1 with no part named, 1 with parts named and none that stands, 1 unparsed; it said a thought falls whole on 4, 3 of them proposed, shown by a part in it, and 0 held back by a part that stands the other way; 0 outdates under the floor 0\.5, the writer not asked$/m.test(prun.out)
               && /decide: 40 settled part\(s\) read — 8 recorded for review, 0 already held, 13 with a quote that did not check out, 1 whose words were not read back in the thought's own characters, 1 named twice in one answer, 4 with a thought gone, 13 of a text that moved while the pair was judged; 1 item\(s\) of an answer were no part, 1 item\(s\) came after the 12 an answer is read to$/m.test(prun.out)
               && / thought\(s\) judged, 2 failed, \d+ deleted mid-pass, 7 put back by the pass for a text that moved while a pair of the thought was judged \(each named above; a thought put back twice is two\), in /.test(prun.out) && / 1 proposal\(s\) recorded /.test(prun.out)
               && !/unfinished row\(s\) to the pool/.test(prun.out),
@@ -20664,6 +20670,22 @@ if (want("16")) {
               && yardClaim.last_error === `2 of 3 pair(s) not judged: pair with ${yardSecond}: this thought's text moved before the pair was asked, the thought already put back 2 times running for a moved text — the pair is not asked, and the thought is not put back again; and the 1 pair(s) after it, not asked`
               && reread.out.split(`  ${parts6.yardNew}: its own text moved before its pair with ${yardSecond} was asked`).length === 3,
             `a text that moves under every call of a first pair that names no part: the thought is put back twice before its second pair, then its claim fails there, the second pair and the third counted as not asked (writer calls ${parts6.calls.yard}; claim ${JSON.stringify(yardClaim ?? null)})`);
+
+          // A whole against a part that stands the other way (review pass 4; the maintainer's decision, 2026-11-22).
+          // The writer names a part in each thought and says the newer falls whole. The older's part shows that the
+          // newer holds the later statement, so the whole is held back: no proposal, both parts recorded, each one's
+          // lineage saying so, the claim succeeded, and the summary counts the whole as held back. (It was proposed,
+          // the newer thought as superseded.)
+          const causeOld = await seed("[16d] The causeway is closed. The toll is two pounds.", 100, 3, ["causeway"]);
+          const causeNew = await seed("[16d] The causeway reopened in May. The toll was one pound before.", 100, 0, ["causeway"]);
+          const heldBack = await decide(denv);
+          const [causeParts, causeClaim] = [await partsOf(causeOld, causeNew), await claim6(causeNew)];
+          const [{ n: causeProposals }] = (await sql`SELECT count(*)::int AS n FROM supersession_proposals WHERE older_id = ${causeOld}::uuid AND newer_id = ${causeNew}::uuid`) as { n: number }[];
+          const causeNotes = causeParts.map((r) => (r.recipe as { judged?: { decide?: { writer?: { falls?: string; against?: boolean; current?: string } } } } | null)?.judged?.decide?.writer);
+          assert(parts6.calls.causeway === 1 && causeClaim?.status === "succeeded" && causeProposals === 0 && causeParts.map((r) => `${r.holder}:${r.statement}`).sort().join("|") === "newer:toll was one pound before|older:causeway is closed"
+              && causeNotes.every((w) => w?.falls === "newer" && w.against === true && w.current === undefined)
+              && /it said a thought falls whole on 1, 0 of them proposed, shown by a part in it, and 1 held back by a part that stands the other way;/.test(heldBack.out) && / 0 proposal\(s\) recorded /.test(heldBack.out),
+            `a whole the writer says of a thought, with a standing part of the other thought against it, is held back: no proposal, both parts recorded and marked so, and the summary counts it (writer calls ${parts6.calls.causeway}; claim ${JSON.stringify(causeClaim ?? null)}; ${causeProposals} proposal(s); ${plain(causeParts)}; ${said(heldBack.out).slice(0, 420)})`);
 
           // Judged again after an edit of the newer text: each statement's row, pending at the earlier fingerprints, is no
           // longer a judgement of the texts as they stand, and the new judgement takes its place as a new row.
@@ -20773,7 +20795,7 @@ if (want("16")) {
                 && marinaClaim.last_error === `1 of 1 pair(s) not judged or with a settled part unrecorded: pair with ${marinaOld}: 2 settled parts were refused — record_settled_part must run under READ COMMITTED; this transaction is REPEATABLE READ`
                 && (await partRowsOf(marinaNew)) === 0 && (await proposalsOf(marinaNew)).length === 0 && (await relationsOf(marinaNew)) === 0
                 && /decide: 2 settled part\(s\) read — 0 recorded for review, 0 already held, 0 with a quote that did not check out, 2 refused by the store$/m.test(refusedRun.out)
-                && /it said a thought falls whole on 1, 1 of them shown by a part;/.test(refusedRun.out) && / 0 proposal\(s\) recorded /.test(refusedRun.out)
+                && /it said a thought falls whole on 1, 1 of them proposed, shown by a part in it, and 0 held back by a part that stands the other way;/.test(refusedRun.out) && / 0 proposal\(s\) recorded /.test(refusedRun.out)
                 && results(marinaLine) === "refused,refused" && marinaLine?.proposal === null && marinaLine.relation === null,
               `parts the store refuses are counted and said once for the pair on the claim, in the store's own words, and nothing else of the judgement is recorded, so the pair is still a candidate once the cause is mended (exit ${refusedRun.code}: claim ${JSON.stringify(marinaClaim ?? null)}; ${said(refusedRun.out)})`);
           }
@@ -20893,7 +20915,7 @@ if (want("16")) {
         }
         // The badge, canal, marina, orchard, paddock, grove and quarry claims are left failed by design: all of this
         // block's thoughts are cleared here, so the runs below start from none.
-        await sql`DELETE FROM thoughts WHERE content LIKE ANY (${sql.array(["audit", "rota", "badge", "annex", "locker", "vault", "kiosk", "jetty", "ferry", "gazebo", "harbor", "marina", "orchard", "paddock", "grove", "meadow", "quarry", "silo", "lagoon", "reef", "canal", "lock gates", "cloakroom", "**audit", "quay", "slipway", "pier", "wharf", "depot", "mill", "hangar", "kiln", "yard"].map((n) => `[16d] The ${n}%`), "TEXT")}::text[])`;
+        await sql`DELETE FROM thoughts WHERE content LIKE ANY (${sql.array(["audit", "rota", "badge", "annex", "locker", "vault", "kiosk", "jetty", "ferry", "gazebo", "harbor", "marina", "orchard", "paddock", "grove", "meadow", "quarry", "silo", "lagoon", "reef", "canal", "lock gates", "cloakroom", "**audit", "quay", "slipway", "pier", "wharf", "depot", "mill", "hangar", "kiln", "yard", "causeway"].map((n) => `[16d] The ${n}%`), "TEXT")}::text[])`;
       })();
 
       // SMD-3326: the tier's 422 — a pair it cannot read faithfully — is that pair's, recorded on the claim with the
