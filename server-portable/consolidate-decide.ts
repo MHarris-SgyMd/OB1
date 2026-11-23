@@ -305,18 +305,9 @@ export const PARTS_MAX = 12;
 /**
  * A string with each half of a surrogate pair that stands alone replaced by U+FFFD. A model's answer can hold one,
  * and Postgres refuses it in a recipe's JSON, which failed the thought at its first write (review pass 1: 6 of 6).
- * Written over code units, not as a pattern: the pattern would need the halves written out in this file.
+ * Read by code point, a half that stands alone is the one character of the surrogate category, and a pair is none.
  */
-function wellFormed(s: string): string {
-  let out = "";
-  for (let i = 0; i < s.length; i++) {
-    const c = s.charCodeAt(i);
-    const next = s.charCodeAt(i + 1);
-    if (c >= 0xd800 && c <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) { out += s[i] + s[i + 1]; i++; }
-    else out += c >= 0xd800 && c <= 0xdfff ? String.fromCharCode(0xfffd) : s[i];
-  }
-  return out;
-}
+const wellFormed = (s: string): string => s.replace(/\p{Cs}/gu, String.fromCharCode(0xfffd));
 
 /** One part as the writer named it. `holder` is the thought that makes the outdated statement; THOUGHT A is the older. */
 export type NamedPart = { holder: "older" | "newer"; stale: string; shown_by: string; word: PartWord; reason: string };
@@ -342,7 +333,13 @@ export type PartsAnswer = { parts: NamedPart[]; dropped: number; over: number; f
  * are (quoteOf), the reason one line.
  */
 export function parseParts(raw: string): PartsAnswer {
-  const kept = (v: unknown): string => cutByCodePoint(wellFormed(oneLine(typeof v === "string" ? v : JSON.stringify(v) ?? String(v))), UNREAD_MAX);
+  // What is kept of an item that was not read, or of an answer: its JSON on one line, cut. An item nested deeper than
+  // JSON.stringify descends is read by JSON.parse and threw here, failing its thought (review pass 4: 40,001 levels).
+  const kept = (v: unknown): string => {
+    let said: string;
+    try { said = typeof v === "string" ? v : JSON.stringify(v) ?? String(v); } catch { said = "an item that could not be printed"; }
+    return cutByCodePoint(wellFormed(oneLine(said)), UNREAD_MAX);
+  };
   const bad: PartsAnswer = { parts: [], dropped: 0, over: 0, falls: null, malformed: true, unread: [kept(raw)] };
   const o = jsonObject(raw);
   if (!o || Array.isArray(o) || !Array.isArray(o.parts)) return bad;
@@ -361,7 +358,11 @@ export function parseParts(raw: string): PartsAnswer {
     const word = typeof p?.word === "string" ? p.word.trim().toLowerCase() : "";
     const stale = wellFormed(quoteOf(p?.stale)), shown_by = wellFormed(quoteOf(p?.shown_by));
     const reason = typeof p?.reason === "string" ? cutByCodePoint(wellFormed(oneLine(p.reason)), REASON_MAX) : "";
-    if (full || holder === null || !(PART_WORDS as readonly string[]).includes(word) || !stale || !shown_by || !reason) {
+    // A quote is kept whole or its item is no part. quoteOf cuts one past REASON_MAX at a word's edge, and the cut
+    // prefix, which the thought holds too, passed the check and was recorded as the statement: the first 395
+    // characters of a sentence of 607, the outdated value after the cut (review pass 4).
+    const whole = (v: unknown) => typeof v !== "string" || [...oneLine(v)].length <= REASON_MAX;
+    if (full || holder === null || !(PART_WORDS as readonly string[]).includes(word) || !stale || !shown_by || !reason || !whole(p?.stale) || !whole(p?.shown_by)) {
       if (full) over++;
       else dropped++;
       if (unread.length < PARTS_MAX) unread.push(kept(item));
@@ -556,10 +557,11 @@ export const DECIDE_PROMPT = [RELATION_QUESTION, ...OFFERED.map((v) => DESCRIPTI
  * thread. 6, the pass's (key `@p4d6`, SMD-4446 PR 2a): version 5's tier call, floor and link step, and a writer asked
  * for the settled parts (partsMessages, SMD-3340's frozen rules) where version 5's wrote a whole-thought proposal.
  * The maintainer marked every proposal version 5 had made on the canary: of 41, 2 were right as a whole, 32 right
- * about a part and 7 neither (docs/subject-anchored-claims.md, rows 8 to 11). Each part whose two quotes pass
- * (checkParts) is recorded as a proposal for review (record_settled_part, migration 151), both thoughts standing;
- * a whole-thought proposal is written only when the writer says a thought falls whole and a part in it passed its
- * quotes (partsJudgement). It changes what the writer is asked and what a judgement records, so it moves the key.
+ * about a part and 7 neither (docs/subject-anchored-claims.md, rows 8 to 11). Each part whose two quotes pass and
+ * are read back in their thoughts' own characters (checkParts, partStands) is recorded as a proposal for review
+ * (record_settled_part, migration 151), both thoughts standing; a whole-thought proposal is written only when the
+ * writer says a thought falls whole and such a part in it stands (partsJudgement). It changes what the writer is
+ * asked and what a judgement records, so it moves the key.
  */
 export const DECIDE_VERSION = 6;
 
@@ -578,8 +580,9 @@ export function consolidatePassKey(cfg: Pick<EmbedConfig, "judgeModel" | "decide
 
 /**
  * A part as the decide note keeps it (version 6): which thought holds the statement, the word, both quotes as the
- * writer typed them with their checks, the reason, and for each quote whether the row holds its thought's own
- * characters (ownWords) or the typing. `repeated`: the same statement of the same thought named earlier in the answer.
+ * writer typed them with their checks, the reason, and for each quote whether it was read back in its thought's own
+ * characters (ownWords): where either was not, the part has no row. `repeated`: the same statement of the same
+ * thought named earlier in the answer.
  */
 export type PartNote = { holder: "older" | "newer"; word: PartWord; stale: string; stale_found: boolean; shown_by: string; shown_found: boolean; reason: string; own: { statement: boolean; shown_by: boolean }; repeated?: true };
 
@@ -921,10 +924,9 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
   const top = best(p, OFFERED);
   const note: DecideNote = { decider: { name: model.name, revision: model.revision, weights_sha256: model.weights_sha256, rules: model.rules }, version: DECIDE_VERSION, top };
   // Version 5: H2O's evolves folded into related before the choice, and the note marked where that moved the verdict.
-  const folded = (proposal: Proposal | null, standing: boolean): Judgement => {
-    const j = decideJudgement(p, proposal, standing, true);
+  const marked = (j: Judgement) => {
     if (j.verdict !== "outdates" && j.verdict !== best(p, PROPOSING_NONE)) note.threaded = true;
-    return j;
+    return { ...j, decide: note };
   };
   if (top === "outdates" && outdatesConfidence(p) >= floor) {
     // Row 3 (SMD-3203): a mediated pair proposes nothing, so the link step goes first, and a pair it caps is written
@@ -937,14 +939,12 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
     const answer = parseParts(await askWriter(cfg, partsMessages({ older, newer }), signal));
     const checked = checkParts(answer, older.content, newer.content);
     note.writer = partsNote(cfg.judgeModel, answer, checked);
-    const j = partsJudgement(p, answer, checked);
-    if (j.verdict !== "outdates" && j.verdict !== best(p, PROPOSING_NONE)) note.threaded = true;
-    return { ...j, decide: note };
+    return marked(partsJudgement(p, answer, checked));
   }
   // Under the floor a standing proposal would record nothing and close the pair's relation (SMD-3151 review pass 3),
   // so the writer is not asked: the pair takes H2O's best verdict that proposes nothing, as a quote that fails does.
   if (top === "outdates") note.floor = floor;
   // Version 5 (SMD-3306 PR 7b): an evolves is related, the work threads giving evolves; version 4 asked the link step
   // after one the pass would store, row 2's cap.
-  return { ...folded(null, false), decide: note };
+  return marked(decideJudgement(p, null, false, true));
 }

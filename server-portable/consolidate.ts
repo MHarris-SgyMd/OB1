@@ -156,8 +156,8 @@ export type Judgement = {
    */
   foldedEvolves?: boolean;
   /**
-   * Decide version 6 (consolidate-decide.ts, SMD-4446): the settled parts the writer named whose two quotes passed,
-   * for the pass to record (record_settled_part, migration 151), whatever the verdict. Absent from the judge's
+   * Decide version 6 (consolidate-decide.ts, SMD-4446): the settled parts the writer named whose two quotes passed
+   * and were read back in their thoughts' own characters, for the pass to record (record_settled_part, migration 151), whatever the verdict. Absent from the judge's
    * answers, and from a pair whose writer was not asked.
    */
   parts?: PartToRecord[];

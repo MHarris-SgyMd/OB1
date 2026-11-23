@@ -2200,8 +2200,14 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
       && kept.unread.length === 2 && kept.unread[0].includes('"in":"C"') && [...kept.unread[1]].length === 600 && parseParts("not json\nat all").unread[0] === "not json at all" && parseParts(ans(["first line\nsecond line"])).unread[0] === "first line second line" && many.unread.length === 3 && badFirst.unread.length === 4
       && parseParts(ans(Array.from({ length: 40 }, () => "x"))).unread.length === 12,
     "what was not read as a part is kept for the dump: an unparsed answer itself, else each item dropped or past the cap, one line each, cut at 600 characters and twelve items");
-  const long = parseParts(ans([{ ...part, stale: "word ".repeat(200), reason: "x ".repeat(400) + "\nsecond line" }])).parts[0];
-  assert([...long.stale].length <= REASON_MAX && long.stale.endsWith("word") && [...long.reason].length === REASON_MAX && !long.reason.includes("\n"), "a quote is cut at a word past the bound and the reason is one clipped line, as a proposal's are");
+  // A quote is kept whole or its item is no part (review pass 4: one past the bound was cut at a word, as a proposal's
+  // is, and the cut prefix was recorded as the statement). The bound is held to the code point, counted on one line.
+  const quoteAt = "w".repeat(REASON_MAX - 4) + " end", quotePast = "w".repeat(REASON_MAX - 3) + " end";
+  const astral = String.fromCodePoint(0x1f600).repeat(REASON_MAX - 2) + " a", spaced = "w".repeat(REASON_MAX - 6) + "   \n   end";
+  const longQ = parseParts(ans([{ ...part, stale: quoteAt, reason: "x ".repeat(400) + "\nsecond line" }, { ...part, stale: quotePast }, { ...part, shown_by: "word ".repeat(200) }, { ...part, stale: astral }, { ...part, shown_by: spaced }]));
+  assert([...quoteAt].length === REASON_MAX && [...quotePast].length === REASON_MAX + 1 && spaced.length > REASON_MAX && astral.length > REASON_MAX && longQ.parts.length === 3 && longQ.dropped === 2 && longQ.unread.length === 2
+      && longQ.parts[0].stale === quoteAt && [...longQ.parts[0].reason].length === REASON_MAX && !longQ.parts[0].reason.includes("\n") && longQ.parts[1].stale === astral && longQ.parts[2].shown_by === "w".repeat(REASON_MAX - 6) + " end",
+    "a quote is kept whole or its item is no part: one of 400 code points is a part as typed; one of 401, in either quote, is dropped and counted; the count is of code points, on one line; and the reason is one clipped line");
   // A half of a surrogate pair that stands alone (review pass 1: Postgres refuses one in a recipe's JSON, which failed
   // the thought at its first write) is replaced wherever the answer's words go on: the two quotes, the reason, the
   // items kept for the dump and the link's words. Built from code units, so this file holds none.
@@ -2469,6 +2475,22 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   assert(ofPart.named === 5 && ofPart.index === 1 && (ofPart.part as { stale: string }).stale === A2.stale && !("parts" in ofPart) && ofPart.model === "w" && ofPart.falls === "none" && ofPart.dropped === 0
       && !("current" in (partJudged({ decide: { writer: wholeNote } }, 0).decide.writer as Record<string, unknown>)) && JSON.stringify(partJudged({ verdict: "related" } as { verdict: string; decide?: Record<string, unknown> }, 0)) === '{"verdict":"related"}',
     "a part's own recipe: the note with the writer's answer cut to that part beside how many it named, a whole's keys left to the proposal's; a judgement with no parts is as it was");
+  // Four behaviours the rows above held one way only (review pass 4: a mutant of each passed the suite). The note of
+  // a whole of the NEWER thought names the older as current. A whole said of a thought with no standing part writes
+  // none of a whole's keys, though a part of the other thought stands. A part's own recipe leaves out every one of
+  // the six keys. And an item past the cap is counted past the cap whatever its shape.
+  const noteB = partsNote("w", fallsB, checkParts(fallsB, mdOlder, mdNewer)), noteWrong = partsNote("w", wrongSide, checkParts(wrongSide, mdOlder, mdNewer));
+  const ofWhole = partJudged({ decide: { writer: wholeNote } }, 0).decide.writer as Record<string, unknown>;
+  const pastCap = parseParts(ans([...Array.from({ length: PARTS_MAX }, () => part), { in: "C", stale: "x" }, "not an item"]));
+  assert(noteB.falls === "newer" && noteB.current === "older" && noteB.evidence === "pending review" && noteWrong.falls === "newer" && noteWrong.current === undefined && noteWrong.evidence === undefined && noteWrong.reason === undefined
+      && noteWrong.parts?.length === 1 && ["current", "evidence", "evidence_found", "stale", "stale_found", "reason"].every((k) => !(k in ofWhole)) && ofWhole.falls === "older" && (ofWhole.part as { stale: string }).stale === A1typed.stale
+      && pastCap.parts.length === PARTS_MAX && pastCap.over === 2 && pastCap.dropped === 0,
+    `the note of a whole names the thought that stays current for either side, and holds a whole's keys only where a part in the thought said to fall stands; a part's own recipe holds none of the six; an ill-shaped item past the cap is counted past it (${noteB.current}, ${JSON.stringify(Object.keys(ofWhole))}, ${pastCap.over}/${pastCap.dropped})`);
+  // An item nested deeper than JSON.stringify descends is no part, and a word stands for its print (review pass 4:
+  // the print threw, and the thought failed at an answer JSON.parse had read). The part beside it is read.
+  const deep = parseParts(`{"parts":[${"[".repeat(40001)}${"]".repeat(40001)},${JSON.stringify(part)}],"a_falls":"no","b_falls":"no"}`);
+  assert(!deep.malformed && deep.dropped === 1 && deep.parts.length === 1 && deep.unread.length === 1 && deep.unread[0] === "an item that could not be printed",
+    `an item too deep to print is dropped and said so, and the part beside it is read (${deep.dropped}, ${deep.parts.length}, ${JSON.stringify(deep.unread[0] ?? null).slice(0, 60)})`);
   // What a write that threw was (partWriteFault): the store's own words are kept, Postgres's cast of an argument is
   // cut to its code, since its message can quote a statement, and anything else is the worker's to classify.
   const pgError = (code: string, message: string) => Object.assign(new Error(message), { errno: code, code });
@@ -2589,8 +2611,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
     assert(a.verdict === "outdates" && a.supersedes === "newer" && a.decide.top === "outdates" && a.decide.writer?.stale_found === true && a.decide.decider.name === "h2o-test" && writerCalls === 1,
       "the tier's outdates asks the writer, and a thought it says falls whole, shown by a part in it, is the judgement");
     assert(a.decide.writer?.falls === "older" && a.decide.writer.current === "newer" && a.decide.writer.evidence === "shipped on Monday" && a.decide.writer.stale === "the plan is to ship on Friday" && a.decide.floor === undefined
-        && a.decide.writer.parts?.length === 1 && a.decide.writer.parts[0].stale_found && a.decide.writer.parts[0].shown_found && a.decide.version === DECIDE_VERSION,
-      "the writer's note keeps the thought that falls, every part with both quotes and their checks, and a proposal's keys from the part that shows the whole");
+        && a.decide.writer.parts?.length === 1 && a.decide.writer.parts[0].stale_found && a.decide.writer.parts[0].shown_found && a.decide.version === DECIDE_VERSION && a.decide.threaded === undefined,
+      "the writer's note keeps the thought that falls, every part with both quotes and their checks, and a proposal's keys from the part that shows the whole; a whole is not marked as the work threads'");
     assert(a.parts?.length === 1 && a.parts[0].holder === "older" && a.parts[0].statement === "the plan is to ship on Friday" && a.parts[0].shown_by === "shipped on Monday" && a.parts[0].word === "implements" && a.parts[0].index === 0,
       "…and the part is the judgement's to record, beside the proposal");
     assert(writerBody.model === "writer-test" && writerBody.response_format?.type === "json_object" && writerBody.messages?.[0]?.content === partsMessages({ older, newer })[0].content && !(writerBody.messages?.[0]?.content ?? "").includes(PART_RULE.trim()),

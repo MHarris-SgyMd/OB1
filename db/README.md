@@ -4902,14 +4902,22 @@ tier gives each pair's verdict, not the judge:
     words and a reason; and for whether either thought falls whole, which the
     rules say is almost never. Its opening lines are the earlier writer's,
     with the answer to an injection attempt in the new shape: no part, and
-    neither thought falling.
+    neither thought falling. The pair's headers still say who wrote each
+    thought. The frozen rules do not hold version 5's rule that an agent's
+    summary or restatement of what the operator stated never outdates the
+    operator's thought (SMD-1726), and nothing after the model reads who
+    wrote a side: whether the rule goes back in is put to the maintainer.
   - **The answer** is read leniently about its wrapping and strictly about
     its keys. An answer with no list, with no yes or no for either thought,
     or with both falling is unparsed as a whole: it names no part, the pair
     takes the tier's verdict, and nothing asks the pair again. An item that
     is no part (no side, a quote or the reason missing, a word outside the
-    eight) is dropped and counted. Once twelve parts are read, every further
-    item is counted as past the cap and not read.
+    eight, a quote longer than 400 characters) is dropped and counted. A
+    quote is read whole or not at all: cut to its opening words it passed
+    the check and was recorded as the statement, of a sentence of 607
+    characters the first 395, the value that changed standing after the cut.
+    Once twelve parts are read, every further item is counted as past the
+    cap and not read.
   - **A part is recorded when both its quotes check out** (above; SMD-4442
     decides a rule for parts) **and both are read back in their thoughts' own
     characters** (next). It is one call of `record_settled_part` (below) of
@@ -4945,6 +4953,10 @@ tier gives each pair's verdict, not the judge:
         600 characters beyond the quote as the check reads it;
       - more than three emphasis marks stand between a word and the quote's
         own mark beside it;
+      - the quote keeps a list item's dash, and a checkbox or struck words
+        stand between the dash and the first word (`- [ ] Write the
+        migration`): the quote's own mark is looked for within a few
+        characters of the word;
       - the search is given up at its bound: every fold of a run is counted,
         4,000 a quote at most. In a list whose lines open and close on the
         same words they are spent on the lines before: of 200 lines of 27
@@ -4968,7 +4980,14 @@ tier gives each pair's verdict, not the judge:
       and markup inside a word, a link's target or struck words can hold
       such a place: "locked door stays" is read back as
       `**locked** door stays`, from `un**locked** door stays`. The row still
-      reads as the quote.
+      reads as the quote. A word's edge is read one UTF-16 unit at a time,
+      as a letter or a digit: a combining mark, or a letter or digit outside
+      the basic plane, counts as an edge. So in a script written with vowel
+      signs a run can start or end inside a word, and a long text in one
+      spends the search's bound: of the sentences of a generated Hindi
+      thought of 6,000 characters, each quoted exactly, 8 of 159 got no
+      run, and 37 of 149 where each opens on one word; the same
+      constructions in English lost none.
     - **The search is to be replaced** by one fold of the text that keeps
       where each character came from (SMD-4529). A prototype read back every
       copy the search loses at a link, and has neither the window nor the
@@ -4993,7 +5012,10 @@ tier gives each pair's verdict, not the judge:
       The thought goes back to the pool, and each of its pairs is judged
       again at the texts as they stand. A part written before the write that
       found the text moved stays, pending at the text as it was, until a
-      judgement that names its statement again takes its place.
+      judgement that names its statement again takes its place. The calls
+      for the pairs already judged are paid again, and an older thought's
+      row is read once, before the thought's first pair: for a later pair
+      that is before the earlier pairs were asked (SMD-4535).
   - **The put-back is bounded.** A thought the pass has put back twice
     running is not put back a third time: its claim fails, naming the pair
     and the text that moved. So a fault that draws the answer every time
@@ -5003,12 +5025,24 @@ tier gives each pair's verdict, not the judge:
       to have moved, and the claim's count holds them as not asked.
     - When it is only the older thought's, the thought's other pairs are
       still judged in that attempt, and the claim fails after them.
-    - The count is the running process's. It ends with every end of an
-      attempt but a put-back: judged, failed, a claim lost, the worker
+    - The count is one run of the pass's: a follower's for as long as it
+      runs, the sleep scheduler's for one period. It ends with every end of
+      an attempt but a put-back: judged, failed, a claim lost, the worker
       stopped. So a follower that meets the thought again later starts from
       none. A thought put back here and judged through by another process
-      keeps this process's count, and is given that many fewer put-backs
-      when this one meets it again.
+      keeps this run's count, and is given that many fewer put-backs when
+      this one meets it again.
+    - A put-back hands the claim back only while it is this worker's. Where
+      the claim was requeued, reaped or taken by another worker meanwhile, it
+      is left to its holder, and the thought is counted with the rows this
+      worker no longer holds, not as put back.
+    - Before each pair after the first, the thought in hand is read again.
+      A pair that names no part makes no write, so nothing else would tell
+      the pass. Found gone, or no longer this worker's, nothing more of it
+      is judged. Its text moved, it is put back before the pair is asked,
+      within the same bound.
+    - Under `--limit` a thought put back gives its place back, so the run
+      that put it back judges it.
   - **A write that fails.** The store's own refusal fails the claim with the
     store's words, which echo no text of a thought. The pair's other parts
     are still sent, and nothing else of the judgement is recorded, so the
@@ -5018,7 +5052,11 @@ tier gives each pair's verdict, not the judge:
     all. A data error that is not the store's own goes on as its SQLSTATE
     alone, since Postgres's cast can quote the value it was given; a follower
     reads it as the thought's, as it would the database's own error. Anything
-    else is the thought's error, as for any write of the pass.
+    else is read as any write's error of the pass is. In a run that is no
+    follower it is the thought's. Under a follower, a privilege or a function
+    gone, or a statement cancelled or timed out, ends the run; a deadlock, a
+    lock not available or a serialization failure sends the thought back to
+    the pool unrecorded; anything else is the thought's.
   - **A whole-thought proposal** is written only when the writer says a
     thought falls whole and a part in that thought stands: both its quotes
     checked out and were read back. That part is the proposal's evidence, as
@@ -5027,7 +5065,10 @@ tier gives each pair's verdict, not the judge:
     one part's. The parts are recorded beside it: a reviewer who rejects the
     whole can still accept them. A whole said with no such part proposes
     nothing. A whole is still proposed when its only such part is one a
-    reviewer rejected before.
+    reviewer rejected before. And it is proposed whatever the answer's
+    other parts say: one held by the other thought, which shows that the
+    thought said to fall holds a statement the other lacks, does not hold
+    the whole back. Both are rules put to the maintainer.
   - **Otherwise** the pair takes the tier's best verdict that proposes
     nothing, as a declined proposal did, and its relation under the same
     floor.
@@ -5338,7 +5379,11 @@ ticket's later cuts.
   the dashboard say nothing of parts. Both censuses of stale lineage rows
   leave a part's row out, as they do a proposal's (a decided part keeps the
   fingerprints it was judged at for good), so a pending part at a moved
-  text shows nowhere until a rebuild or the next judgement. The sweep
+  text is in neither census until a rebuild or the next judgement. One
+  read does show it: `thought_validity` (149) has no arm for a part's
+  lineage row, so both thoughts of such a part read `stale` there, and
+  still `stale` after a rebuild, where a stale proposal reads `requested`.
+  The arm is PR 2b's. The sweep
   (`db/rebuild.ts --orphans`, the sleep scheduler) and preflight look for
   four kinds' orphaned lineage rows, and neither a proposal's nor a part's:
   a rebuild of one of its thoughts deletes one. Preflight's lineage
