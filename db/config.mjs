@@ -1282,36 +1282,64 @@ export function parseRetagKey(key) {
  *
  * RETAG_TAGS_ROW_SQL joins the row: artifact_kind and produced_by `metadata`,
  * one row by 061's unique key. RETAG_DUE_SQL is the backlog: the row marked
- * (063's stale_since), or at a fingerprint other than the thought's text;
- * tagged (`type` or `topics`) with no row and no failure marker, preflight's
- * lineage row's "tags with no tag lineage"; or a capture that fell back
+ * (063's stale_since), or at a fingerprint other than the thought's text, or
+ * made under a recipe other than the recorded key's; tagged (`type` or
+ * `topics`) with no row and no failure marker, preflight's lineage row's
+ * "tags with no tag lineage"; or a capture that fell back
  * (metadata_extraction_failed set, the egress refusal's marker included).
+ *
+ * The recipe (PR 3b, decided 2026-11-22: every run, as re-embed's model is):
+ * ob1_config.retag_key names the tags' target, model and prompt version, and
+ * a row whose recipe makes another key — an older model's, an earlier prompt
+ * version's, one a caller recorded with no model — is behind it. A writing run
+ * records its key before it pools, so the target is the run's own; a brain
+ * with no key recorded has no target, and no row is behind by its recipe.
  */
 export const RETAG_TAGS_ROW_SQL =
   "LEFT JOIN derivations d ON d.artifact_kind = 'metadata' AND d.artifact_id = t.id AND d.produced_by = 'metadata'";
-export const RETAG_DUE_SQL =
+/** The recorded key, NULL where unset or blank (db/retag.ts's and 150's reading). */
+export const RETAG_RECORDED_KEY_SQL = "(SELECT NULLIF(value, '') FROM ob1_config WHERE key = 'retag_key')";
+/** The key tags row `d`'s recipe makes, retagKey's shape; NULL where the recipe names no model or prompt version. */
+export const RETAG_RECIPE_KEY_SQL = `('${RETAG_KEY_PREFIX}' || (d.recipe->>'model') || '@p' || (d.recipe->>'prompt_version'))`;
+/** The row stands under a recipe other than `target`'s, an SQL text expression (NULL: no target, and no row is). */
+const retagOtherRecipeSql = (target) => `(d.id IS NOT NULL AND ${target} IS NOT NULL AND ${RETAG_RECIPE_KEY_SQL} IS DISTINCT FROM ${target})`;
+const retagDueSql = (target) =>
   "(d.stale_since IS NOT NULL" +
   " OR (d.id IS NOT NULL AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)))" +
+  ` OR ${retagOtherRecipeSql(target)}` +
   " OR (d.id IS NULL AND COALESCE(t.metadata ? 'type' OR t.metadata ? 'topics', false) AND t.metadata->>'metadata_extraction_failed' IS NULL)" +
   " OR t.metadata->>'metadata_extraction_failed' IS NOT NULL)";
+export const RETAG_DUE_SQL = retagDueSql(RETAG_RECORDED_KEY_SQL);
 
-/**
- * The backlog counted for the pool keyed $1: by kind, the first that applies,
- * the row's side first (marked, stale, fallback, missing), and against the
- * key's claim rows — `unpooled` with none under it, `due` re-tagged once
- * (succeeded) and behind its text again, which a run puts back. One row; run
- * with `unsafe(RETAG_BACKLOG_SQL, [key])`.
- */
-export const RETAG_BACKLOG_SQL =
+const retagBacklogSql = (target) =>
   "WITH b AS (" +
   " SELECT t.id, CASE WHEN d.stale_since IS NOT NULL THEN 'marked'" +
   " WHEN d.id IS NOT NULL AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) THEN 'stale'" +
+  ` WHEN ${retagOtherRecipeSql(target)} THEN 'recipe'` +
   " WHEN t.metadata->>'metadata_extraction_failed' IS NOT NULL THEN 'fallback' ELSE 'missing' END AS why" +
-  ` FROM thoughts t ${RETAG_TAGS_ROW_SQL} WHERE ${RETAG_DUE_SQL})` +
+  ` FROM thoughts t ${RETAG_TAGS_ROW_SQL} WHERE ${retagDueSql(target)})` +
   " SELECT count(*) FILTER (WHERE why = 'missing')::int AS missing, count(*) FILTER (WHERE why = 'marked')::int AS marked," +
-  " count(*) FILTER (WHERE why = 'stale')::int AS stale, count(*) FILTER (WHERE why = 'fallback')::int AS fallback," +
+  " count(*) FILTER (WHERE why = 'stale')::int AS stale, count(*) FILTER (WHERE why = 'recipe')::int AS recipe," +
+  " count(*) FILTER (WHERE why = 'fallback')::int AS fallback," +
   " count(*) FILTER (WHERE c.thought_id IS NULL)::int AS unpooled, count(*) FILTER (WHERE c.status = 'succeeded')::int AS due" +
   " FROM b LEFT JOIN thought_work_claims c ON c.thought_id = b.id AND c.work_type = $1";
+
+/**
+ * The backlog counted for the pool keyed $1: by kind, the first that applies,
+ * the row's side first (marked, stale, recipe, fallback, missing), and
+ * against the key's claim rows — `unpooled` with none under it, `due`
+ * re-tagged once (succeeded) and in the backlog again, which a run puts back.
+ * The target is the recorded key. One row; run with
+ * `unsafe(RETAG_BACKLOG_SQL, [key])`.
+ */
+export const RETAG_BACKLOG_SQL = retagBacklogSql(RETAG_RECORDED_KEY_SQL);
+/**
+ * The same, with key $1 the target as well: the backlog a run that records $1
+ * finds — a first run, or a --switch-key — counted before it records, as it
+ * will count (PR 3b review pass 2: an upper bound and the recorded key's
+ * counts had stood in for it). `unsafe(RETAG_BACKLOG_AS_KEY_SQL, [key])`.
+ */
+export const RETAG_BACKLOG_AS_KEY_SQL = retagBacklogSql("$1::text");
 
 /**
  * The corpus by the model its vectors carry (migration 021): one row per
