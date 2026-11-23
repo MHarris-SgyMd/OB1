@@ -229,9 +229,13 @@ function definedIn(file: string): string[] {
  * definer, needs no entry. It is 063's derivation_descendants
  * too, a part in its kind order, and does not carry 063: the one function
  * 063 still last defines, record_supersession_proposal, is restored by name
- * wherever a section needs it.
+ * wherever a section needs it. 152 is 115's ob1_work_claim_json and
+ * renew_work_claim and 140's claim_work, each with the renewal count
+ * (SMD-4540), and carries 115 and 140: a restore of any of the three
+ * re-runs 115 and 140 first, putting back their other functions (115's
+ * release_work_claim, 140's cap functions), then 152.
  */
-const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"] };
+const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -16557,8 +16561,9 @@ console.log("\n[103] Migration 115: work claims — a ticket or one piece of it 
   const after = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM work_claims`)).rows[0].n;
   const [cw, rn, rl, lwc] = await Promise.all(["claim_work", "renew_work_claim", "release_work_claim", "list_work_claims"].map(functionsNamed));
   assert(after === before && cw === 1 && rn === 1 && rl === 1 && lwc === 2, `115 applied again changes nothing: ${after} claims stand, one each of claim_work/renew/release and 143's eight-argument list_work_claims beside 115's four (${cw},${rn},${rl},${lwc})`);
-  // 140 redefines claim_work, 143 list_work_claims (a new arity): this section re-applied 115's, so restore theirs — the
-  // last definers — for [126], [130] and any later section (SMD-3778). list_work_claims' restore re-runs 143, dropping
+  // 152 last defines claim_work (140's body with the renewal count, SMD-4540), renew_work_claim and ob1_work_claim_json,
+  // 143 list_work_claims (a new arity): this section re-applied 115's, so restore theirs — the last definers — for
+  // [126], [130], [137] and any later section (SMD-3778). list_work_claims' restore re-runs 143, dropping
   // 115's four-argument form, so one stands: the eight.
   await restoreShipped("claim_work");
   await restoreShipped("list_work_claims");
@@ -20654,10 +20659,11 @@ console.log("\n[125] Migration 138: a priority write names every statement it cl
     `a re-apply is a no-op: the writers answer with the item and the closed list (${again.outcome})`);
 }
 
-console.log("\n[126] Migration 140: the per-holder cap on live work claims, operator-settable — work_claim_cap_settings one standing row at most, history after (an UPDATE but its end, a DELETE and a TRUNCATE refused); ob1_work_claim_cap_builtin() 50; ob1_work_claim_cap_refusal at the range's edges; ob1_work_claim_cap() the builtin under the standing setting; set_work_claim_cap an operator key's alone, by its agent id, refusing a bad cap, writing nothing for the cap standing, NULL clearing; claim_work refusing a NEW claim past the holder's cap CLAIM_LIMIT, counting live claims by agent id or by name, a renewal and a lapsed claim exempt, a release freeing a slot; a stored cap the refusal names failing every new claim 22000 while a renewal is still taken, work_claim_cap_setting() saying it without raising; claim_work 140's; a re-apply a no-op (SMD-3606)");
+console.log("\n[126] Migration 140: the per-holder cap on live work claims, operator-settable — work_claim_cap_settings one standing row at most, history after (an UPDATE but its end, a DELETE and a TRUNCATE refused); ob1_work_claim_cap_builtin() 50; ob1_work_claim_cap_refusal at the range's edges; ob1_work_claim_cap() the builtin under the standing setting; set_work_claim_cap an operator key's alone, by its agent id, refusing a bad cap, writing nothing for the cap standing, NULL clearing; claim_work refusing a NEW claim past the holder's cap CLAIM_LIMIT, counting live claims by agent id or by name, a renewal and a lapsed claim exempt, a release freeing a slot; a stored cap the refusal names failing every new claim 22000 while a renewal is still taken, work_claim_cap_setting() saying it without raising; claim_work 140's body, which 152 carries with the renewal count (SMD-4540); a re-apply a no-op (SMD-3606)");
 {
   const file = files.find((f) => /^\d{3}_work_claim_cap\.sql$/.test(f)) ?? "no NNN_work_claim_cap.sql";
-  // [103] re-applies 115's claim_work for its idempotency check, then restores 140's (SMD-3778); this restore is the backstop so this section holds 140's.
+  // [103] re-applies 115's claim_work for its idempotency check, then restores the last definer's (SMD-3778): 152, carrying
+  // 140's body with the renewal count (SMD-4540). This restore is the backstop so this section holds it.
   await restoreShipped("claim_work");
   type Claim = { id: string; issue: string; holder: string; holder_agent_id: string | null; state: string; expires_at: string };
   type Answer = { outcome: string; code: string | null; message: string | null; claim: Claim | null; held_by: Claim[]; token: string | null; cap?: number; held?: number };
@@ -20691,7 +20697,7 @@ console.log("\n[126] Migration 140: the per-holder cap on live work claims, oper
 
   // The shape: the table, its key and one-standing index, two triggers; eight functions commented by 140, the reads STABLE,
   // the builtin and refusal IMMUTABLE, the setter, the guard and the lock VOLATILE, none SECURITY DEFINER; 140 the last
-  // definer of each, and of claim_work.
+  // definer of each, and 152, carrying 140's body, of claim_work.
   const cols = (await q<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
       FROM pg_attribute WHERE attrelid = 'work_claim_cap_settings'::regclass AND attnum > 0 AND NOT attisdropped`))[0].c;
   const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('work_claim_cap_settings_one_standing')) AS d`)).d ?? "";
@@ -20707,8 +20713,10 @@ console.log("\n[126] Migration 140: the per-holder cap on live work claims, oper
          && vol["ob1_work_claim_cap()"] === "s" && vol["work_claim_cap_setting()"] === "s" && vol["ob1_work_claim_holder_live_count(text,uuid,timestamp with time zone)"] === "s"
          && vol["ob1_work_claim_cap_builtin()"] === "i" && vol["ob1_work_claim_cap_refusal(integer)"] === "i"
          && vol["set_work_claim_cap(integer,jsonb)"] === "v" && vol["ob1_work_claim_cap_settings_guard()"] === "v" && vol["ob1_work_claim_holder_lock(text,uuid)"] === "v"
-         && ["ob1_work_claim_cap_builtin", "ob1_work_claim_cap_refusal", "ob1_work_claim_cap_settings_guard", "ob1_work_claim_cap", "set_work_claim_cap", "work_claim_cap_setting", "ob1_work_claim_holder_lock", "ob1_work_claim_holder_live_count", "claim_work"].every((f) => lastDefinerOf(f) === file),
-    `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; eight functions commented by 140 with the right volatilities, none SECURITY DEFINER, 140 the last definer of each and of claim_work (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+         && ["ob1_work_claim_cap_builtin", "ob1_work_claim_cap_refusal", "ob1_work_claim_cap_settings_guard", "ob1_work_claim_cap", "set_work_claim_cap", "work_claim_cap_setting", "ob1_work_claim_holder_lock", "ob1_work_claim_holder_live_count"].every((f) => lastDefinerOf(f) === file)
+         // claim_work's last definer is 152, carrying this file's body with the renewal count (SMD-4540).
+         && /^\d{3}_claim_renewals\.sql$/.test(lastDefinerOf("claim_work")),
+    `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; eight functions commented by 140 with the right volatilities, none SECURITY DEFINER, 140 the last definer of each, and 152, carrying 140's body, of claim_work (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
 
   // No setting: the cap is the built-in 50; the setting says so.
   const none = { c: await capNow(), s: await settingNow(), b: Number((await one<{ b: number }>(`SELECT ob1_work_claim_cap_builtin() AS b`)).b) };
@@ -20814,10 +20822,16 @@ console.log("\n[126] Migration 140: the per-holder cap on live work claims, oper
          && /^22000 /.test(capRaise) && mend.changed === true && (await capNow()) === 50,
     `a stored cap the refusal names fails every new claim 22000 naming it, a renewal is still taken, the setting says it without raising, and a clear mends it (${brokenClaim.outcome.slice(0, 50)}; renew ${brokenRenew.outcome}; ${JSON.stringify(said).slice(0, 70)})`);
 
-  // A re-apply is a no-op: the cap and the reader answer as before.
+  // A re-apply is a no-op: the cap and the reader answer as before. 152 carries this file's claim_work with its renewal
+  // count (SMD-4540), so it is the last definer, and is restored after: [137] and later sections hold the counting body.
   await reapply(file.slice(0, 4));
-  assert((await capNow()) === 50 && lastDefinerOf("claim_work") === file && (await claim("SMD-8621", H)).outcome === "claimed",
-    `a re-apply is a no-op: the built-in cap stands, 140 is still claim_work's last definer, and a claim is taken (${await capNow()})`);
+  const renewalsFile = files.find((f) => /^\d{3}_claim_renewals\.sql$/.test(f)) ?? "no NNN_claim_renewals.sql";
+  const bodyCounts = async () => /renewals = renewals \+ 1/.test((await db.query<{ d: string }>(`SELECT pg_get_functiondef('claim_work(text,text,text,integer,text,jsonb)'::regprocedure) AS d`)).rows[0].d);
+  const reappliedCounts = await bodyCounts();
+  assert((await capNow()) === 50 && lastDefinerOf("claim_work") === renewalsFile && !reappliedCounts && (await claim("SMD-8621", H)).outcome === "claimed",
+    `a re-apply is a no-op: the built-in cap stands, the database holds this file's claim_work (no renewal count) while 152, carrying its body, is the last definer, and a claim is taken (${await capNow()}, ${lastDefinerOf("claim_work")}, counts ${reappliedCounts})`);
+  await restoreShipped("claim_work");
+  assert(await bodyCounts(), "…and the restore puts 152's counting claim_work back for the sections after");
 }
 
 console.log("\n[127] Migration 141: an entity's priority statements follow it — the prunes (record_thought_entities, prune_orphan_entities) spare an entity with an open statement, or one an open statement takes its due time from, a re-extraction naming it again keeping its id, and take it once the statement is cleared; a deliberate DELETE and a forgetting (rebuild_derived, unchanged) still close it as deleted; a role without SELECT on the assertions prunes as before, for the sweep; merge_entities restates each open statement whose due reference names the loser to name the survivor (a reference that would name its own item dropped), counted as priority_refs_moved, nothing for a role that cannot restate or above READ COMMITTED; apply_entity_type_gate's merge moves the retyped entity's statements and references, counting what stands; the shape; a re-apply a no-op (SMD-4241)");
@@ -22236,7 +22250,7 @@ console.log("\n[131] Migration 144: forget_thought runs as its owner — a SECUR
 console.log("\n[132] Migration 145: release every live claim one holder holds — release_holder_claims an operator key's alone, by its agent id (an agent key, a name alone, an unclassified key refused NOT_OPERATOR; no envelope raises); a blank holder NO_HOLDER, a blank reason NO_REASON; it ends the holder's live claims (unreleased and unexpired) with the operator and reason on each, in issue order with the piece, leaving its lapsed and self-released claims and every other holder's; an unknown holder releases 0, a second call 0; SECURITY INVOKER not DEFINER, VOLATILE, 145 its last definer; a re-apply a no-op (SMD-3606)");
 {
   const file = files.find((f) => /^\d{3}_release_holder_claims\.sql$/.test(f)) ?? "no NNN_release_holder_claims.sql";
-  // [103] re-applies 115's claim_work; [126] restored 140's. Re-affirm it here: this section makes claims with claim_work and ends them with 145's release_holder_claims.
+  // [103] re-applies 115's claim_work; [126] restores the last definer's, 152's (SMD-4540). Re-affirm it here: this section makes claims with claim_work and ends them with 145's release_holder_claims.
   await restoreShipped("claim_work");
   type ClaimAns = { outcome: string; claim: { id: string } | null; token: string | null };
   type HolderOut = { ok: boolean; error?: string; kind?: string | null; message?: string; holder?: string; released?: number; claims?: { id: string; issue: string; piece: string | null }[] };
@@ -23648,6 +23662,99 @@ console.log("\n[136] Migration 151: settled parts — a statement in one thought
   }
   // No part and no part's lineage row is left for a later section's re-apply of an older file to trip on (111's CHECK lacks the kind).
   assert((await count(`SELECT count(*)::int AS c FROM settled_parts`)) === 0 && (await count(`SELECT count(*)::int AS c FROM derivations WHERE artifact_kind = 'part'`)) === 0, "the section leaves no part and no part's lineage row behind");
+}
+
+console.log("\n[137] Migration 152: a work claim counts its renewals — work_claims.renewals, an integer defaulting to 0 with a check, NULL for a claim from before it (uncounted); 152 the last definer of claim_work, renew_work_claim and ob1_work_claim_json, carrying 140's and 115's bodies; a new claim at 0; renew_work_claim and claim_work with the holder's token each raise it by one, a lapsed claim nothing covers counting its revival; a refusal (not yours, released, taken over) leaves it; a takeover's claim starts at 0; an uncounted claim stays uncounted; the claim's jsonb and the listing as the server reads it carry it; a re-apply keeps every count (SMD-4540)");
+{
+  type Claim = { id: string; renewals: number | null };
+  type Answer = { outcome: string; code: string | null; claim: Claim | null; token: string | null };
+  const file = files.find((f) => /^\d{3}_claim_renewals\.sql$/.test(f)) ?? "no NNN_claim_renewals.sql";
+  await restoreShipped("claim_work");
+  await db.exec(`INSERT INTO ob1_agents (label, kind) VALUES ('[137] a', 'agent'), ('[137] b', 'agent')`);
+  const A = JSON.stringify({ name: "[137] a" }), B = JSON.stringify({ name: "[137] b" });
+  const ans = async (sql: string, params: unknown[]): Promise<Answer> => {
+    try { return (await db.query<{ r: Answer }>(sql, params)).rows[0].r; }
+    catch (e) { return { outcome: `raised: ${(e as Error).message.split("\n")[0]}`, code: null, claim: null, token: null }; }
+  };
+  const claim = (issue: string, actor: string, token: string | null = null) => ans(`SELECT claim_work($1, NULL, NULL, 14400, $2, $3::jsonb) AS r`, [issue, token, actor]);
+  const renew = (id: string, token: string, actor: string) => ans(`SELECT renew_work_claim($1::uuid, $2, 14400, $3::jsonb) AS r`, [id, token, actor]);
+  const release = (id: string, token: string, actor: string) => ans(`SELECT release_work_claim($1::uuid, $2, 'done', false, $3::jsonb) AS r`, [id, token, actor]);
+  const countOf = async (id: string) => (await db.query<{ n: number | null }>(`SELECT renewals AS n FROM work_claims WHERE id = $1::uuid`, [id])).rows[0]?.n;
+  // Lapsed: all three stamps back five hours, past the four-hour lease, so work_claims_lease holds ([103]'s age() moves two).
+  const lapse = (id: string) => db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', renewed_at = renewed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [id]);
+  try {
+    // The shape: an integer, nullable, defaulting to 0, its check and its comment; 152 the three functions' last definer.
+    const col = (await db.query<{ t: string; d: string | null; n: string }>(`SELECT data_type AS t, column_default AS d, is_nullable AS n FROM information_schema.columns WHERE table_name = 'work_claims' AND column_name = 'renewals'`)).rows[0];
+    const chk = (await db.query<{ d: string }>(`SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'work_claims_renewals_counted'`)).rows[0]?.d ?? "";
+    const cc = (await db.query<{ c: string | null }>(`SELECT col_description('work_claims'::regclass, (SELECT attnum FROM pg_attribute WHERE attrelid = 'work_claims'::regclass AND attname = 'renewals')) AS c`)).rows[0].c ?? "";
+    const definers = ["claim_work", "renew_work_claim", "ob1_work_claim_json"].map(lastDefinerOf);
+    assert(col?.t === "integer" && col.d === "0" && col.n === "YES" && /CHECK \(\(renewals >= 0\)\)/.test(chk) && /Migration 152 \/ SMD-4540/.test(cc) && definers.every((f) => f === file),
+      `work_claims.renewals is an integer defaulting to 0, nullable, checked >= 0 and commented, and 152 last defines claim_work, renew_work_claim and ob1_work_claim_json (${JSON.stringify(col)}; ${chk}; ${definers.join(", ")})`);
+
+    // A new claim starts at 0; each renewal that lands counts one, by either path.
+    const c1 = await claim("SMD-8701", A);
+    const r1 = await renew(c1.claim!.id, c1.token!, A);
+    const r2 = await claim("SMD-8701", A, c1.token);
+    assert(c1.outcome === "claimed" && c1.claim!.renewals === 0 && r1.outcome === "renewed" && r1.claim!.renewals === 1 && r2.outcome === "renewed" && r2.claim!.renewals === 2 && (await countOf(c1.claim!.id)) === 2,
+      `a new claim starts at 0, and renew_work_claim and claim_work with the holder's token each count one (${c1.claim?.renewals}, ${r1.claim?.renewals}, ${r2.claim?.renewals})`);
+
+    // A refusal counts nothing: another key's renewal.
+    const notYours = await renew(c1.claim!.id, c1.token!, B);
+    assert(notYours.code === "CLAIM_NOT_YOURS" && (await countOf(c1.claim!.id)) === 2, `a renewal refused CLAIM_NOT_YOURS leaves the count (${notYours.code}, ${await countOf(c1.claim!.id)})`);
+
+    // A lapsed claim nothing covers, renewed by its holder: revived, and counted.
+    await lapse(c1.claim!.id);
+    const revived = await renew(c1.claim!.id, c1.token!, A);
+    assert(revived.outcome === "renewed" && revived.claim!.renewals === 3, `a lapsed claim nothing covers, renewed by its holder, is revived and counts it (${revived.outcome}, ${revived.claim?.renewals})`);
+
+    // Lapsed again and taken over: the taker's claim starts at 0, the old one keeps its count, and its holder's renewal is refused uncounted.
+    await lapse(c1.claim!.id);
+    const taken = await claim("SMD-8701", B);
+    const late = await renew(c1.claim!.id, c1.token!, A);
+    assert(taken.outcome === "claimed" && taken.claim!.renewals === 0 && late.code === "CLAIM_RELEASED" && (await countOf(c1.claim!.id)) === 3,
+      `a takeover's claim starts at 0, and the old claim keeps 3 while its holder's renewal is refused CLAIM_RELEASED (${taken.claim?.renewals}, ${late.code}, ${await countOf(c1.claim!.id)})`);
+
+    // A released claim: its renewal refused, the count left.
+    const c2 = await claim("SMD-8702", A);
+    await renew(c2.claim!.id, c2.token!, A);
+    const done = await release(c2.claim!.id, c2.token!, A);
+    const afterEnd = await renew(c2.claim!.id, c2.token!, A);
+    assert(done.outcome === "released" && done.claim!.renewals === 1 && afterEnd.code === "CLAIM_RELEASED" && (await countOf(c2.claim!.id)) === 1,
+      `a released claim answers with its count, and a renewal after it is refused CLAIM_RELEASED and counts nothing (${done.claim?.renewals}, ${afterEnd.code})`);
+
+    // A claim from before 152 (NULL): renewed, it stays uncounted, never read as a count.
+    const c3 = await claim("SMD-8703", A);
+    await db.query(`UPDATE work_claims SET renewals = NULL WHERE id = $1::uuid`, [c3.claim!.id]);
+    const r3 = await renew(c3.claim!.id, c3.token!, A);
+    const r4 = await claim("SMD-8703", A, c3.token);
+    assert(r3.outcome === "renewed" && r3.claim!.renewals === null && r4.outcome === "renewed" && r4.claim!.renewals === null && (await countOf(c3.claim!.id)) === null,
+      `a claim from before 152, uncounted, stays so through renewals by either path (${JSON.stringify(r3.claim?.renewals)}, ${JSON.stringify(r4.claim?.renewals)})`);
+
+    // The listing as the server reads it (store-sql.ts's expression): 143's columns kept, each count read by the claim's id, the listing's order by its ordinality.
+    const listed = (await db.query<{ issue: string; renewals: number | null; holder: string }>(
+      `SELECT l.issue, l.holder, (SELECT (to_jsonb(w) ->> 'renewals')::int FROM work_claims w WHERE w.id = l.id) AS renewals FROM list_work_claims(ARRAY['SMD-8701', 'SMD-8702', 'SMD-8703'], NULL, true, 10) WITH ORDINALITY AS l ORDER BY l.ordinality`)).rows;
+    const outCols = (await db.query<{ out: string }>(`SELECT pg_get_function_result('list_work_claims(text[],text,boolean,integer,text,text,timestamptz,uuid)'::regprocedure) AS out`)).rows[0].out;
+    assert(JSON.stringify(listed.map((r) => [r.issue, r.holder, r.renewals])) === JSON.stringify([["SMD-8701", "[137] a", 3], ["SMD-8701", "[137] b", 0], ["SMD-8702", "[137] a", 1], ["SMD-8703", "[137] a", null]]) && !/renewals/.test(outCols),
+      `the listing, read as the server reads it in its own order, carries each claim's count, and list_work_claims keeps 143's columns, so a re-apply of 143 can make it again (${JSON.stringify(listed)})`);
+
+    // The check: a count below 0 is refused.
+    let refused = "";
+    try { await db.query(`UPDATE work_claims SET renewals = -1 WHERE id = $1::uuid`, [c2.claim!.id]); } catch (e) { refused = (e as Error).message; }
+    assert(/work_claims_renewals_counted/.test(refused), `a count below 0 is refused by the check (${refused.slice(0, 80) || "taken"})`);
+
+    // A re-apply keeps every count, and a new claim still starts at 0.
+    const counts = async () => (await db.query<{ id: string; n: number | null }>(`SELECT id::text AS id, renewals AS n FROM work_claims WHERE issue LIKE 'SMD-870%' ORDER BY id`)).rows;
+    const before = await counts();
+    await reapply(file.slice(0, 4));
+    const after = await counts();
+    const c4 = await claim("SMD-8704", A);
+    assert(JSON.stringify(after) === JSON.stringify(before) && c4.claim!.renewals === 0, `a re-apply keeps every count, and a new claim still starts at 0 (${after.length} claims; ${c4.claim?.renewals})`);
+  } catch (e) {
+    assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
+  } finally {
+    await db.exec(`DELETE FROM work_claims WHERE issue LIKE 'SMD-870%'`).catch(() => {});
+    await db.exec(`DELETE FROM ob1_agents WHERE label LIKE '[137]%'`).catch(() => {});
+  }
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to
