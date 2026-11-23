@@ -24083,8 +24083,10 @@ if (want("29")) {
       const starts: StartResult[] = [];
       const abRun = retag({ pausesMs: [10], onPass: (_stop, abort) => { abortInHand = abort; }, onStart: (r) => starts.push(r), banner: false, summary: false, session: { application_name: "retag-29-session" } });
       for (let i = 0; i < 200 && !bodies.some((b) => b.includes("[29] AB")); i++) await Bun.sleep(25);
-      const sessions = Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'retag-29-session'`) as { n: number }[])[0].n);
+      // The abort at once, while the slow answer is out; the session's connections read after it, still open (review pass 2:
+      // the read before it could outlast the stub's window on a loaded box).
       const abortedN = abortInHand ? (abortInHand as InHandAbort)() : -1;
+      const sessions = Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'retag-29-session'`) as { n: number }[])[0].n);
       SPECIAL.delete("[29] AB");
       const abDone = await abRun;
       const abClaim = (await claims()).find((c) => c.id === AB);
