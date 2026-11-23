@@ -24064,6 +24064,52 @@ if (want("29")) {
       assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
         `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
 
+      // SMD-2298 PR 4a: the options a caller like the sleep scheduler passes. abortInHand aborts the tags call in hand:
+      // the thought goes to the back of the queue, nothing written, and the run re-tags it after; onStart hears the
+      // start; banner and summary false keep their lines out; session settings reach the run's own connections.
+      const AB = await tagged("[29] AB, its call aborted in hand");
+      await move(AB, "[29] AB, its call aborted in hand, moved");
+      SPECIAL.set("[29] AB", "slow");
+      let abortInHand: InHandAbort | null = null;
+      const starts: StartResult[] = [];
+      const abRun = retag({ pausesMs: [10], onPass: (_stop, abort) => { abortInHand = abort; }, onStart: (r) => starts.push(r), banner: false, summary: false, session: { application_name: "retag-29-session" } });
+      for (let i = 0; i < 200 && !bodies.some((b) => b.includes("[29] AB")); i++) await Bun.sleep(25);
+      const sessions = Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'retag-29-session'`) as { n: number }[])[0].n);
+      const abortedN = abortInHand ? (abortInHand as InHandAbort)() : -1;
+      SPECIAL.delete("[29] AB");
+      const abDone = await abRun;
+      const abClaim = (await claims()).find((c) => c.id === AB);
+      assert(abortedN === 1 && bodies.filter((b) => b.includes("[29] AB")).length === 2 && settled(await tagsRow(AB)) && abClaim?.status === "succeeded"
+          && abDone.code !== 2 && starts.length === 1 && starts[0].ok === true && sessions > 0
+          && !/job: {4}/.test(abDone.out) && !/re-tagged \(/.test(abDone.out),
+        `abortInHand aborts the call in hand: the thought set back, re-tagged after from its text, settled; onStart heard once, through; banner and summary left out; the session's settings on its connections (${abortedN} aborted; ${sessions} session(s); ${JSON.stringify(starts)})`);
+      // The admit gate: nothing pooled or sent while it is shut; opened, the run goes on.
+      const G = await tagged("[29] G, behind the admit gate");
+      await move(G, "[29] G, behind the admit gate, moved");
+      let openGate: () => void = () => {};
+      const shut = new Promise<void>((r) => { openGate = r; });
+      let admitAsks = 0;
+      const admit: Admit = (signal) => new Promise<void>((resolve, reject) => {
+        admitAsks++;
+        void shut.then(resolve);
+        signal.addEventListener("abort", () => reject(new Error("stopped at the gate")), { once: true });
+      });
+      const gRun = retag({ pausesMs: [10], admit });
+      await Bun.sleep(400);
+      const gPooledShut = (await claims()).some((c) => c.id === G);
+      const gSentShut = bodies.some((b) => b.includes("[29] G"));
+      openGate();
+      const gDone = await gRun;
+      assert(!gPooledShut && !gSentShut && admitAsks >= 2 && gDone.code !== 2 && settled(await tagsRow(G)) && (await claims()).find((c) => c.id === G)?.status === "succeeded",
+        `the admit gate shut: nothing pooled or sent; opened, the run pools and re-tags, the gate asked before the pool and each claim (${gPooledShut}/${gSentShut}; ${admitAsks} ask(s); ${line(gDone.out, "re-tagged (")})`);
+      // onStart hears a refusal by its kind: the key's, and the input's.
+      const keyStarts: StartResult[] = [];
+      const usageStarts: StartResult[] = [];
+      const keyRefused = await retag({ onStart: (r) => keyStarts.push(r) }, { ...base, OB1_METADATA_MODEL: "stub-meta-other" });
+      const usageRefused = await retag({ workers: 0, onStart: (r) => usageStarts.push(r) });
+      assert(keyRefused.code === 2 && JSON.stringify(keyStarts) === '[{"ok":false,"refused":"key"}]' && usageRefused.code === 2 && JSON.stringify(usageStarts) === '[{"ok":false,"refused":"usage"}]',
+        `onStart hears a refusal by its kind: the key's, the input's (${JSON.stringify(keyStarts)} ${JSON.stringify(usageStarts)})`);
+
       // --switch-key (PR 3b): the key is the tags' target recipe, and every tags row made under another is behind it.
       // A dry run under another model counts them (every row: none is under the new key yet); the switch, cut short
       // by --limit 1, records the key, and a plain run under the new model finishes it; a third re-tags nothing (no
