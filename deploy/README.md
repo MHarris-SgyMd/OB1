@@ -556,6 +556,37 @@ free:
   - Without `ps`, two of the 40 searches were answered by exact matches
     alone, the embedder not answering in time.
 
+  Two brains backlogged at once, on the same Mac (SMD-3379 PR 3c-3), each
+  run again made once: each brain's share `chat=1,embed=1` with no broker,
+  or both on the broker with `ps`. For 12 minutes nothing wrote to either
+  brain, since a live write pauses its own brain's sleep. A probe sent
+  each brain a search every 30 s, and the model server a capture's
+  metadata call:
+
+  | Background asks for | Shares | Search, median | Metadata call, median | Judge model listed, of 720 s | Thoughts extracted, the two brains |
+  |---|---|---|---|---|---|
+  | one model | fixed | 0.1 s | 3.2 s | not asked for | 68 |
+  | one model | broker | 0.1 s | 3.2 s | not asked for | 89 |
+  | two models | fixed | none answered by its embedding | 3.2 s | 0 | 72 |
+  | two models | broker | 21.5 s | 16.1 s | 438 | 21 |
+
+  - **On one model the two ways are alike for a live call.** Each brain's
+    background held one slot and a live call found the third: the
+    metadata call took 2.5 s with no backlog. Why the broker's brains
+    extracted more was not established.
+  - **On two models, fixed shares starved one.** A share is per model, so
+    both brains kept the metadata model busy while the judge model
+    waited: its load began 19 minutes after Ollama decided it, two
+    minutes after live captures had paused both sleeps. The embedder
+    left Ollama's list as that load was decided and was not loaded again
+    meanwhile, so every search for those 12 minutes waited 120 s and was
+    answered by exact matches alone.
+  - **On two models the broker kept all three in turn.** The judge model
+    loaded four times in the 12 minutes, three of them on asks granted
+    63 to 74 s after they were made, and no call failed. Live calls
+    waited for a model a turn had put out: 18 of 46 searches took over
+    30 s.
+
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
 coordinator holds the brain's one connection, and its passes ask through it,
