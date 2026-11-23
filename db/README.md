@@ -6424,9 +6424,10 @@ bun retag.ts --url … --switch-key       # a model or prompt version other than
 
 The tags' re-run path (SMD-2298), the last of the lineage kinds to get one. The
 backlog is every thought tagged (`type` or `topics`) with no tags row and no
-failure marker — preflight's "tagged before 061" — every one whose tags row
-(`derivations`, kind `metadata`) is marked (`stale_since`) or names another
-fingerprint, and every one whose capture fell back
+failure marker — preflight's lineage row's "tags with no tag lineage" — every
+one whose tags row (`derivations`, kind `metadata`) is marked (`stale_since`),
+names another fingerprint, or was made under a recipe other than the recorded
+key's (PR 3b), and every one whose capture fell back
 (`metadata_extraction_failed` set, the egress refusal's marker included: nothing
 else re-tags a thought the policy kept from the model at capture, so the
 worker's own gate fails it naming the rule while the policy refuses it, and

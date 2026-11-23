@@ -24071,9 +24071,10 @@ if (want("29")) {
       // the one row left under the old key. A capture tagged under the old recipe afterwards is behind the key too.
       const OTHER = retagKey("stub-meta-2", METADATA_PROMPT_VERSION);
       const envOther = { ...base, OB1_METADATA_MODEL: "stub-meta-2" };
-      SPECIAL.clear(); // the stub answers every thought now: the cases above left 413, 400 and prose answers set
+      SPECIAL.clear(); // the stub answers every thought now: the cases above left 413, 400, prose and partial answers set
       const rowsUnder = async (key: string) => Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM derivations d WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND ${RETAG_RECIPE_KEY_SQL} = $1`, [key])) as { n: number }[])[0].n);
-      const tagRows = Number(((await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'metadata' AND produced_by = 'metadata'`) as { n: number }[])[0].n);
+      const allTagRows = async () => Number(((await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'metadata' AND produced_by = 'metadata'`) as { n: number }[])[0].n);
+      const tagRows = await allTagRows();
       // Behind the new key by recipe alone: every tags row at its text and unmarked, none being under the new key yet.
       const recipeOnly = Number(((await sql`SELECT count(*)::int AS n FROM derivations d JOIN thoughts t ON t.id = d.artifact_id
          WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND d.stale_since IS NULL
@@ -24089,7 +24090,7 @@ if (want("29")) {
       const finished = await retag({ pausesMs: [10] }, envOther);
       const failedOther = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${OTHER} AND status = 'failed'`) as { id: string }[];
       const converged = await rowsUnder(OTHER);
-      const rowsNow = Number(((await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'metadata' AND produced_by = 'metadata'`) as { n: number }[])[0].n);
+      const rowsNow = await allTagRows();
       const statusAfter = await retag({ status: true }, envOther);
       const callsThen = bodies.length;
       const again = await retag({ pausesMs: [10] }, envOther);

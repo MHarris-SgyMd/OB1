@@ -5214,8 +5214,9 @@ if (configFailed) {
          * pending row read as a run that stopped). Since PR 3b the recorded key
          * is the tags' target recipe, and a row under another recipe is behind
          * it: where this server tags captures under another key than the one
-         * recorded, a line says what follows (each capture behind it, or a
-         * plain run here refused, the switch the way forward).
+         * recorded, a line says what follows (each capture behind it; a plain
+         * run here refused, the switch the way forward; or the tree that
+         * recorded the key named).
          */
         try {
           const { RETAG_BACKLOG_AS_KEY_SQL, RETAG_BACKLOG_SQL, RETAG_KEY_PREFIX, formatPassCounts, parseRetagKey, passUnfinished, retagKey } = await import("../db/config.mjs");
@@ -5261,7 +5262,8 @@ if (configFailed) {
             // key db/retag.ts never makes (hand-set: --job refuses its shape) no run is under (review pass 1: a plain
             // run, refused, was named for it, and --switch-key for a newer tree's). `reclaims`: whether a pass claims
             // under the key again, so an expired lease's reclaim is true of it — the newer tree's does; no pass takes up
-            // an older version's or a hand-set key's (review pass 2).
+            // an older version's or a hand-set key's (review pass 2). `target`: the key the run it names records, whose
+            // backlog the none-unfinished line counts (PR 3b review pass 3).
             const runUnder = (key: string): { prefix: string } | { words: string; reclaims: boolean; target: string } => {
               const parsed = parseRetagKey(key);
               if (parsed === null) {
@@ -5326,8 +5328,8 @@ if (configFailed) {
             }
             // The server's captures against the target (PR 3b): a capture's tags carry this server's key, and a row under
             // another recipe than the recorded key's is behind it. Another model at this tree's version may be meant (a
-            // fast model at capture, a stronger one re-tagging), so it is said, ok; another version is not this tree's
-            // to keep up — a plain run here is refused, or this tree is the older one.
+            // fast model at capture, a stronger one re-tagging), so it is said, ok; another version or a hand-set key is
+            // not this tree's to keep up — a plain run here is refused, or this tree is the older one.
             if (recorded !== null && recorded !== serverKey) {
               const rec = parseRetagKey(recorded);
               const lead = `ob1_config.retag_key is ${recorded}, and this server tags captures under ${serverKey}`;

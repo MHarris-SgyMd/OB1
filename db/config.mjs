@@ -1326,10 +1326,11 @@ const retagBacklogSql = (target) =>
 
 /**
  * The backlog counted for the pool keyed $1: by kind, the first that applies,
- * the row's side first (marked, stale, recipe, fallback, missing), and against the
- * key's claim rows — `unpooled` with none under it, `due` re-tagged once
- * (succeeded) and behind its text again, which a run puts back. The target is
- * the recorded key. One row; run with `unsafe(RETAG_BACKLOG_SQL, [key])`.
+ * the row's side first (marked, stale, recipe, fallback, missing), and
+ * against the key's claim rows — `unpooled` with none under it, `due`
+ * re-tagged once (succeeded) and in the backlog again, which a run puts back.
+ * The target is the recorded key. One row; run with
+ * `unsafe(RETAG_BACKLOG_SQL, [key])`.
  */
 export const RETAG_BACKLOG_SQL = retagBacklogSql(RETAG_RECORDED_KEY_SQL);
 /**
