@@ -1006,6 +1006,15 @@ jobs:
         working-directory: db
         run: bun bench-live.ts --self-check && bun bench-brains.ts --self-check
 
+      # claim-report.ts (SMD-4540 PR 2): how long work claims run, read from a
+      # list_claims dump or work_claims — each ending read from its release, the
+      # merged PR from the reason, the quartiles, the tables and both inputs'
+      # shapes, on fixtures. No database.
+      - name: Claim report rules
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: db
+        run: bun claim-report.ts --self-check
+
       # This job's suite counts, for publish-test-counts (SMD-3614): on a push
       # to main alone, the one run that publishes them, and after a failed
       # step too, so the page shows what ran.

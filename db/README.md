@@ -6907,6 +6907,36 @@ counted. Samples taken before SMD-4382 kept the pending and claimed rows alone,
 under every `extract:` key, and are read as before:
 `extraction rows pending or claimed`.
 
+### claim-report.ts
+
+How long work claims run, from claim to release (SMD-4540 PR 2): each claim's
+ending read from its release, its hours, and since migration 152 how many of its
+renewals landed, so SMD-4541 can decide whether a claim should state when its
+work will be done. It reads `list_claims`' answers with `include_ended` (any
+client holding a read key, no database credentials) or `work_claims` itself.
+
+```bash
+bun claim-report.ts --from claims.json [--sizes sizes.json] [--now 2026-11-23T19:00:00Z] [--json]
+bun claim-report.ts --url "$DATABASE_URL" [--sizes sizes.json]
+bun claim-report.ts --self-check
+```
+
+- **Endings:** merged (its holder released it saying "merged"), closed by
+  board-sync, taken over, force-released, released (other: a split into pieces,
+  a drop), and lapsed, never released (counted, timed only to its lease's end).
+  Live claims are left out.
+- **Merged claims** are grouped by client (the label's first word before `@`,
+  else the key's name), by shape (a whole ticket or one piece) and, with
+  `--sizes` (a JSON object of PRs by number, each `{ additions, deletions }`, as
+  `gh pr view N --json additions,deletions` gives), by the merged PR's changed
+  lines. A merged claim's PR is the reason's `OB1 PR N`.
+- **What it cannot see** it says under the table: a claim runs to its release, at
+  its merge, so its hours hold the waits for review and for the merge word, not
+  work alone; a renewal count says how often,
+  not when, and each client renews at its own pace, so counts compare within one
+  client; a claim made before 152 is uncounted; a claim taken over hides the work
+  before its lapse.
+
 ### bench-querylog.ts
 
 The two `query_log` costs SMD-1492 settles with numbers rather than prose. It ages
