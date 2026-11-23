@@ -7661,7 +7661,7 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20cp] Migration 153: onto a populated brain at the file before it — refused without each function it needs and 130's index, by name, nothing made; then applied: the bare pr: and version: subjects and their thread as they were, nothing mapped until an operator names a repository; a key scoped to its repository admitted; the setting's grants carried from thought_facets' (a reader SELECT, a subject writer SELECT, INSERT and UPDATE); an operator's setting maps the standing keys, the thread kept under the scoped key; a re-apply with a setting standing a no-op (SMD-3887)");
+console.log("\n[20cp] Migration 153: onto a populated brain at the file before it — refused without each function it needs and 130's index, by name, nothing made; then applied: the bare pr: and version: subjects and their thread as they were, nothing mapped until an operator names a repository; a key scoped to its repository admitted; the setting's grants carried from thought_facets' (a reader SELECT, a writer of facets and sources SELECT, INSERT and UPDATE, a writer of facets alone SELECT); an operator's setting maps the standing keys, the thread kept under the scoped key; a re-apply with a setting standing a no-op (SMD-3887)");
 {
   const the153 = MIGRATIONS.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   const NUM = the153.slice(0, 3);
@@ -7679,9 +7679,10 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
     await subjects(a, ["pr:12"]);
     await subjects(b, ["pr:12"]);
     await subjects(c, ["version:v1.4"]);
-    const READER = "ob1_upgrade_153_reader", WRITER = "ob1_upgrade_153_writer", NONE = "ob1_upgrade_153_none";
-    await sql.unsafe(`CREATE ROLE ${READER} NOLOGIN; CREATE ROLE ${WRITER} NOLOGIN; CREATE ROLE ${NONE} NOLOGIN;
-                      GRANT SELECT ON thought_facets TO ${READER}; GRANT SELECT, INSERT ON thought_facets TO ${WRITER}`);
+    const READER = "ob1_upgrade_153_reader", WRITER = "ob1_upgrade_153_writer", FACETS = "ob1_upgrade_153_facets", NONE = "ob1_upgrade_153_none";
+    await sql.unsafe(`CREATE ROLE ${READER} NOLOGIN; CREATE ROLE ${WRITER} NOLOGIN; CREATE ROLE ${NONE} NOLOGIN; CREATE ROLE ${FACETS} NOLOGIN;
+                      GRANT SELECT ON thought_facets TO ${READER}; GRANT SELECT, INSERT ON thought_facets TO ${WRITER}; GRANT INSERT ON thought_sources TO ${WRITER};
+                      GRANT SELECT, INSERT, UPDATE ON thought_facets TO ${FACETS}`);
     const keys = async () => ((await sql`SELECT payload->>'key' AS k FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL ORDER BY 1`) as unknown as { k: string }[]).map((r) => r.k).join(",");
     const edges = async (key: string) => ((await sql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${key}`)[0] as { n: number }).n;
     const made = async () => (await sql`SELECT to_regclass('subject_repo_settings') IS NOT NULL AS m`)[0].m as boolean;
@@ -7721,9 +7722,9 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
 
     // The setting's grants, carried from thought_facets'.
     const may = async (role: string) => ((await sql`SELECT p, has_table_privilege(${role}, 'subject_repo_settings', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p`) as unknown as { p: string; y: boolean }[]).filter((r) => r.y).map((r) => r.p).join();
-    const grants = async () => `${await may(READER)} | ${await may(WRITER)} | ${await may(NONE)}`;
-    assert((await grants()) === "SELECT | SELECT,INSERT,UPDATE | ",
-      `a reader of thought_facets reads the setting, a subject writer also inserts and updates it, a role with neither gains nothing (${await grants()})`);
+    const grants = async () => `${await may(READER)} | ${await may(WRITER)} | ${await may(FACETS)} | ${await may(NONE)}`;
+    assert((await grants()) === "SELECT | SELECT,INSERT,UPDATE | SELECT | ",
+      `a reader of thought_facets reads the setting, a writer of facets and sources (the structure group's) also inserts and updates it, a writer of facets alone (the deliverables group's) reads it, a role with neither gains nothing (${await grants()})`);
 
     // An operator names the repository: the standing keys mapped, the thread kept under the scoped key.
     await sql`SELECT set_agent_kind('upgrade-153-op', 'operator')`;
@@ -7735,10 +7736,10 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
 
     // A re-apply with a setting standing is a no-op.
     await applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 });
-    assert((await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r" && (await grants()) === "SELECT | SELECT,INSERT,UPDATE | ",
-      `a re-apply with a setting standing is a no-op: the keys, the repository and the grants as they were (${await keys()})`);
+    assert((await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r" && (await grants()) === "SELECT | SELECT,INSERT,UPDATE | SELECT | ",
+      `a re-apply with a setting standing is a no-op: the keys, the repository and the grants as they were (${await keys()}; ${await grants()})`);
 
-    for (const role of [READER, WRITER, NONE]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+    for (const role of [READER, WRITER, FACETS, NONE]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
   } catch (e) {
     assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
   } finally {

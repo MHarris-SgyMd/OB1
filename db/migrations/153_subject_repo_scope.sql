@@ -87,13 +87,13 @@
 --   members and their order.
 --
 -- WHO READS AND WRITES
---   The roles holding SELECT on thought_facets get SELECT on
+--   The roles reading or writing thought_facets get SELECT on
 --   subject_repo_settings (the sweep reads the setting in PR 3b, the server's
---   thread read too); those holding INSERT on thought_facets get INSERT and
---   UPDATE as well (db/config.mjs: SELECT in the capture group, the three in
---   the structure and deliverables groups, the two that write facets). Every
---   subject writer reads the setting now, through record_thought_subjects, so
---   the SELECT is a writer's need from here on. The trigger holds what a row
+--   thread read too); those writing both thought_facets and thought_sources
+--   get INSERT and UPDATE as well (db/config.mjs: SELECT in the capture group,
+--   the three in the structure group). Every subject writer reads the setting
+--   now, through record_thought_subjects, so the SELECT is a writer's need
+--   from here on. The trigger holds what a row
 --   may be, and the setter who may call it (132's convention). The setter is
 --   SECURITY INVOKER: its mapping writes thought_facets and derivations as the
 --   caller.
@@ -287,21 +287,29 @@ CREATE OR REPLACE TRIGGER subject_repo_settings_no_truncate
   FOR EACH STATEMENT EXECUTE FUNCTION ob1_subject_repo_settings_guard();
 
 -- The grants, carried to the roles that hold thought_facets' already (140's
--- carry): a role holding SELECT on thought_facets gets SELECT here, one holding
--- INSERT there gets INSERT and UPDATE too, as db/config.mjs's groups list them;
--- the owner holds every privilege already. A re-apply grants what is held
--- already, which changes nothing.
+-- carry), as db/config.mjs's groups list them: a role reading or writing
+-- thought_facets gets SELECT here (every subject writer reads the setting); one
+-- writing both thought_facets and thought_sources, the structure group's mark,
+-- gets INSERT and UPDATE too, so the setter runs as the server's role. A
+-- deliverables writer, which inserts facets but no sources, takes SELECT alone:
+-- it never sets the repository (review pass 1). The owner holds every
+-- privilege already. A re-apply grants what is held already, which changes
+-- nothing.
 DO $grant$
 DECLARE
   v_item record;
 BEGIN
   FOR v_item IN
-    SELECT DISTINCT a.grantee, a.privilege_type
+    SELECT a.grantee,
+           bool_or(a.privilege_type = 'INSERT' AND EXISTS (
+             SELECT 1 FROM aclexplode((SELECT s.relacl FROM pg_class s WHERE s.oid = to_regclass('thought_sources'))) AS w
+              WHERE w.grantee = a.grantee AND w.privilege_type = 'INSERT')) AS sets
       FROM pg_class c, aclexplode(c.relacl) AS a
      WHERE c.oid = 'thought_facets'::regclass AND a.grantee <> c.relowner AND a.privilege_type IN ('SELECT', 'INSERT')
+     GROUP BY a.grantee
   LOOP
     EXECUTE format('GRANT %s ON subject_repo_settings TO %s',
-                   CASE v_item.privilege_type WHEN 'SELECT' THEN 'SELECT' ELSE 'SELECT, INSERT, UPDATE' END,
+                   CASE WHEN v_item.sets THEN 'SELECT, INSERT, UPDATE' ELSE 'SELECT' END,
                    CASE WHEN v_item.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(v_item.grantee)) END);
   END LOOP;
 END
