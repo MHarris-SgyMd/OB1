@@ -229,11 +229,11 @@ function definedIn(file: string): string[] {
  * definer, needs no entry. It is 063's derivation_descendants
  * too, a part in its kind order, and does not carry 063: the one function
  * 063 still last defines, record_supersession_proposal, is restored by name
- * wherever a section needs it. 152 carries 115's ob1_work_claim_json and
+ * wherever a section needs it. 152 is 115's ob1_work_claim_json and
  * renew_work_claim and 140's claim_work, each with the renewal count
- * (SMD-4540), so it carries 115 and 140: a restore of any of the three
+ * (SMD-4540), and carries 115 and 140: a restore of any of the three
  * re-runs 115 and 140 first, putting back their other functions (115's
- * release_work_claim, 140's cap readers), then 152.
+ * release_work_claim, 140's cap functions), then 152.
  */
 const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
@@ -20697,7 +20697,7 @@ console.log("\n[126] Migration 140: the per-holder cap on live work claims, oper
 
   // The shape: the table, its key and one-standing index, two triggers; eight functions commented by 140, the reads STABLE,
   // the builtin and refusal IMMUTABLE, the setter, the guard and the lock VOLATILE, none SECURITY DEFINER; 140 the last
-  // definer of each, and of claim_work.
+  // definer of each, and 152, carrying 140's body, of claim_work.
   const cols = (await q<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
       FROM pg_attribute WHERE attrelid = 'work_claim_cap_settings'::regclass AND attnum > 0 AND NOT attisdropped`))[0].c;
   const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('work_claim_cap_settings_one_standing')) AS d`)).d ?? "";
@@ -22250,7 +22250,7 @@ console.log("\n[131] Migration 144: forget_thought runs as its owner — a SECUR
 console.log("\n[132] Migration 145: release every live claim one holder holds — release_holder_claims an operator key's alone, by its agent id (an agent key, a name alone, an unclassified key refused NOT_OPERATOR; no envelope raises); a blank holder NO_HOLDER, a blank reason NO_REASON; it ends the holder's live claims (unreleased and unexpired) with the operator and reason on each, in issue order with the piece, leaving its lapsed and self-released claims and every other holder's; an unknown holder releases 0, a second call 0; SECURITY INVOKER not DEFINER, VOLATILE, 145 its last definer; a re-apply a no-op (SMD-3606)");
 {
   const file = files.find((f) => /^\d{3}_release_holder_claims\.sql$/.test(f)) ?? "no NNN_release_holder_claims.sql";
-  // [103] re-applies 115's claim_work; [126] restored 140's. Re-affirm it here: this section makes claims with claim_work and ends them with 145's release_holder_claims.
+  // [103] re-applies 115's claim_work; [126] restores the last definer's, 152's (SMD-4540). Re-affirm it here: this section makes claims with claim_work and ends them with 145's release_holder_claims.
   await restoreShipped("claim_work");
   type ClaimAns = { outcome: string; claim: { id: string } | null; token: string | null };
   type HolderOut = { ok: boolean; error?: string; kind?: string | null; message?: string; holder?: string; released?: number; claims?: { id: string; issue: string; piece: string | null }[] };
@@ -23666,7 +23666,7 @@ console.log("\n[136] Migration 151: settled parts — a statement in one thought
 
 console.log("\n[137] Migration 152: a work claim counts its renewals — work_claims.renewals, an integer defaulting to 0 with a check, NULL for a claim from before it (uncounted); 152 the last definer of claim_work, renew_work_claim and ob1_work_claim_json, carrying 140's and 115's bodies; a new claim at 0; renew_work_claim and claim_work with the holder's token each raise it by one, a lapsed claim nothing covers counting its revival; a refusal (not yours, released, taken over) leaves it; a takeover's claim starts at 0; an uncounted claim stays uncounted; the claim's jsonb and the listing as the server reads it carry it; a re-apply keeps every count (SMD-4540)");
 {
-  type Claim = { id: string; renewals: number | null; state: string };
+  type Claim = { id: string; renewals: number | null };
   type Answer = { outcome: string; code: string | null; claim: Claim | null; token: string | null };
   const file = files.find((f) => /^\d{3}_claim_renewals\.sql$/.test(f)) ?? "no NNN_claim_renewals.sql";
   await restoreShipped("claim_work");
@@ -23680,7 +23680,7 @@ console.log("\n[137] Migration 152: a work claim counts its renewals — work_cl
   const renew = (id: string, token: string, actor: string) => ans(`SELECT renew_work_claim($1::uuid, $2, 14400, $3::jsonb) AS r`, [id, token, actor]);
   const release = (id: string, token: string, actor: string) => ans(`SELECT release_work_claim($1::uuid, $2, 'done', false, $3::jsonb) AS r`, [id, token, actor]);
   const countOf = async (id: string) => (await db.query<{ n: number | null }>(`SELECT renewals AS n FROM work_claims WHERE id = $1::uuid`, [id])).rows[0]?.n;
-  // Lapsed: every time moved back past the lease, as [103]'s age() does, so work_claims_lease holds.
+  // Lapsed: all three stamps back five hours, past the four-hour lease, so work_claims_lease holds ([103]'s age() moves two).
   const lapse = (id: string) => db.query(`UPDATE work_claims SET claimed_at = claimed_at - interval '5 hours', renewed_at = renewed_at - interval '5 hours', expires_at = expires_at - interval '5 hours' WHERE id = $1::uuid`, [id]);
   try {
     // The shape: an integer, nullable, defaulting to 0, its check and its comment; 152 the three functions' last definer.
@@ -23743,9 +23743,10 @@ console.log("\n[137] Migration 152: a work claim counts its renewals — work_cl
     assert(/work_claims_renewals_counted/.test(refused), `a count below 0 is refused by the check (${refused.slice(0, 80) || "taken"})`);
 
     // A re-apply keeps every count, and a new claim still starts at 0.
-    const before = (await db.query<{ id: string; n: number | null }>(`SELECT id::text AS id, renewals AS n FROM work_claims WHERE issue LIKE 'SMD-870%' ORDER BY id`)).rows;
+    const counts = async () => (await db.query<{ id: string; n: number | null }>(`SELECT id::text AS id, renewals AS n FROM work_claims WHERE issue LIKE 'SMD-870%' ORDER BY id`)).rows;
+    const before = await counts();
     await reapply(file.slice(0, 4));
-    const after = (await db.query<{ id: string; n: number | null }>(`SELECT id::text AS id, renewals AS n FROM work_claims WHERE issue LIKE 'SMD-870%' ORDER BY id`)).rows;
+    const after = await counts();
     const c4 = await claim("SMD-8704", A);
     assert(JSON.stringify(after) === JSON.stringify(before) && c4.claim!.renewals === 0, `a re-apply keeps every count, and a new claim still starts at 0 (${after.length} claims; ${c4.claim?.renewals})`);
   } catch (e) {

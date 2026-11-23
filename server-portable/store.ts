@@ -1398,7 +1398,7 @@ export type WorkClaim = {
   releasedBy: string | null;
   releasedByKind: string | null;
   releaseReason: string | null;
-  /** How many renewals of the claim landed (migration 152, SMD-4540): 0 for a new claim, null for one made before 152, uncounted. */
+  /** How many renewals of the claim landed (migration 152, SMD-4540): 0 for a new claim; null for one made before 152 (uncounted) or read from a brain before it. */
   renewals: number | null;
   state: "live" | "lapsed" | "released";
 };

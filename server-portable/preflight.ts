@@ -3239,8 +3239,7 @@ if (configFailed) {
             add("ticket claims", "fail", `${tc.missing.join(", ")} missing under ${only143 ? "143's" : "115's"} signature; claim_work, renew_claim, release_claim and list_claims call them`,
                 only143 ? ledgerRemedy("143", "Apply db/migrations/143_work_claims_cursor.sql.")
                   // 115 by hand puts its claim_work, renew_work_claim and ob1_work_claim_json back over their last definers'
-                  // (140's cap, 152's renewal count, SMD-4540) and 143's list beside its own: the files after it name them. 152
-                  // is left to the migrator on a brain whose ledger reads it not applied yet (its guard needs 140 first).
+                  // (140's cap, 152's renewal count, SMD-4540) and 143's list beside its own: the files after it name them.
                   : ledgerRemedy("115", with152
                     ? "Apply db/migrations/115_work_claims.sql, then 140_work_claim_cap.sql, 143_work_claims_cursor.sql and 152_claim_renewals.sql (152 the last definer of claim_work, renew_work_claim and ob1_work_claim_json, 143 of list_work_claims)."
                     : "Apply db/migrations/115_work_claims.sql, then 140_work_claim_cap.sql and 143_work_claims_cursor.sql (140 the last definer of claim_work, 143 of list_work_claims)."));

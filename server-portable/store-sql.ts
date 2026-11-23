@@ -1100,9 +1100,9 @@ export class SqlStore implements ThoughtStore {
       rows = await this.sql`
         SELECT l.id, l.issue, l.piece, l.holder, l.holder_agent_id, l.holder_kind, l.label, l.claimed_at, l.renewed_at, l.expires_at,
                l.released_at, l.released_by, l.released_by_kind, l.release_reason, l.state, l.page_key, l.remaining,
-               -- 152's count (SMD-4540) beside the listing: list_work_claims keeps 143's columns, since a re-apply of 143 would
-               -- refuse it a new one. Read by the claim's id through its row's jsonb, so a brain before 152 lists with null,
-               -- not a missing column (review pass 1), and by the primary key, not a hash of every claim's row (pass 2).
+               -- 152's count (SMD-4540) beside the listing: list_work_claims keeps 143's columns, as 143's CREATE OR REPLACE,
+               -- re-applied, would refuse a new one. Through the row's jsonb, so a brain before 152 lists with null, not a missing
+               -- column (review pass 1); by the claim's id, the primary key, not a hash of every claim's row (pass 2).
                (SELECT (to_jsonb(w) ->> 'renewals')::int FROM work_claims w WHERE w.id = l.id) AS renewals
           FROM list_work_claims(${opts.issue === undefined ? null : this.sql.array([opts.issue], "TEXT")}::text[], ${opts.holder ?? null}::text,
                                 ${opts.includeEnded === true}::boolean, ${opts.limit ?? 100}::int,

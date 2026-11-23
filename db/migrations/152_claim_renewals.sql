@@ -7,32 +7,31 @@
 --   work_claims (115) keeps a claim's start, its last renewal and its end. A
 --   renewal overwrites renewed_at, so nothing says how often a holder renewed.
 --   SMD-4540 reports how long claims run, by how they ended and by the work's
---   size, so SMD-4541 can decide whether a claim should state when its work will
---   be done. The count says how often a claim's holder renewed it, which reads
---   within one kind of client, each renewing at its own pace (changes/
---   smd-4540.md's limits), not as a measure of work across them. The maintainer
---   chose (2026-11-23) the counter first, so that it reaches a release, and the
---   stable brain, before the report needs it.
+--   size, so SMD-4541 can decide whether a claim should state when its work
+--   will be done. Each kind of client renews at its own pace, so a count reads
+--   within one kind, not as a measure of work across them (changes/smd-4540.md,
+--   Limits). The maintainer chose (2026-11-23) the counter first, so that it
+--   reaches a release, and the stable brain, before the report needs it.
 --
 -- WHAT
 --   * work_claims.renewals: how many renewals of the claim landed. A claim made
 --     from this migration on starts at 0 (the column's default); a claim made
 --     before it reads NULL, uncounted, never 0, since its renewals went
 --     unrecorded. CHECK renewals >= 0.
---   * renew_work_claim and claim_work's renewal branch (the holder's own token on
---     exactly this work) raise it by one, in the UPDATE that renews. NULL + 1 is
---     NULL, so an uncounted claim stays uncounted. A refusal writes nothing, so
---     it counts nothing; a lapsed claim its holder renews, nothing covering it,
---     counts that renewal; a takeover's new claim is a new row and starts at 0.
+--   * renew_work_claim and claim_work's renewal branch (the holder's own token
+--     on exactly this work) raise it by one, in the UPDATE that renews.
+--     NULL + 1 is NULL, so an uncounted claim stays uncounted. A refusal writes
+--     nothing, so it counts nothing; a lapsed claim nothing covers, renewed by
+--     its holder, counts that renewal; a takeover's new claim starts at 0.
 --   * ob1_work_claim_json adds `renewals`, so every function answering with a
 --     claim's jsonb built by it (claim_work, renew_work_claim,
 --     release_work_claim, release_closed_ticket_claims) carries it; 145's
 --     release_holder_claims names its claims by id, issue and piece alone.
 --   * list_work_claims is left as 143 made it. It returns columns, not the
---     jsonb, and a RETURNS TABLE cannot gain one under CREATE OR REPLACE; made
---     again here with one more, 143's own CREATE OR REPLACE would refuse it at a
---     `migrate.ts --reapply`, which runs every file in order. The server reads
---     each claim's renewals beside it by the claim's id, a scalar subquery
+--     jsonb, and a RETURNS TABLE cannot gain one under CREATE OR REPLACE: made
+--     again here with one more, 143's own CREATE OR REPLACE would then fail at
+--     a `migrate.ts --reapply`, which runs every file in order. The server
+--     reads each claim's count beside it by the claim's id, a scalar subquery
 --     through the row's jsonb (store-sql.ts).
 --
 -- WHO READS
@@ -41,17 +40,17 @@
 --
 -- SAFETY
 --   One column added (no existing column altered), its default and its check;
---   three functions redefined with their signatures unchanged, each carrying its
---   last definer's body (115's ob1_work_claim_json and renew_work_claim, 140's
---   claim_work) with the count its only change. No row is rewritten: existing
---   claims keep NULL. MINOR under MAINTAINING.md's versioning. test-schema [137],
---   test-upgrade [20co].
+--   three functions redefined with their signatures unchanged, each carrying
+--   its last definer's body (115's ob1_work_claim_json and renew_work_claim,
+--   140's claim_work) with the count its only change. No row is rewritten:
+--   existing claims keep NULL. MINOR under MAINTAINING.md's versioning.
+--   test-schema [137], test-upgrade [20co].
 --
 -- Prerequisites
 --   115 (work_claims and its helpers) and 140 (claim_work's cap and its
---   helpers). Applied by `bun db/migrate.ts`. Re-applied: the column, its default,
---   its check and every count are kept, and the functions are replaced as they
---   were.
+--   helpers). Applied by `bun db/migrate.ts`. Re-applied: the column, its
+--   default, its check and every count are kept, and the functions are
+--   replaced as they were.
 -- =============================================================================
 
 -- Refused up front, by name, on a schema the ledger records but does not hold

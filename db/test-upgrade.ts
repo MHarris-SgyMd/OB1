@@ -801,9 +801,9 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // or 016's requeue_thought_work ([20cm]); 151 adds the settled parts' table
   // beside the proposals', with its lineage kind and rebuild_derived's arm for
   // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]);
-  // 152 counts a work claim's renewals — a column on work_claims, 115's
+  // 152 counts a work claim's renewals in a column on work_claims (115's
   // renew_work_claim and ob1_work_claim_json and 140's claim_work carried with
-  // the count — refusing by name without 115 or 140 ([20co]) —
+  // the count), refusing by name without 115 or 140 ([20co]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
@@ -7616,6 +7616,7 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
     (await sql`SELECT renew_work_claim(${id}::uuid, ${token}, 14400, (${actor}::text)::jsonb) AS r`)[0].r as Answer;
   const countOf = async (id: string) => ((await sql`SELECT renewals FROM work_claims WHERE id = ${id}::uuid`)[0] as { renewals: number | null }).renewals;
   const column = async () => Number((await sql`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'work_claims' AND column_name = 'renewals'`)[0].n);
+  const apply152 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
 
   // A claim made before 152, renewed once there.
   const old = await claim("SMD-7301", H);
@@ -7623,12 +7624,12 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
 
   // Without 140's ob1_work_claim_cap (the carried claim_work calls it): refused by name, no column added.
   await sql`ALTER FUNCTION ob1_work_claim_cap() RENAME TO ob1_work_claim_cap_away`;
-  const without = await applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 }).then(() => "applied", (e: Error) => e.message);
+  const without = await apply152().then(() => "applied", (e: Error) => e.message);
   await sql`ALTER FUNCTION ob1_work_claim_cap_away() RENAME TO ob1_work_claim_cap`;
   assert(/^migration 152 needs 140 \(ob1_work_claim_cap\); this schema lacks it/.test(without) && (await column()) === 0,
     `without 140's ob1_work_claim_cap the file is refused by name, and no renewals column is added (${without.slice(0, 80)})`);
 
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
+  await apply152();
 
   // The claim from before stays uncounted, through a renewal by either path; one after starts at 0 and counts both.
   const oldAgain = await renew(old.claim!.id, old.token!, H);
@@ -7648,8 +7649,8 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
   assert(JSON.stringify(listed.map((r) => [r.issue, r.renewals])) === JSON.stringify([["SMD-7301", null], ["SMD-7302", 2]]),
     `the server's listing carries each claim's count, NULL for the one from before (${JSON.stringify(listed)})`);
 
-  // A re-apply keeps every count, and the default.
-  await applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
+  // A re-apply keeps every count, and a new claim still starts at 0.
+  await apply152();
   const later = await claim("SMD-7303", H);
   assert((await countOf(old.claim!.id)) === null && (await countOf(fresh.claim!.id)) === 2 && later.claim!.renewals === 0,
     `a re-apply keeps every count, and a new claim still starts at 0 (${await countOf(fresh.claim!.id)}, ${later.claim?.renewals})`);
