@@ -49,6 +49,7 @@ env:
 # reads history takes it at checkout, fetch-depth: 0; the changes job's lazy
 # blob fetches, the base's classifier and this workflow, are anonymous, the
 # repository public), so the token has no reason to stay in the workspace.
+# The changes job's decide step is handed it in its env, to read main's lists.
 
 # Every job has a time limit, where GitHub's default is 360 minutes: a hung
 # lease, deadlock or container wait would otherwise hold the one required check,
@@ -82,7 +83,16 @@ jobs:
   # runs the jobs whose block it edits, and skip= names the gated jobs whose
   # block is unchanged (PR 2; an edit outside the jobs, of this job or of
   # repo-consistency, which runs the checker, runs them all). A path its
-  # CHARGES map names counts against the gated jobs it gives alone (PR 3a).
+  # CHARGES map names counts against the gated jobs it gives alone (PR 3a),
+  # one it marks `:list` only when that job's list of what it read agrees.
+  # Any other path ran every job until PR 3b-2: now the jobs MAP_LISTS names
+  # skip it when nothing they read on main's newest green run differs from
+  # that commit to this checkout. The classifier fetches those lists itself,
+  # the reads-<job> artifacts of that run, with this job's token, which reads
+  # and writes nothing more than the workflow's contents: read allows (enough
+  # for a public repository's artifacts: the probe, OB1 PR 846). A job whose
+  # list is missing, cut short, or a failed or blind job's runs; with no
+  # lists, or any doubt about what differs, every job runs as before.
   # Each gated job runs on any other answer. It fails open: a failed or
   # cancelled run of this job runs them all, and the aggregate lets them skip
   # only when this job succeeded and said code=false or named them. Any other
@@ -118,6 +128,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "$EVENT" = pull_request ] && git show 'HEAD^1:.github/ci/changes.sh' > "$RUNNER_TEMP/changes.sh" 2> /dev/null; then
             bash "$RUNNER_TEMP/changes.sh" "$EVENT" "$BASE_REF" "$DEFAULT_BRANCH"
@@ -163,7 +174,7 @@ jobs:
       # changed dirs, so pre-existing violations never surface there. A Bun
       # script, TypeScript since SMD-1870 — bun is the runtime every other job
       # and every developer here uses, and checks 13, 14, 18, 20, 23, 28, 29,
-      # 32 to 38, 40, 44, 48, 50, 51 and 55 parse YAML with Bun.YAML.
+      # 32 to 38, 40, 44, 48, 50, 51, 55 and 56 parse YAML with Bun.YAML.
       - name: Check metadata, links, dependencies, SQL guards, shell hazards, core-function redefinitions, credential compares, fixture redaction, thought writes, the vendored files' Bun-native shape, Supabase-isms in schema SQL, the compose stack's ports and forwards, the change files and their index, the type-checked directories' pins, the connector registry, main's ruleset record, destructive statements in SQL files, runtime supabase-js imports, the retired Workers target, the workflows' runner and action pins, one Bun pinned everywhere, every suite run by a workflow, db/ci-parity.sh running what CI runs, every job's time limit, the jobs whose suite counts reach the wiki, the edge proxy, commitlint's categories, and the checker's own check numbers
         run: bun scripts/check-consistency.ts
 
