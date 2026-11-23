@@ -2054,8 +2054,8 @@ Until such a stream ends it keeps its place: at most 32 for each caller's
 name, and the server's 256 across names. Nothing on the server tells it from
 a live stream that is idle, and a healthy caller's count in `listen` does not
 fall either while its sessions are open. What tells is a count above the
-sessions that key is known to have, or the climb that follows. A caller whose
-sessions vanish and ask again by another path
+sessions that caller is known to have, or a count that climbs to its bound, as
+follows. A caller whose sessions vanish and ask again by another path
 holds an old stream's place beside each new one, and at its bound is
 refused: `ok` lines under one name with no end between them, `listen`'s
 count for that name climbing, then a `LISTEN_CALLER_FULL` for each further
@@ -2063,8 +2063,8 @@ ask. With a relay that hid a client's leaving from the server altogether, a
 caller reached its bound of 32 in 22 s (SMD-4459's third review); a close and a kill were hidden by
 none of a podman machine's port relay, the stack's forwarder, its proxy and
 a quick tunnel, each tried once. The one lever is restarting `mcp`, which
-ends every stream: every session's client then reopens, and it is no lever to
-pull twice (above).
+ends every stream: each session's client is left to open its stream again, one
+of its reopens in the hour, and it is no lever to pull twice (above).
 
 A client that has stopped asking (above) leaves a `client` end with no
 `subscriptions/listen` line after it under its name, where its key has one
