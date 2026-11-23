@@ -11,14 +11,14 @@
  *   bun scripts/agent-runner/live-check.ts --self-check
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimsDir } from "./claims.ts";
 import type { Config, Fetch } from "./facts.ts";
 import type { Gql, GqlResult } from "../../db/linear-api.ts";
 import { handbackComment, liveRun, type LiveDeps, type LiveInput } from "./live.ts";
-import type { Outcome, RunRecord } from "./record.ts";
+import { bundleFile, diffFile, type Outcome, type RunRecord } from "./record.ts";
 import type { RunInput, RunResult } from "./run.ts";
 
 const CFG = { team: "SMD", restUrl: "http://127.0.0.1:8010/api" } as unknown as Config;
@@ -88,8 +88,12 @@ function stubGql(s: GqlScenario, seq: string[] = []): { gql: Gql; calls: { query
   return { gql, calls };
 }
 
-/** A RunResult the stub run() returns for a given outcome, with the record fields the hand-back comment reads. */
-function fakeResult(outcome: Outcome | null): RunResult {
+/**
+ * A RunResult the stub run() returns for a given outcome, with the record fields the hand-back comment reads. `dir`
+ * is the run's directory: one from `runDirWith` holds what a run that imported its branch keeps, and the default
+ * holds nothing, as after a run that kept no bundle.
+ */
+function fakeResult(outcome: Outcome | null, dir = "/obr-no-such-run-dir"): RunResult {
   const record: RunRecord = {
     run: "2026-01-02T03-04-05-000Z", ticket: "SMD-9", base: "base0", branch: "agent/smd-9-x", claimId: "claim-1", pr: null, pgid: null,
     step: outcome === null ? "gate" : outcome === "env-failure" ? "prepare" : "work", outcome,
@@ -98,11 +102,20 @@ function fakeResult(outcome: Outcome | null): RunResult {
     gate: outcome === null ? { pass: true, failed: [], ciCheckFiles: [] } : outcome === "work-failure" ? { pass: false, failed: ["branch"], ciCheckFiles: [] } : null,
     notes: [],
   };
-  return { outcome, gatePassed: outcome === null, record, dir: "/tmp/run" };
+  return { outcome, gatePassed: outcome === null, record, dir };
+}
+
+/** A run directory under `root` holding the files named: the bundle run.ts keeps once its import landed, and the diff. */
+function runDirWith(root: string, name: string, kept: { bundle: boolean; diff: boolean }): string {
+  const dir = join(root, name);
+  mkdirSync(dir, { recursive: true });
+  if (kept.bundle) writeFileSync(bundleFile(dir), "bundle");
+  if (kept.diff) writeFileSync(diffFile(dir), "diff");
+  return dir;
 }
 
 /** Build a LiveInput over the stubs, recording the claimId run() is called with (null if it isn't). */
-function makeInput(dir: string, fetchS: FetchScenario, gqlS: GqlScenario, outcome: Outcome | null, seen: { claimId: string | null | undefined }): { input: LiveInput; fetchCalls: { url: string; method: string }[]; gqlCalls: { query: string; variables: Record<string, unknown> }[]; seq: string[] } {
+function makeInput(dir: string, fetchS: FetchScenario, gqlS: GqlScenario, outcome: Outcome | null, seen: { claimId: string | null | undefined }): { input: LiveInput; fetchCalls: { url: string; method: string; body: string }[]; gqlCalls: { query: string; variables: Record<string, unknown> }[]; seq: string[] } {
   const seq: string[] = [];
   const f = stubFetch(fetchS, seq);
   const g = stubGql(gqlS, seq);
@@ -276,13 +289,62 @@ export async function selfCheck(): Promise<number> {
     });
 
     await section("the hand-back comment is computed and carries no token", () => {
-      const body = handbackComment(fakeResult(null));
+      const kept = runDirWith(root, "run-kept", { bundle: true, diff: true });
+      const body = handbackComment(fakeResult(null, kept));
       ok(body.includes("passed the gate") && body.includes("agent/smd-9-x") && body.includes("not pushed"), "the pass comment names the outcome, branch and no-push");
-      const worky = handbackComment(fakeResult("work-failure"));
-      ok(worky.includes("work failure") && worky.includes("branch"), "the work-failure comment names the failed gate check");
-      const tokened = fakeResult(null);
+      const worky = handbackComment(fakeResult("work-failure", kept));
+      ok(worky.includes("work failure") && worky.includes("Gate: failed — branch"), "the work-failure comment names the failed gate check");
+      const tokened = fakeResult(null, kept);
       tokened.record.branch = `agent/wc\\_${"e".repeat(64)}`;
       ok(!handbackComment(tokened).includes("e".repeat(10)), "a claim token in its markdown-escaped form, wc\\_…, is masked in the comment too");
+      return Promise.resolve();
+    });
+
+    await section("the hand-back comment says only what the run left (SMD-4516)", async () => {
+      const names = (s: string) => /branch|bundle|diff|agent\/smd-9-x/i.test(s);
+      const kept = runDirWith(root, "left-kept", { bundle: true, diff: true });
+      const full = handbackComment(fakeResult(null, kept));
+      ok(full.includes("Branch `agent/smd-9-x` is in the runner's bare repository") && full.includes("The bundle and diff are kept"), "a run that imported its branch names the branch, the bundle and the diff");
+      const noDiff = handbackComment(fakeResult("work-failure", runDirWith(root, "left-no-diff", { bundle: true, diff: false })));
+      ok(noDiff.includes("The bundle is kept") && !noDiff.includes("diff"), "a run that kept a bundle and no diff names the bundle alone");
+      // An environment failure at the work step (SMD-4490: the API did not answer before the worker's first call).
+      const env = fakeResult("env-failure");
+      env.record.step = "work";
+      env.record.sessions = [{ role: "worker", turns: 1, costUsd: 0, ended: "api-error" }];
+      const envBody = handbackComment(env);
+      ok(envBody.includes("an environment failure") && envBody.includes("The run kept nothing to publish from") && !names(envBody), "an environment failure at the work step names no branch, bundle or diff");
+      ok(!/import|session/i.test(envBody.replace(/^Sessions: .*$/m, "")), "and claims neither that nothing was imported nor that a session left anything: a failed copy after the import, and a run with no session, are told truly");
+      ok(envBody.includes("worker 1 turns $0.00 (ended api-error)"), "and still says how the worker session ended");
+      const noBundle = handbackComment(fakeResult("work-failure", runDirWith(root, "left-diff-alone", { bundle: false, diff: true })));
+      ok(noBundle.includes("The run kept nothing to publish from") && !noBundle.includes("is in the runner's bare repository"), "the kept bundle is the sign: a directory without one names no branch");
+
+      // The release's reason says the same of the branch.
+      const seen = { claimId: undefined as string | null | undefined };
+      const none = makeInput(mkdtempSync(join(root, "rel-none-")), {}, {}, "env-failure", seen);
+      await liveRun(none.input);
+      const noneReason = none.fetchCalls.find((c) => c.url.includes("/release"))?.body ?? "";
+      ok(noneReason.includes("nothing kept to publish from") && !noneReason.includes("agent/smd-9-x") && !noneReason.includes("import"), "the release's reason for a run that kept no bundle names no branch");
+      const some = makeInput(mkdtempSync(join(root, "rel-kept-")), {}, {}, null, seen);
+      some.input.deps.run = async () => fakeResult(null, kept);
+      await liveRun(some.input);
+      const someReason = some.fetchCalls.find((c) => c.url.includes("/release"))?.body ?? "";
+      ok(someReason.includes("branch agent/smd-9-x in the bare repository, not pushed"), "the release's reason for a run that kept its bundle names the branch");
+    });
+
+    await section("the hand-back comment says when the branch was not reviewed (SMD-4516)", () => {
+      const kept = runDirWith(root, "unreviewed-kept", { bundle: true, diff: true });
+      const NOT_REVIEWED = "this branch was not reviewed by the runner";
+      const pass = fakeResult(null, kept);
+      pass.record.sessions = [{ role: "worker", turns: 3, costUsd: 1.5, ended: "result" }, { role: "review", turns: 1, costUsd: 0, ended: "api-error" }];
+      const body = handbackComment(pass);
+      ok(body.includes("passed the gate") && body.includes(NOT_REVIEWED) && body.includes("review 1 turns $0.00 (ended api-error)"), "a gate pass whose review ended api-error says the branch was not reviewed");
+      ok(!handbackComment(fakeResult(null, kept)).includes(NOT_REVIEWED), "a run whose review finished draws no such line");
+      const timed = fakeResult(null, kept);
+      timed.record.sessions[1] = { role: "review", turns: null, costUsd: null, ended: "time" };
+      ok(handbackComment(timed).includes(NOT_REVIEWED), "a review that ran out of time is not a review either");
+      const before = fakeResult("work-failure");
+      before.record.sessions = [{ role: "worker", turns: 2, costUsd: 1, ended: "limit" }];
+      ok(!handbackComment(before).includes(NOT_REVIEWED), "a run that ended before its review says nothing of one");
       return Promise.resolve();
     });
   } finally {

@@ -10,6 +10,10 @@
 // checked against its own rule as the line is written, so a caller's string
 // that reaches a field by mistake is `?`, not the string.
 //
+// One line is no request's: the end of a listen stream the MCP server held open
+// (endListenStream, SMD-4459). It is built here too and held to the same
+// rules, and its point and its log record are its own, not a request's.
+//
 // Lines go to stdout, which compose's log rotation bounds (deploy/compose.yaml,
 // x-logging). Each request is also an OpenTelemetry span (PR 2b), whose
 // attributes are the line's checked values and nothing else, a point on the
@@ -913,6 +917,94 @@ export function endsWithStream(trace: RequestTrace, signal: AbortSignal): Stream
     onStall: () => trace.end({ outcome: "stalled" }),
     onCancel: gone,
   };
+}
+
+/**
+ * How a listen stream the MCP server held open ended (SMD-4459), on the record its end writes:
+ * - `client`: its client's side went. Its client closed it, or its connection dropped: the server is told one thing
+ *   for both (measured on Bun 1.4.3: a fetch aborted, its reader cancelled, the client's exit, its kill, a socket
+ *   half-closed, destroyed and reset each reach the request as "The connection was closed"), so the record has one
+ *   word for them. Whether the proxy's access log tells the two apart was not measured;
+ * - `stop`: the server's stop closed it. Written as the stop's drain ends, before its flush, so the record is sent;
+ * - `server`: the server ended it itself: a listen that asks for nothing this server sends is acknowledged and
+ *   closed at once.
+ * None is a failure, and none is a request's outcome: a stream's request ended `ok` when the stream opened.
+ */
+export type ListenEnd = "client" | "stop" | "server";
+const LISTEN_ENDS: ReadonlySet<string> = new Set<ListenEnd>(["client", "stop", "server"]);
+
+/** A listen stream's end, as the route knows it: whose stream, how it ended, how long it was held, and its opening request's trace id. */
+export interface ListenEndRecord {
+  /** The configured name of the key that opened it, as its request's line has it. */
+  agent?: string;
+  end: ListenEnd;
+  /** Milliseconds from the stream's opening, where its request's line was written, to its end. */
+  heldMs: number;
+  /** The trace id on its opening request's line, so the two lines are one stream's. */
+  trace?: string;
+}
+
+/**
+ * How long a listen stream was held, in seconds: from a second, under which a stream was opened and dropped, to a
+ * day. A stream is held until its client goes or the server restarts, so most of a healthy brain's are hours.
+ */
+const LISTEN_HELD: HistogramSpec = {
+  unit: "s",
+  description: "How long each listen stream was held open, to its end (SMD-4459)",
+  bounds: [1, 5, 15, 60, 300, 900, 3600, 14400, 43200, 86400],
+};
+
+/** An end's fields, each held to its rule as a request's are (checked): these keys and no other, in this order. */
+function checkedEnd(r: ListenEndRecord) {
+  return {
+    door: "mcp" as const,
+    event: "listen_end" as const,
+    // A name that is no string is `?`.
+    agent: r.agent === undefined ? undefined : typeof r.agent === "string" ? labelPart(r.agent) : "?",
+    end: known(r.end, LISTEN_ENDS) as ListenEnd | "?",
+    held_ms: count(r.heldMs) ?? 0,
+    trace: r.trace !== undefined && TRACE_ID.test(r.trace) ? r.trace : undefined,
+  };
+}
+
+/** The line for a listen stream's end: JSON with `ts` first, then its checked fields (an absent one left out). */
+export function listenEndLine(r: ListenEndRecord, now: Date = new Date()): string {
+  return JSON.stringify({ ts: now.toISOString(), ...checkedEnd(r) });
+}
+
+/**
+ * Records a listen stream's end (SMD-4459), at once and whole: its line, where request lines go; one point on
+ * `ob1.mcp.listen_stream.duration`, labelled with how it ended; and, where log records are sent, a record named
+ * `ob1.listen_end` whose body is the line's fields. Nothing of it is a request's: the line has an `event` and no
+ * `outcome`, `method` or `status`, so what reads a line's `outcome` where it has one reads none of these (the
+ * dashboard's panel of records not `ok` asks for one, and so does deploy/README.md's filter); no point
+ * goes on the request-duration histogram, which the dashboard's percentiles and the failure alert read; and there is
+ * no span, the stream's request having ended its own when the stream opened. Nothing is held open for it either: a
+ * stream has no record between its opening's and this one.
+ * It throws nothing: it is called from a stream's end and from the stop, and a sink or an SDK that throws loses what
+ * it was writing and nothing else. A name that is no string is `?`, as an `end` it does not know is; a time held that is
+ * no count is 0, and a trace id that fails its rule is left out. A record that is null or undefined is left unsaid;
+ * any other value is read as a record, which the route's are.
+ */
+export function endListenStream(r: ListenEndRecord): void {
+  let fields: ReturnType<typeof checkedEnd>;
+  try {
+    fields = checkedEnd(r);
+  } catch {
+    return;
+  }
+  try {
+    sink(listenEndLine(r));
+  } catch {}
+  try {
+    histogram("ob1.mcp.listen_stream.duration", LISTEN_HELD).record(fields.held_ms / 1000, { "ob1.end": fields.end });
+  } catch {}
+  try {
+    if (!sdk) return;
+    const body: Record<string, string | number> = {};
+    for (const [key, value] of Object.entries(fields)) if (value !== undefined) body[key] = value;
+    sdk.emit({ name: "ob1.listen_end", body, severity: "INFO", context: otel.ROOT_CONTEXT, at: performance.now() });
+  } catch {}
 }
 
 /**

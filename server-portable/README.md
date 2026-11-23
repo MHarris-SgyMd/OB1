@@ -1776,7 +1776,8 @@ MCP tools do rather than a copy of it:
   stream alive while a call runs (SMD-1864). Both were moved out of `index.ts` so the
   REST core (SMD-2284) could build on them rather than on a copy.
 - **`telemetry.ts`** — the one JSON line written per request, on every route of both
-  servers but the keyless liveness probe (SMD-1849), from one per-request record
+  servers but the keyless liveness probe (SMD-1849), and the line the MCP server
+  writes at the end of a listen stream it held (SMD-4459); a request's from one per-request record
   each server's first middleware makes (notFound, for a path that middleware
   never sees): its keys an allow-list, each value held to its rule as the line is written, so no
   URL, key, argument or thought text reaches it (`deploy/README.md`, "What the

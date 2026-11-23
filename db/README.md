@@ -5699,7 +5699,7 @@ bun sleep.ts --url …               # one period, if there is work, until its p
 bun sleep.ts --url … --dry-run     # the idle reading and each pass's pool; writes nothing
 #   --capture SECONDS (20)   --abort-after SECONDS (60; at least the 60 s stall floor)   --reembed-share SECONDS (120; 0 to 86,400, 0: alone until its pool drains)   --rescan SECONDS (3600; 60 to 86,400)   --poll SECONDS (5; at most 60)   --workers N (1 for each claim pass: N re-embed, N extraction and, once it joins, N consolidation calls at once, the subject sweep's one beside them)
 #   --statement-timeout SECONDS (300; 0: the role's or database's own)   --work-mem MB (4)   --maintenance-work-mem MB (64)
-#   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2)
+#   --max-wait SECONDS (60; 1 to 86,400): among the scheduler's own calls waiting for a share of a model server's slots, consolidation's go first, and one queued this long goes first at the next turn, after older ones that go first; not a timeout (SMD-3379 PR 2c-2); also the most one stretch of extraction's calls holds consolidation and a model subject sweep back where they yield to it (SMD-4495)
 #   --dump-dir DIR (none): each consolidation pass appends every verdict to DIR/<its pass key>.jsonl, consolidate.ts's --dump, each file created 0600 (SMD-3203)
 #   --quiet and --budget were removed in 2.0.0, refused with 2 (Upgrading to 2.0.0, below)
 #   exits 0 done — no work, or a period's pools drained — or --follow stopped by one signal · 1 one period whose re-embed was set down or aside, or gave way at its share, or caught up, with its pool left, or with a pass a statement held or the subject sweep held or set down, or no work but a backlog a model switch leaves aside or the sweep held or set down, a pass that ended by itself with 0, or an uncaught error · 2 usage, configuration (each pass's start, checked before the first period, included, but the subject sweep's, which sets it down), followers running outside sleep, or a pass's refusal (under --follow, all but a model, provider or lookup refusal at the start of a pass that got through its start before, which is retried) · 75 a migration seen (under the coordinator its supervisor starts it again at once; run by hand, run it again once the migration is done) · 130 a signal before one period ended, or a second signal
@@ -6028,7 +6028,22 @@ board-sync's among them) seldom let drain: the capture trigger pools each one
 as it is written, so one was pending or in hand at nearly every poll, and
 consolidation joined mostly once they stopped. The subject sweep still waits
 for the whole pool (below): beside consolidation, its judge calls slowed
-extraction on a model server of one slot. A limit stands: a backlog thought a
+extraction on a model server of one slot. Where the judge's calls would take
+extraction's turn — on a local chat endpoint the judge's model
+(`OB1_JUDGE_MODEL`) is not extraction's, so each turn between them can load the
+other model, or extraction's background share of its model is one slot (on a
+local endpoint `OB1_MODEL_SLOTS` 1 or 2; on any, `OB1_BACKGROUND_SLOTS`'s
+`chat=1` or an override for its model) — consolidation and a model subject
+sweep yield to extraction from the start of either to the period's end, said
+at the start (`yield:`) and as the yield first holds them back: they wait
+between calls while an extraction call is asked for or running, and a second
+after, `--max-wait` at most in one stretch of extraction's calls (calls less
+than a second apart), then go on for a second before waiting again; a call in
+hand runs on (SMD-4495). A stub server of one slot under a capture every 4 s:
+extraction's median wait 64 s without it, 15 s with it, and 439 s against
+21 s with a judge model of its own and a 5 s load. With one model, or on a
+hosted provider, and slots to spare, the judge runs beside extraction, as
+SMD-4468 made it. A limit stands: a backlog thought a
 pause has taken goes behind the newer writes (below), so while they come
 faster than extraction takes them it is not reached, and the join waits for
 it, as before; a stalled one is joined past only once extraction holds nothing
@@ -6673,9 +6688,10 @@ bun retag.ts --url … --switch-key       # a model or prompt version other than
 
 The tags' re-run path (SMD-2298), the last of the lineage kinds to get one. The
 backlog is every thought tagged (`type` or `topics`) with no tags row and no
-failure marker — preflight's "tagged before 061" — every one whose tags row
-(`derivations`, kind `metadata`) is marked (`stale_since`) or names another
-fingerprint, and every one whose capture fell back
+failure marker — preflight's lineage row's "tags with no tag lineage" — every
+one whose tags row (`derivations`, kind `metadata`) is marked (`stale_since`),
+names another fingerprint, or was made under a recipe other than the recorded
+key's (PR 3b), and every one whose capture fell back
 (`metadata_extraction_failed` set, the egress refusal's marker included: nothing
 else re-tags a thought the policy kept from the model at capture, so the
 worker's own gate fails it naming the rule while the policy refuses it, and
@@ -6700,12 +6716,21 @@ in a row, none answered between, is the request's shape and stops the run,
 exit 2), as is a thought whose metadata is null or no JSON object, before any
 call; a tag key the row holds and the answer leaves out is cleared (a list to
 `[]`, the type keys to null); a provider error is read by `claim-loop.ts`'s rule; an
-edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
-key other than the recorded one needs `--switch-key`; `--status` and
+edit meanwhile (`STALE_READ`) puts the thought back in the pool. The recorded
+key is the tags' target recipe (PR 3b, every run, as re-embed's model is): a
+tags row made under another model or prompt version is behind it, so a first
+run, or a `--switch-key` to a new model or prompt version, re-tags the corpus
+under its key, and a switch cut short finishes with a plain run. A run under a
+key other than the recorded one needs `--switch-key`, and `--status`,
+`--dry-run` and the refusal count the backlog as recording it finds it; a
+writing run's `--job` must name the recipe it writes. `--status` and
 `--dry-run` write nothing. `rebuild_derived` requeues a tags row it marks
-under the recorded key since migration 150 (PR 2). Not yet: preflight's
-rows and the prompt version's `--switch` (PR 3), a sleep pass and `--follow`
-(PR 4). test-live [29] drives it against a stub chat endpoint.
+under the recorded key since migration 150 (PR 2). Preflight's `retag pass`
+row counts each `retag:` key's pool by the unfinished-pass rule, and the
+backlog by the worker's own predicate (`db/config.mjs`'s `RETAG_DUE_SQL`, PR
+3a), and says where this server tags captures under another key than the
+recorded one (PR 3b). Not yet: a sleep pass and `--follow` (PR 4). test-live
+[29] drives it against a stub chat endpoint.
 
 ## Extensions
 
@@ -6899,10 +6924,13 @@ bun bench-brains.ts --self-check   # the notes, the brains file, what a sample k
 "keyFile": "…"}}` takes a url and a file holding the key alone. An entry gives
 a connector or a key file, not both; a connector's entry may add `mcp` to send
 that key to another url. `load` and `clean` read only the brain they name;
-`sample` reads every entry. No key is printed. A refusal names a flag or a brain
+`sample` reads every entry. No brain may be named `(ollama)`: the model server's
+samples carry that name. No key is printed. A refusal names a flag or a brain
 and, for a file, the file system's code (`ENOENT`): never the path typed, a
 file's text, a connector's name or a parser's words, any of which could be a key
-put in the wrong place. Each subcommand refuses a flag it does not read.
+put in the wrong place. A brain's answer of a shape the harness does not read is
+said in those words, not in a thrown error's. Each subcommand refuses a flag it
+does not read.
 
 - **load** captures the arm's notes, generated from the arm's name and the index,
   so every brain gets the same text and no arm's note is another's. Each starts
@@ -6918,12 +6946,16 @@ put in the wrong place. Each subcommand refuses a flag it does not read.
   from it.
 - **sample** reads every brain's `brain_info` and `worker_status` each `--every`
   seconds (15), and, with `--ollama`, the model server's loaded models from
-  Ollama's `/api/ps`. It only reads, so stable can be one of the brains. It exits 1
-  if a brain never answered. A signal ends the wait; the round in hand is finished
+  Ollama's `/api/ps`. `--ollama` is an http or https url; a query it carries
+  stays behind the path. Each line keeps the time its run of `sample` began, the
+  thoughts the brain holds, and every pool's pending, claimed, failed and
+  unpooled counts with whether its key is the brain's own (the extraction rows,
+  below). It only reads, so stable can be one of the brains. It exits 1 if a
+  brain never answered. A signal ends the wait; the round in hand is finished
   and written, and it then exits 128 plus the signal's number, whatever the
-  brains answered. A second signal exits at once, the round in hand unwritten. It
-  appends to `--out` only where that file is new or holds samples alone, each a
-  JSON object with a time, an arm and a brain: not a brains file, nor
+  brains answered. A second signal exits at once, the round in hand unwritten.
+  It appends to `--out` only where that file is new or holds samples alone, each
+  a JSON object with a time, an arm and a brain: not a brains file, nor
   `bench-live.ts`'s samples, nor a file whose last sample was cut short. A
   `--brains` file that names no brain is refused, unless `--ollama` names a
   model server to sample alone.
@@ -6952,28 +6984,67 @@ put in the wrong place. Each subcommand refuses a flag it does not read.
   run finds it. It deletes the notes alone. The entities extraction drew from
   them stay until an operator prunes the orphans (`prune_orphan_entities()`),
   and the audit log keeps each note's text.
-- **summary** prints, for each arm and brain, its sleep's background calls in two
-  windows: before `--split` minutes, with no live load from the harness, and after
-  it, with `bench-live.ts` running. For each window it gives:
+- **summary** prints, for each run of an arm and each brain, its sleep's
+  background calls in two windows: before `--split` minutes (12 unless given)
+  and after it. For each window it gives:
   - `s`, the seconds from the window's first sleep stamp to its last;
   - the calls, and their time;
   - the mean number in flight: their time over `s`;
   - the slot waits, of every model server the sleep asks, its decide tier's
-    included, in all and by pass. A pass reads `extract 51/1322s (51 waited
-    658s)`: its calls, their seconds, and its asks that waited with their seconds.
+    included, in all and by pass. `waited` counts the asks that waited, and
+    `wait s` is the time every ask spent before its slot, so a little time can
+    stand beside no ask that waited. A pass reads `extract 51/1322s (51 waited
+    658s)`: its calls, their seconds, and its asks that waited with those
+    seconds; `-` where no pass called or waited.
 
-  It also gives the brain's extraction rows pending or claimed (first, last, most,
-  and when they ran dry), how many of its samples failed, how often the model
-  server's loaded models differed from one sample to the next, and each `--live`
-  file's latencies by label. A brain that never answered in an arm is said so.
-  Two runs of one arm name appended to one `--out` read as one arm. An `--out`
-  with no samples exits 1.
+  A row `between` the two is the one pair of stamps across the split, which is
+  in neither window: the three rows together are the arm's whole increase. A row
+  ending `(the sleep begun again N time(s))` spans that many restarts read; two
+  between one pair of stamps read as one. A window with fewer than two stamps
+  has no figures: its row says how many it has, and in how many of the window's
+  samples the sleep was working.
+
+  Under a brain's rows come its board-sync's, where that stamped tallies in the
+  arm: the same columns from board-sync's own stamps, in rows that name no brain
+  and say `its board-sync`. A line under those says in how many of the samples
+  that kept a dated mark the coordinator's mark for a pass was not `running`,
+  where any was not; or that no sample kept one, for a pass that stamped its
+  tallies twice or more. A mark is dated where its sample kept the time of the
+  coordinator's stamp; the marks are under "A process begun again".
+
+  It also gives the brain's extraction rows (below), how many of its samples
+  failed, the model server's loaded sets (`(none)` for none loaded) and how
+  often they differed from one sample to the next, and each `--live` file's
+  latencies by label. Each latency row ends with its file's place among the
+  `--live` flags. Under the latency table each file has a line: its name, its
+  calls, when the first and last of them began, and how many began in a sampled
+  arm's window after the split. A brain that never answered in an arm is said
+  so. Two runs of `sample` under one arm name, appended to one `--out`, are a
+  table each (`run 1 of 2 of that name in the file`). Samples are read in the
+  order of their times, whatever the file's. An `--out` with no samples exits 1.
+
+  **"Before" is no live load and "after" is under it only if you made it so.**
+  The summary splits each arm at `--split` minutes from its first sample and
+  checks nothing about when `bench-live.ts` ran. Read each `--live` file's line:
+  on the evidence of 2026-11-16, one arm's live files began 59 of their 60 calls
+  after its last sample. Start `bench-live.ts` at the split, and keep sampling
+  until it ends.
+
+  Other defaults: `sample` runs 20 minutes (`--minutes`) at 15 s (`--every`);
+  `load` captures 150 notes (`--notes`), two at a time (`--parallel`). An arm's
+  name is letters, digits and `-`.
 
 **Reading "in flight".** It is near the slots the sleep held on average, with
 these limits:
 
-- It is the sleep's alone. Board-sync's calls, the api's vector mender's and a
-  detached job's hold slots too and are not in it.
+- A row is one process's. Board-sync's calls hold the same slots and have rows
+  of their own. The two are not summed: each row's `s` runs between its own
+  process's stamps. Board-sync stamps at least as each pass starts and as it
+  ends, and a pass runs every `OB1_BOARD_SYNC_INTERVAL` (five minutes unless
+  set). So a window holds a few of its stamps, or fewer than the two a row
+  needs, and a row's `s` can be one pass's seconds.
+- The api's vector mender's calls and a detached job's hold slots too, stamp no
+  tallies, and are in no row.
 - A call's time runs from its slot to its answer, failed or not. Its wait inside
   the model server (a model loading, a call ahead of it) is in that time; its
   wait for a slot is not. A model server that stalls a call makes it read as held.
@@ -6990,21 +7061,115 @@ stamps them at least once a minute, more often while it works, by the database's
 clock, and a call counts when it ends. So a window's figures are the sum of the
 increases from stamp to stamp, over the time between its first and last stamps.
 That is up to a stamp short of its minutes at each end, and the pair of stamps
-across the split is in neither window. A pair of stamps in which any pass's
-tally falls, or a pass drops out, marks the process begun again: every pass's
-value then is the increase since, and the summary counts the restarts. The calls
-the old process made after its last stamp are lost. A restart whose first stamp
-already passes the old one's on every tally is not seen. Each sample keeps the
-coordinator's children and the time of its stamp, whose `for_s` says when one
-began. A sleep that has made no model call stamps no tallies, nor does a build
-before SMD-3379 PR 2b-2a: for those, the summary gives the share of samples in
-which the sleep was working.
+across the split is in neither window: it is the row `between`. A sleep that has
+made no model call stamps no tallies, nor does a build before SMD-3379 PR 2b-2a:
+for those, the summary gives the share of samples in which the sleep was
+working.
 
-**The extraction rows** are `worker_status`'s pending and claimed rows under
-every `extract:` key. They are thoughts, so `bench-live.ts`'s probes and any
-older backlog are among them. Failed rows are not counted, so "ran dry" does not
-say every note was extracted. A brain whose extraction has never run has no pool
-yet, and its loaded notes show only once its sleep's first pass pools them.
+**A process begun again.** Across a restart every pass's value is the increase
+since, and the summary counts the restarts. The calls the old process made after
+the last of its stamps a sample caught are lost. A restart is read two ways
+(SMD-4382), over every stamp of the arm, so a window that opens on a new
+process's first stamp still has the fall before it:
+
+- **From the tallies.** A pair of stamps in which any pass's tally falls, or a
+  pass drops out, is a restart. It is the only sign on a brain with no
+  coordinator, for a pass the coordinator does not run, and in samples that kept
+  no stamp time (those of 2026-11-16). It misses a restart whose first stamp
+  already passes the old one's on every tally.
+- **From the coordinator's marks,** for the restart the tallies miss. Each
+  sample keeps the coordinator's children and the time of its stamp. A child
+  marked `running` for `for_s` seconds began that long before the stamp. A
+  beginning that lies between the stamps of a fall is that fall's restart and
+  counts once. A beginning with no fall is a restart at the pair of stamps it
+  lies between.
+
+An enumeration of 217 million small cases (review pass 2, rerun at each change
+since) found no reading of the marks that counts an old process's whole tally as
+an increase. What it found:
+
+- **A restart counted in error** adds at most the tallies of the stamp before
+  it. That stamp is the running process's own, and no older than its mark was
+  late plus a second: 0.9 s old where every mark landed at once, 16 s where one
+  was twenty seconds late, on that grid.
+- **A restart missed** loses the old process's last sampled tallies, whatever
+  its age. It is missed only where the new process's first sampled tallies
+  already pass them.
+
+What the marks cannot say:
+
+- **A run no sample saw running has no mark.** One that lived wholly between two
+  samples, in a crash loop or while samples failed, is read by its tallies
+  alone. Read an arm whose summary says a pass's mark was not `running` in some
+  samples as one whose restarts may be undercounted. Where it says no sample
+  kept a dated mark, the tallies were the only reading.
+- **A beginning is read to the half second,** since `for_s` is rounded, and late
+  by as long as its mark's write took. A stamp half a second or less after a
+  beginning may be either process's. It is taken for the old one's last, unless
+  the tallies fall into it: read as a new one's first, an old process's last
+  stamp would count its whole life as the increase. Where it was the new one's
+  first, the pair after it reads as a restart, and that stamp's tallies, less
+  the old process's last, are counted beyond the truth. At two real restarts
+  the sleep stamped its first tallies 0.9 and 1.3 s after it began. They come
+  once its start's probes have answered or timed out, however long that takes.
+- **A beginning read early,** at or before the old process's last stamp, where
+  that stamp ends a fall, is taken for that fall's restart, whether or not
+  another beginning lies in the fall. Its own restart is not counted.
+- **A mark written late, beside a fall.** A beginning read up to ten seconds
+  after a fall's later stamp is taken for that fall's restart, unless a
+  beginning already lies between the fall's stamps, or one read late was
+  already given it: then it counts as a restart of its own. A run that did
+  begin there, its restart one the tallies hide, is not counted.
+- **A mark written late, with no fall.** A beginning read after its own
+  process's first stamp counts a restart a pair late, or one that never was, or
+  none where no stamp follows the time read.
+- **Two runs close together.** A run whose first mark reads within fifteen
+  seconds of the run before is read as that run.
+- **A mark more than fifteen seconds late,** on a run last seen running more
+  than fifteen seconds before the time it reads, reads as a run of its own. It
+  is dropped once a later mark reads within a second of the run it belongs to,
+  or more than fifteen seconds earlier than the late reading and within fifteen
+  seconds of that run. Until then, or with only marks themselves late after it,
+  it stands.
+
+**The extraction rows** are `worker_status`'s rows under the key the brain says
+is its own (`active`). They are thoughts, so `bench-live.ts`'s probes are among
+them. The line gives, first to last:
+
+- the rows pending or claimed, and the most there were;
+- the thoughts with no row under the key ("not yet pooled"). A capture is pooled
+  as it lands once the key is the brain's recorded one, so these are thoughts
+  from before that. A run pools them at its first pass, so they are work to do;
+- the rows failed.
+
+How the line ends:
+
+- **`ran dry at T`:** the first sample with nothing to do after the last with
+  some, where the last sample has none.
+- **`nothing to do throughout`:** a pool no sample saw with work.
+- **`never dry at the end`:** the last sample has work. Where a sample saw the
+  pool empty after its first work, the line says when (`nothing to do first at
+  T, then work again`): a probe's row after the backlog was done reads so, and
+  is no backlog left unfinished.
+- **`nothing left to do at T, but N more rows had failed …`:** said in place of
+  `ran dry`, which would read as every note extracted. N is the failed rows
+  under the key the arm ended on at the last sample, less that key's failed rows
+  at the arm's first sample; a key with no row then had none failed. Rows can
+  come and fail between two samples: a pool with nothing seen pending then reads
+  `nothing to do in any sample, but N more rows had failed …`.
+- **`no row under the key at the last sample`:** the key is gone or changed to
+  one with no row, so what was left to do is unread.
+
+An older key's leftover rows are said apart and keep no pool from running dry.
+A key that changed in the arm is said: first, last and most are then two pools'.
+
+`worker_status` names a pool only once it has a row. A brain whose extraction
+has never run has no row under its key, whatever was loaded on it: the line
+says so, with the thoughts the brain holds, which are that backlog. A sample
+with no row under the key, and one that kept no pools, are each passed over and
+counted. Samples taken before SMD-4382 kept the pending and claimed rows alone,
+under every `extract:` key, and are read as before:
+`extraction rows pending or claimed`.
 
 ### bench-querylog.ts
 
@@ -8328,7 +8493,7 @@ OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its 
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
 OB1_LIVE_SHARD=sweep ./with-postgres.sh bun test-live.ts    # [38s], the subject sweep under sleep, alone at first (SMD-3306 PR 6b-2)
-OB1_LIVE_SHARD=claims ./with-postgres.sh bun test-live.ts   # [10] from the rest, which was the longest cell by ~110 s, and [38b] from long (SMD-4366)
+OB1_LIVE_SHARD=claims ./with-postgres.sh bun test-live.ts   # [10] from the rest, which was the longest cell by ~110 s, and [38b] from long (SMD-4366); [38y] from sleep (SMD-4538)
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout they run side by side, each on a Postgres of its own, as db/ci-parity.sh runs them (SMD-3688): never two in one Postgres, since each drops the schema and roles are the cluster's
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database

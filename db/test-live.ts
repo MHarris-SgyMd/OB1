@@ -68,7 +68,7 @@ import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe } from "../server-portable/lineage.ts";
 import { METADATA_PROMPT_VERSION, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
 import { run as runRetag, type RetagOptions } from "./retag.ts";
-import { parseRetagKey, retagKey } from "./config.mjs";
+import { parseRetagKey, RETAG_RECIPE_KEY_SQL, retagKey } from "./config.mjs";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
 import { identityHash, readForgottenIdentities } from "./ingest-structure.ts";
@@ -177,6 +177,11 @@ if (!URL_) {
  * 44588332017) sweep was ~435 s of sections, the longest cell once the rest
  * was cut, so [26] runs in sleep, ~292 s without it: sleep ~364 s, sweep
  * ~363, the rest ~303.
+ * SMD-4495's [38y], the judge model's passes yielding to extraction (90 s on
+ * CI: the rule's cells by dry run and four runs under captures), went to sleep
+ * beside [38c] at first, which took sleep's cell to 547 s on main's run for
+ * 529f836e, the run's longest against sweep's 516. It runs in claims beside
+ * [38b], the other scheduler section, claims 378 s on that run (SMD-4538).
  * Each shard's count is published to the wiki's Test-counts page on a push to
  * main (SMD-3614). An assertion outside every section would count in each
  * shard; [doc] fails a run that makes one (trackSections).
@@ -186,7 +191,7 @@ const SHARDS: Readonly<Record<string, readonly string[]>> = {
   long: ["9", "9f", "10e", "17", "38r", "39"],
   extract: ["10f", "10h"],
   sweep: ["38s", "50", "51", "38p"],
-  claims: ["10", "38b"],
+  claims: ["10", "38b", "38y"],
 };
 /** Every shard's name: SHARDS' and the rest. */
 const SHARD_NAMES = [...Object.keys(SHARDS), "rest"];
@@ -24613,9 +24618,9 @@ if (want("29")) {
       const lineage0 = await lineage();
       const status0 = await cli("--status");
       const dry = await retag({ dryRun: true });
-      const backlog0 = "backlog: 6 thought(s) — 1 tagged with no tags row (before 061), 2 with the row marked stale, 1 with the row at other text, 2 whose capture fell back; 6 not yet in the pool, 0 re-tagged before and due again";
+      const backlog0 = "backlog: 6 thought(s) — 1 tagged with no tags row (before 061), 2 with the row marked stale, 1 with the row at other text, 0 with the row under another model or prompt version, 2 whose capture fell back; 6 not yet in the pool, 0 re-tagged before and due again";
       assert(status0.code === 0 && status0.out.includes(`job:    ${JOB}`) && status0.out.includes(backlog0) && status0.out.includes("status: 0 re-tagged, 0 failed, 0 in flight, 0 pending") && status0.out.includes("ob1_config.retag_key is not set")
-          && dry.code === 0 && dry.out.includes(`would: record ${JOB} in ob1_config.retag_key; add 6 thought(s) to the pool and put 0 back; send up to 6 thought(s) to stub-meta`) && dry.out.includes("Nothing was written.")
+          && dry.code === 0 && dry.out.includes(`would: record ${JOB} in ob1_config.retag_key; add 6 thought(s) to the pool and put 0 back; send up to 6 thought(s) to stub-meta`) && dry.out.includes(`— as a run recording ${JOB} finds it`) && dry.out.includes("Nothing was written.")
           && (await configured()) === undefined && (await claims()).length === 0 && (await lineage()) === lineage0 && bodies.length === 0,
         `bun db/retag.ts --status names the key and the backlog by kind, six, none pooled; --dry-run says what it would do; neither records the key, pools, moves a tags row or calls the model (${status0.code}/${dry.code}: ${line(status0.out, "backlog:")}; ${bodies.length} call(s))`);
 
@@ -24668,7 +24673,7 @@ if (want("29")) {
       const aFed = (await claims()).find((c) => c.id === A)?.status;
       await move(M, "[29] M, moved with no rebuild");
       const status2 = await cli("--status");
-      assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
+      assert(status1.code === 0 && status1.out.includes("status: 7 re-tagged, 1 failed, 0 in flight, 0 pending") && status1.out.includes("backlog: 1 thought(s) — 1 tagged with no tags row (before 061), 0 with the row marked stale, 0 with the row at other text, 0 with the row under another model or prompt version, 0 whose capture fell back; 0 not yet in the pool, 0 re-tagged before and due again")
           && status1.stderr.includes(`${R}  attempt 1  the egress policy refused it`) && fed.enqueued === 1 && fed.unqueued === 0 && fed.pools.includes(JOB) && aFed === "pending" && drainer(JOB) === "bun db/retag.ts --url <url>"
           && status2.out.includes("backlog: 3 thought(s) — 1 tagged with no tags row (before 061), 1 with the row marked stale, 1 with the row at other text") && status2.out.includes("0 not yet in the pool, 1 re-tagged before and due again")
           && status2.out.includes("status: 6 re-tagged, 1 failed, 0 in flight, 1 pending"),
@@ -24823,18 +24828,63 @@ if (want("29")) {
       assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
         `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
 
-      // --switch-key: a run under another key goes ahead and records it.
-      const OTHER = retagKey("stub-meta", METADATA_PROMPT_VERSION + 1);
-      const switched = await retag({ job: OTHER, switchKey: true, pausesMs: [10] });
+      // --switch-key (PR 3b): the key is the tags' target recipe, and every tags row made under another is behind it.
+      // A dry run under another model counts them (every row: none is under the new key yet); the switch, cut short
+      // by --limit 1, records the key, and a plain run under the new model finishes it; a third re-tags nothing (no
+      // loop). N, its metadata nulled by a raw writer, is behind by its row's recipe and refused as before, failed:
+      // the one row left under the old key. A capture tagged under the old recipe afterwards is behind the key too.
+      const OTHER = retagKey("stub-meta-2", METADATA_PROMPT_VERSION);
+      const envOther = { ...base, OB1_METADATA_MODEL: "stub-meta-2" };
+      SPECIAL.clear(); // the stub answers every thought now: the cases above left 413, 400, prose and partial answers set
+      const rowsUnder = async (key: string) => Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM derivations d WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND ${RETAG_RECIPE_KEY_SQL} = $1`, [key])) as { n: number }[])[0].n);
+      const allTagRows = async () => Number(((await sql`SELECT count(*)::int AS n FROM derivations WHERE artifact_kind = 'metadata' AND produced_by = 'metadata'`) as { n: number }[])[0].n);
+      const tagRows = await allTagRows();
+      // Behind the new key by recipe alone: every tags row at its text and unmarked, none being under the new key yet.
+      const recipeOnly = Number(((await sql`SELECT count(*)::int AS n FROM derivations d JOIN thoughts t ON t.id = d.artifact_id
+         WHERE d.artifact_kind = 'metadata' AND d.produced_by = 'metadata' AND d.stale_since IS NULL
+           AND d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))`) as { n: number }[])[0].n);
+      const dryOther = await retag({ dryRun: true }, envOther);
+      const dryOtherSwitch = await retag({ dryRun: true, switchKey: true }, envOther);
+      const dryJob = await retag({ dryRun: true, switchKey: true, job: retagKey("stub-meta-3", METADATA_PROMPT_VERSION) }, envOther);
+      const asOther = new RegExp(`recording it finds (\\d+) thought\\(s\\) behind ${OTHER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}, (\\d+) of them by their tags' recipe alone`).exec(dryOther.out);
+      const refusedOther = await retag({ pausesMs: [10] }, envOther);
+      const callsBefore = bodies.length;
+      const switchedOne = await retag({ switchKey: true, limit: 1, pausesMs: [10] }, envOther);
+      const afterOneSwitch = await rowsUnder(OTHER);
+      const finished = await retag({ pausesMs: [10] }, envOther);
+      const failedOther = (await sql`SELECT thought_id::text AS id FROM thought_work_claims WHERE work_type = ${OTHER} AND status = 'failed'`) as { id: string }[];
+      const converged = await rowsUnder(OTHER);
+      const rowsNow = await allTagRows();
+      const statusAfter = await retag({ status: true }, envOther);
+      const callsThen = bodies.length;
+      const again = await retag({ pausesMs: [10] }, envOther);
+      assert(tagRows > 2 && finished.code === 1 && failedOther.length === 1 && failedOther[0].id === N && dryOther.code === 0
+          && asOther !== null && Number(asOther[2]) === recipeOnly && recipeOnly > 0 && Number(asOther[1]) >= tagRows
+          && new RegExp(`backlog: ${asOther[1]} thought\\(s\\) — .*, ${recipeOnly} with the row under another model or prompt version, .* — as a run recording `).test(dryOther.out)
+          && dryOther.out.includes(`would: refuse this run without --switch-key; with it, record ${OTHER} in ob1_config.retag_key; add `)
+          && dryOtherSwitch.out.includes(`would: record ${OTHER} in ob1_config.retag_key; add `)
+          && dryJob.out.includes("would: refuse this run: --job retag:stub-meta-3@p") && !/would: record/.test(dryJob.out)
+          && refusedOther.code === 2 && refusedOther.err.includes(`pass --switch-key: it records ${OTHER} and re-tags what it finds behind it (${asOther[1]} thought(s) behind ${OTHER}, ${recipeOnly} of them`)
+          && (await configured()) === OTHER && switchedOne.code !== 2 && afterOneSwitch === 1 && converged === rowsNow - 1 && rowsNow >= tagRows && callsThen - callsBefore >= tagRows - 1
+          && /backlog: 1 thought\(s\)/.test(statusAfter.out) && again.code === 1 && /(^|\s)0 re-tagged \(/.test(again.out) && bodies.length === callsThen,
+        `a dry run under another model counts the backlog as recording its key finds it, exact (${asOther?.[1]} behind, ${recipeOnly} by recipe alone, as SQL counts it), and says the run is refused without --switch-key, or with a --job recipe it doesn't write (review passes 1 and 2); a plain run is refused naming them, --switch-key --limit 1 records the key and re-tags one, a plain run finishes the rest — every tags row under the new key but N's, refused as before, N alone in the backlog — and a third run calls nothing (${afterOneSwitch}/${converged}/${rowsNow}; ${line(finished.out, "re-tagged (")}; ${line(again.out, "re-tagged (")})`);
+      const late = await tagged("[29] late, tagged under the old recipe after the switch");
+      const statusLate = await retag({ status: true }, envOther);
+      const lateRun = await retag({ pausesMs: [10] }, envOther);
+      const lateRow = await tagsRow(late);
+      assert(/backlog: 2 thought\(s\) — .* 1 with the row under another model or prompt version, /.test(statusLate.out) && lateRun.code === 1 && /(^|\s)1 re-tagged \(/.test(lateRun.out) && lateRow?.recipe?.model === "stub-meta-2" && !lateRow.marked,
+        `…a capture tagged under the old recipe after the switch is behind the key, --status counting it by its recipe: a plain run re-tags it under the new model (${line(statusLate.out, "backlog:")}; ${line(lateRun.out, "re-tagged (")})`);
+      // A writing run under a --job recipe it does not write would leave every row behind its key: refused; read-only, shown.
       const statusOther = await retag({ status: true });
+      const mismatched = await retag({ job: retagKey("stub-meta-3", METADATA_PROMPT_VERSION), switchKey: true }, envOther);
       const badJob = await retag({ dryRun: true, job: "extract:x@p1" });
       const shownJob = await retag({ status: true, job: "retag:x@p7" });
-      assert(switched.code !== 2 && (await configured()) === OTHER && switched.out.includes(`ob1_config.retag_key = ${OTHER}`)
+      assert(mismatched.code === 2 && mismatched.err.includes(`names a recipe this run does not write: its tags carry ${OTHER}'s`) && (await configured()) === OTHER
           && statusOther.code === 0 && statusOther.out.includes(`ob1_config.retag_key is ${OTHER}; this run uses ${JOB}`)
           && badJob.code === 2 && /--job names a re-tag pool/.test(badJob.err) && shownJob.code === 0 && shownJob.out.includes("job:    retag:x@p7")
           && retagKey("qwen3:8b", 1) === "retag:qwen3:8b@p1" && JSON.stringify(parseRetagKey("retag:qwen3:8b@p1")) === '{"model":"qwen3:8b","promptVersion":1}'
           && parseRetagKey("retag:m@p01") === null && parseRetagKey("extract:m@p1") === null,
-        `--switch-key: a run under another key goes ahead and records it; --status under another recorded key says so, exit 0; --job of another shape refused, exit 2, and one of this shape used; the key builds and parses back, p01 and another prefix refused (${switched.code}: ${await configured()}; ${statusOther.code}; ${badJob.code})`);
+        `a writing run under a --job recipe it does not write is refused, exit 2, nothing recorded; --status under another recorded key says so, exit 0; --job of another shape refused, and one of this shape shown read-only; the key builds and parses back, p01 and another prefix refused (${mismatched.code}: ${line(mismatched.err, "--job")})`);
     } finally {
       stub.stop(true);
       await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'retag:%'`;
@@ -27082,8 +27132,8 @@ async function sleepScaffold(sql: SQL) {
   const MODEL = "stub-sleep";
   const EX = extractionKey(MODEL), CO = consolidateKey(MODEL);
   await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO})`;
-  /** Each model call, in order: an extraction, a judgement or the subject sweep's question ([38s]), and when it arrived. */
-  const modelCalls: { kind: "extract" | "judge" | "subject"; at: number }[] = [];
+  /** Each model call, in order: an extraction, a judgement or the subject sweep's question ([38s]), when it arrived and, for an extraction once answered, when ([38y]). */
+  const modelCalls: { kind: "extract" | "judge" | "subject"; at: number; end?: number }[] = [];
   /** Each embedding's input but the probe's, in order (SMD-2679 PR 4b: re-embed first). */
   const embedCalls: { input: string; at: number }[] = [];
   /** What the stub reads at each request, which a case sets and puts back, and the counters it bumps (judgesHeld, probes, embedProbes). */
@@ -27165,12 +27215,14 @@ async function sleepScaffold(sql: SQL) {
     hangs: 0,
     /** A probe the hang holds answered after this long instead, unless its client aborts it first: a model server of one slot ending its call in hand. */
     hungProbeMs: 0,
+    /** Models the stub serves besides the scaffold's own: a judge model of its own ([38y], SMD-4495). */
+    alsoServed: [] as string[],
   };
   const stub = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     async fetch(req) {
-      if (req.method === "GET") return Response.json({ object: "list", data: [{ id: MODEL }] });
+      if (req.method === "GET") return Response.json({ object: "list", data: [MODEL, ...sw.alsoServed].map((id) => ({ id })) });
       const body = (await req.json()) as { messages?: { role: string; content: string }[]; model?: string; input?: string };
       // Embeddings, apart from the chat switches below (SMD-2679 PR 4b: the scheduler runs re-embed): a vector on the
       // input's axis, unless a case says the embedding provider is down (503) or refuses the key (401).
@@ -27243,7 +27295,8 @@ async function sleepScaffold(sql: SQL) {
       }
       const judging = /<thought_a>/.test(prompt);
       if (sw.badRequest && !judging) return new Response(JSON.stringify({ error: { message: "response_format is not supported by this model" } }), { status: 400 });
-      modelCalls.push({ kind: judging ? "judge" : "extract", at: Date.now() });
+      const call: { kind: "judge" | "extract"; at: number; end?: number } = { kind: judging ? "judge" : "extract", at: Date.now() };
+      modelCalls.push(call);
       if (sw.slow) await Bun.sleep(sw.slow);
       if (!judging && sw.onExtract) {
         const first = sw.onExtract;
@@ -27274,6 +27327,7 @@ async function sleepScaffold(sql: SQL) {
           : { verdict: "unrelated", supersedes: "unknown", confidence: 0.9, reason: "different subjects" };
         return Response.json({ choices: [{ message: { content: JSON.stringify(answer) } }], model: body.model });
       }
+      call.end = Date.now();
       return Response.json({ choices: [{ message: { content: JSON.stringify({ entities: [{ name: "billing", type: "topic", confidence: 0.9 }], relationships: [] }) } }] });
     },
   });
@@ -27539,6 +27593,24 @@ if (want("38")) {
     const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`)[0].c);
     const sessionsBefore = await sessions();
     sw.slowExtract = 1500;
+    // Consolidation joins on one of two lines here, and the row takes either (SMD-4515). A thought's entities are
+    // written a moment before its claim is marked finished. A poll in that moment on the last thought reads no
+    // backlog left (SMD-4468, backlogCut: a thought with entities is extracted whatever its claim says) and a pool
+    // not drained, so the scheduler joins on SMD-4468's line where a poll a moment later reads the pool drained.
+    // Either way extraction is over. Measured: asking for the drained line alone the row failed three times, twice
+    // in about 11 runs of ci-parity and once in CI, the first judge call 1.5 s after the last extraction began each
+    // time; and it failed the one run made with each claim's finish held a second, at 1.7 s.
+    // Taking either line is safe only while a backlog note is the last extracted. The period's first pool takes the
+    // three notes in one statement, so their claims' order is a tie, and today's note is no backlog: were it last,
+    // consolidation would join beside it as the older two ended, by design ([38c]'s cases), and judge 25 ms into its
+    // extraction (measured, put last by hand). So at the first extraction call the older notes still to claim are
+    // dated after it.
+    // How many it dated: none would mean the claims were no longer pending at that call (a worker that takes them in
+    // one batch), the tie standing again with nothing to say so, so the row holds it (review pass 1).
+    let datedLast = -1;
+    sw.onExtract = async () => {
+      datedLast = (await sql`UPDATE thought_work_claims SET enqueued_at = clock_timestamp() WHERE work_type = ${EX} AND status = 'pending' AND thought_id IN (${older}::uuid, ${deploy}::uuid) RETURNING 1`).length;
+    };
     // Bounded: a period that never finds both pools drained would wait for ever.
     const acOnce = new AbortController();
     // With --dump-dir (SMD-3203): the period's consolidation pass writes every verdict there too.
@@ -27559,6 +27631,7 @@ if (want("38")) {
     }
     const once = onceRace === "hung" ? -1 : onceRace;
     sw.slowExtract = 0;
+    sw.onExtract = null;
     await pollUntil(async () => (await sessions()) === sessionsBefore, 3_000);
     const sessionsAfter = await sessions();
     const onceText = lines.join("\n");
@@ -27567,8 +27640,9 @@ if (want("38")) {
     const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
     assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
       `one period extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}${hungAt}`})`);
-    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText),
-      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it)`);
+    const joinedAt = Math.max(onceText.indexOf("extraction drained — consolidating beside it"), onceText.indexOf("extraction has done the thoughts captured before the period began — consolidating beside it"));
+    assert(firstJudge > lastExtract && joinedAt > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText) && datedLast >= 1,
+      `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it; consolidation joined on "${lines.find((l) => /consolidating beside it|consolidating first/.test(l))?.trim() ?? "no line"}"; ${datedLast} older note(s) dated after today's at the first call)`);
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
     assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
       `…writing nothing to thoughts.supersedes and no audit row — its own work cannot pause it — and, without --follow, no heartbeat (${supersedes} superseding, ${(await auditRows()) - auditBefore} audit row(s), heartbeat ${JSON.stringify(await beat())})`);
@@ -31136,6 +31210,173 @@ if (want("38c")) await (async () => {
       `…and after an extraction model's switch, thoughts carrying only the old key's entities are backlog: sixteen pooled again behind the inflow hold the join through 8 s of it, all sixteen still to extract, and once it ends they are extracted under the current key and every note is judged (joined during it ${joinedInFlowE}; ${leftE} of ${archive.length} still to extract at its end; ${retiredE} retired row(s) left; ${e.inflow.length} captured, all judged after ${e.allJudged}; exit ${e.code}${!joinedInFlowE && e.allJudged ? "" : lastLines()})`);
   } finally {
     await unpoolSubjects().catch(() => {});
+    await done();
+  }
+})();
+
+if (want("38y")) await (async () => {
+  console.log("\n[38y] db/sleep.ts: the judge model's passes yield to extraction where they share a model server's slot or load another model on it (SMD-4495, the maintainer's rule) — with a judge model of its own on a local model server, or extraction's background share one slot, consolidation and the subject sweep wait between calls while an extraction call is asked for or running, from consolidation's start to the period's end, a drain between captures ending nothing; a stretch of extraction's calls holds them --max-wait at most; with one model and slots to spare, the judge runs beside extraction as SMD-4468 made it");
+  const sql = new SQL({ url: URL_, max: 4 });
+  const { EX, CO, modelCalls, sw, env, capture, lines, sleepRun, bounded, done } = await sleepScaffold(sql);
+  const JUDGE = "stub-judge";
+  const CO2 = consolidateKey(JUDGE);
+  /** The brain emptied of this section's thoughts and claims, the subject sweep's pool and window too, between cases. */
+  const reset = async () => {
+    await sql`DELETE FROM thoughts`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type IN (${EX}, ${CO}, ${CO2})`;
+    await sql`DELETE FROM ob1_config WHERE key IN ('subject_pool_key', 'subject_pool_filled', ${JUDGE_WINDOW_KEY})`;
+    await sql`DELETE FROM thought_work_claims WHERE work_type LIKE 'subjects:%'`;
+  };
+  /** Of `ids`, those judged under `co`. */
+  const judgedOf = async (co: string, ids: string[]) => Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${co} AND status = 'succeeded' AND thought_id = ANY(${sql.array([...ids], "TEXT")}::uuid[])`)[0].c);
+  /**
+   * The judge model's calls from `from` on that arrived while an extraction call had been running 250 ms or more: each
+   * passed the gate with extraction's call in flight. A call admitted just before extraction's next began arrives within
+   * a few ms of it, inside the margin.
+   */
+  const beside = (from: number) => {
+    const ex = modelCalls.filter((c) => c.kind === "extract" && c.at >= from);
+    return modelCalls.filter((c) => c.kind !== "extract" && c.at >= from && ex.some((e) => c.at > e.at + 250 && c.at < (e.end ?? Infinity))).length;
+  };
+  const YIELD_START = /^ {2}yield: {2}/;
+  const YIELDING = /^ {2}consolidation and a model subject sweep now yield to extraction's calls, for the rest of the period$/;
+  const lastLines = () => `; its last lines: ${lines.slice(-14).map((l) => l.trim().slice(0, 160)).join(" | ")}`;
+  /**
+   * One --follow run (poll 250 ms, the yield's grace 200 ms, one worker a pass unless `o.workers`) on six older notes on
+   * axis 63, two to seven days old, each a neighbour of every capture today, under `runEnv`; `phase` runs while it goes
+   * on — writing captures every `everyMs` through `flow` — then each capture is waited to be judged under `co` (60 s)
+   * and the run stopped.
+   */
+  const withRun = async (runEnv: Record<string, string | undefined>, co: string, o: { subjects?: boolean; yieldCapMs?: number; workers?: number }, phase: (flow: (label: string, everyMs: number, forMs: number) => Promise<string[]>) => Promise<void>) => {
+    lines.length = 0;
+    await reset();
+    for (let i = 0; i < 6; i++) await capture(`An older note on the ledger, number ${i}.`, "sync-sleep", 2 + i, 63);
+    const written: string[] = [];
+    const flow = async (label: string, everyMs: number, forMs: number) => {
+      const mine: string[] = [];
+      const until = Date.now() + forMs;
+      for (let i = 0; Date.now() < until; i++) {
+        mine.push(await capture(`A capture on the ${label}, number ${i}.`, "sync-sleep", 0, 63));
+        await Bun.sleep(everyMs);
+      }
+      written.push(...mine);
+      return mine;
+    };
+    const ac = new AbortController();
+    const run = sleepRun({ follow: true, minStampEveryS: 1, pollMs: 250, workers: o.workers ?? 1, signal: ac.signal, env: runEnv, yieldGraceMs: 200, ...(o.yieldCapMs ? { yieldCapMs: o.yieldCapMs } : {}), ...(o.subjects ? { subjects: true } : {}) });
+    let allJudged = false, code = -9;
+    try {
+      await phase(flow);
+      allJudged = await pollUntil(async () => (await judgedOf(co, written)) === written.length, 60_000);
+    } finally {
+      ac.abort();
+      code = await bounded(run, ac);
+      sw.slowExtract = 0;
+      sw.slowJudge = 0;
+      sw.slowSubject = 0;
+    }
+    return { allJudged, code, written };
+  };
+  try {
+    // The rule, read at the start (a dry run says it): a judge model of its own on a local endpoint, or extraction's
+    // background share one slot, whether OB1_MODEL_SLOTS leaves it so or OB1_BACKGROUND_SLOTS' override for its model
+    // says so; not on a hosted endpoint, where nothing loads in turn (review pass 1), and not under `off`.
+    await reset();
+    const startOf = async (runEnv: Record<string, string | undefined>) => {
+      lines.length = 0;
+      await sleepRun({ dryRun: true, env: runEnv });
+      return lines.find((l) => YIELD_START.test(l)) ?? null;
+    };
+    const plain = { ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: undefined, OB1_CHAT_LOCAL: undefined };
+    sw.alsoServed = [JUDGE];
+    const cells = {
+      twoLocal: await startOf({ ...plain, OB1_JUDGE_MODEL: JUDGE }),
+      twoHosted: await startOf({ ...plain, OB1_JUDGE_MODEL: JUDGE, OB1_LLM_LOCAL: undefined }),
+      override: await startOf({ ...plain, OB1_BACKGROUND_SLOTS: "chat:stub-sleep=1" }),
+      off: await startOf({ ...plain, OB1_BACKGROUND_SLOTS: "off", OB1_MODEL_SLOTS: "1" }),
+      spare: await startOf({ ...plain }),
+    };
+    assert(cells.twoLocal?.includes(`the judge's model, ${JUDGE}, is not extraction's, stub-sleep, on one local model server`) === true && cells.twoHosted === null
+        && cells.override?.includes("extraction's background share of stub-sleep is one slot") === true && cells.off === null && cells.spare === null,
+      `the rule as the start says it: a judge model of its own on a local endpoint yields, on a hosted one not; extraction's share one slot by OB1_BACKGROUND_SLOTS' override for its model yields; under \`off\`, or one model with slots to spare, nothing (${JSON.stringify(cells)})`);
+
+    // A judge model of its own, the canary's shape (a 7B extracting, a 27B judging, on one Ollama): each turn between the
+    // two can load the other (stub runs: 141 loads in 300 s of captures, 18 of 74 extracted by its end). Four captures
+    // drained first, so consolidation joins and the subject sweep starts on the drain — then captures every 1.2 s for
+    // 10 s, extraction 500 ms a call: no judgement or subject question passes the gate while an extraction call runs,
+    // the drain having ended no yield, and both go on in the gaps.
+    sw.alsoServed = [JUDGE];
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    sw.slowSubject = 200;
+    let joinedA = false, judgedGapsA = 0, besideA = -1, yieldSaidA = false, startSaidA = false, askedA = 0;
+    const a = await withRun({ ...env, OB1_JUDGE_MODEL: JUDGE }, CO2, { subjects: true }, async (flow) => {
+      await flow("drain", 100, 400);
+      joinedA = await pollUntil(async () => lines.some((l) => /consolidating beside it/.test(l)) && lines.some((l) => /^ {2}the subject sweep starts beside consolidation/.test(l)), 30_000);
+      const from = Date.now();
+      await flow("ledger", 1200, 10_000);
+      startSaidA = lines.some((l) => YIELD_START.test(l) && l.includes(`the judge's model, ${JUDGE}, is not extraction's`));
+      yieldSaidA = lines.some((l) => YIELDING.test(l));
+      besideA = beside(from);
+      judgedGapsA = modelCalls.filter((c) => c.kind !== "extract" && c.at >= from).length;
+      askedA = modelCalls.filter((c) => c.kind === "subject" && c.at >= from).length;
+    });
+    assert(joinedA && startSaidA && yieldSaidA && besideA === 0 && judgedGapsA > 0 && askedA >= 5 && a.allJudged && a.code === 0,
+      `a judge model of its own: said at the start and as the yield first holds consolidation back, the subject sweep started on a drain, and from then to the period's end no judgement or subject question passes the gate while an extraction call runs, under captures every 1.2 s, both going on in its gaps (joined and swept ${joinedA}; start line ${startSaidA}, yield line ${yieldSaidA}; ${besideA} call(s) beside one, ${judgedGapsA} of the judge model's during the captures, ${askedA} of them subject questions (5 or more, so the sweep's own yield is tried); ${a.written.length} captured, all judged ${a.allJudged}; exit ${a.code}${joinedA && besideA === 0 && judgedGapsA > 0 ? "" : lastLines()})`);
+
+    // One model, extraction's background share one slot (OB1_MODEL_SLOTS=2, one left for live calls): each judge call
+    // takes extraction's turn. Captures every 1.2 s from before the run, so consolidation joins on the backlog alone.
+    sw.alsoServed = [];
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    let startSaidB = false, besideB = -1, judgedB = 0;
+    const b = await withRun({ ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: "2" }, CO, {}, async (flow) => {
+      const from = Date.now();
+      await flow("register", 1200, 12_000);
+      startSaidB = lines.some((l) => YIELD_START.test(l) && l.includes("extraction's background share of stub-sleep is one slot"));
+      besideB = beside(from);
+      judgedB = modelCalls.filter((c) => c.kind === "judge" && c.at >= from).length;
+    });
+    assert(startSaidB && besideB === 0 && judgedB > 0 && b.allJudged && b.code === 0,
+      `…one model with extraction's background share one slot (OB1_MODEL_SLOTS=2): said at the start, and no judgement passes the gate while an extraction call runs, judging in its gaps (start line ${startSaidB}; ${besideB} beside one, ${judgedB} judged during the captures; ${b.written.length} captured, all judged ${b.allJudged}; exit ${b.code}${startSaidB && besideB === 0 ? "" : lastLines()})`);
+
+    // One model and slots to spare (the defaults' three of four): no yield, the judge beside extraction (SMD-4468).
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    let besideC = -1, saidC = true;
+    const c = await withRun({ ...env, OB1_BACKGROUND_SLOTS: undefined, OB1_MODEL_SLOTS: undefined }, CO, {}, async (flow) => {
+      const from = Date.now();
+      await flow("journal", 1200, 12_000);
+      besideC = beside(from);
+      saidC = lines.some((l) => YIELD_START.test(l) || YIELDING.test(l));
+    });
+    assert(!saidC && besideC > 0 && c.allJudged && c.code === 0,
+      `…one model with slots to spare: no yield said, and the judge runs beside extraction's calls (said ${saidC}; ${besideC} judgement(s) beside one; ${c.written.length} captured, all judged ${c.allJudged}; exit ${c.code}${!saidC && besideC > 0 ? "" : lastLines()})`);
+
+    // Captures faster than extraction takes them, under a judge model of its own: two workers a pass at 500 ms a call
+    // take 4 a second against 5 captured, so extraction's calls never all end, no grace opens the gate, and the yield's
+    // cap (1.5 s here, --max-wait's 60 s shipped) is what lets judgements through, a turn of the grace (200 ms here) each
+    // cap, the gate closing again after (review pass 1: open from the first cap until the count reached 0, under two
+    // workers it stayed open for the rest of the period, the judge beside extraction throughout: 100 judgements in this
+    // window). Each worker fits two 150 ms calls in a 200 ms turn; eight a turn bounds it with room for a turn timer
+    // firing late under load (review pass 2).
+    sw.alsoServed = [JUDGE];
+    sw.slowExtract = 500;
+    sw.slowJudge = 150;
+    let judgedD = 0, joinedD = false, turnsD = 0;
+    const d = await withRun({ ...env, OB1_JUDGE_MODEL: JUDGE }, CO2, { yieldCapMs: 1500, workers: 2 }, async (flow) => {
+      const flowing = flow("archive", 200, 14_000);
+      joinedD = await pollUntil(async () => lines.some((l) => YIELDING.test(l)), 12_000);
+      const from = Date.now();
+      await flowing;
+      turnsD = Math.floor((Date.now() - from) / 1700) + 1;
+      judgedD = modelCalls.filter((c) => c.kind === "judge" && c.at >= from).length;
+    });
+    assert(joinedD && judgedD > 0 && judgedD <= 8 * (turnsD + 1) && d.allJudged && d.code === 0,
+      `…and captures faster than two extraction workers take them: their calls never all end, and the yield's cap lets judgements through a turn at a time, the gate closing again after each (yielding ${joinedD}; ${judgedD} judged during the captures after, at most ${8 * (turnsD + 1)} for ${turnsD} turn(s); ${d.written.length} captured, all judged ${d.allJudged}; exit ${d.code}${joinedD && judgedD > 0 && judgedD <= 8 * (turnsD + 1) ? "" : lastLines()})`);
+  } finally {
+    sw.alsoServed = [];
+    await reset().catch(() => {});
     await done();
   }
 })();

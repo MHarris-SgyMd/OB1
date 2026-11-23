@@ -115,6 +115,16 @@ function modelSection(heading: string, text: string, scanSecrets: ScanSecrets): 
   return `### ${heading}\n\n_Unverified model output: the runner did not write this and does not vouch for it._\n\n${fenced(shown)}`;
 }
 
+/**
+ * The sentence for a run whose review did not finish, or null (SMD-4490, SMD-4516). Such a run goes on to the gate
+ * (run.ts), so whatever a person reads of it says so: the PR body here, and the hand-back comment (live.ts). With no
+ * review session at all there is nothing to say: the run ended before its review.
+ */
+export function unreviewedLine(sessions: SessionCost[]): string | null {
+  const reviews = sessions.filter((s) => s.role === "review");
+  return reviews.length > 0 && !reviews.some((s) => s.ended === "result") ? "**The review session did not finish, so this branch was not reviewed by the runner.** No review findings were taken." : null;
+}
+
 /** The facts section and the diff stat — the runner's own computed output, no model text (the diff stat still fenced, its file names being the branch's). */
 function factsBlock(input: PrBodyInput): string {
   const parts: string[] = [];
@@ -144,8 +154,8 @@ function factsBlock(input: PrBodyInput): string {
   if (sess) parts.push(`### Sessions\n\n${sess}`);
   // A run goes on to the gate when its review did not finish (run.ts), so the body says so: no findings section then
   // means no review, not a review that found nothing (SMD-4490).
-  const reviews = input.sessions.filter((s) => s.role === "review");
-  if (reviews.length > 0 && !reviews.some((s) => s.ended === "result")) parts.push("**The review session did not finish, so this branch was not reviewed by the runner.** No review findings were taken.");
+  const unreviewed = unreviewedLine(input.sessions);
+  if (unreviewed !== null) parts.push(unreviewed);
   const stat = input.diffStat.trimEnd();
   if (stat !== "") parts.push(`### Changed files\n\n${fenced(cap(stat, DIFFSTAT_CAP))}`);
   return parts.join("\n\n");
