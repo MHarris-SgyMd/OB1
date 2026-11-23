@@ -24,7 +24,7 @@
  * pool"), and a thought tagged before 061 had no row at all. The backlog is
  * every thought
  *   - tagged (`type` or `topics`) with no tags row and no failure marker —
- *     preflight's "tagged before 061" count, the same predicate;
+ *     preflight's lineage row's "tags with no tag lineage", the same predicate;
  *   - whose tags row is marked (`stale_since`), or names a fingerprint other
  *     than the thought's text — the metadata share of preflight's `marked`
  *     and `stale` counts (preflight counts every kind's rows, and reads at
@@ -36,7 +36,7 @@
  *     worker's own gate fails it naming the rule — once the policy changes,
  *     --retry-failed revisits it.
  * A tags row under another recipe at the current text is current here: a
- * new model or prompt version is a new pool and a --switch (SMD-2298 PR 3).
+ * new model or prompt version is a new pool and a --switch (SMD-2298 PR 3b).
  *
  * Each claimed thought is read again first: one no longer in the backlog —
  * re-tagged meanwhile by another run, board-sync's re-tag of an issue or a
@@ -113,13 +113,14 @@
  * which skips a pooled one), and a thought re-tagged before and back in the
  * backlog since is put back (requeue_thought_work's reset, on a row still
  * `succeeded` when it is locked: review pass 1); a failed one waits for
- * --retry-failed, and a claimed one is its holder's. Not here (SMD-2298's
- * later PRs): preflight's retag rows (PR 3), the --switch for a prompt
- * version (PR 3), and a sleep pass and --follow on the shared follower
- * (PR 4). recipes/thought-enrichment's enrich-thoughts.mjs, which wrote its
- * own tag set through the SQL shim, is retired for this (decided 2026-11-15:
- * "not a second re-tag path"; SMD-3318 PR 3b): its summary, importance and
- * confidence fields are not the core's.
+ * --retry-failed, and a claimed one is its holder's. Preflight's
+ * `retag pass` row counts the pool and the backlog by the same predicate,
+ * db/config.mjs's RETAG_DUE_SQL (PR 3a). Not here (SMD-2298's later PRs):
+ * the --switch for a prompt version (PR 3b), and a sleep pass and --follow
+ * on the shared follower (PR 4). recipes/thought-enrichment's
+ * enrich-thoughts.mjs, which wrote its own tag set through the SQL shim, is
+ * retired for this (decided 2026-11-15: "not a second re-tag path"; SMD-3318
+ * PR 3b): its summary, importance and confidence fields are not the core's.
  *
  * ── Identity ────────────────────────────────────────────────────────────────
  * OB1_WORKER_KEY, a key MCP_ACCESS_KEYS holds, names the worker as every
@@ -141,7 +142,7 @@ import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, lease
 import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
 import { claimWorker, recordFailedAndStop, releaseFinished, thoughtFault, type FaultHost, type ReleaseHost } from "./claim-loop.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
-import { parseRetagKey, retagKey } from "./config.mjs";
+import { parseRetagKey, RETAG_BACKLOG_SQL, RETAG_DUE_SQL, RETAG_TAGS_ROW_SQL, retagKey } from "./config.mjs";
 
 /** Every argument accounted for (db/cli.ts): an unknown flag, or one given twice, is refused before anything is read (SMD-2015). */
 const FLAGS = {
@@ -371,17 +372,13 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   // ── The backlog ─────────────────────────────────────────────────────────────
 
   /**
-   * Whether thought `t`, beside its tags row `d` (LEFT JOINed: artifact_kind
-   * and produced_by `metadata`, one row by 061's unique key), is in the
-   * backlog: the header's four kinds. Preflight's predicates, so the counts
-   * agree with what it prints.
+   * Whether thought `t`, beside its tags row `d`, is in the backlog: the
+   * header's four kinds, db/config.mjs's RETAG_DUE_SQL over its
+   * RETAG_TAGS_ROW_SQL — the definition preflight's `retag pass` row counts by
+   * (SMD-2298 PR 3a).
    */
-  const fellBack = () => sql`(t.metadata->>'metadata_extraction_failed' IS NOT NULL)`;
-  const due = () => sql`(d.stale_since IS NOT NULL
-        OR (d.id IS NOT NULL AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)))
-        OR (d.id IS NULL AND COALESCE(t.metadata ? 'type' OR t.metadata ? 'topics', false) AND t.metadata->>'metadata_extraction_failed' IS NULL)
-        OR ${fellBack()})`;
-  const tagsRow = () => sql`LEFT JOIN derivations d ON d.artifact_kind = 'metadata' AND d.artifact_id = t.id AND d.produced_by = 'metadata'`;
+  const due = () => sql.unsafe(RETAG_DUE_SQL);
+  const tagsRow = () => sql.unsafe(RETAG_TAGS_ROW_SQL);
   /** The backlog's ids, for the pool's two statements. */
   const backlogIds = () => sql`SELECT t.id FROM thoughts t ${tagsRow()} WHERE ${due()}`;
 
@@ -393,16 +390,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
 
   /** The backlog by kind — the first that applies, in the order the header lists them from the row's side — and what the pool step would do with it. */
   async function backlog(): Promise<Backlog> {
-    const [b] = (await sql`
-      WITH b AS (
-        SELECT t.id, CASE WHEN d.stale_since IS NOT NULL THEN 'marked'
-                          WHEN d.id IS NOT NULL AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) THEN 'stale'
-                          WHEN ${fellBack()} THEN 'fallback' ELSE 'missing' END AS why
-          FROM thoughts t ${tagsRow()} WHERE ${due()})
-      SELECT count(*) FILTER (WHERE why = 'missing')::int AS missing, count(*) FILTER (WHERE why = 'marked')::int AS marked,
-             count(*) FILTER (WHERE why = 'stale')::int AS stale, count(*) FILTER (WHERE why = 'fallback')::int AS fallback,
-             count(*) FILTER (WHERE c.thought_id IS NULL)::int AS unpooled, count(*) FILTER (WHERE c.status = 'succeeded')::int AS due
-        FROM b LEFT JOIN thought_work_claims c ON c.thought_id = b.id AND c.work_type = ${JOB}`) as Backlog[];
+    const [b] = (await sql.unsafe(RETAG_BACKLOG_SQL, [JOB])) as Backlog[];
     return { missing: Number(b.missing), marked: Number(b.marked), stale: Number(b.stale), fallback: Number(b.fallback), unpooled: Number(b.unpooled), due: Number(b.due) };
   }
 

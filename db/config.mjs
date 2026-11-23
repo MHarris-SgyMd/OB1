@@ -1274,6 +1274,46 @@ export function parseRetagKey(key) {
 }
 
 /**
+ * The re-tag backlog (SMD-2298), defined once: db/retag.ts pools by it and
+ * preflight's `retag pass` row counts by it, so the two cannot disagree on
+ * what is behind its tags (PR 3a: the predicate had lived in the worker
+ * alone). Plain SQL over a thought `t` and its tags row `d`, unqualified as
+ * the pass rows' reads are.
+ *
+ * RETAG_TAGS_ROW_SQL joins the row: artifact_kind and produced_by `metadata`,
+ * one row by 061's unique key. RETAG_DUE_SQL is the backlog: the row marked
+ * (063's stale_since), or at a fingerprint other than the thought's text;
+ * tagged (`type` or `topics`) with no row and no failure marker, preflight's
+ * lineage row's "tags with no tag lineage"; or a capture that fell back
+ * (metadata_extraction_failed set, the egress refusal's marker included).
+ */
+export const RETAG_TAGS_ROW_SQL =
+  "LEFT JOIN derivations d ON d.artifact_kind = 'metadata' AND d.artifact_id = t.id AND d.produced_by = 'metadata'";
+export const RETAG_DUE_SQL =
+  "(d.stale_since IS NOT NULL" +
+  " OR (d.id IS NOT NULL AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)))" +
+  " OR (d.id IS NULL AND COALESCE(t.metadata ? 'type' OR t.metadata ? 'topics', false) AND t.metadata->>'metadata_extraction_failed' IS NULL)" +
+  " OR t.metadata->>'metadata_extraction_failed' IS NOT NULL)";
+
+/**
+ * The backlog counted for the pool keyed $1: by kind, the first that applies,
+ * the row's side first (marked, stale, fallback, missing), and against the
+ * key's claim rows — `unpooled` with none under it, `due` re-tagged once
+ * (succeeded) and behind its text again, which a run puts back. One row; run
+ * with `unsafe(RETAG_BACKLOG_SQL, [key])`.
+ */
+export const RETAG_BACKLOG_SQL =
+  "WITH b AS (" +
+  " SELECT t.id, CASE WHEN d.stale_since IS NOT NULL THEN 'marked'" +
+  " WHEN d.id IS NOT NULL AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) THEN 'stale'" +
+  " WHEN t.metadata->>'metadata_extraction_failed' IS NOT NULL THEN 'fallback' ELSE 'missing' END AS why" +
+  ` FROM thoughts t ${RETAG_TAGS_ROW_SQL} WHERE ${RETAG_DUE_SQL})` +
+  " SELECT count(*) FILTER (WHERE why = 'missing')::int AS missing, count(*) FILTER (WHERE why = 'marked')::int AS marked," +
+  " count(*) FILTER (WHERE why = 'stale')::int AS stale, count(*) FILTER (WHERE why = 'fallback')::int AS fallback," +
+  " count(*) FILTER (WHERE c.thought_id IS NULL)::int AS unpooled, count(*) FILTER (WHERE c.status = 'succeeded')::int AS due" +
+  " FROM b LEFT JOIN thought_work_claims c ON c.thought_id = b.id AND c.work_type = $1";
+
+/**
  * The corpus by the model its vectors carry (migration 021): one row per
  * label, NULL for unknown, vectorless rows left out — what preflight's
  * `vector models` check and reembed.ts's corpus line both read. Plain SQL with
