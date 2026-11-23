@@ -214,20 +214,23 @@ SMD-4493. Measured and decided on 2026-11-23, in that ticket's first PR, which c
 
 1. **A vanished client is accepted,** as a frozen one is: its stream ends when whatever faces it gives up, a quarter of an hour as measured. This was first decided otherwise, and built: the forwarder's kernel at 8 retransmissions, which ended a vanished client's stream in 1 min 55 s where that client was a container on the forwarder's network. The review of that PR found no client these documents describe that the forwarder's kernel faces, and the maintainer took it back the same day.
 2. **A frozen client is accepted.** Its place is kept until it thaws, is killed, or the server restarts: at most 32 for each caller's name, and the server's 256 across names. The sign is a caller's count on keyed `/health` that does not fall, and until decision 4 is built the lever is restarting `mcp`, which ends every stream.
-3. **A revoked key's streams are ended.** The server asks again, every few minutes, whether each caller that holds streams still stands, and ends the streams of one that does not. Not built: this ticket's second PR. To settle in its build:
-   - what the server keeps to ask with, a held stream keeping nothing of its request;
-   - what counts as not standing: revoked in the registry, its line gone from the key list, a key rotated under its name;
-   - a token caller, whose token lapses in minutes by design: the paragraph this replaces accepted an expired token's stream, and no decision says otherwise yet;
-   - how often, and what no answer means (the REST core away at a key edit, the registry busy);
-   - how one caller's streams are ended and the rest left, the SDK's one way closing all;
-   - what such an end is recorded as.
-4. **A lever short of a restart:** an operator's action that ends one caller's streams, each with its closing frame. Not built: this ticket's third PR. To settle in its build:
-   - where it lives, the MCP server holding the streams and no key list, and who may use it;
-   - how a caller is named, a line's `agent` being its name's first 64 characters;
-   - whether that caller may ask again at once;
-   - that it ends the caller's live streams with the dead ones, each a reopen for its client.
+3. **A revoked key's streams are ended.** Not built: this ticket's second PR. As it is to be built:
+   - **What a stream keeps:** its caller's name, and the digest the REST core knows that caller by, which is no secret: a key's SHA-256, as `MCP_ACCESS_KEYS` holds it, or for a token a digest of its issuer and subject, and of its client where its name has one. `whoami` is to give it. Never the key or the token: a held stream keeps no credential.
+   - **How it asks:** one operation of the REST core, new, asked under this server's forwarder key with the digests of the callers that hold streams. It says of each that it stands, is revoked, or is not known. Every 60 seconds, and only while a stream is held.
+   - **Not standing** is revoked in the registry, or a digest the REST core no longer knows: its line gone from the key list, or its key rotated. A changed scope ends nothing.
+   - **No answer ends nothing.** The REST core away, its registry busy, the forwarder key refused: the streams are kept, the next pass asks again, and the outage is logged once. An upgrade replaces the REST core first, and would otherwise cost every live client a reopen.
+   - **A token caller's stream is not ended when its token lapses.** A token lives 10 minutes, which would be six ends an hour, and the client's documentation says it waits about six hours after five reopens in one. Its stream is ended when its subject is revoked in the registry, by the same ask. A sign-out at the authorization server alone ends none: accepted.
+   - **How one caller's streams are ended:** each is cancelled, with no closing frame. The SDK writes its closing frame only as it closes every stream at once; one stream ends by its request's signal or its body's cancel, which its client reads as a drop. That client asks again and is refused as revoked.
+   - **Recorded** as an end of a kind of its own, `revoked`.
+   - To measure in its build: what the real client does with such an end, and with the refusal that follows it.
+4. **A lever short of a restart:** an operator's action that ends one caller's streams. Not built: this ticket's third PR. As it is to be built:
+   - **Where:** an operation of the REST core, the brain's canonical surface; the MCP server gets no door of its own. The order reaches the MCP server by decision 3's ask, so within 60 seconds.
+   - **Who:** the operator's key alone, with a reason, as a claim is released by force. The order is a row in a table of its own, so it outlives a restart of the REST core and leaves a record.
+   - **What it ends:** that caller's streams opened before the order, the live with the dead, each a reopen for its client. By decision 3's cancel, so with no closing frame. The caller may ask again at once: to keep a caller out, its key is revoked.
+   - **How a caller is named:** by its whole name, as keyed `/health` says it under `listen`. A line's `agent` is that name's first 64 characters.
+   - **Recorded** as an end of a kind of its own, named in its build.
 
-Not taken: a shorter timeout anywhere in the stack (decision 1); ending every stream at a set age, which costs each live client a reopen for the frozen few (and is under "Considered and not taken" for its own reasons); and closing a caller's oldest stream when it asks at its bound, which a key with more than 32 live sessions would turn into each reopening closing another live stream.
+Not taken: a shorter timeout anywhere in the stack (decision 1); ending every stream at a set age, which costs each live client a reopen for the frozen few (and is under "Considered and not taken" for its own reasons); and closing a caller's oldest stream when it asks at its bound, which a key with more than 32 live sessions would turn into each reopening closing another live stream. Nor, for decision 3: asking `whoami` again with a stream's own key, which keeps a secret for as long as the stream is held and can ask nothing for a token caller once its token has lapsed; and ending a token caller's stream at its token's lapse, which the client's five reopens an hour forbid.
 
 ## Considered and not taken
 
