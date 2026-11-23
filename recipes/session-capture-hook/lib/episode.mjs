@@ -598,19 +598,19 @@ export function provenanceOf(s) {
  * assistant itself wrote. `{ text }`, empty when the episode has no assistant
  * text; or `{ withheld }`, why there is none to send.
  *
- * Scanned and blanked whole before the clip, as the summary's sources are
- * (SMD-3656): a clip through a secret's prefix (`w|c_` and 64 hex, `sk-a|nt-…`)
- * left a body no rule matched, and modelSummary's scan of the clipped excerpt
- * passed it to the model. A multi-line key block is withheld whole, as the
- * summary refuses one, and so is any secret under `refuse`, as the derived
- * summary's episode would be.
+ * Scanned whole before the clip (SMD-3656): a clip through a secret's prefix
+ * (`w|c_` and 64 hex, `sk-a|nt-…`) left a body no rule matched, and
+ * modelSummary's scan of the clipped excerpt passed it to the model. A hit
+ * anywhere in the messages withholds them, as modelSummary's scan always did:
+ * they are not blanked and sent, since a blanking's residue (a quoted value's
+ * second line, a value after a second keyword) would reach the model where none
+ * did before (review pass 1, secrets adversary).
  */
-export function assistantExcerpt(ep, onSecret = "redact") {
+export function assistantExcerpt(ep) {
   const joined = (ep.assistant ?? []).map((t) => String(t).trim()).filter(Boolean).join("\n\n----\n\n");
-  const r = redactSecrets(joined);
-  if (r.blocks.length) return { withheld: `a multi-line key block (${r.blocks[0].reasons.join(", ")}) in the assistant messages` };
-  if (onSecret === "refuse" && r.spans.length) return { withheld: `${r.spans[0].reasons.join(", ")} in the assistant messages, under OB1_CAPTURE_ON_SECRET=refuse` };
-  return { text: r.text.length > LIMITS.modelInputChars ? r.text.slice(-LIMITS.modelInputChars) : r.text };
+  const hit = scanForSecrets(joined)[0];
+  if (hit) return { withheld: `${hit.reason} at char ${hit.at} in the assistant messages` };
+  return { text: joined.length > LIMITS.modelInputChars ? joined.slice(-LIMITS.modelInputChars) : joined };
 }
 
 /**

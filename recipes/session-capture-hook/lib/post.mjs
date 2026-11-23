@@ -208,10 +208,10 @@ export function prepare(hook, opts = {}) {
     // excerpt at rest unread (review pass 2). The fingerprint stays the DERIVED
     // text's, so an episode is asked of the model once — a re-end with the same
     // derived summary is skipped, not re-modelled.
-    // The excerpt is blanked whole before its clip (SMD-3656); one withheld — a key block, or a secret under refuse —
-    // leaves the payload without it, and the derived summary is sent, as modelSummary sends it for a payload with none.
+    // The excerpt is scanned whole before its clip (SMD-3656); one withheld, a secret anywhere in the messages, leaves
+    // the payload without it, and the derived summary is sent, as modelSummary sends it for a payload with none.
     if (opts.summary === "model" && !eventSpec(payload.event)?.checkpoint) {
-      const excerpt = assistantExcerpt(ep, onSecret);
+      const excerpt = assistantExcerpt(ep);
       if (excerpt.withheld) log(`model summary withheld for ${chain}: ${excerpt.withheld} — nothing will be sent to the model, derived summary sent`);
       else payload.assistant = excerpt.text;
     }
