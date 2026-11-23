@@ -245,6 +245,12 @@ export const RETAG_KEY_PREFIX: "retag:";
 export function retagKey(model: string, promptVersion: number): string;
 /** `retag:<model>@p<version>` → the model and prompt version it names; null for any other shape. */
 export function parseRetagKey(key: string): { model: string; promptVersion: number } | null;
+/** The LEFT JOIN of thought `t`'s tags row `d` (artifact_kind and produced_by `metadata`). */
+export const RETAG_TAGS_ROW_SQL: string;
+/** Whether thought `t`, beside its tags row `d`, is in the re-tag backlog: db/retag.ts's pool and preflight's count. */
+export const RETAG_DUE_SQL: string;
+/** The backlog by kind (missing, marked, stale, fallback) and against key $1's claim rows (unpooled, due): one row. */
+export const RETAG_BACKLOG_SQL: string;
 /** `SELECT embedding_model AS model, count(*) AS c` over the rows with a vector, grouped (021). */
 export const CORPUS_BY_MODEL_SQL: string;
 /** Those rows read against one model: at it, unlabelled, and the other models with counts. */
