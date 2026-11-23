@@ -26783,9 +26783,9 @@ if (want("38")) {
     // written a moment before its claim is marked finished. A poll in that moment on the last thought reads no
     // backlog left (SMD-4468, backlogCut: a thought with entities is extracted whatever its claim says) and a pool
     // not drained, so the scheduler joins on SMD-4468's line where a poll a moment later reads the pool drained.
-    // Either way extraction is over: measured, the row failed 3 runs of about 12 under ci-parity's load asking for
-    // the drained line alone, the first judge call 1.5 s after the last extraction began each time, and failed
-    // every time with a claim's finish held a second.
+    // Either way extraction is over. Measured: asking for the drained line alone the row failed three times, twice
+    // in about 11 runs of ci-parity and once in CI, the first judge call 1.5 s after the last extraction began each
+    // time; and it failed the one run made with each claim's finish held a second, at 1.7 s.
     // That holds only while a backlog note is the last extracted. The period's first pool takes the three notes in
     // one statement, so their claims' order is a tie, and today's note is no backlog: were it last, consolidation
     // would join beside it as the older two ended, by design ([38c]'s cases), and judge 25 ms into its extraction
