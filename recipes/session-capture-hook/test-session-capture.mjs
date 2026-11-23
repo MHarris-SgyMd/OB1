@@ -1328,6 +1328,32 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const bsAgain = scanSummary(bsDry.ep, bsDry.text);
   assert(bsDry.redactions.map((r) => r.in).join() === "prompt 1,the text,the text" && /https:\/\/u:\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(bsDry.text) && !/3f9a3f9a/.test(bsDry.text) && bsAgain.length === 1 && /^64-hex token .* in prompt 1$/.test(bsAgain[0].reason),
     `…the source round took the password, the text round the digest the un-URL'd path then showed (title and ask); the prompt, read whole and unclipped, still carries it, and that is the hit (${bsDry.redactions.map((r) => r.in).join()})`);
+
+  // SMD-4542: three shapes of password the rule let by, each blanked in a prompt and in the outcome, and found nowhere
+  // in the payload or the dry run: a second keyword taken as the value, a getter's default, a quoted value whose first
+  // word is short. A bare reference and unquoted prose stay as they were.
+  const pwShapes = [
+    ["the db line reads password: password = Tr0ub4dor3x now", "Tr0ub4dor3x"],
+    ['I changed it to password = os.environ.get("DB_PASSWORD", "Kp7mWq2zR9") so it falls back locally', "Kp7mWq2zR9"],
+    ["PASSWORD = os.getenv('DB_PASS', 'Zx8vBn3mQw') for the local run", "Zx8vBn3mQw"],
+    ['set password="Kp7m Wq2z R9x" in the vault', "Wq2z R9x"],
+  ];
+  const pwBlanked = pwShapes.map(([text, secret]) => {
+    const inPrompt = redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]);
+    const inOutcome = redactEpisode(segment([{ t: "prompt", text: "tidy the vault notes" }, { t: "outcome", text }]).episodes[0]);
+    return { secret, prompt: !inPrompt.text.includes(secret) && /\[redacted:password assignment/.test(inPrompt.text), outcome: !inOutcome.text.includes(secret) && /\[redacted:password assignment/.test(inOutcome.text) };
+  });
+  const pwKept = ["password = os.environ['DB_PASSWORD'] here", "const password = process.env.DB_PASSWORD;", 'the password: abc then "x" later'].map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text.includes(text));
+  assert(pwBlanked.every((b) => b.prompt && b.outcome) && pwKept.every(Boolean),
+    `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; a bare reference and unquoted prose are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
+  writeFileSync(join(TMP, "pw-shapes.jsonl"), [user(pwShapes[0][0], { origin: { kind: "human" } }), user(pwShapes[1][0], { origin: { kind: "human" } }), user(pwShapes[3][0], { origin: { kind: "human" } }), assistant([{ type: "text", text: pwShapes[2][0] }])].join("\n"));
+  const shapePrep = prepare({ ...base, session_id: "s-pw-shapes", transcript_path: join(TMP, "pw-shapes.jsonl") });
+  const shapePayload = shapePrep.payloadPath ? readFileSync(shapePrep.payloadPath, "utf8") : "";
+  const shapeDry = await spawnScript(["--dry-run", join(TMP, "pw-shapes.jsonl")]);
+  const shapeLeft = pwShapes.map(([, secret]) => secret).filter((x) => shapePayload.includes(x) || shapeDry.out.includes(x) || shapeDry.err.includes(x));
+  assert(shapePrep.code === 0 && shapePayload && shapeDry.code === 0 && shapeLeft.length === 0,
+    `…and none of the four passwords is in the payload written or the dry run's output (SMD-4542) (${shapePrep.code} ${shapeDry.code} ${JSON.stringify(shapeLeft)})`);
+  if (shapePrep.payloadPath) unlinkSync(shapePrep.payloadPath);
 }
 
 // ── [6] Posting ──────────────────────────────────────────────────────────────
