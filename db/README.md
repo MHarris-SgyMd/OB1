@@ -6424,9 +6424,10 @@ bun retag.ts --url … --switch-key       # a model or prompt version other than
 
 The tags' re-run path (SMD-2298), the last of the lineage kinds to get one. The
 backlog is every thought tagged (`type` or `topics`) with no tags row and no
-failure marker — preflight's "tagged before 061" — every one whose tags row
-(`derivations`, kind `metadata`) is marked (`stale_since`) or names another
-fingerprint, and every one whose capture fell back
+failure marker — preflight's lineage row's "tags with no tag lineage" — every
+one whose tags row (`derivations`, kind `metadata`) is marked (`stale_since`),
+names another fingerprint, or was made under a recipe other than the recorded
+key's (PR 3b), and every one whose capture fell back
 (`metadata_extraction_failed` set, the egress refusal's marker included: nothing
 else re-tags a thought the policy kept from the model at capture, so the
 worker's own gate fails it naming the rule while the policy refuses it, and
@@ -6451,14 +6452,21 @@ in a row, none answered between, is the request's shape and stops the run,
 exit 2), as is a thought whose metadata is null or no JSON object, before any
 call; a tag key the row holds and the answer leaves out is cleared (a list to
 `[]`, the type keys to null); a provider error is read by `claim-loop.ts`'s rule; an
-edit meanwhile (`STALE_READ`) puts the thought back in the pool. A run under a
-key other than the recorded one needs `--switch-key`; `--status` and
+edit meanwhile (`STALE_READ`) puts the thought back in the pool. The recorded
+key is the tags' target recipe (PR 3b, every run, as re-embed's model is): a
+tags row made under another model or prompt version is behind it, so a first
+run, or a `--switch-key` to a new model or prompt version, re-tags the corpus
+under its key, and a switch cut short finishes with a plain run. A run under a
+key other than the recorded one needs `--switch-key`, and `--status`,
+`--dry-run` and the refusal count the backlog as recording it finds it; a
+writing run's `--job` must name the recipe it writes. `--status` and
 `--dry-run` write nothing. `rebuild_derived` requeues a tags row it marks
 under the recorded key since migration 150 (PR 2). Preflight's `retag pass`
 row counts each `retag:` key's pool by the unfinished-pass rule, and the
 backlog by the worker's own predicate (`db/config.mjs`'s `RETAG_DUE_SQL`, PR
-3a). Not yet: the prompt version's `--switch` (PR 3b), a sleep pass and
-`--follow` (PR 4). test-live [29] drives it against a stub chat endpoint.
+3a), and says where this server tags captures under another key than the
+recorded one (PR 3b). Not yet: a sleep pass and `--follow` (PR 4). test-live
+[29] drives it against a stub chat endpoint.
 
 ## Extensions
 
