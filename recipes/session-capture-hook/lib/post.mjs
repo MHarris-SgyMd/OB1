@@ -2,7 +2,7 @@
  * lib/post.mjs — a capture's two halves (SMD-4338): the foreground prepares a
  * payload per episode and queues it; the detached child posts the queue in
  * order, each payload superseding its episode's last capture, and keeps or
- * gives up what does not land. Also the brain's verdict on a capture, the
+ * gives up what does not land, by the brain's verdict (lib/rpc.mjs). Also the
  * queue's ordering between runs, and --check's look at one brain.
  */
 
@@ -13,7 +13,7 @@ import { spawn } from "node:child_process";
 import { UUID, oneLine, sha256, shownUrl } from "./util.mjs";
 import { DEAD_DIR, INFLIGHT_DIR, LOG_PATH, PENDING_DIR, PENDING_MAX_AGE_MS, SELF, STATE_DIR, claim, ensureDirs, isAlive, lastAttemptMs, listPayloads, log, moveTo, pruneDead, readState, release, sessionPayloads, statePath, sweepInflight, writeJson, writeState } from "./state.mjs";
 import { countRedactions, describeRedactions } from "./secrets.mjs";
-import { CaptureError, REFUSAL_RE, SDK_ERROR_RE, rpc, textOfResult } from "./rpc.mjs";
+import { CaptureError, providerMends, rpc, textOfResult, verdictOf } from "./rpc.mjs";
 import { urlSource } from "./config.mjs";
 import { HOOK_EVENTS, HOOK_VERSION, VERSION_RE, checkpointOf, eventSpec } from "./hook.mjs";
 import { assistantExcerpt, chainOf, cleanEpisode, distinctPrompts, episodeChain, gateFindings, headerTickets, provenanceOf } from "./episode.mjs";
@@ -24,59 +24,6 @@ import { modelStatusLine, modelSummary } from "./model.mjs";
 const CAPTURE_SURFACE = new Set(["capture_thought", "set_priority", "clear_priority", "open_item", "update_item", "set_item_status", "propose_item_close", "decide_item_close"]);
 
 // ── Posting over MCP ─────────────────────────────────────────────────────────
-
-/**
- * Whether a refusal is the brain's embedding provider refusing the call (SMD-2892): EMBEDDING_PROVIDER_ERROR, any
- * status. Its key, its model, its address, a gateway's answer, or a request it refuses — a 400 included, which a
- * hosted provider answers to every call for a setting it will not take (the maintainer's call, 2026-11-12: kept, as
- * before the code, rather than lose every summary to a misconfigured brain). Such a payload is kept, as a transient
- * is, until the mend lands it or the week is up.
- */
-export function providerMends(result) {
-  return result?.structuredContent?.code === "EMBEDDING_PROVIDER_ERROR";
-}
-
-/**
- * The server's machine-readable verdict on a result (SMD-1978), read from the
- * MCP result's `structuredContent` — `{ code, retryable, positions? }` — and,
- * for a server from before that field, derived from the prose rules unchanged.
- * `retryable` is the transient/final split (a kept payload vs a dead one);
- * `mend` names a pointer a retry should drop to mend the capture; `positions`
- * the derived_from indices to drop (absent for a key that may not know a source
- * exists — the existence-oracle rule); `on` marks a pointer the server could not
- * judge, which postPending counts. The hook keys on this, not on English.
- */
-export function verdictOf(result, text) {
-  const sc = result?.structuredContent;
-  if (sc && typeof sc.code === "string") {
-    // Valid indices only: a non-array, or a float, string or NEGATIVE element
-    // from a non-conforming server, is dropped — a negative would otherwise pass
-    // the retry loop's upper bound and drop nothing while burning a retry (review
-    // pass 2). An empty result falls to the drop-all salvage, as a capture key's
-    // position-less refusal does.
-    const positions = Array.isArray(sc.positions) ? sc.positions.filter((n) => Number.isInteger(n) && n >= 0) : [];
-    // The shape refusals took a code in SMD-2283 (before it they were prose the
-    // rules below read): each mends the pointer its prose named, so the hook
-    // drops and retries exactly what it did before.
-    const mend = (sc.code === "DERIVED_FROM_MISSING" || sc.code === "REFUSED_DERIVED_FROM_SHAPE") ? "derived"
-      : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP" || sc.code === "REFUSED_SUPERSEDES_SHAPE") ? "supersedes"
-      : sc.code === "REFUSED_METADATA_SHAPE" ? "metadata"
-        : (sc.retryable !== true && sc.code !== "EMBEDDING_PROVIDER_ERROR" && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2), and never on EMBEDDING_PROVIDER_ERROR, whose provider's words may say metadata (SMD-2892)
-          : null;
-    return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };
-  }
-  // A server from before SMD-1978: the prose rules, unchanged. A "Refused:" is
-  // final and may be mended by dropping the pointer it names; an "Error:" (the
-  // store away, a pointer it could not judge) is a transient the payload keeps.
-  const isRefused = REFUSAL_RE.test(text);
-  const refused = isRefused || SDK_ERROR_RE.test(text);
-  const mend = isRefused ? (/derived_from/.test(text) ? "derived" : /supersedes/.test(text) ? "supersedes" : /metadata/.test(text) ? "metadata" : null) : null;
-  return {
-    code: null, retryable: !refused, mend,
-    positions: [...text.matchAll(/derived_from\[(\d+)\]/g)].map((m) => Number(m[1])),
-    on: /this key's `supersedes` could not be (?:checked|attributed)/.test(text) ? "supersedes" : undefined,
-  };
-}
 
 /**
  * capture_thought over MCP. Returns { id, note, sent } on success. A refusal of a
@@ -179,6 +126,7 @@ export async function postCapture(cfg, payload) {
 /** How many payloads a run posts beside its own — the queue's five (SMD-1298); the run's own, one per episode, all post (SMD-2013's second review pass: the oldest of more than five waited for a run that might never come). */
 export const RUN_MAX = 5;
 
+let payloadSeq = 0;
 /**
  * The foreground: read the transcript, decide, summarise, scan, hand off.
  * Returns { code, message, payloadPaths, payloadPath?, payload? } — the caller
@@ -188,7 +136,6 @@ export const RUN_MAX = 5;
  * whose summary carries a secret has it blanked (`opts.onSecret` `redact`, the
  * default) or is refused alone (`refuse`) — the others still post (SMD-2127).
  */
-let payloadSeq = 0;
 export function prepare(hook, opts = {}) {
   const event = String(hook.hook_event_name ?? "");
   // An event this hook is not for — a command pasted under SubagentStop or

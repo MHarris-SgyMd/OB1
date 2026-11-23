@@ -1,8 +1,10 @@
 /**
  * lib/rpc.mjs — the session hook's MCP client (SMD-4338): one JSON-RPC call
  * over Streamable HTTP with its timeout, the answer parsed from JSON or SSE,
- * a refusal and the SDK's errors by their words, and a tool's result as text.
- * The capture, the write fan-out and the claims renewal all call through it.
+ * a refusal and the SDK's errors by their words, a tool's result as text, and
+ * the brain's verdict on a write (`verdictOf`, `providerMends`), which the
+ * capture and the write fan-out both keep or give up by. The capture, the
+ * write fan-out and the claims renewal all call through it.
  */
 
 import { shownUrl } from "./util.mjs";
@@ -120,6 +122,59 @@ export function resultText(resp) {
     if (resp.result && typeof resp.result === "object") return resultText(resp.result);
   }
   return "";
+}
+
+/**
+ * Whether a refusal is the brain's embedding provider refusing the call (SMD-2892): EMBEDDING_PROVIDER_ERROR, any
+ * status. Its key, its model, its address, a gateway's answer, or a request it refuses — a 400 included, which a
+ * hosted provider answers to every call for a setting it will not take (the maintainer's call, 2026-11-12: kept, as
+ * before the code, rather than lose every summary to a misconfigured brain). Such a payload is kept, as a transient
+ * is, until the mend lands it or the week is up.
+ */
+export function providerMends(result) {
+  return result?.structuredContent?.code === "EMBEDDING_PROVIDER_ERROR";
+}
+
+/**
+ * The server's machine-readable verdict on a result (SMD-1978), read from the
+ * MCP result's `structuredContent` — `{ code, retryable, positions? }` — and,
+ * for a server from before that field, derived from the prose rules unchanged.
+ * `retryable` is the transient/final split (a kept payload vs a dead one);
+ * `mend` names a pointer a retry should drop to mend the capture; `positions`
+ * the derived_from indices to drop (absent for a key that may not know a source
+ * exists — the existence-oracle rule); `on` marks a pointer the server could not
+ * judge, which postPending counts. The hook keys on this, not on English.
+ */
+export function verdictOf(result, text) {
+  const sc = result?.structuredContent;
+  if (sc && typeof sc.code === "string") {
+    // Valid indices only: a non-array, or a float, string or NEGATIVE element
+    // from a non-conforming server, is dropped — a negative would otherwise pass
+    // the retry loop's upper bound and drop nothing while burning a retry (review
+    // pass 2). An empty result falls to the drop-all salvage, as a capture key's
+    // position-less refusal does.
+    const positions = Array.isArray(sc.positions) ? sc.positions.filter((n) => Number.isInteger(n) && n >= 0) : [];
+    // The shape refusals took a code in SMD-2283 (before it they were prose the
+    // rules below read): each mends the pointer its prose named, so the hook
+    // drops and retries exactly what it did before.
+    const mend = (sc.code === "DERIVED_FROM_MISSING" || sc.code === "REFUSED_DERIVED_FROM_SHAPE") ? "derived"
+      : (sc.code === "REFUSED_SUPERSEDES_UNKNOWN" || sc.code === "REFUSED_SUPERSEDES_OWNERSHIP" || sc.code === "REFUSED_SUPERSEDES_SHAPE") ? "supersedes"
+      : sc.code === "REFUSED_METADATA_SHAPE" ? "metadata"
+        : (sc.retryable !== true && sc.code !== "EMBEDDING_PROVIDER_ERROR" && /metadata/.test(text)) ? "metadata" // a coded metadata REFUSAL a later server might send — mended by the prose beside the code; gated on non-retryable so a transient that merely mentions metadata is kept whole, as the prose path is (SMD-2168 review passes 1–2), and never on EMBEDDING_PROVIDER_ERROR, whose provider's words may say metadata (SMD-2892)
+          : null;
+    return { code: sc.code, retryable: sc.retryable === true, mend, positions, on: sc.code === "SUPERSEDES_UNJUDGED" ? "supersedes" : undefined };
+  }
+  // A server from before SMD-1978: the prose rules, unchanged. A "Refused:" is
+  // final and may be mended by dropping the pointer it names; an "Error:" (the
+  // store away, a pointer it could not judge) is a transient the payload keeps.
+  const isRefused = REFUSAL_RE.test(text);
+  const refused = isRefused || SDK_ERROR_RE.test(text);
+  const mend = isRefused ? (/derived_from/.test(text) ? "derived" : /supersedes/.test(text) ? "supersedes" : /metadata/.test(text) ? "metadata" : null) : null;
+  return {
+    code: null, retryable: !refused, mend,
+    positions: [...text.matchAll(/derived_from\[(\d+)\]/g)].map((m) => Number(m[1])),
+    on: /this key's `supersedes` could not be (?:checked|attributed)/.test(text) ? "supersedes" : undefined,
+  };
 }
 
 export { POST_TIMEOUT_MS, textOfResult };
