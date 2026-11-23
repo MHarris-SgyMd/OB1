@@ -12,9 +12,13 @@
 # marker's, is what the job opened, however it opened it: an import, a
 # readFileSync, a cat, a walk. Nothing is traced and nothing is slowed.
 #
-# The lists are recorded and kept on a push to main, and nothing reads them
-# yet: PR 3b-2 gathers a run's lists into the map the changes job skips by,
-# once main's runs show a job reads the same files from run to run.
+# The lists are recorded and kept on a push to main, and the changes job
+# reads them (PR 3b-2): .github/ci/changes.sh's by_map fetches the lists of
+# main's newest green run and skips a pull request's job when nothing its
+# list holds differs since. So a row is a claim a skip rests on: by_map
+# reads the header's job, cell, commit, status, sight and counts, and each
+# row's kind and path, and takes a list whose rows are not as many as its
+# header counts for no list at all.
 #
 # A list's rows, under its header line:
 #   f<TAB>path    a tracked file opened since the marker;

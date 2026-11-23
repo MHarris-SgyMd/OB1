@@ -8228,7 +8228,7 @@ OB1_LIVE_SHARD=rest ./with-postgres.sh bun test-live.ts     # one shard, as its 
 OB1_LIVE_SHARD=sleep ./with-postgres.sh bun test-live.ts    # the shards SHARDS lists in test-live.ts, each its own cell
 OB1_LIVE_SHARD=long ./with-postgres.sh bun test-live.ts
 OB1_LIVE_SHARD=sweep ./with-postgres.sh bun test-live.ts    # [38s], the subject sweep under sleep, alone at first (SMD-3306 PR 6b-2)
-OB1_LIVE_SHARD=claims ./with-postgres.sh bun test-live.ts   # [10] from the rest, which was the longest cell by ~110 s, and [38b] from long (SMD-4366)
+OB1_LIVE_SHARD=claims ./with-postgres.sh bun test-live.ts   # [10] from the rest, which was the longest cell by ~110 s, and [38b] from long (SMD-4366); [38y] from sleep (SMD-4538)
 OB1_LIVE_SHARD=extract ./with-postgres.sh bun test-live.ts  # an assertion outside every section would count in each shard, which [doc] fails on; from one checkout they run side by side, each on a Postgres of its own, as db/ci-parity.sh runs them (SMD-3688): never two in one Postgres, since each drops the schema and roles are the cluster's
 ./with-postgres.sh bun test-search-path.ts  # pgvector installed OFF the search_path (managed-Postgres shape)
 bun test-cli.ts                             # every script's flags through cli.ts — no database
