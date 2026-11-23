@@ -584,10 +584,10 @@ free:
     captures timed beside those took 2.8 to 7.0 s, and captures after
     them 2.3 to 3.7 s. Why the broker's brains extracted more was not
     established. All of this held while no other caller asked for
-    another model. In the first pair of runs a third brain on the server
-    asked for the judge model after minute 12, and under fixed shares 24
-    of the next 32 searches waited 120 s and were answered by exact
-    matches alone.
+    another model. In the first run under fixed shares a third brain on
+    the server asked for the judge model after minute 12, and 24 of the
+    next 32 searches waited 120 s and were answered by exact matches
+    alone; in the first run on the broker no third brain asked.
   - **On two models, fixed shares left the judge model and the embedder
     unloaded.** A share is per model, so both brains kept the metadata
     model busy while each also asked for the judge model. Ollama decided
