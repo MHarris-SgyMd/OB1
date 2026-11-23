@@ -801,13 +801,16 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // or 016's requeue_thought_work ([20cm]); 151 adds the settled parts' table
   // beside the proposals', with its lineage kind and rebuild_derived's arm for
   // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]);
-  // 152 redefines 111's subject_key_valid on its own signature and adds the
+  // 152 counts a work claim's renewals in a column on work_claims (115's
+  // renew_work_claim and ob1_work_claim_json and 140's claim_work carried with
+  // the count), refusing by name without 115 or 140 ([20co]);
+  // 153 redefines 111's subject_key_valid on its own signature and adds the
   // operator's subject-key repository setting and its setter, refusing by
-  // name without 016, 046, 061, 111, 113, 115, 120 or 130's index ([20co]) —
+  // name without 016, 046, 061, 111, 113, 115, 120 or 130's index ([20cp]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 123, `030 is among the last one hundred and twenty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 124, `030 is among the last one hundred and twenty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7600,25 +7603,83 @@ console.log("\n[20cn] Migration 151: onto a populated brain at the file before i
   await sql.close();
 }
 
-console.log("\n[20co] Migration 152: onto a populated brain at the file before it — refused without each function it needs and 130's index, by name, nothing made; then applied: the bare pr: and version: subjects and their thread as they were, nothing mapped until an operator names a repository; a key scoped to its repository admitted; the setting's grants carried from thought_facets' (a reader SELECT, a subject writer SELECT, INSERT and UPDATE); an operator's setting maps the standing keys, the thread kept under the scoped key; a re-apply with a setting standing a no-op (SMD-3887)");
+console.log("\n[20co] Migration 152: onto a populated brain at the file before it — refused by name without 140's ob1_work_claim_cap, nothing added; then applied: the claims standing keep NULL (uncounted) and stay so through renewals, a claim after it starts at 0 and counts each renewal by either path, a refusal counting nothing; the server's listing (143's columns, renewals read by each claim's id) carries each count; a re-apply keeps them (SMD-4540)");
 {
-  const the152 = MIGRATIONS.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f))!;  // by name: renumbered when main takes its number
-  const NUM = the152.slice(0, 3);
+  const the152 = MIGRATIONS.find((f) => /^\d{3}_claim_renewals\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the152 });
   const sql = new SQL({ url: URL_, max: 1 });
+  await sql`SELECT set_agent_kind('up-ren', 'agent')`;
+  await sql`SELECT set_agent_kind('up-ren-b', 'agent')`;
+  const H = JSON.stringify({ name: "up-ren" }), B = JSON.stringify({ name: "up-ren-b" });
+  type Answer = { outcome: string; code: string | null; claim: { id: string; renewals?: number | null } | null; token: string | null };
+  const claim = async (issue: string, actor: string, token: string | null = null) =>
+    (await sql`SELECT claim_work(${issue}, NULL, NULL, 14400, ${token}, (${actor}::text)::jsonb) AS r`)[0].r as Answer;
+  const renew = async (id: string, token: string, actor: string) =>
+    (await sql`SELECT renew_work_claim(${id}::uuid, ${token}, 14400, (${actor}::text)::jsonb) AS r`)[0].r as Answer;
+  const countOf = async (id: string) => ((await sql`SELECT renewals FROM work_claims WHERE id = ${id}::uuid`)[0] as { renewals: number | null }).renewals;
+  const column = async () => Number((await sql`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'work_claims' AND column_name = 'renewals'`)[0].n);
+  const apply152 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
+
+  // A claim made before 152, renewed once there.
+  const old = await claim("SMD-7301", H);
+  await renew(old.claim!.id, old.token!, H);
+
+  // Without 140's ob1_work_claim_cap (the carried claim_work calls it): refused by name, no column added.
+  await sql`ALTER FUNCTION ob1_work_claim_cap() RENAME TO ob1_work_claim_cap_away`;
+  const without = await apply152().then(() => "applied", (e: Error) => e.message);
+  await sql`ALTER FUNCTION ob1_work_claim_cap_away() RENAME TO ob1_work_claim_cap`;
+  assert(/^migration 152 needs 140 \(ob1_work_claim_cap\); this schema lacks it/.test(without) && (await column()) === 0,
+    `without 140's ob1_work_claim_cap the file is refused by name, and no renewals column is added (${without.slice(0, 80)})`);
+
+  await apply152();
+
+  // The claim from before stays uncounted, through a renewal by either path; one after starts at 0 and counts both.
+  const oldAgain = await renew(old.claim!.id, old.token!, H);
+  const oldByClaim = await claim("SMD-7301", H, old.token);
+  const fresh = await claim("SMD-7302", H);
+  const f1 = await renew(fresh.claim!.id, fresh.token!, H);
+  const f2 = await claim("SMD-7302", H, fresh.token);
+  const refused = await renew(fresh.claim!.id, fresh.token!, B);
+  assert((await column()) === 1 && oldAgain.claim!.renewals === null && oldByClaim.claim!.renewals === null && (await countOf(old.claim!.id)) === null
+         && fresh.claim!.renewals === 0 && f1.claim!.renewals === 1 && f2.claim!.renewals === 2 && refused.code === "CLAIM_NOT_YOURS" && (await countOf(fresh.claim!.id)) === 2,
+    `a claim standing at the upgrade stays uncounted through renewals by either path; one after starts at 0 and counts each, another key's refusal counting nothing (${JSON.stringify([oldAgain.claim?.renewals, oldByClaim.claim?.renewals, fresh.claim?.renewals, f1.claim?.renewals, f2.claim?.renewals, refused.code])})`);
+
+  // The server's listing (store-sql.ts's expression): list_work_claims as 143 made it, each count read by the claim's id.
+  const listed = (await sql`
+    SELECT l.issue, (SELECT (to_jsonb(w) ->> 'renewals')::int FROM work_claims w WHERE w.id = l.id) AS renewals
+      FROM list_work_claims(ARRAY['SMD-7301', 'SMD-7302'], NULL, true, 10) WITH ORDINALITY AS l ORDER BY l.ordinality`) as { issue: string; renewals: number | null }[];
+  assert(JSON.stringify(listed.map((r) => [r.issue, r.renewals])) === JSON.stringify([["SMD-7301", null], ["SMD-7302", 2]]),
+    `the server's listing carries each claim's count, NULL for the one from before (${JSON.stringify(listed)})`);
+
+  // A re-apply keeps every count, and a new claim still starts at 0.
+  await apply152();
+  const later = await claim("SMD-7303", H);
+  assert((await countOf(old.claim!.id)) === null && (await countOf(fresh.claim!.id)) === 2 && later.claim!.renewals === 0,
+    `a re-apply keeps every count, and a new claim still starts at 0 (${await countOf(fresh.claim!.id)}, ${later.claim?.renewals})`);
+
+  await sql.close();
+}
+
+console.log("\n[20cp] Migration 153: onto a populated brain at the file before it — refused without each function it needs and 130's index, by name, nothing made; then applied: the bare pr: and version: subjects and their thread as they were, nothing mapped until an operator names a repository; a key scoped to its repository admitted; the setting's grants carried from thought_facets' (a reader SELECT, a subject writer SELECT, INSERT and UPDATE); an operator's setting maps the standing keys, the thread kept under the scoped key; a re-apply with a setting standing a no-op (SMD-3887)");
+{
+  const the153 = MIGRATIONS.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the153.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the153 });
+  const sql = new SQL({ url: URL_, max: 1 });
   try {
-    const K = "subject:upgrade-152@p1";
+    const K = "subject:upgrade-153@p1";
     const thought = async (content: string, mins: number) =>
       String((await sql`INSERT INTO thoughts (content, content_fingerprint, created_at) VALUES (${content}, content_fingerprint_of(${content}), '2027-07-01T00:00:00Z'::timestamptz + make_interval(mins => ${mins}::int)) RETURNING id`)[0].id);
     const subjects = async (id: string, keys: string[]) =>
       // An array literal: Bun's client sends a JS array as no Postgres array here (these keys hold no comma or quote).
       sql`SELECT record_thought_subjects(${id}::uuid, ${`{${keys.join(",")}}`}::text[], 'model', ${K}, NULL::uuid, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${id}::uuid), '{"deterministic": false}'::jsonb)`;
-    const a = await thought("upgrade 152: PR 12 opened", 1), b = await thought("upgrade 152: PR 12 reviewed", 2), c = await thought("upgrade 152: v1.4 cut", 3);
+    const a = await thought("upgrade 153: PR 12 opened", 1), b = await thought("upgrade 153: PR 12 reviewed", 2), c = await thought("upgrade 153: v1.4 cut", 3);
     await subjects(a, ["pr:12"]);
     await subjects(b, ["pr:12"]);
     await subjects(c, ["version:v1.4"]);
-    const READER = "ob1_upgrade_152_reader", WRITER = "ob1_upgrade_152_writer", NONE = "ob1_upgrade_152_none";
+    const READER = "ob1_upgrade_153_reader", WRITER = "ob1_upgrade_153_writer", NONE = "ob1_upgrade_153_none";
     await sql.unsafe(`CREATE ROLE ${READER} NOLOGIN; CREATE ROLE ${WRITER} NOLOGIN; CREATE ROLE ${NONE} NOLOGIN;
                       GRANT SELECT ON thought_facets TO ${READER}; GRANT SELECT, INSERT ON thought_facets TO ${WRITER}`);
     const keys = async () => ((await sql`SELECT payload->>'key' AS k FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL ORDER BY 1`) as unknown as { k: string }[]).map((r) => r.k).join(",");
@@ -7627,7 +7688,7 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
     const keysBefore = await keys(), edgesBefore = await edges("pr:12");
 
     // Without any one thing it needs, the file is refused by name and makes nothing.
-    const apply152 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 }).then(() => "applied", (e: Error) => e.message);
+    const apply153 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 }).then(() => "applied", (e: Error) => e.message);
     const needs: [string, string, string][] = [
       ["content_fingerprint_of", "text", "016 (content_fingerprint_of)"],
       ["ob1_registry_kind", "uuid, text", "046 (ob1_registry_kind)"],
@@ -7641,18 +7702,18 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
     const unrefused: string[] = [];
     for (const [name, args, says] of needs) {
       await sql.unsafe(`ALTER FUNCTION ${name}(${args}) RENAME TO ${name}_away`);
-      const got = await apply152();
+      const got = await apply153();
       await sql.unsafe(`ALTER FUNCTION ${name}_away(${args}) RENAME TO ${name}`).catch((e: Error) => unrefused.push(`${name} could not be put back: ${e.message.slice(0, 60)}`));
       if (!got.startsWith(`migration ${NUM} needs ${says}; this schema lacks it`) || (await made())) unrefused.push(`${name}: ${got.slice(0, 80)}`);
     }
     await sql.unsafe(`ALTER INDEX thought_facets_subject_key_uniq RENAME TO thought_facets_subject_key_uniq_away`);
-    const noIndex = await apply152();
+    const noIndex = await apply153();
     await sql.unsafe(`ALTER INDEX thought_facets_subject_key_uniq_away RENAME TO thought_facets_subject_key_uniq`);
     if (!noIndex.startsWith(`migration ${NUM} needs 130 (thought_facets_subject_key_uniq`) || (await made())) unrefused.push(`the index: ${noIndex.slice(0, 80)}`);
     assert(unrefused.length === 0 && !(await made()) && (await keys()) === keysBefore,
       `without any one of the eight functions or 130's index it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the index tried`})`);
 
-    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 });
     const scopedOk = (await sql`SELECT subject_key_valid('pr:mharris-sgymd/ob1#12') AS a, subject_key_valid('version:o/r@v1.4') AS b, subject_key_valid('pr:12') AS c`)[0] as { a: boolean; b: boolean; c: boolean };
     assert((await made()) && (await keys()) === keysBefore && keysBefore === "pr:12,pr:12,version:v1.4" && (await edges("pr:12")) === edgesBefore && edgesBefore === 1
            && scopedOk.a && scopedOk.b && scopedOk.c && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === null,
@@ -7665,15 +7726,15 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
       `a reader of thought_facets reads the setting, a subject writer also inserts and updates it, a role with neither gains nothing (${await grants()})`);
 
     // An operator names the repository: the standing keys mapped, the thread kept under the scoped key.
-    await sql`SELECT set_agent_kind('upgrade-152-op', 'operator')`;
-    const op = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'upgrade-152-op'`)[0].id);
+    await sql`SELECT set_agent_kind('upgrade-153-op', 'operator')`;
+    const op = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'upgrade-153-op'`)[0].id);
     // Through text: Bun's client sends a string cast straight to jsonb as a jsonb string, not the object.
-    const set = (await sql`SELECT set_subject_repo('o/r', (${JSON.stringify({ name: "upgrade-152-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; mapped: number; keys: number };
+    const set = (await sql`SELECT set_subject_repo('o/r', (${JSON.stringify({ name: "upgrade-153-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; mapped: number; keys: number };
     assert(set.ok === true && set.mapped === 3 && set.keys === 2 && (await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await edges("pr:12")) === 0 && (await edges("pr:o/r#12")) === 1,
       `an operator's setting maps the three standing keys to two scoped ones, and the thread's edge closes under the bare key and stands under the scoped one (${JSON.stringify(set)}; ${await keys()})`);
 
     // A re-apply with a setting standing is a no-op.
-    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the152 });
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 });
     assert((await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r" && (await grants()) === "SELECT | SELECT,INSERT,UPDATE | ",
       `a re-apply with a setting standing is a no-op: the keys, the repository and the grants as they were (${await keys()})`);
 

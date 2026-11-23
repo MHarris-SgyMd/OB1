@@ -868,6 +868,14 @@ else {
       await ticket.unsafe("ALTER FUNCTION list_work_claims_away(text[], text, boolean, integer, text, text, timestamptz, uuid) RENAME TO list_work_claims");
       assert(missing.code === 1 && /ticket claims\s+list_work_claims\(text\[\],text,boolean,integer,text,text,timestamptz,uuid\) missing under 143's signature/.test(missing.out) && /143_work_claims_cursor\.sql/.test(missing.out),
              `list_work_claims missing under 143's signature alone: does not start, naming it and 143 (exit ${missing.code}; ${line(missing.out).trim().slice(0, 160)})`);
+      // One of 115's own missing (renew_work_claim): 115 by hand alone would put claim_work, renew_work_claim and
+      // ob1_work_claim_json back over 140's and 152's (SMD-4540), so the remedy names the files after it, in order.
+      await ticket.unsafe("ALTER FUNCTION renew_work_claim(uuid, text, integer, jsonb) RENAME TO renew_work_claim_away");
+      const ownMissing = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });
+      await ticket.unsafe("ALTER FUNCTION renew_work_claim_away(uuid, text, integer, jsonb) RENAME TO renew_work_claim");
+      assert(ownMissing.code === 1 && /ticket claims\s+renew_work_claim\(uuid,text,integer,jsonb\) missing under 115's signature/.test(ownMissing.out)
+             && /115_work_claims\.sql, then 140_work_claim_cap\.sql, 143_work_claims_cursor\.sql and 152_claim_renewals\.sql \(152 the last definer of claim_work, renew_work_claim and ob1_work_claim_json, 143 of list_work_claims\)/.test(ownMissing.out),
+             `renew_work_claim missing under 115's signature: does not start, and a by-hand remedy names 115, then 140, 143 and 152, the last definers (exit ${ownMissing.code}; ${line(ownMissing.out).trim().slice(0, 240)})`);
       // Statement logging, set for the database so the next connection reads it (a superuser's settings).
       await ticket.unsafe(`ALTER DATABASE ${dbIdent} SET log_min_duration_statement = 0`);
       const logging = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE });

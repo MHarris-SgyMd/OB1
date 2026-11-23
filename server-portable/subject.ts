@@ -77,13 +77,13 @@ const CONNECTIVES = /\b(?:and|or|plus|with|of|for|the|a|an|to|in|on|its)\b/giu;
 /** The most code points a phrase keeps: 111's 207 less `phrase:`. */
 const PHRASE_MAX = 200;
 
-/** A repository as a scoped key names it, `<owner>/<repo>`, lowercase, as GitHub names them (152's ob1:subject-key-shapes). */
+/** A repository as a scoped key names it, `<owner>/<repo>`, lowercase, as GitHub names them (153's ob1:subject-key-shapes). */
 const KEY_REPO = "[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9._-]{1,100}";
 const SCOPED_PR = new RegExp(`^pr:${KEY_REPO}#[0-9]{1,9}$`);
 const SCOPED_VERSION = new RegExp(`^version:${KEY_REPO}@v[0-9]+(\\.[0-9]+){1,3}$`);
 
 /**
- * 152's subject_key_valid (111's, with a pull request's and a version's key scoped to its repository beside the bare
+ * 153's subject_key_valid (111's, with a pull request's and a version's key scoped to its repository beside the bare
  * ones, the repository not `.` or `..`): a key it refuses is never sent, and a scoped key the setter wrote is one the
  * thread read takes (SMD-3887).
  */

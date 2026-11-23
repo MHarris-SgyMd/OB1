@@ -1,5 +1,5 @@
 -- =============================================================================
--- Migration 152: a pr: or version: subject key names its repository, on a brain
+-- Migration 153: a pr: or version: subject key names its repository, on a brain
 --                whose operator names one (SMD-3887 PR 3a, docs/claim-validity.md
 --                row 13)
 -- =============================================================================
@@ -134,14 +134,14 @@ DECLARE
 BEGIN
   IF to_regclass('thought_facets_subject_key_uniq') IS NULL THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'migration 152 needs 130 (thought_facets_subject_key_uniq, one standing subject a thought and key); this schema lacks it',
+      MESSAGE = 'migration 153 needs 130 (thought_facets_subject_key_uniq, one standing subject a thought and key); this schema lacks it',
       HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
       ERRCODE = 'invalid_schema_definition';
   END IF;
   FOR i IN 1 .. array_length(v_need, 1) LOOP
     IF to_regprocedure(v_need[i][1]) IS NULL THEN
       RAISE EXCEPTION USING
-        MESSAGE = format('migration 152 needs %s; this schema lacks it', v_need[i][2]),
+        MESSAGE = format('migration 153 needs %s; this schema lacks it', v_need[i][2]),
         -- ASCII only: Bun's client hands a HINT holding a non-ASCII character back mis-decoded (030's fourth review pass).
         HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
         ERRCODE = 'invalid_schema_definition';
@@ -171,7 +171,7 @@ AS $$
   AND NOT (p_key ~ '^(pr|version):[^/]*/\.\.?[#@]')
 $$;
 COMMENT ON FUNCTION subject_key_valid(text) IS
-  'Whether a text is a subject key: ticket:<TEAM-N>, pr:<number> or pr:<owner>/<repo>#<number>, version:v<n>.<n>[.<n>[.<n>]] or version:<owner>/<repo>@v<n>.<n>[...], or phrase:<lower-case words>, at most 207 characters. The owner (1 to 39 letters, digits and inner hyphens) and the repository (1 to 100 letters, digits, dots, hyphens and underscores, not . or ..) are lowercase, as GitHub names them. IMMUTABLE: a key''s shape never depends on the brain''s setting; a brain scopes its keys only once its operator names a repository (set_subject_repo), and both shapes stay valid. The facet validator, record_thought_subjects and the thread edges read it. Migrations 111, 152 / SMD-3306, SMD-3887.';
+  'Whether a text is a subject key: ticket:<TEAM-N>, pr:<number> or pr:<owner>/<repo>#<number>, version:v<n>.<n>[.<n>[.<n>]] or version:<owner>/<repo>@v<n>.<n>[...], or phrase:<lower-case words>, at most 207 characters. The owner (1 to 39 letters, digits and inner hyphens) and the repository (1 to 100 letters, digits, dots, hyphens and underscores, not . or ..) are lowercase, as GitHub names them. IMMUTABLE: a key''s shape never depends on the brain''s setting; a brain scopes its keys only once its operator names a repository (set_subject_repo), and both shapes stay valid. The facet validator, record_thought_subjects and the thread edges read it. Migrations 111, 153 / SMD-3306, SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 2. ob1_subject_repo_refusal — what is wrong with a repository value
@@ -194,7 +194,7 @@ AS $$
   END
 $$;
 COMMENT ON FUNCTION ob1_subject_repo_refusal(text) IS
-  'What is wrong with a repository value for the subject-key setting — NULL, not lowercase, not <owner>/<repo> as GitHub names it, or a repository of . or .. — in words, or NULL for none. The one place the shape is spelled: subject_repo_settings'' trigger, set_subject_repo and ob1_subject_repo() read it. Migration 152 / SMD-3887.';
+  'What is wrong with a repository value for the subject-key setting — NULL, not lowercase, not <owner>/<repo> as GitHub names it, or a repository of . or .. — in words, or NULL for none. The one place the shape is spelled: subject_repo_settings'' trigger, set_subject_repo and ob1_subject_repo() read it. Migration 153 / SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 3. ob1_subject_scoped_key — a bare pr: or version: key in a repository
@@ -212,7 +212,7 @@ AS $$
   END
 $$;
 COMMENT ON FUNCTION ob1_subject_scoped_key(text, text) IS
-  'A bare subject key scoped to a repository: pr:<n> becomes pr:<repo>#<n> and version:v<n>... becomes version:<repo>@v<n>...; any other key (ticket:, phrase:, a key scoped already), or a NULL repository, comes back as given. IMMUTABLE. set_subject_repo maps a brain''s standing keys by it; the thread read resolves a bare key by it (SMD-3887 PR 3b). Migration 152 / SMD-3887.';
+  'A bare subject key scoped to a repository: pr:<n> becomes pr:<repo>#<n> and version:v<n>... becomes version:<repo>@v<n>...; any other key (ticket:, phrase:, a key scoped already), or a NULL repository, comes back as given. IMMUTABLE. set_subject_repo maps a brain''s standing keys by it; the thread read resolves a bare key by it (SMD-3887 PR 3b). Migration 153 / SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 4. subject_repo_settings — the operator's settings
@@ -229,7 +229,7 @@ CREATE TABLE IF NOT EXISTS subject_repo_settings (
   CHECK ((ended_at IS NULL) = (ended_by IS NULL) AND (ended_at IS NULL) = (ended_by_agent_id IS NULL))
 );
 COMMENT ON TABLE subject_repo_settings IS
-  'The operator''s repository for subject keys (ob1_subject_repo(): the standing row''s repo, or NULL when none stands, and the brain''s pr: and version: keys stay unscoped). One row per setting, at most one standing (ended_at NULL); a row changes only to end, once, when the next setting or a clear replaces it, and a DELETE or TRUNCATE is refused, so the rows say which repository stood when. repo is checked by ob1_subject_repo_refusal when written. set_by and ended_by name the operator key by its name then, with its agent id, which the trigger holds to a key the registry classifies operator. Written through set_subject_repo, an operator key''s alone, which maps the standing unscoped keys to it. Migration 152 / SMD-3887.';
+  'The operator''s repository for subject keys (ob1_subject_repo(): the standing row''s repo, or NULL when none stands, and the brain''s pr: and version: keys stay unscoped). One row per setting, at most one standing (ended_at NULL); a row changes only to end, once, when the next setting or a clear replaces it, and a DELETE or TRUNCATE is refused, so the rows say which repository stood when. repo is checked by ob1_subject_repo_refusal when written. set_by and ended_by name the operator key by its name then, with its agent id, which the trigger holds to a key the registry classifies operator. Written through set_subject_repo, an operator key''s alone, which maps the standing unscoped keys to it. Migration 153 / SMD-3887.';
 
 CREATE UNIQUE INDEX IF NOT EXISTS subject_repo_settings_one_standing ON subject_repo_settings ((true)) WHERE ended_at IS NULL;
 
@@ -277,7 +277,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_subject_repo_settings_guard() IS
-  'Refuses a subject_repo_settings row whose repo ob1_subject_repo_refusal names (22023, in its words), one written already ended, one whose set_by_agent_id (or, ending it, ended_by_agent_id) the registry does not classify operator (42501), an UPDATE other than a standing row ending once, and every DELETE and TRUNCATE — for the owner too. Migration 152 / SMD-3887.';
+  'Refuses a subject_repo_settings row whose repo ob1_subject_repo_refusal names (22023, in its words), one written already ended, one whose set_by_agent_id (or, ending it, ended_by_agent_id) the registry does not classify operator (42501), an UPDATE other than a standing row ending once, and every DELETE and TRUNCATE — for the owner too. Migration 153 / SMD-3887.';
 
 CREATE OR REPLACE TRIGGER subject_repo_settings_history
   BEFORE INSERT OR UPDATE OR DELETE ON subject_repo_settings
@@ -339,7 +339,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION ob1_subject_repo() IS
-  'The repository a brain scopes its pr: and version: subject keys to: the standing operator setting (subject_repo_settings), or NULL when none stands, and keys stay unscoped. A stored value ob1_subject_repo_refusal names raises 22000 naming the setting. Migration 152 / SMD-3887.';
+  'The repository a brain scopes its pr: and version: subject keys to: the standing operator setting (subject_repo_settings), or NULL when none stands, and keys stay unscoped. A stored value ob1_subject_repo_refusal names raises 22000 naming the setting. Migration 153 / SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 6. set_subject_repo — the operator's write, which maps the standing keys
@@ -483,7 +483,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION set_subject_repo(text, jsonb) IS
-  'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes nothing ({changed: false}). Setting a repository maps every standing unscoped pr:/version: subject to it (ob1:subject-repo-mapping): the facet closed and its scoped twin (ob1_subject_scoped_key) written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked alone. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, keys (the distinct scoped keys), thoughts}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Migration 152 / SMD-3887.';
+  'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes nothing ({changed: false}). Setting a repository maps every standing unscoped pr:/version: subject to it (ob1:subject-repo-mapping): the facet closed and its scoped twin (ob1_subject_scoped_key) written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked alone. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, keys (the distinct scoped keys), thoughts}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Migration 153 / SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 7. subject_repo_setting — the standing setting, for brain_info
@@ -506,12 +506,12 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION subject_repo_setting() IS
-  'The standing subject-key repository for brain_info: {repo: null, source: none} when none is set (keys stay unscoped), else {repo, source: operator, set_at, set_by, refused} where refused is ob1_subject_repo_refusal''s word on it or null. Never raises, unlike ob1_subject_repo(). Migration 152 / SMD-3887.';
+  'The standing subject-key repository for brain_info: {repo: null, source: none} when none is set (keys stay unscoped), else {repo, source: operator, set_at, set_by, refused} where refused is ob1_subject_repo_refusal''s word on it or null. Never raises, unlike ob1_subject_repo(). Migration 153 / SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 8. record_thought_subjects — 130's door for a set, its keys scoped
 -- ---------------------------------------------------------------------------
--- 130's body verbatim but where marked 152: a bare pr: or version: key written
+-- 130's body verbatim but where marked 153: a bare pr: or version: key written
 -- scoped on a brain whose operator names a repository, the setting read under
 -- the lock set_subject_repo takes exclusively (review pass 1: the writers would
 -- otherwise undo the mapping, and one in flight could slip a bare key past it).
@@ -562,7 +562,7 @@ BEGIN
   END IF;
   -- The set: each key once, in key order.
   SELECT COALESCE(array_agg(DISTINCT k ORDER BY k), '{}') INTO v_keys FROM unnest(p_keys) AS k;
-  -- 152 (SMD-3887): on a brain whose operator names a repository, a bare pr: or version: key is written scoped to it,
+  -- 153 (SMD-3887): on a brain whose operator names a repository, a bare pr: or version: key is written scoped to it,
   -- so a pass that found `pr:12` keeps the thread the setter mapped (ob1_subject_scoped_key); a key too long once
   -- scoped is written bare, as the setter leaves one. Read under the ob1:subject-repo lock, shared here and exclusive
   -- in set_subject_repo, so a write never interleaves with a mapping. Taken before the thought's lock below; the
@@ -679,4 +679,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) IS
-  'The subject pass''s write of one thought''s own subjects as a set (SMD-3306 PR 7a-3a): the standing `subject` facets made to be exactly these keys (each once; at most three, ob1:subject-set), found one way (`by`) by one pass (judge_key). A standing subject under a key of the set, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); every other standing subject is closed (valid_until); each key not kept is written, with its lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) in the same transaction. NULL or an empty set closes every standing subject. `metadata` names one key. Refused, writing nothing (action none, stale), when the thought''s fingerprint is not the one the pass read, or the ticket it is filed under (ob1_filed_ticket) disagrees: metadata''s key under another ticket than it is filed under now, or any other way''s set on a thought filed since. Under the advisory lock on the thought (111''s), the thought locked FOR KEY SHARE first; the threads of the keys it moves re-link at the commit (120''s triggers, which lock them all in key order). Returns {ok, action, ids (the standing facets after, by key), kept, added, closed, closedIds (on a write), stale?, gone?}: action added when it wrote and closed nothing, closed when it closed and wrote nothing, replaced when it did both, kept when it did neither, none when nothing stood and nothing was asked, or on a refusal. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group), and since 120 what a re-link writes, as record_thought_subject. Since 152 (SMD-3887), on a brain whose operator names a repository (ob1_subject_repo), each bare pr: or version: key is written scoped to it (ob1_subject_scoped_key), bare only when too long once scoped; the setting is read under the ob1:subject-repo lock, shared here and exclusive in set_subject_repo, so a write never interleaves with a mapping, and a caller needs SELECT on subject_repo_settings. Migrations 130, 152 / SMD-3306, SMD-3887.';
+  'The subject pass''s write of one thought''s own subjects as a set (SMD-3306 PR 7a-3a): the standing `subject` facets made to be exactly these keys (each once; at most three, ob1:subject-set), found one way (`by`) by one pass (judge_key). A standing subject under a key of the set, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); every other standing subject is closed (valid_until); each key not kept is written, with its lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) in the same transaction. NULL or an empty set closes every standing subject. `metadata` names one key. Refused, writing nothing (action none, stale), when the thought''s fingerprint is not the one the pass read, or the ticket it is filed under (ob1_filed_ticket) disagrees: metadata''s key under another ticket than it is filed under now, or any other way''s set on a thought filed since. Under the advisory lock on the thought (111''s), the thought locked FOR KEY SHARE first; the threads of the keys it moves re-link at the commit (120''s triggers, which lock them all in key order). Returns {ok, action, ids (the standing facets after, by key), kept, added, closed, closedIds (on a write), stale?, gone?}: action added when it wrote and closed nothing, closed when it closed and wrote nothing, replaced when it did both, kept when it did neither, none when nothing stood and nothing was asked, or on a refusal. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group), and since 120 what a re-link writes, as record_thought_subject. Since 153 (SMD-3887), on a brain whose operator names a repository (ob1_subject_repo), each bare pr: or version: key is written scoped to it (ob1_subject_scoped_key), bare only when too long once scoped; the setting is read under the ob1:subject-repo lock, shared here and exclusive in set_subject_repo, so a write never interleaves with a mapping, and a caller needs SELECT on subject_repo_settings. Migrations 130, 153 / SMD-3306, SMD-3887.';

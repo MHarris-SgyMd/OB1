@@ -37,8 +37,8 @@ const noLeadingZeros = (n: string) => n.replace(/^0+(?=[0-9])/, "");
  * a ticket alone (`SMD-3306`) is read so only when its prefix is a ticket's (isTicket), as a word such as `PR-12` or
  * `UTF-8` is no ticket a text names (review pass 1); `pr:` and `version:v` are read in any case (review pass 3), their
  * numbers without leading zeros (`pr:012` is `pr:12`, `version:v01.2` `version:v1.2`), and a repository they are scoped
- * to lowercased (`pr:O/R#012` is `pr:o/r#12`, 152's shape: SMD-3887; a bare key is read as written, not resolved to the
- * brain's repository — 3b's). Any other key is taken as written, trimmed. Null for what is no subject key (152's
+ * to lowercased (`pr:O/R#012` is `pr:o/r#12`, 153's shape: SMD-3887; a bare key is read as written, not resolved to the
+ * brain's repository — 3b's). Any other key is taken as written, trimmed. Null for what is no subject key (153's
  * subject_key_valid, mirrored by subjectKeyValid).
  */
 export function threadKey(raw: string): string | null {
@@ -50,7 +50,7 @@ export function threadKey(raw: string): string | null {
   }
   const bare = /^([A-Za-z][A-Za-z0-9]*-[0-9]+)$/.exec(k);
   if (bare) return isTicket(bare[1].toUpperCase()) ? `ticket:${bare[1].toUpperCase()}` : null;
-  // A repository's scope (152, SMD-3887), lowercased as the setter writes it: `pr:MHarris/OB1#012` is `pr:mharris/ob1#12`.
+  // A repository's scope (153, SMD-3887), lowercased as the setter writes it: `pr:MHarris/OB1#012` is `pr:mharris/ob1#12`.
   const pr = /^pr:(?:([^\s#@]+)#)?([0-9]{1,9})$/i.exec(k);
   if (pr) {
     const p = pr[1] === undefined ? `pr:${noLeadingZeros(pr[2])}` : `pr:${pr[1].toLowerCase()}#${noLeadingZeros(pr[2])}`;

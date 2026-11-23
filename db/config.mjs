@@ -2513,11 +2513,11 @@ export const ROLE_GRANTS = Object.freeze({
     // citations that name the row and, detaching, writes them. A role without
     // these cannot delete any thought, cited or not.
     Object.freeze({ table: "thought_facets", privileges: Object.freeze(["SELECT", "UPDATE"]),                     since: "042" }),
-    // 152's subject-key repository (SMD-3887): a reader of a thought's subjects
+    // 153's subject-key repository (SMD-3887): a reader of a thought's subjects
     // resolves a bare pr: or version: key by the operator's setting (the thread
     // read, SMD-3887 PR 3b). Read only; the setter's writes are the structure
     // group's.
-    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT"]),                        since: "152" }),
+    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT"]),                        since: "153" }),
     // 046's audit trigger runs as the caller on EVERY write that carries an
     // actor: it reads the key's kind from ob1_agents (by id, else by name). A
     // role without SELECT there fails every capture, edit and delete inside the
@@ -2708,11 +2708,11 @@ export const ROLE_GRANTS = Object.freeze({
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),
-    // 152's subject-key repository (SMD-3887): a subject writer reads the
+    // 153's subject-key repository (SMD-3887): a subject writer reads the
     // operator's setting to scope its keys (the sweep, SMD-3887 PR 3b), and the
     // operator's setter writes it and maps the standing keys, as a writer of
     // subjects.
-    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),  since: "152" }),
+    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),  since: "153" }),
     // board-sync's findings step (SMD-2681, db/board-findings.ts) records what
     // it posted: read for the cap and "not posted again", inserted after Linear
     // answers. Never updated or deleted — a failed post rolls the claim back.
@@ -2852,9 +2852,9 @@ export const ROLE_GRANTS = Object.freeze({
     // does not need (review pass 2).
     Object.freeze({ sequence: "deliverable_events_seq_seq", privileges: Object.freeze(["USAGE"]), since: "134" }),
     Object.freeze({ table: "thought_facets",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "042" }),
-    // 152 (SMD-3887) carries the subject-key repository's grants to every writer of thought_facets, this group's roles
+    // 153 (SMD-3887) carries the subject-key repository's grants to every writer of thought_facets, this group's roles
     // among them, so a role provisioned from this list holds what one carried at the upgrade does (review pass 1).
-    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "152" }),
+    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "153" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
