@@ -26775,12 +26775,17 @@ if (want("38")) {
     const sessions = async () => Number((await sql`SELECT count(*)::int AS c FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend'`)[0].c);
     const sessionsBefore = await sessions();
     sw.slowExtract = 1500;
-    // The order this row tests is one of two (SMD-4515). The period's first pool takes the three notes in one
-    // statement, so their claims' order is a tie, and today's note is no backlog (SMD-4468, backlogCut: pooled since
-    // the start and dated today). Were it extracted last, consolidation would join beside it once the two older
-    // notes were done — by design, with another line, and judging while it is extracted: [38c]'s cases. This row is
-    // the other order's, so at the first extraction call the older notes still to claim are dated after it. Without
-    // this the row failed 2 runs of 7 on 2026-11-21, and failed when today's note was put last by hand.
+    // Consolidation joins on one of two lines here, and the row takes either (SMD-4515). A thought's entities are
+    // written a moment before its claim is marked finished. A poll in that moment on the last thought reads no
+    // backlog left (SMD-4468, backlogCut: a thought with entities is extracted whatever its claim says) and a pool
+    // not drained, so the scheduler joins on SMD-4468's line where a poll a moment later reads the pool drained.
+    // Either way extraction is over: measured, the row failed 3 runs of about 12 under ci-parity's load asking for
+    // the drained line alone, the first judge call 1.5 s after the last extraction began each time, and failed
+    // every time with a claim's finish held a second.
+    // That holds only while a backlog note is the last extracted. The period's first pool takes the three notes in
+    // one statement, so their claims' order is a tie, and today's note is no backlog: were it last, consolidation
+    // would join beside it as the older two ended, by design ([38c]'s cases), and judge 25 ms into its extraction
+    // (measured, put last by hand). So at the first extraction call the older notes still to claim are dated after it.
     // How many it dated: none would mean the claims were no longer pending at that call (a worker that takes them in
     // one batch), the tie standing again with nothing to say so, so the row holds it (review pass 1).
     let datedLast = -1;
@@ -26816,7 +26821,8 @@ if (want("38")) {
     const props = await sql`SELECT older_id, newer_id, status FROM supersession_proposals`;
     assert(once === 0 && (await claims(EX)).succeeded === 3 && Object.keys(await claims(CO)).every((s) => s === "succeeded") && props.length === 1 && props[0].older_id === older && props[0].newer_id === newer && props[0].status === "pending",
       `one period extracts every thought, then judges, leaving the one outdated note a pending proposal, and exits 0 (exit ${once}; ${JSON.stringify(await claims(EX))} ${JSON.stringify(await claims(CO))}; ${props.length} proposal(s)${once === 0 ? "" : `; its last lines: ${lines.slice(-8).join(" | ").trim()}${hungAt}`})`);
-    assert(firstJudge > lastExtract && onceText.indexOf("extraction drained — consolidating beside it") > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText) && datedLast >= 1,
+    const joinedAt = Math.max(onceText.indexOf("extraction drained — consolidating beside it"), onceText.indexOf("extraction has done the thoughts captured before the period began — consolidating beside it"));
+    assert(firstJudge > lastExtract && joinedAt > onceText.indexOf("  working:") && /the pools drained — the period ends/.test(onceText) && datedLast >= 1,
       `…in the fixed order: no judgement before the last extraction (${firstJudge - lastExtract} ms after it; consolidation joined on "${lines.find((l) => /consolidating beside it|consolidating first/.test(l))?.trim() ?? "no line"}"; ${datedLast} older note(s) dated after today's at the first call)`);
     const supersedes = Number((await sql`SELECT count(*)::int AS c FROM thoughts WHERE supersedes IS NOT NULL`)[0].c);
     assert(supersedes === 0 && (await auditRows()) === auditBefore && (await beat()) === null,
