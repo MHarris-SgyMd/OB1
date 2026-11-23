@@ -26,7 +26,7 @@ import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
 import { askOwnSubject, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
@@ -2588,6 +2588,27 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   assert(refusedWords("OLD", ["record_settled_part: first"]) === "pair with OLD: a settled part was refused — record_settled_part: first"
       && refusedWords("OLD", ["record_settled_part: first", "record_settled_part: second", "record_settled_part: third"]) === "pair with OLD: 3 settled parts were refused — record_settled_part: first",
     "a pair's refused parts are one problem on the claim: how many, and the store's words for the first");
+  // The settle of a stale part (SMD-4446 PR 2b-2). What the store answered, as the pass knows its five answers
+  // (settleAnswer): anything else is unknown, with the word cut as a write's is. What a call that threw was
+  // (settleRefusal): the store's own refusal by its name, its words kept and cut to 200, and null for anything else,
+  // a part write's refusal among them. And the clause a thought's claim carries for the parts not removed.
+  const settled = [{ ok: true, action: "removed", id: "x", was: "stale" }, { ok: false, error: "NOT_FOUND", id: "x" }, { ok: false, error: "DECIDED", id: "x", status: "rejected" },
+    { ok: false, error: "EDITED_SINCE", older_edited: true, newer_edited: false }, { ok: false, error: "NOT_STALE", id: "x" }].map((r) => JSON.stringify(settleAnswer(r)));
+  const unsettledAnswers = [{ ok: false, error: 'HELD "by" a later store' }, { ok: true, action: "archived" }, { ok: false, action: "removed" }, { ok: true, error: "DECIDED" }, { ok: true, action: "recorded" }, { ok: true }, {}, null, undefined, "removed", 7,
+    { ok: "true", action: "removed" }, { ok: false, error: "LATER_" + "y".repeat(60) }].map((r) => (settleAnswer(r) as { unknown?: string }).unknown);
+  assert(settled.join() === '{"known":"removed"},{"known":"NOT_FOUND"},{"known":"DECIDED"},{"known":"EDITED_SINCE"},{"known":"NOT_STALE"}'
+      && unsettledAnswers.join("|") === `HELDbyalaterstore|archived|removed|DECIDED|recorded|no word|no word|no word|no word|no word|no word|removed|LATER_${"y".repeat(34)}`,
+    `the settle's five answers are known by their word and their ok together; any other is unknown, said with the word it gave, cut as a write's is (${unsettledAnswers.join("|")})`);
+  const settleIsolation = settleRefusal(pgError("0A000", "settle_stale_part must run under READ COMMITTED; this transaction is REPEATABLE READ"));
+  assert(settleIsolation === "settle_stale_part must run under READ COMMITTED; this transaction is REPEATABLE READ"
+      && settleRefusal(pgError("22023", "settle_stale_part: " + "x".repeat(500)))?.length === 200
+      && settleRefusal(pgError("0A000", "record_settled_part must run under READ COMMITTED; this transaction is SERIALIZABLE")) === null && settleRefusal(pgError("42883", "function settle_stale_part(uuid, text, text) does not exist")) === null
+      && settleRefusal(pgError("42501", "permission denied for table settled_parts")) === null && settleRefusal(pgError("40P01", "deadlock detected")) === null && settleRefusal(pgError("0A000", "settle_stale_parts_later must run elsewhere")) === null
+      && settleRefusal(new Error("Connection closed")) === null && settleRefusal("settle_stale_part: a string") === null && settleRefusal(null) === null,
+    "a settle that threw is the store's own refusal where its words begin with the function's name, kept and cut to 200; a missing function or grant, a deadlock, another function's refusal, a lost connection and a value that is no error are none");
+  assert(unsettledWords([]) === "" && unsettledWords(["settle_stale_part: first"]) === "a stale settled part was not removed — settle_stale_part: first"
+      && unsettledWords(["settle_stale_part: first", "settle_stale_part: second"]) === "2 stale settled parts were not removed — settle_stale_part: first",
+    "a thought's stale parts the store would not remove are one clause of its claim's error: how many, and the store's words for the first; none is no clause");
 
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };

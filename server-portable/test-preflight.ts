@@ -1592,13 +1592,36 @@ else {
   const part151 = (await ctx.unsafe(`SELECT record_settled_part('${partO}'::uuid, '${partN}'::uuid, 'older', 'ship by Friday', 'shipped on Thursday', 'implements', 'the later note reports it done', 'consolidate:t@p4',
       (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partO}'::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partN}'::uuid), '{"deterministic": false}'::jsonb) AS r`))[0].r as { action: string; id: string };
   await ctx.unsafe(`SELECT review_settled_part('${part151.id}'::uuid, 'accept', 'right')`);
-  const staleBefore151 = staleIn((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out);
+  // …and a second part of the pair, which nobody decides (SMD-4446 PR 2b-2): the one the census counts as it waits.
+  const part151b = (await ctx.unsafe(`SELECT record_settled_part('${partO}'::uuid, '${partN}'::uuid, 'older', 'the plan is to ship', 'it shipped', 'implements', 'the later note reports it done', 'consolidate:t@p4',
+      (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partO}'::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partN}'::uuid), '{"deterministic": false}'::jsonb) AS r`))[0].r as { action: string; id: string };
+  const before151 = (await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out;
+  const staleBefore151 = staleIn(before151);
   await ctx.unsafe(`UPDATE thoughts SET content = 'preflight-151 older: the plan was to ship by Friday', content_fingerprint = content_fingerprint_of('preflight-151 older: the plan was to ship by Friday') WHERE id = '${partO}'::uuid`);
   const rows151 = (await ctx.unsafe(`SELECT count(*) FILTER (WHERE artifact_kind = 'part')::int AS parts, count(*) FILTER (WHERE artifact_kind NOT IN ('part', 'proposal', 'relation', 'subject'))::int AS own
                                        FROM derivations WHERE input_ids[1] = '${partO}'::uuid`))[0] as { parts: number; own: number };
-  const staleAfter151 = staleIn((await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out);
-  assert(part151.action === "recorded" && rows151.parts === 1 && rows151.own >= 1 && staleAfter151 - staleBefore151 === rows151.own,
-         `a settled part's lineage row is not counted stale when its thought's text moves: the coverage's count grows by the thought's own rows, of which it has one, and not by the part's (${staleBefore151} before, ${staleAfter151} after; ${rows151.own} of its own, ${rows151.parts} part's)`);
+  const after151 = (await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out;
+  const staleAfter151 = staleIn(after151);
+  assert(part151.action === "recorded" && part151b.action === "recorded" && rows151.parts === 2 && rows151.own >= 1 && staleAfter151 - staleBefore151 === rows151.own,
+         `a settled part's lineage row is not counted stale when its thought's text moves: the coverage's count grows by the thought's own rows, of which it has one, and not by the parts' (${staleBefore151} before, ${staleAfter151} after; ${rows151.own} of its own, ${rows151.parts} parts')`);
+  // The parts that wait for a decide-mode run of the pass are counted in the coverage (PR 2b-2): the undecided one at
+  // a text that has moved, which no rebuild has seen and no lineage row marks, then, once a rebuild has run, as
+  // stale. The accepted one is counted in neither: a decision stands whatever its texts do.
+  const waiting = (out: string) => /; (\d+) settled part\(s\) stale and (\d+) pending at a text that has moved since \(a decide-mode run of the consolidation pass judges their pairs again, records in its place the statement it names again and removes the rest: bun db\/consolidate\.ts\)/.exec(out)?.slice(1, 3).join("/") ?? "no parts clause";
+  await ctx.unsafe(`SELECT rebuild_derived('${partO}'::uuid, 'preflight: the text moved')`);
+  const rebuilt151 = (await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out;
+  assert(waiting(before151) === "0/0" && waiting(after151) === "0/1" && waiting(rebuilt151) === "1/0" && /✓  lineage\s/.test(rebuilt151),
+         `the coverage counts the settled parts that wait for the pass: none while the texts stand, the undecided one as pending at a moved text once a text moves, and as stale once a rebuild has run; the accepted one in neither (${waiting(before151)}, ${waiting(after151)}, ${waiting(rebuilt151)})`);
+  // A part without its lineage row is refused as any derived row is, named, and its remedy is the part's own: the
+  // row written again from the part, which holds both fingerprints. Followed, the check is ok again.
+  await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'part' AND artifact_id = '${part151b.id}'::uuid`);
+  const noPartRow = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  const partRemedy = /record the row again from the part \((SELECT ob1_record_derivation\('part', .*? FROM settled_parts s WHERE s\.id = '<part id>')\)/.exec(noPartRow.out)?.[1] ?? "";
+  if (partRemedy) await ctx.unsafe(partRemedy.replace("<part id>", part151b.id));
+  const partRowBack = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  assert(noPartRow.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 settled part\\(s\\) \\(${part151b.id}\\)`).test(noPartRow.out) && /A settled part's row is written with it by 151's record_settled_part/.test(noPartRow.out)
+      && partRemedy !== "" && /✓  lineage\s+every derived row has its lineage row/.test(partRowBack.out) && waiting(partRowBack.out) === "1/0",
+         `a settled part without its lineage row does not start, the part named, and the remedy is the part's own; followed as printed, the check is ok again (exit ${noPartRow.code}: ${noPartRow.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 200)}; then ${partRowBack.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 80)})`);
   await ctx.unsafe(`SELECT delete_thought('${partN}'::uuid)`);
   await ctx.unsafe(`SELECT delete_thought('${partO}'::uuid)`);
   // 120's edge (SMD-3306): a work thread's standing edge without its lineage
@@ -3652,6 +3675,13 @@ else {
         if (plantedLedger) await claims.unsafe(`DROP TABLE schema_migrations`);
         else if (added) await claims.unsafe(`DELETE FROM schema_migrations WHERE name = '149_thought_validity.sql' AND sha256 = 'test'`);
       }
+      // The lineage census reads the parts too (PR 2b-2): a role that may not is told so in the coverage, the check
+      // standing, where its read unasked made the whole row a skip; a brain without the table has no such clause.
+      const lineageLine = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+lineage\s/.test(l))?.trim() ?? "(no lineage row)";
+      const unreadParts = "; the settled parts not read (this role holds no SELECT on settled_parts, the server group's since 151)";
+      assert(heldParts && lineageLine(noParts.out).includes(unreadParts) && !/not checked — this role cannot read settled_parts/.test(noParts.out) && /settled part\(s\) stale and \d+ pending at a text that has moved since/.test(lineageLine(missingBoth.out))
+             && !/settled part/.test(lineageLine(noFnNoParts.out)) && lineageLine(noFnNoParts.out).slice(0, 12) === lineageLine(missingBoth.out).slice(0, 12),
+             `the lineage row reads the settled parts where the role may, says they were not read where it may not, the check standing, and says nothing of them on a brain without their table (${lineageLine(missingBoth.out).slice(-150)} | ${lineageLine(noParts.out).slice(-120)} | ${lineageLine(noFnNoParts.out).slice(-90)})`);
       assert(/!  validity\s+the server's role cannot SELECT thought_audit: the validity read answers the axes resting on them unknown, naming them in unread/.test(noAudit.out)
              && heldParts && /!  validity\s+the server's role cannot SELECT settled_parts: the validity read answers the axes resting on them unknown, naming them in unread/.test(noParts.out)
              && /✓  validity\s+thought_validity present; the server's role reads every table it reads/.test(missingBoth.out)

@@ -852,6 +852,83 @@ export function refusedWords(olderId: string, refusals: string[]): string {
 }
 
 /**
+ * Decide version 6 (SMD-4446 PR 2b-2): the settled parts whose text has moved since they were judged, with no rebuild
+ * run for their thought since. None runs after an edit, so such a part is still `pending`: at fingerprints that are
+ * no longer its texts', which an accept refuses unless forced, and nothing judges its pair again. A decide-mode run
+ * of the pass sets each stale, as rebuild_derived does when it runs, and pools its thought again. Columns: `id`, the
+ * part's, and `newer_id`, the thought the pass judges its pair from.
+ *
+ * Two tests, the cheap one first. The part's fingerprints against the ones the thoughts store
+ * (thoughts.content_fingerprint): equal, the text has not moved, and no text is hashed (6 to 11 ms for 3,000 parts,
+ * where hashing both texts of each took 579 to 984: SMD-4446 PR 1's review pass 4). Then, for the parts that differ,
+ * against each text's own (content_fingerprint_of), which is what the part's write and its accept compare: the stored
+ * key is NULL on a thought whose text another holds too (023), and is left behind by a raw UPDATE of the text (018).
+ * Without the second test a part of such a thought would be set stale at every run, though its texts stand, and its
+ * thought judged again each time. Not seen: a text moved by a raw UPDATE that left the stored key as the part has it.
+ * An accept still refuses that part, and a rebuild sets it stale.
+ *
+ * Its names are schema-qualified: preflight reads it too, and qualifies every name of its own.
+ */
+export const MOVED_PARTS_SQL = `WITH differs AS MATERIALIZED (
+    SELECT s.id FROM public.settled_parts s JOIN public.thoughts o ON o.id = s.older_id JOIN public.thoughts n ON n.id = s.newer_id
+     WHERE s.status = 'pending'
+       AND (s.older_fingerprint IS DISTINCT FROM o.content_fingerprint OR s.newer_fingerprint IS DISTINCT FROM n.content_fingerprint))
+  SELECT s.id, s.newer_id FROM differs d JOIN public.settled_parts s ON s.id = d.id JOIN public.thoughts o ON o.id = s.older_id JOIN public.thoughts n ON n.id = s.newer_id
+   WHERE s.status = 'pending'
+     AND (s.older_fingerprint <> public.content_fingerprint_of(o.content) OR s.newer_fingerprint <> public.content_fingerprint_of(n.content))`;
+
+/**
+ * The settled parts that wait for a decide-mode run of the pass: `stale`, the ones a rebuild or such a run set stale,
+ * and `moved`, the pending ones at a text that has moved since (MOVED_PARTS_SQL). One read for the pass's --status,
+ * db/rebuild.ts --status and preflight's lineage census, so the three say the same of one brain. For a brain that has
+ * the parts' store (151): the caller looks first.
+ */
+export const PARTS_WAITING_SQL = `SELECT (SELECT count(*)::int FROM public.settled_parts WHERE status = 'stale') AS stale,
+       (SELECT count(*)::int FROM (${MOVED_PARTS_SQL}) m) AS moved`;
+
+/**
+ * Whether a brain has the parts' store, and whether the role asking may read it: `has`, `reads`. The server group and
+ * the worker group hold SELECT on settled_parts since 151 (db/config.mjs); a role that reads the proposals through
+ * another group does not, and a status that read the parts unasked would fail where it ran before.
+ */
+export const PARTS_STORE_SQL = `SELECT to_regclass('public.settled_parts') IS NOT NULL AS has,
+       COALESCE(has_table_privilege(to_regclass('public.settled_parts'), 'SELECT'), false) AS reads`;
+/** The line a status prints for the parts where the role may not read them. */
+export const PARTS_UNREAD = "not read — this role holds no SELECT on settled_parts (the server group's and the worker group's since 151)";
+
+/**
+ * What a settle_stale_part call answered, as this pass knows the store's five answers (the stale parts' migration):
+ * `removed`, with `ok` true, and NOT_FOUND, DECIDED, EDITED_SINCE or NOT_STALE, each with `ok` false. Anything else is
+ * `unknown`, with the word the store gave, cut as partAnswer cuts a write's: an answer a later store might give, one
+ * that is no object, or none at all.
+ */
+export function settleAnswer(r: unknown): { known: "removed" | "NOT_FOUND" | "DECIDED" | "EDITED_SINCE" | "NOT_STALE" } | { unknown: string } {
+  const o = r as { ok?: unknown; action?: unknown; error?: unknown } | null | undefined;
+  if (o?.ok === true && o.action === "removed") return { known: "removed" };
+  if (o?.ok === false && (o.error === "NOT_FOUND" || o.error === "DECIDED" || o.error === "EDITED_SINCE" || o.error === "NOT_STALE")) return { known: o.error };
+  const word = [o?.error, o?.action].find((w): w is string => typeof w === "string" && w !== "");
+  return { unknown: (word ?? "").replace(/[^A-Za-z0-9_]/g, "").slice(0, 40) || "no word" };
+}
+
+/**
+ * The store's own refusal of a settle_stale_part call that threw: its words, which begin with the function's name
+ * and echo no argument (an id and two fingerprints are all it is given). Null for any other throw, which is the
+ * caller's to rethrow as it came. Read by name as a part's write is (partWriteFault): the refusal's SQLSTATE under a
+ * session that defaults above READ COMMITTED is one a follower ends on (worker-bootstrap.ts's followClassify), where
+ * the same default only fails the thoughts whose parts it refuses.
+ */
+export function settleRefusal(e: unknown): string | null {
+  const message = e instanceof Error ? e.message : "";
+  return /^settle_stale_part\b/.test(message) ? message.slice(0, 200) : null;
+}
+
+/** A thought's stale parts the store would not remove, as one clause of its claim's error: how many, and the store's own words for the first. Empty for none. */
+export function unsettledWords(refusals: string[]): string {
+  if (refusals.length === 0) return "";
+  return `${refusals.length === 1 ? "a stale settled part was" : `${refusals.length} stale settled parts were`} not removed — ${refusals[0]}`;
+}
+
+/**
  * H2O's distribution as decide version 5 chooses from it: evolves folded into related (related + evolves, evolves 0),
  * so related stands for both words. Folded before the choice, not after (the maintainer's choice, review pass 2): a
  * related top and an evolves top over the same two shares store one number (0.85 for 0.45 and 0.40 either way, where

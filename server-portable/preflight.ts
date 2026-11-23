@@ -32,7 +32,7 @@ import { EGRESS_UNITS, KEYED_UNITS, hostOf, localKnob, type EgressTerm, type Egr
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
-import { consolidatePassKey } from "./consolidate-decide.ts";
+import { consolidatePassKey, PARTS_WAITING_SQL } from "./consolidate-decide.ts";
 import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, PRIORITY_GRANT_FIX, priorityFindingsRow, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
@@ -2694,6 +2694,9 @@ if (configFailed) {
                      (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
                      -- The settled parts' table (SMD-4446), where its file is applied: that file last defines rebuild_derived, so 067's remedy names it there.
                      to_regclass('public.settled_parts') IS NOT NULL AS has_parts,
+                     -- …and whether this role may read it: the server group's and the worker group's since 151. The census
+                     -- reads the parts only then, and says so otherwise: unasked, a role without it lost the whole check.
+                     COALESCE(has_table_privilege(to_regclass('public.settled_parts'), 'SELECT'), false) AS reads_parts,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
                      -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
@@ -2709,11 +2712,12 @@ if (configFailed) {
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; reads_parts: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; thread_edges: number; thread_edge_ids: string[] | null; subjects: number; subject_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; te_read: number; sj_read: number };
+            const readsParts = bodies.has_parts && bodies.reads_parts;
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; thread_edges: number; thread_edge_ids: string[] | null; subjects: number; subject_ids: string[] | null; parts: number; part_ids: string[] | null; parts_stale: number; parts_moved: number; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; te_read: number; sj_read: number; pa_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -2753,6 +2757,19 @@ if (configFailed) {
                    sj_s AS (SELECT id FROM public.thought_facets WHERE kind = 'subject' AND valid_until IS NULL LIMIT ${BOUND}),
                    sj AS (SELECT s.id FROM sj_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'subject' AND d.artifact_id = s.id)),
+                   -- 151 (SMD-4446): a settled part and its lineage row, written with it by record_settled_part: the validity
+                   -- read takes a part by that row, so a part without one stands unseen. And the parts that wait for a
+                   -- decide-mode run of the pass (PARTS_WAITING_SQL, the pass's own read): the stale ones, and the
+                   -- pending ones at a text that has moved with no rebuild since, which no lineage row marks. Where the
+                   -- store stands and this role may read it.
+                   ${readsParts
+                     ? `pa_s AS (SELECT id FROM public.settled_parts LIMIT ${BOUND}),
+                   pa AS (SELECT s.id FROM pa_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'part' AND d.artifact_id = s.id)),
+                   pw AS (${PARTS_WAITING_SQL}),`
+                     : `pa_s AS (SELECT NULL::uuid AS id WHERE false),
+                   pa AS (SELECT NULL::uuid AS id WHERE false),
+                   pw AS (SELECT 0 AS stale, 0 AS moved),`}
                    md_s AS (SELECT t.id FROM public.thoughts t
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
@@ -2777,8 +2794,8 @@ if (configFailed) {
                            -- 111: a subject off its text is the subject pass's to find again — its pool reads the fingerprint —
                            -- until rebuild_derived gains its arm (SMD-3306).
                            -- 151: a settled part's row is left out, as a proposal's is. Once a rebuild has run its status is
-                           -- its mark, and a decided part keeps the fingerprints it was judged at for good. (A pending part at
-                           -- a moved text with no rebuild since is so far counted nowhere: SMD-4446's later cuts.)
+                           -- its mark, and a decided part keeps the fingerprints it was judged at for good. A pending part at
+                           -- a moved text with no rebuild since is counted with the stale ones (pw, above).
                            WHERE d.artifact_kind NOT IN ('proposal', 'part', 'relation', 'subject')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d
@@ -2795,6 +2812,8 @@ if (configFailed) {
                      (SELECT count(*)::int FROM re) AS relations, (SELECT array_agg(id::text) FROM (SELECT id FROM re LIMIT 3) s) AS relation_ids,
                      (SELECT count(*)::int FROM te) AS thread_edges, (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM te LIMIT 3) s) AS thread_edge_ids,
                      (SELECT count(*)::int FROM sj) AS subjects,  (SELECT array_agg(id::text) FROM (SELECT id FROM sj LIMIT 3) s) AS subject_ids,
+                     (SELECT count(*)::int FROM pa) AS parts,     (SELECT array_agg(id::text) FROM (SELECT id FROM pa LIMIT 3) s) AS part_ids,
+                     (SELECT stale FROM pw) AS parts_stale, (SELECT moved FROM pw) AS parts_moved,
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM lp) AS lineage_pairs, (SELECT array_agg(id::text) FROM (SELECT id FROM lp LIMIT 3) s) AS lineage_pair_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
@@ -2808,7 +2827,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
                      (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read,
                      (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read, (SELECT count(*)::int FROM te_s) AS te_read,
-                     (SELECT count(*)::int FROM sj_s) AS sj_read`)) as Census[];
+                     (SELECT count(*)::int FROM sj_s) AS sj_read, (SELECT count(*)::int FROM pa_s) AS pa_read`)) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2818,7 +2837,7 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read, c.te_read, c.sj_read].some((r) => Number(r) >= BOUND);
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read, c.te_read, c.sj_read, c.pa_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
@@ -2828,6 +2847,7 @@ if (configFailed) {
             if (Number(c.relations)) missing.push(`${n(c.relations)} judged relation(s) (${(c.relation_ids ?? []).join(", ")})`);
             if (Number(c.thread_edges)) missing.push(`${n(c.thread_edges)} thread edge(s) (${(c.thread_edge_ids ?? []).join(", ")})`);
             if (Number(c.subjects)) missing.push(`${n(c.subjects)} own subject(s) (${(c.subject_ids ?? []).join(", ")})`);
+            if (Number(c.parts)) missing.push(`${n(c.parts)} settled part(s) (${(c.part_ids ?? []).join(", ")})`);
             // 064's kind has its own writer and no backfill: the remedy for a
             // section is that writer, said beside the general one (cold read,
             // first review pass: the general remedy named 061's backfill, which
@@ -2838,8 +2858,13 @@ if (configFailed) {
               // 120 (SMD-3306): a thread's edge and its row are thread_relink's, written together; a re-link writes a closed one again.
               + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the key each edge is named under above>'." : "")
               // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
-              + (Number(c.subjects) ? " An own subject's row is written with it by 130's record_thought_subjects (111's record_thought_subject its set of one): close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+              + (Number(c.subjects) ? " An own subject's row is written with it by 130's record_thought_subjects (111's record_thought_subject its set of one): close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "")
+              // 151 (SMD-4446): a part's row is its own writer's too, and 061's backfill knows no part. Its fingerprints
+              // are the part's own, so the row can be written again as the part holds it.
+              + (Number(c.parts) ? " A settled part's row is written with it by 151's record_settled_part: record the row again from the part (SELECT ob1_record_derivation('part', s.id, ARRAY[s.older_id, s.newer_id], ARRAY[s.older_fingerprint, s.newer_fingerprint], s.judge_key, '{\"deterministic\": false}'::jsonb, s.canonical_agent_id) FROM settled_parts s WHERE s.id = '<part id>'), which keeps a reviewer's decision on it; the recipe it was judged under is not known again." : "");
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)${
+              readsParts ? `; ${c.parts_stale} settled part(s) stale and ${c.parts_moved} pending at a text that has moved since (a decide-mode run of the consolidation pass judges their pairs again, records in its place the statement it names again and removes the rest: bun db/consolidate.ts)`
+              : bodies.has_parts ? "; the settled parts not read (this role holds no SELECT on settled_parts, the server group's since 151)" : ""}`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -2944,7 +2969,7 @@ if (configFailed) {
             add("lineage", "skip", `not checked — this role cannot read ${denied} (${msg})`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "derivations" ? "the capture group's row since 061" : "a row of the grants table"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (064) and pg_proc.");
+            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (064), settled_parts (151) and pg_proc.");
           }
         }
 
