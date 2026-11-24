@@ -13,27 +13,35 @@
  *   bun db/claim-report.ts --self-check
  *
  * --from reads claims as list_claims answers them, with include_ended: a JSON
- * array of claims, a page (an object with a `claims` array), or an array of
- * pages walked to the end (each page's `cursor` as the next call's `after`); the
- * server's camelCase or work_claims' snake_case. A page that says `truncated` as
- * the last one read is refused: the rest of the brain is missing. A brain's
- * claims reach it that way through any client holding a read key, with no
- * database credentials.
+ * array of claims, a page (an object with a `claims` array: REST's
+ * `GET /v1/claims` body), or an array of pages walked to the end (each page's
+ * `cursor` as the next call's `after`); the server's camelCase or work_claims'
+ * snake_case. An MCP tool result is unwrapped (its `structuredContent`, else its
+ * text; a JSON-RPC answer's `result`). A page that says `truncated` as the last
+ * one read is refused: the rest of the brain is missing; pages that hold fewer
+ * claims than the first page counted are warned of. A walk without include_ended
+ * holds live claims alone. A brain's claims reach it that way through any
+ * client holding a read key, with no database credentials.
  * --url reads work_claims directly (SELECT on it, the `claims` group's). Give
  * one of the two.
- * --sizes reads a JSON object of merged PRs' sizes, by number:
- *   { "869": { "additions": 540, "deletions": 23, "commits": 6 } }
- * (`gh pr view N --json additions,deletions,commits` gives each). A merged
- * claim's PRs are read from its release reason's first sentence: each "OB1 PR N"
- * and the list that follows one ("OB1 PR 705, PR 710 and PR 719"), summed; else
- * its last "PR N".
- * --now dates the report: a claim made after it is left out, one released after
- * it reads as unreleased, and lapsed or live is read against it. Unset, the clock.
- * --json prints the report's numbers instead of its table.
+ * --sizes reads merged PRs' sizes: `gh pr list --state merged --limit 500 --json
+ * number,additions,deletions` as it prints them, or an object by number,
+ *   { "869": { "additions": 540, "deletions": 23 } }
+ * A merged claim's PRs are read from its release reason's first sentence (split
+ * at a full stop before a capital): each "OB1 PR N" and the list that follows one
+ * ("OB1 PR 705, PR 710 and PR 719"), summed; else its last "PR N". Other wordings
+ * ("OB1 PR 705, 710 and 719", "OB1 PR 832/847") read the first PR alone.
+ * --now dates the report, an ISO time with its zone: a claim made after it is
+ * left out, one released after it reads as unreleased, and lapsed or live is
+ * read against it. Unset, the clock: give a saved dump the time it was read, or
+ * its live claims read as lapsed. A row keeps only its last lease and count, so
+ * a claim renewed after --now reads with that renewal.
+ * --json prints the report's numbers, and what it cannot see, instead of its table.
  *
  * How a claim ended (ENDINGS), read from its release:
- *   merged                 its holder released it saying "merged", not "not
- *                          merged" (the claim rule's "Merged: OB1 PR N → main …")
+ *   merged                 its holder released it saying "merged", not "not",
+ *                          "never", "yet", "n't" or "be merged" (the claim rule's
+ *                          "Merged: OB1 PR N → main …")
  *   closed by board-sync   released as its ticket closed, by the server's own
  *                          test (closedBySync: the claim's ticket, 118's reason)
  *   taken over             lapsed, and another claim on its work took it over
@@ -47,17 +55,17 @@
  * The durations by client, by shape and by size are of merged claims alone:
  * the claims whose work is known to have finished.
  *
- * What it cannot see, said under the table: a claim runs to its release, at its
- * merge, so its hours hold the waits for review and for the word to merge, not
- * work alone; a renewal count says how often a
- * claim was renewed, not when, and each client renews at its own pace (a Claude
- * Code agent at each commit, push and long test run, its session hook at
+ * What it cannot see (NOT_SEEN, under the table): a claim runs to its release,
+ * at its merge, so its hours hold the waits for review and for the word to
+ * merge, not work alone; a claim made late, just before its merge, reads short;
+ * a PR that closed two claims is counted under each; a renewal count says how
+ * often a claim was renewed, not when, and each client renews at its own pace (a
+ * Claude Code agent at each commit, push and long test run, its session hook at
  * compactions and the session's end and, with the claims hook pasted, each
  * quarter of the lease; the agent runner when it publishes), so counts compare
  * within one client; a claim made before migration 152 is uncounted; a claim
- * taken over hides the work done before its lapse; a claim from before a week
- * lease at PR open ran under a shorter one; a claim board-sync closed is timed
- * to that pass, not its merge, and left out of the merged tables.
+ * taken over hides the work done before its lapse; a claim board-sync closed is
+ * timed to that pass, not its merge, and left out of the merged tables.
  */
 import { readFileSync } from "node:fs";
 import { commandLine } from "./cli.ts";
@@ -79,7 +87,7 @@ export type Ending = (typeof ENDINGS)[number];
  * A merge named in a release reason: "Merged: OB1 PR 869 → main …", "SMD-3379 PR 2b-2a merged: OB1 PR 706 …". The
  * word, not a PR's number: a split's reason names its pieces ("Split into PR 1 … and PR 2 …").
  */
-const MERGED_RE = /(?<!\bnot )(?<!n't )\bmerged\b/i;
+const MERGED_RE = /(?<!(?:\b(?:not|never|yet|be)|n['’]t)\s+)\bmerged\b/i;
 /** The repository's PRs, as the claim rule writes them ("OB1 PR 869"), each with the list that follows it ("…, PR 710 and PR 719"); else any "PR N". */
 const OB1_PR_RE = /\bOB1 PR (\d+)((?:,? (?:and )?PR \d+\b)*)/g;
 const PR_RE = /\bPR (\d+)\b/g;
@@ -216,7 +224,7 @@ export function report(all: ClaimRow[], now: number, sizes?: Record<string, { ad
   };
 }
 
-const h = (v: number | null) => (v === null ? "—" : v < 1 ? v.toFixed(2) : v < 10 ? v.toFixed(1) : String(Math.round(v)));
+const h = (v: number | null) => (v === null ? "—" : v < 0.995 ? v.toFixed(2) : v < 9.95 ? v.toFixed(1) : String(Math.round(v)));
 const r1 = (v: number | null) => (v === null ? "—" : Number.isInteger(v) ? String(v) : v.toFixed(1));
 function table(title: string, groups: Group[]): string[] {
   const head = `  ${"".padEnd(26)}${"claims".padStart(7)}${"p25 h".padStart(8)}${"median h".padStart(10)}${"p75 h".padStart(8)}${"max h".padStart(8)}${"renewals, median".padStart(18)}${"uncounted".padStart(11)}`;
@@ -228,6 +236,7 @@ function table(title: string, groups: Group[]): string[] {
 export function render(rep: Report): string {
   const lines = [
     `Work claims, as of ${rep.at}: ${rep.claims} read, ${rep.byEnding.live} live (left out)${rep.later ? `, ${rep.later} made after it (left out)` : ""}.`,
+    ...(rep.claims > 0 && rep.byEnding.live === rep.claims ? ["Every claim read is live: list_claims without include_ended lists live claims alone."] : []),
     "",
     ...table("By how each ended (hours from claim to release; lapsed, never released: to its lease's end):", rep.endings),
     "",
@@ -235,32 +244,67 @@ export function render(rep: Report): string {
     "",
     ...table("Merged claims, by shape:", rep.shapes),
   ];
-  if (rep.sizes) lines.push("", ...table("Merged claims, by the PR's changed lines (--sizes):", rep.sizes), ...(rep.unreadSizes ? [`  ${rep.unreadSizes} merged claim(s) name no PR, or one --sizes lacks or holds without numeric additions and deletions: "size unknown".`] : []));
-  lines.push("",
-    "Not seen here: a claim runs to its release, at its merge, so its hours hold the waits for review and for the word to merge,",
-    "not work alone; a renewal count says how often a claim was renewed, not when, and each client renews at its own pace, so",
-    "counts compare within one client; a claim made before migration 152 is uncounted; a claim taken over hides the work done",
-    "before its lapse; a claim made before the week lease at a PR's opening ran under a shorter lease; a claim board-sync",
-    "closed is timed to that pass, not to its merge, and is left out of the merged tables.");
+  if (rep.sizes) lines.push("", ...table("Merged claims, by the PR's changed lines (--sizes):", rep.sizes), ...(rep.unreadSizes ? [`  ${rep.unreadSizes} merged claim(s) "size unknown": the reason names no PR, or --sizes has no additions and deletions for one it names.`] : []));
+  lines.push("", ...NOT_SEEN);
   return lines.join("\n");
 }
 
-type Page = { claims: unknown[]; truncated?: unknown };
-const isPage = (v: unknown): v is Page => !!v && typeof v === "object" && !Array.isArray(v) && Array.isArray((v as Page).claims);
+/** What the report cannot see, printed under its table and carried in --json. */
+export const NOT_SEEN = [
+  "Not seen here: a claim runs to its release, at its merge, so its hours hold the waits for review and for the word to merge,",
+  "not work alone; a claim made late, just before its merge, reads short; a PR that closed two claims is counted under each;",
+  "a renewal count says how often a claim was renewed, not when, and each client renews at its own pace, so counts compare",
+  "within one client; a claim made before migration 152 is uncounted; a claim taken over hides the work done before its",
+  "lapse; a claim board-sync closed is timed to that pass, not to its merge, and is left out of the merged tables.",
+];
+
+type Page = { claims: unknown[]; truncated?: unknown; remaining?: unknown };
+const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 /**
- * Claims from a --from file's text: an array of claims, a page (an object with a `claims` array), or an array of pages;
- * null where it is none of them, "truncated" where the last page says more follow. A claim on two pages counts once.
+ * A list_claims page as a client saved it, unwrapped: the page itself (REST's body, or what a program reads), an MCP
+ * tool result (its `structuredContent`, else its first text content as JSON), or a JSON-RPC answer (its `result`).
  */
-export function claimsFromText(text: string): { rows: ClaimRow[]; unread: number } | null | "truncated" {
+function pageOf(v: unknown, depth = 0): Page | null {
+  if (!isObject(v) || depth > 3) return null;
+  if (Array.isArray(v.claims)) return v as Page;
+  if (isObject(v.result)) return pageOf(v.result, depth + 1);
+  if (isObject(v.structuredContent)) return pageOf(v.structuredContent, depth + 1);
+  const text = Array.isArray(v.content) ? (v.content as { type?: unknown; text?: unknown }[]).find((c) => c?.type === "text" && typeof c.text === "string")?.text : undefined;
+  if (typeof text === "string") { try { return pageOf(JSON.parse(text), depth + 1); } catch { return null; } }
+  return null;
+}
+export type FromFile = { rows: ClaimRow[]; unread: number; warning: string | null };
+/**
+ * Claims from a --from file's text: an array of claims, a page, or an array of pages, a page as pageOf unwraps it;
+ * null where it is none of them, "truncated" where the last page says more follow. A claim on two pages counts once.
+ * Pages holding fewer claims than the first page counted (its claims and `remaining`) are warned of: a page missed.
+ */
+export function claimsFromText(text: string): FromFile | null | "truncated" {
   let v: unknown;
   try { v = JSON.parse(text); } catch { return null; }
-  const pages = isPage(v) ? [v] : Array.isArray(v) && v.length > 0 && v.every(isPage) ? (v as Page[]) : null;
+  const one = pageOf(v);
+  const many = Array.isArray(v) && v.length > 0 ? v.map((x) => pageOf(x)) : null;
+  const pages = one ? [one] : many && many.every((p) => p !== null) ? (many as Page[]) : null;
   if (pages && pages[pages.length - 1].truncated === true) return "truncated";
   const list = pages ? pages.flatMap((p) => p.claims) : Array.isArray(v) ? v : null;
   if (!list) return null;
   const read = list.map(rowOf);
   const rows = [...new Map(read.filter((x): x is ClaimRow => x !== null).map((c) => [c.id, c])).values()];
-  return { rows, unread: read.filter((x) => x === null).length };
+  const first = pages?.[0];
+  const promised = first && typeof first.remaining === "number" ? first.claims.length + first.remaining : null;
+  const warning = promised !== null && rows.length < promised
+    ? `the pages hold ${rows.length} claims where the first page counted ${promised}: a page is missing, or claims ended during the walk`
+    : null;
+  return { rows, unread: read.filter((x) => x === null).length, warning };
+}
+
+/** --sizes as `gh pr list --json number,additions,deletions` prints it, or an object by number; null where it is neither. */
+export function sizesOf(v: unknown): Record<string, { additions?: number; deletions?: number }> | null {
+  if (Array.isArray(v)) {
+    if (!v.every((x) => isObject(x) && typeof x.number === "number")) return null;
+    return Object.fromEntries((v as { number: number; additions?: number; deletions?: number }[]).map((x) => [String(x.number), { additions: x.additions, deletions: x.deletions }]));
+  }
+  return isObject(v) ? (v as Record<string, { additions?: number; deletions?: number }>) : null;
 }
 
 export function selfCheck(): number {
@@ -289,8 +333,9 @@ export function selfCheck(): number {
     `each ending read from its release: merged (twice, a piece's too), closed by board-sync, taken over, force-released, lapsed never released, live (${[merged, pieceMerged, closed, taken, forced, lapsed, live].map(e).join(", ")})`);
   ok(e(split) === "released (other)", `a split's reason, naming its pieces "PR 1" and "PR 2" but no merge, reads as released (other) (${e(split)})`);
   const dropped = claim({ id: "d", releasedAt: at(1), releasedBy: "claude-code", releaseReason: "dropped: the user chose another fix" });
-  const notMerged = claim({ id: "nm", releasedAt: at(1), releasedBy: "claude-code", releaseReason: "Dropped, not merged: OB1 PR 870 closed" });
-  ok(e(dropped) === "released (other)" && e(notMerged) === "released (other)", `a release naming no merge, or "not merged", reads as released (other) (${e(dropped)}, ${e(notMerged)})`);
+  const negated = ["Dropped, not merged: OB1 PR 870 closed", "never merged; dropped", "not yet merged; dropped", "wasn’t merged", "won't be merged: superseded"]
+    .map((r, i) => e(claim({ id: `nm${i}`, releasedAt: at(1), releasedBy: "claude-code", releaseReason: r })));
+  ok(e(dropped) === "released (other)" && negated.every((x) => x === "released (other)"), `a release naming no merge, or a merge it denies ("not", "never", "yet", "n't", "be merged"), reads as released (other) (${e(dropped)}; ${negated.join(", ")})`);
   // Board-sync by the server's own test: an operator's or a holder's reason worded alike is theirs.
   const opClosed = claim({ id: "oc", releasedAt: at(1), releasedBy: "op", releasedByKind: "operator", releaseReason: "SMD-1 closed: Done (completed); by hand" });
   const ownClosed = claim({ id: "hc", releasedAt: at(1), releasedBy: "claude-code", releasedByKind: "agent", releaseReason: "SMD-1 closed: merged as OB1 PR 9" });
@@ -309,8 +354,9 @@ export function selfCheck(): number {
   const three = claim({ id: "3", releaseReason: "Piece PR 2 done: 2a (OB1 PR 832), 2b (OB1 PR 847) and 2c (OB1 PR 865 -> 35b49c9b) merged" });
   const list = claim({ id: "li", releaseReason: "SMD-3668's three PRs merged: OB1 PR 705, PR 710 and PR 719 (main 410e28a0)" });
   const later = claim({ id: "la", releaseReason: "PR 3b-2 merged: OB1 PR 860 -> 7f8a1c4a. PR 3b is done: 3b-1 (OB1 PR 839), the measurement" });
-  const prs = [merged, pieceMerged, pieceAfter, bare, closed, three, list, later].map((c) => prsOf(c).join("+") || "none");
-  ok(prs.join() === "869,706,869,412,none,832+847+865,705+710+719,860",
+  const twice = claim({ id: "tw", releaseReason: "Merged: OB1 PR 869 → main (OB1 PR 869's second commit)" });
+  const prs = [merged, pieceMerged, pieceAfter, bare, closed, three, list, later, twice].map((c) => prsOf(c).join("+") || "none");
+  ok(prs.join() === "869,706,869,412,none,832+847+865,705+710+719,860,869",
     `the PRs are the first sentence's "OB1 PR N" with any list after one, a piece's own name and a later sentence's PRs passed over, else its last "PR N" (${prs.join()})`);
   ok(clientOf(merged) === "claude-code" && clientOf(claim({ id: "x", label: "Codex@laptop codex/smd-1" })) === "codex" && clientOf(claim({ id: "y", label: null, holder: "runner-key" })) === "runner-key",
     "the client is the label's first word before '@', lower-cased, else the key's name");
@@ -327,6 +373,12 @@ export function selfCheck(): number {
   const multi = claim({ id: "mu", piece: "PR 3", releasedAt: at(6), releasedBy: "claude-code", releaseReason: "PR 3 merged: OB1 PR 1 and PR 2" });
   const sizes = { "869": { additions: 500, deletions: 40 }, "1": { additions: 1500, deletions: 0 }, "2": { additions: 300, deletions: 200 } };
   const rep = report([merged, pieceMerged, multi, closed, taken, forced, split, dropped, lapsed, live], NOW, sizes);
+  const halfSized = report([merged], NOW, { "869": { additions: 500 } });
+  ok(halfSized.unreadSizes === 1 && halfSized.sizes?.map((g) => g.key).join() === "size unknown",
+    `a size without its deletions reads unknown, counted as unread (${halfSized.unreadSizes})`);
+  const listed = sizesOf([{ number: 869, additions: 500, deletions: 40 }]);
+  ok(listed?.["869"]?.deletions === 40 && sizesOf([{ additions: 1 }]) === null && sizesOf("x") === null,
+    "--sizes reads gh pr list's array by its numbers, or an object by number; anything else is refused");
   const mergedGroup = rep.endings.find((g) => g.key === "merged");
   ok(rep.claims === 10 && rep.byEnding.live === 1 && rep.byEnding.merged === 3 && mergedGroup?.hours.n === 3 && mergedGroup.hours.median === 6 && mergedGroup.uncounted === 1 && mergedGroup.renewals.median === 2,
     `the endings' table: 10 claims, 1 live left out, 3 merged at a median 6 h, one of them uncounted, renewals median 2 of the two counted (${JSON.stringify(mergedGroup)})`);
@@ -337,14 +389,19 @@ export function selfCheck(): number {
   const bySize = rep.sizes?.map((g) => `${g.key}:${g.hours.n}`).join();
   ok(bySize === "500 to 1,999 lines:1,2,000 lines or more:1,size unknown:1" && rep.unreadSizes === 1,
     `by size: PR 869's 540 lines in 500 to 1,999, PRs 1 and 2 summed (1,500 + 500) in 2,000 or more, the one naming no PR --sizes holds unknown (${bySize})`);
+  ok(/Every claim read is live/.test(render(report([live], NOW))) && !/Every claim read is live/.test(render(report([live, merged], NOW))),
+    "a read of live claims alone says include_ended was likely left off");
   ok(report([merged], NOW).sizes === null && !render(report([merged], NOW)).includes("--sizes"), "without --sizes no size table is printed");
   const text = render(rep);
-  ok(/^Work claims, as of 2026-11-23T12:00:00\.000Z: 10 read, 1 live \(left out\)\./.test(text) && /each client renews at its own pace/.test(text) && /the waits for review and for the word to merge/.test(text) && /board-sync/.test(text) && /uncounted/.test(text),
+  ok(/^Work claims, as of 2026-11-23T12:00:00\.000Z: 10 read, 1 live \(left out\)\./.test(text) && /each client renews at its own pace/.test(text) && /the waits for review and for the word to merge/.test(text) && text.includes(NOT_SEEN.join("\n")) && /uncounted/.test(text),
     "the table says when, how many and what it cannot see");
   // Dated in the past: a claim made later is left out, a release still to come is not read.
   const past = report([merged, claim({ id: "new", claimedAt: at(-1), expiresAt: at(-20) })], NOW - 3 * H);
   ok(past.claims === 1 && past.later === 1 && past.byEnding.live === 1 && past.byEnding.merged === 0,
     `--now in the past: the claim made after it left out, the merge after it not yet read (${JSON.stringify(past.byEnding)}, ${past.later} later)`);
+  const edge = report([claim({ id: "made", claimedAt: at(0) }), claim({ id: "done", releasedAt: at(0), releasedBy: "claude-code", releaseReason: "Merged: OB1 PR 1" })], NOW);
+  ok(edge.claims === 2 && edge.later === 0 && edge.byEnding.live === 1 && edge.byEnding.merged === 1,
+    `a claim made, or released, at --now itself counts as made, or released (${JSON.stringify(edge.byEnding)})`);
 
   // The inputs.
   const camel = claimsFromText(JSON.stringify({ claims: [{ id: "a", issue: "SMD-2", piece: null, holder: "h", claimedAt: at(3), expiresAt: at(1), releasedAt: at(2), releaseReason: "Merged: OB1 PR 1", renewals: 2 }, { nope: true }] }));
@@ -360,6 +417,17 @@ export function selfCheck(): number {
   const walked = claimsFromText(JSON.stringify([page(["p1", "p2"], true), page(["p2", "p3"], false)]));
   ok(walked !== null && walked !== "truncated" && walked.rows.map((c) => c.id).join() === "p1,p2,p3" && claimsFromText(JSON.stringify(page(["p1"], true))) === "truncated" && claimsFromText(JSON.stringify([page(["p1"], false), page(["p2"], true)])) === "truncated",
     "pages walked to the end read as one list, a claim on two counted once; a last page saying more follow is refused");
+  const pg = page(["w1", "w2"], false);
+  const mcp = { content: [{ type: "text", text: JSON.stringify(pg) }], structuredContent: pg };
+  const forms = [mcp, { content: [{ type: "text", text: "2 claims: …" }], structuredContent: pg }, { content: mcp.content }, { jsonrpc: "2.0", id: 1, result: mcp }, [mcp]].map((f) => {
+    const got = claimsFromText(JSON.stringify(f));
+    return got && got !== "truncated" ? got.rows.map((c) => c.id).join("+") : String(got);
+  });
+  ok(forms.every((f) => f === "w1+w2"), `an MCP tool result (structuredContent, or its text alone), a JSON-RPC answer and an array of results unwrap to their page (${forms.join(", ")})`);
+  const gap = claimsFromText(JSON.stringify([{ ...page(["g1", "g2"], true), remaining: 4 }, page(["g5", "g6"], false)]));
+  const whole = claimsFromText(JSON.stringify([{ ...page(["g1", "g2"], true), remaining: 2 }, page(["g3", "g4"], false)]));
+  ok(gap !== null && gap !== "truncated" && /first page counted 6/.test(gap.warning ?? "") && whole !== null && whole !== "truncated" && whole.warning === null,
+    `pages holding fewer claims than the first page counted are warned of; a whole walk is not (${gap && gap !== "truncated" ? gap.warning : gap})`);
   ok(claimsFromText("not json") === null && claimsFromText(JSON.stringify({ claims: "x" })) === null && rowOf({ id: "z", issue: "SMD-4", holder: "h", claimedAt: at(1), expiresAt: at(0), renewals: -1 })?.renewals === null,
     "text that is not a claims list is refused, and a count below 0 reads uncounted");
 
@@ -382,13 +450,18 @@ async function main(): Promise<number> {
   let sizes: Record<string, { additions?: number; deletions?: number }> | undefined;
   if (cli.has("sizes")) {
     let v: unknown;
-    try { v = JSON.parse(readFileSync(cli.value("sizes")!, "utf8")); } catch (e) { console.error(`claim-report.ts: --sizes could not be read as JSON (${(e as NodeJS.ErrnoException).code ?? "not JSON"})`); return 2; }
-    if (!v || typeof v !== "object" || Array.isArray(v)) { console.error("claim-report.ts: --sizes is an object of PRs by number: { \"869\": { \"additions\": 540, \"deletions\": 23 } }"); return 2; }
-    sizes = v as typeof sizes;
+    let text: string;
+    try { text = readFileSync(cli.value("sizes")!, "utf8"); } catch (e) { console.error(`claim-report.ts: --sizes could not be read (${(e as NodeJS.ErrnoException).code ?? "unreadable"})`); return 2; }
+    try { v = JSON.parse(text); } catch { console.error("claim-report.ts: --sizes is not JSON"); return 2; }
+    const got = sizesOf(v);
+    if (!got) { console.error("claim-report.ts: --sizes is `gh pr list --state merged --json number,additions,deletions` as it prints it, or an object of PRs by number: { \"869\": { \"additions\": 540, \"deletions\": 23 } }"); return 2; }
+    sizes = got;
   }
-  const print = (rows: ClaimRow[], unread: number) => {
+  const print = (rows: ClaimRow[], unread: number, warning: string | null = null) => {
+    if (!rows.length && unread) { console.error(`claim-report.ts: none of the ${unread} entries read as a claim: give list_claims' page (an MCP result's structuredContent or text, REST's body), its claims, or work_claims' rows`); return 2; }
     const rep = report(rows, now, sizes);
-    console.log(cli.has("json") ? JSON.stringify({ ...rep, unreadClaims: unread }, null, 2) : render(rep) + (unread ? `\n${unread} entr${unread === 1 ? "y" : "ies"} in --from read as no claim, left out.` : ""));
+    console.log(cli.has("json") ? JSON.stringify({ ...rep, unreadClaims: unread, warning, notSeen: NOT_SEEN.join(" ") }, null, 2)
+      : render(rep) + (unread ? `\n${unread} entr${unread === 1 ? "y" : "ies"} in --from read as no claim, left out.` : "") + (warning ? `\nWarning: ${warning}.` : ""));
     return 0;
   };
   if (cli.has("from")) {
@@ -396,8 +469,8 @@ async function main(): Promise<number> {
     try { text = readFileSync(cli.value("from")!, "utf8"); } catch (e) { console.error(`claim-report.ts: --from could not be read (${(e as NodeJS.ErrnoException).code ?? "unreadable"})`); return 2; }
     const got = claimsFromText(text);
     if (got === "truncated") { console.error("claim-report.ts: --from's last page says more claims follow (truncated): call list_claims again with `after` set to its cursor, to the end, and give the pages as one JSON array"); return 2; }
-    if (!got) { console.error("claim-report.ts: --from is no claims list: a JSON array of claims, a page (an object with a `claims` array), or an array of pages, as list_claims answers"); return 2; }
-    return print(got.rows, got.unread);
+    if (!got) { console.error("claim-report.ts: --from is no claims list: a JSON array of claims, a page (an object with a `claims` array; an MCP tool result or JSON-RPC answer holding one), or an array of pages, as list_claims answers"); return 2; }
+    return print(got.rows, got.unread, got.warning);
   }
   const sql = openSql(databaseUrl(cli.value("url")), { max: 1 });
   return closeThenExit(sql, async () => {
