@@ -1627,10 +1627,11 @@ else {
   assert(noPartRow.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 settled part\\(s\\) \\(${part151b.id}\\)`).test(noPartRow.out) && /A settled part's row is written with it by 151's record_settled_part/.test(noPartRow.out)
       && partRemedy !== "" && /✓  lineage\s+every derived row has its lineage row/.test(partRowBack.out) && waiting(partRowBack.out) === "1/0 placed",
          `a settled part without its lineage row does not start, the part named, and the remedy is the part's own; followed as printed, the check is ok again (exit ${noPartRow.code}: ${noPartRow.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 200)}; then ${partRowBack.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 80)})`);
-  // The census reads at most 10,001 parts, in no order (review pass 2). Where the store holds more, its counts are of
-  // the parts read, and the coverage says so. (It said so only when the count of the parts that wait itself reached
-  // the bound: a part at a moved text among the rows not read was counted as none, and nothing said.) 10,001 more
-  // parts on this pair, at the texts as they stand, each with its lineage row.
+  // The parts' read has two bounds, and the coverage says so only where one was reached (review pass 3). It tests at
+  // most 10,001 pending parts for a moved text and places at most 10,001 that wait; every part's row is read. (Review
+  // pass 2 said so wherever the store held 10,001 parts of any status: over exact counts on any brain with that
+  // many decided parts, in the words of a real cut.) 10,001 more parts on this pair, pending at the texts as they
+  // stand, each with its lineage row: the first bound is reached.
   await ctx.unsafe(`WITH made AS (
                       INSERT INTO settled_parts (older_id, newer_id, holder, statement, shown_by, word, reason, older_fingerprint, newer_fingerprint, judge_key)
                       SELECT '${partO}'::uuid, '${partN}'::uuid, 'older', 'pf bound part ' || i, 'shown', 'resolves', 'for this row',
@@ -1640,12 +1641,66 @@ else {
                     INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
                     SELECT 'part', id, ARRAY[older_id, newer_id], ARRAY[older_fingerprint, newer_fingerprint], 'pf-bound-parts', '{"deterministic": false}'::jsonb FROM made`);
   const boundParts = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  // One fewer: 10,000 pending parts, and 10,002 parts in all with the accepted one and the stale one. Neither bound
+  // is reached, the counts are exact, and nothing is said of a bound.
+  await ctx.unsafe(`DELETE FROM settled_parts WHERE id = (SELECT id FROM settled_parts WHERE judge_key = 'pf-bound-parts' LIMIT 1)`);
+  const [{ n: partsInAll }] = (await ctx.unsafe(`SELECT count(*)::int AS n FROM settled_parts`)) as { n: number }[];
+  const underBound = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  // The older text moves again: the 10,000 pending parts wait, and with the stale one 10,001 do. The second bound is
+  // reached and the first is not: the clause again.
+  await ctx.unsafe(`UPDATE thoughts SET content = 'preflight-151 older: the plan had been to ship by Friday', content_fingerprint = content_fingerprint_of('preflight-151 older: the plan had been to ship by Friday') WHERE id = '${partO}'::uuid`);
+  const waitBound = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
   await ctx.unsafe(`DELETE FROM settled_parts WHERE judge_key = 'pf-bound-parts'`);
-  const boundPartsLine = boundParts.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "";
+  const lineageOf = (out: string) => out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "";
+  const CUT = /; of the settled parts, where more than 10,000 are pending or wait \(10,001 pending ones tested for a moved text and 10,001 that wait placed, at most, in no order\), (\d+) settled part\(s\) stale and (\d+) pending at a text that has moved since/;
+  const [cutPending, cutWaiting] = [CUT.exec(lineageOf(boundParts.out)), CUT.exec(lineageOf(waitBound.out))];
   const [{ n: boundPartsLeft }] = (await ctx.unsafe(`SELECT count(*)::int AS n FROM derivations WHERE produced_by = 'pf-bound-parts'`)) as { n: number }[];
-  assert(/; of the 10,001 settled parts read, in no order, where the store holds more, \d+ settled part\(s\) stale and \d+ pending at a text that has moved since/.test(boundPartsLine)
-         && !/settled parts read, in no order/.test(partRowBack.out) && boundPartsLeft === 0,
-         `where the store holds more settled parts than the census reads, the coverage says its counts are of the parts read, in no order; under the bound it says nothing of that (${boundPartsLine.trim().slice(0, 120)} … ${boundPartsLine.slice(boundPartsLine.indexOf("; of the 10,001 settled parts"), boundPartsLine.indexOf("; of the 10,001 settled parts") + 190)})`);
+  assert(cutPending !== null && cutPending[1] === "1" && cutPending[2] === "0"
+         && partsInAll === 10002 && !/of the settled parts, where more than/.test(underBound.out) && /; 1 settled part\(s\) stale and 0 pending at a text that has moved since/.test(lineageOf(underBound.out))
+         && cutWaiting !== null && cutWaiting[1] === "1" && cutWaiting[2] === "10000"
+         && !/of the settled parts, where more than/.test(partRowBack.out) && boundPartsLeft === 0,
+         `the coverage says its counts of the settled parts may leave some out only where a bound of the read was reached: with 10,001 pending parts, of which it tests that many for a moved text; not with 10,002 parts of which 10,000 are pending, its counts exact; and again with 10,001 that wait, of which it places that many (${cutPending === null ? "no clause" : `said, ${cutPending[1]} stale and ${cutPending[2]} moved`}; ${partsInAll} parts: ${/of the settled parts, where more than/.test(underBound.out) ? "said" : "not said"}; ${cutWaiting === null ? "no clause" : `said, ${cutWaiting[1]} stale and ${cutWaiting[2]} moved`})`);
+  // Review pass 3: where a waiting part stands between thoughts that have vectors. Every part the rows above build
+  // waits for a vector, which is placed before any claim is read: nothing held the key the census reads a failed
+  // claim under, nor its counts of the parts held and behind a failed claim. Three parts wait here beside the stale
+  // one above: one whose pair holds a pending proposal at a moved text, so it is held, and two on a second pair.
+  // Both newer thoughts hold a failed claim. The census reads it under the pass's key where the server runs decide
+  // mode, and as a reader that knows no key where it runs judge mode, which reads the pass's decide-mode keys and
+  // names them: a judge-mode key's failed claim keeps no part from a decide run.
+  const pwMk = async (text: string) => ((await ctx.unsafe(`SELECT upsert_thought('${text}', '{}'::jsonb) AS r`))[0].r as { id: string }).id;
+  const [pwHeldO, pwHeldN, pwFailO, pwFailN] = [await pwMk("preflight-pw older: the gate is shut"), await pwMk("preflight-pw newer: the gate was opened"),
+    await pwMk("preflight-pw older: the lamp is out and the wick is short"), await pwMk("preflight-pw newer: the lamp was lit and the wick was trimmed")];
+  await ctx.unsafe(`UPDATE thoughts SET embedding = ('[' || array_to_string(array_fill(0.5::real, ARRAY[${EMBEDDING_DIM}]), ',') || ']')::vector WHERE id IN ('${pwHeldO}', '${pwHeldN}', '${pwFailO}', '${pwFailN}')`);
+  const pwFp = (id: string) => `(SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${id}'::uuid)`;
+  const pwPart = async (o: string, n: string, statement: string, shown: string) => ((await ctx.unsafe(`SELECT record_settled_part('${o}'::uuid, '${n}'::uuid, 'older', '${statement}', '${shown}', 'resolves', 'for this row', 'consolidate:t@p4',
+      ${pwFp(o)}, ${pwFp(n)}, '{"deterministic": false}'::jsonb) AS r`))[0].r as { action: string }).action;
+  const pwMade = [await pwPart(pwHeldO, pwHeldN, "the gate is shut", "the gate was opened"), await pwPart(pwFailO, pwFailN, "the lamp is out", "the lamp was lit"), await pwPart(pwFailO, pwFailN, "the wick is short", "the wick was trimmed")];
+  await ctx.unsafe(`SELECT record_supersession_proposal('${pwHeldO}'::uuid, '${pwHeldN}'::uuid, 'newer_supersedes_older', 0.8, 'for this row', 0.9, 'consolidate:t@p4', NULL)`);
+  for (const [id, text] of [[pwHeldN, "preflight-pw newer: the gate was opened on Monday"], [pwFailN, "preflight-pw newer: the lamp was lit and the wick was trimmed on Monday"]]) {
+    await ctx.unsafe(`UPDATE thoughts SET content = '${text}', content_fingerprint = content_fingerprint_of('${text}') WHERE id = '${id}'::uuid`);
+  }
+  const PW_KEY = consolidatePassKey({ decider: "h2o-pw", judgeModel: "writer-pw" });
+  const PW_JUDGE = consolidateKey("writer-pw");
+  await ctx.unsafe(`INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at, last_error) VALUES ('${pwFailN}'::uuid, '${PW_KEY}', 'failed', now(), 'for this row'), ('${pwHeldN}'::uuid, '${PW_KEY}', 'failed', now(), 'for this row')`);
+  const pwEnv = { ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on", OB1_JUDGE_MODEL: "writer-pw" };
+  const pwOwn = lineageOf((await run({ ...pwEnv, OB1_CONSOLIDATE_DECIDER: "h2o-pw" })).out);
+  const pwOther = lineageOf((await run({ ...pwEnv, OB1_CONSOLIDATE_DECIDER: "h2o-pw-other" })).out);
+  const pwKeyless = lineageOf((await run({ ...pwEnv, OB1_CONSOLIDATE_DECIDER: undefined })).out);
+  await ctx.unsafe(`UPDATE thought_work_claims SET work_type = '${PW_JUDGE}' WHERE work_type = '${PW_KEY}'`);
+  const pwJudgeKey = lineageOf((await run({ ...pwEnv, OB1_CONSOLIDATE_DECIDER: undefined })).out);
+  await ctx.unsafe(`DELETE FROM thought_work_claims WHERE work_type IN ('${PW_KEY}', '${PW_JUDGE}')`);
+  for (const id of [pwHeldN, pwHeldO, pwFailN, pwFailO]) await ctx.unsafe(`SELECT delete_thought('${id}'::uuid)`);
+  const PW_COUNTS = "; 1 settled part(s) stale and 3 pending at a text that has moved since (a decide-mode run of the pass (bun db/consolidate.ts) ";
+  const PW_REST = "1 wait for a vector; 1 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale";
+  const PW_TWO = "takes up 2, the pair judged again or, where nothing will judge it again, the part removed";
+  const pwSaid = (line: string) => line.slice(Math.max(line.indexOf("; 1 settled part(s) stale"), 0)).slice(0, 420);
+  assert(pwMade.join() === "recorded,recorded,recorded" && PW_KEY !== PW_JUDGE
+         && pwOwn.endsWith(`${PW_COUNTS}takes up none as things stand; ${PW_REST}; 2 wait for --retry-failed, their thought's claim under the pass's key having failed)`)
+         && pwOther.endsWith(`${PW_COUNTS}${PW_TWO}; ${PW_REST})`),
+         `the census places a waiting part between thoughts that have vectors: held by its pair's pending proposal at a moved text, or behind a failed claim of its thought under the pass's key, and under that key alone, a server run with another decider reading none (its own key: ${pwSaid(pwOwn)} | another decider: ${pwSaid(pwOther)})`);
+  assert(pwKeyless.endsWith(`${PW_COUNTS}takes up none as things stand; ${PW_REST}; 2 wait behind a claim of their thought that failed in a pass under ${PW_KEY} (bun db/consolidate.ts --retry-failed with that judge's model))`)
+         && pwJudgeKey.endsWith(`${PW_COUNTS}${PW_TWO}; ${PW_REST})`),
+         `…and a server in judge mode reads as one that knows no key: a failed claim under a decide-mode key of the pass places the part and is named, the held part's thought's not among them, and one under a judge-mode key places none (${pwSaid(pwKeyless)} | under a judge-mode key: ${pwSaid(pwJudgeKey)})`);
   await ctx.unsafe(`SELECT delete_thought('${partN}'::uuid)`);
   await ctx.unsafe(`SELECT delete_thought('${partO}'::uuid)`);
   // 120's edge (SMD-3306): a work thread's standing edge without its lineage

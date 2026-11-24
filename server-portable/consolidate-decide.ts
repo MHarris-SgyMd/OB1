@@ -854,8 +854,9 @@ export function refusedWords(olderId: string, refusals: string[]): string {
 /**
  * Decide version 6 (SMD-4446 PR 2b-2): the pending settled parts whose text has moved since they were judged. Nothing
  * runs a rebuild after an edit, so such a part is still `pending`: at fingerprints that are no longer its texts',
- * which an accept refuses unless forced. A decide-mode run of the pass pools its thought and judges its pair again.
- * Columns: `id`, the part's, and `newer_id`, the thought the pass judges its pair from.
+ * which an accept refuses unless forced. A decide-mode run of the pass pools its thought, and judges its pair again
+ * or, where nothing will judge it again, removes the part. Columns: `id`, the part's, and `newer_id`, the thought the
+ * pass judges its pair from.
  *
  * Two tests, the cheap one first. The part's fingerprints against the ones the thoughts store
  * (thoughts.content_fingerprint): equal, the text has not moved, and no text is hashed (6 to 11 ms for 3,000 parts,
@@ -869,11 +870,11 @@ export function refusedWords(olderId: string, refusals: string[]): string {
  * part. A rebuild does not see it either, short of its force: rebuild_derived and the validity read take the stored
  * key where there is one (review pass 1: this said a rebuild sets such a part stale).
  *
- * `limit` bounds the pending parts read (preflight reads at most its census's bound). Its names are
- * schema-qualified: preflight reads it too, and qualifies every name of its own.
+ * `pending` is where the pending parts are read from: the table, or a bounded read of it that the caller names
+ * (partsStandingSql's `pend`, for preflight). Its names are schema-qualified: preflight reads it too, and qualifies
+ * every name of its own.
  */
-export function movedPartsSql(limit?: number): string {
-  const pending = limit === undefined ? "public.settled_parts" : `(SELECT id, older_id, newer_id, status, older_fingerprint, newer_fingerprint FROM public.settled_parts WHERE status = 'pending' LIMIT ${Math.trunc(limit)})`;
+export function movedPartsSql(pending = "public.settled_parts"): string {
   return `WITH differs AS MATERIALIZED (
     SELECT s.id FROM ${pending} s JOIN public.thoughts o ON o.id = s.older_id JOIN public.thoughts n ON n.id = s.newer_id
      WHERE s.status = 'pending'
@@ -922,12 +923,13 @@ export function partHeldSql(part: string, older: string, newer: string): string 
  * mark, or pending at a text that has moved (movedPartsSql). The pass writes no status of its own to say so (review
  * pass 1: it set such a part stale at each pass's start, under the supersession advisory lock, and three findings
  * were seams of that one write): it reads the fact where it needs it. Columns: `id`, `older_id`, `newer_id`,
- * `status`, `vectorless` (a side of the pair has no vector) and `held` (partHeldSql).
+ * `status`, `vectorless` (a side of the pair has no vector) and `held` (partHeldSql). `pending`: movedPartsSql's.
+ * Every part's row is read to find the stale ones, whatever `pending` is: no index serves the status (SMD-4560).
  */
-export function waitingPartsSql(limit?: number): string {
+export function waitingPartsSql(pending?: string): string {
   return `SELECT s.id, s.older_id, s.newer_id, s.status, (o.embedding IS NULL OR n.embedding IS NULL) AS vectorless, ${partHeldSql("s", "o", "n")} AS held
     FROM public.settled_parts s JOIN public.thoughts o ON o.id = s.older_id JOIN public.thoughts n ON n.id = s.newer_id
-   WHERE s.status = 'stale' OR s.id IN (SELECT m.id FROM (${movedPartsSql(limit)}) m)`;
+   WHERE s.status = 'stale' OR s.id IN (SELECT m.id FROM (${movedPartsSql(pending)}) m)`;
 }
 
 /**
@@ -948,64 +950,97 @@ export function partsToPoolSql(): string {
 
 /**
  * Where the parts that wait stand: `stale` and `moved` (pending at a moved text) count them; `vector`, `held` and
- * `failed` count those a decide-mode run does not take up as things are. `failed_keys`: the consolidation keys under
- * which a failed claim placed a part, for a read that knows no key (PartsClaims "any"); empty otherwise.
+ * `failed` count those a decide-mode run does not take up as things are. `failed_keys`: the pass's decide-mode keys
+ * under which a failed claim placed a part, for a read that knows no key (PartsClaims "any"); empty otherwise. `cut`: a
+ * bounded read reached one of its two bounds, so its counts may leave parts out; false for a read with no bound.
  */
-export type PartsStanding = { stale: number; moved: number; vector: number; held: number; failed: number; failed_keys?: string[] | null };
+export type PartsStanding = { stale: number; moved: number; vector: number; held: number; failed: number; failed_keys?: string[] | null; cut?: boolean };
 
 /**
  * Which claim places a waiting part `failed` (review pass 2). `{ under }`: a failed claim of its thought under the
  * pass's key alone, given as the SQL that names the key (`$1`): the claim the pool step skips and --retry-failed
- * returns. "any": one under any consolidation key, for a reader that knows no key (db/rebuild.ts), the keys named.
- * "unread": no claim is read, for a role that may not read thought_work_claims (a server's, where neither extraction
- * nor the subject pool is on): no part is placed `failed` then, and the words say so. As the stale proposals'
- * standing reads a claim (staleStandingOf, 067's second review pass). Read under any key by every reader, a claim
- * that had failed under a retired key placed its part behind a --retry-failed that returns nothing, while the run
- * pooled its thought (run: "judges the pair of 0 again; 1 wait for --retry-failed" beside a dry run's "re-pool 1").
+ * returns. "any": one under any decide-mode key of the pass, for a reader that knows no such key (db/rebuild.ts, and
+ * a judge-mode pass or server: partsClaimsFor), the keys named. "unread": no claim is read, for a role that may not
+ * read thought_work_claims (a server's, where neither extraction nor the subject pool is on): no part is placed
+ * `failed` then, and the words say so. As the stale proposals' standing reads a claim (staleStandingOf, 067's second
+ * review pass). Read under any key by every reader, a claim that had failed under a retired key placed its part
+ * behind a --retry-failed that returns nothing, while the run pooled its thought (run: "judges the pair of 0 again;
+ * 1 wait for --retry-failed" beside a dry run's "re-pool 1").
+ *
+ * Only a decide-mode run takes a part up, so only a decide-mode key's failed claim keeps one from it (review pass 3).
+ * A judge-mode reader that read under its own key was wrong both ways: it missed the decide pass's failed claim
+ * ("takes up 1" where a decide run pools none), and placed a part behind a judge-mode claim that no decide run
+ * skips. The keyless read took a judge-mode key's failed claim the same way.
  */
 export type PartsClaims = { under: string } | "any" | "unread";
+
+/** A decide-mode key's ending as SQL's regular expression reads it: isDecideKey's own, for the keyless read. */
+export const DECIDE_KEY_TAIL_SQL = "@p[0-9]+d[0-9]+$";
+
+/**
+ * How a reader that knows the pass's key reads a failed claim (PartsClaims): under that key where it is decide
+ * mode's, `param` the SQL that names it; else as a reader that knows none, since a judge-mode key's claims say
+ * nothing of a part. For the pass's own status and preflight's census, which a judge-mode process runs too.
+ */
+export function partsClaimsFor(key: string, param: string): PartsClaims {
+  return isDecideKey(key) ? { under: param } : "any";
+}
 
 /**
  * The parts that wait, counted and placed, for the pass's --status, db/rebuild.ts --status and preflight's lineage
  * census: one read. Each waiting part is placed once: waiting for a vector; else held by its pair's proposal
- * (partHeldSql); else behind a failed claim of its thought (`claims`: under the pass's key, which the pass and
- * preflight know, or under any consolidation key with the keys named, for db/rebuild.ts); else a decide-mode run's.
- * For a brain that has the parts' store (151): the caller looks first (PARTS_STORE_SQL). `limit` bounds the pending
- * parts read and the rows placed, for preflight: where the store holds more than the bound the counts are of the
- * parts read, in no order, and preflight says so.
+ * (partHeldSql); else behind a failed claim of its thought (`claims`: under the pass's key, which a decide-mode pass
+ * and server know, or under any decide-mode key with the keys named, for db/rebuild.ts and a judge-mode reader); else
+ * a decide-mode run's.
+ * For a brain that has the parts' store (151): the caller looks first (PARTS_STORE_SQL).
+ *
+ * `limit`, for preflight, bounds two things and not the read: the pending parts tested for a moved text (`pend`),
+ * and the waiting parts placed. Every part's row is still read once to find the stale ones (waitingPartsSql). `cut`
+ * says whether either bound was reached: the counts are then of the parts read, in no order, and preflight says so.
+ * (Review pass 3: preflight said so wherever the store held the bound's number of parts of any status, over exact
+ * counts, and this said the read itself was bounded.)
+ *
+ * `placed` is materialized: read by one aggregate, it was written into each of them, the claims probed three times
+ * a row, and on PostgreSQL 16 the planner's cost for that carried the census past the point where it compiles the
+ * query at every server start (review pass 3; the read's cost at scale is SMD-4560).
  */
-export function partsStandingSql(limit?: number, claims: PartsClaims = "any"): string {
+export function partsStandingSql(limit: number | undefined, claims: PartsClaims): string {
   const columns = "x.newer_id, x.status, x.vectorless, x.held";
-  const w = limit === undefined ? `SELECT ${columns} FROM (${waitingPartsSql()}) x` : `SELECT ${columns} FROM (${waitingPartsSql(limit)}) x LIMIT ${Math.trunc(limit)}`;
-  const under = claims === "unread" ? null : claims === "any" ? `c.work_type LIKE '${CONSOLIDATE_KEY_PREFIX}%'` : `c.work_type = ${claims.under}`;
+  const bound = limit === undefined ? null : Math.trunc(limit);
+  const pend = bound === null ? "" : `pend AS MATERIALIZED (SELECT id, older_id, newer_id, status, older_fingerprint, newer_fingerprint FROM public.settled_parts WHERE status = 'pending' LIMIT ${bound}),
+       `;
+  const w = bound === null ? `SELECT ${columns} FROM (${waitingPartsSql()}) x` : `SELECT ${columns} FROM (${waitingPartsSql("pend")}) x LIMIT ${bound}`;
+  const under = claims === "unread" ? null : claims === "any" ? `c.work_type LIKE '${CONSOLIDATE_KEY_PREFIX}%' AND c.work_type ~ '${DECIDE_KEY_TAIL_SQL}'` : `c.work_type = ${claims.under}`;
+  const cut = bound === null ? "false" : `((SELECT count(*) FROM pend) >= ${bound} OR (SELECT count(*) FROM w) >= ${bound})`;
   const failed = under === null ? "" : `
                      WHEN EXISTS (SELECT 1 FROM public.thought_work_claims c
                                    WHERE c.thought_id = w.newer_id AND ${under} AND c.status = 'failed') THEN 'failed'`;
   const keys = claims !== "any" ? "ARRAY[]::text[]" : `COALESCE((SELECT array_agg(DISTINCT c.work_type ORDER BY c.work_type)
                      FROM placed p JOIN public.thought_work_claims c ON c.thought_id = p.newer_id AND ${under} AND c.status = 'failed'
                     WHERE p.standing = 'failed'), ARRAY[]::text[])`;
-  return `WITH w AS MATERIALIZED (${w}),
-       placed AS (
+  return `WITH ${pend}w AS MATERIALIZED (${w}),
+       placed AS MATERIALIZED (
          SELECT w.status, w.newer_id,
                 CASE WHEN w.vectorless THEN 'vector' WHEN w.held THEN 'held'${failed}
                      ELSE 'next' END AS standing
            FROM w)
   SELECT count(*) FILTER (WHERE status = 'stale')::int AS stale, count(*) FILTER (WHERE status = 'pending')::int AS moved,
          count(*) FILTER (WHERE standing = 'vector')::int AS vector, count(*) FILTER (WHERE standing = 'held')::int AS held,
-         count(*) FILTER (WHERE standing = 'failed')::int AS failed, ${keys} AS failed_keys
+         count(*) FILTER (WHERE standing = 'failed')::int AS failed, ${keys} AS failed_keys, ${cut} AS cut
     FROM placed`;
 }
 
 /**
  * What becomes of the parts that wait, in the words every status line gives: how many a decide-mode run takes up,
  * and how many wait for something else, each with what it waits for. Empty where none waits. `claims` is how the
- * read placed a failed claim (PartsClaims): "key" under the pass's key, "any" with the keys named, "unread" where
- * the role may not read the claims. (Review pass 1: the lines said of every stale part that a run judges its pair
- * again, and a run then pooled nothing for one behind a failed claim or without a vector. Review pass 2: "judges
- * the pair again" was said of the parts a run removes with no judgement, their pair closed for good, and read
- * "judges the pair of 0 again" where a run takes up none.)
+ * read placed a failed claim, the value the read was built with (PartsClaims; partsStanding gives both from one):
+ * under the pass's key, under any with the keys named, or unread where the role may not read the claims. (Review
+ * pass 1: the lines said of every stale part that a run judges its pair again, and a run then pooled nothing for
+ * one behind a failed claim or without a vector. Review pass 2: "judges the pair again" was said of the parts a run
+ * removes with no judgement, their pair closed for good, and read "judges the pair of 0 again" where a run takes up
+ * none.)
  */
-export function partsWaitWords(p: PartsStanding, claims: "key" | "any" | "unread" = "any"): string {
+export function partsWaitWords(p: PartsStanding, claims: PartsClaims): string {
   const waiting = Number(p.stale) + Number(p.moved);
   if (waiting === 0) return "";
   const next = waiting - Number(p.vector) - Number(p.held) - Number(p.failed);
@@ -1019,6 +1054,15 @@ export function partsWaitWords(p: PartsStanding, claims: "key" | "any" | "unread
   ].filter(Boolean);
   const run = next > 0 ? `takes up ${next}, the pair judged again or, where nothing will judge it again, the part removed` : "takes up none as things stand";
   return `a decide-mode run of the pass (bun db/consolidate.ts) ${run}${rest.length ? `; ${rest.join("; ")}` : ""}`;
+}
+
+/**
+ * The read and its words together, for a status line: one value says how a failed claim is read, to both (review
+ * pass 3: given to each apart, in two encodings that each defaulted to "any", a caller out of step compiled and
+ * printed "failed in a pass under" with no key named).
+ */
+export function partsStanding(claims: PartsClaims, limit?: number): { sql: string; words: (p: PartsStanding) => string } {
+  return { sql: partsStandingSql(limit, claims), words: (p) => partsWaitWords(p, claims) };
 }
 
 /** Whether a pass key is decide mode's (decideKey's shape): the sleep scheduler reads the parts' work for such a key alone, since a judge-mode pass pools nothing for a part. */
@@ -1065,7 +1109,8 @@ export function settleRefusal(e: unknown): string | null {
 /**
  * A thought's waiting parts that were not removed and will not be by a run as things are, as one clause of its
  * claim's error: how many, and why for the first. The store would not remove it (its own words, or an answer the
- * pass does not know), or the pair's answer could not be read. Empty for none.
+ * pass does not know), the pair's answer could not be read or was not read whole, or a text moved under the
+ * removal with the thought past its bound on put-backs. Empty for none.
  */
 export function unsettledWords(reasons: string[]): string {
   if (reasons.length === 0) return "";

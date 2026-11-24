@@ -63,7 +63,7 @@ import type { SQL } from "bun";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { staleStandings, staleStandingsText, STALE_STANDING_ROWS_SQL, type StaleStandingRow } from "../server-portable/consolidate.ts";
-import { PARTS_STORE_SQL, PARTS_UNREAD, partsStandingSql, partsWaitWords, type PartsStanding } from "../server-portable/consolidate-decide.ts";
+import { PARTS_STORE_SQL, PARTS_UNREAD, partsStanding, type PartsStanding } from "../server-portable/consolidate-decide.ts";
 
 // Every argument accounted for (db/cli.ts, SMD-2134): a flag this door does not
 // have is refused rather than ignored, and a blank --reason is refused as every
@@ -454,15 +454,17 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       out(`  proposals:   ${c.stale_proposals} stale (a text moved under the verdict${standings.total ? `: ${staleStandingsText(standings, null, "bun db/consolidate.ts --retry-failed")}` : ""}; the pass replaces one it finds in conflict again and settles one it does not — a reviewer may decide one sooner: bun db/consolidate.ts --list stale)`);
       // 151 (SMD-4446): the settled parts that wait, where the store stands, and where each stands. The lineage
       // rows above do not count them: a part's row is left out of `stale`, as a proposal's is, and a pending part
-      // at a text that has moved with no rebuild since has no mark at all. The pass's own read (partsStandingSql),
-      // keyless here as the stale proposals' above: a failed claim under any consolidation key places a part,
-      // and its key is named, where the pass's --status and preflight read the pass's key alone (review pass 2).
-      // A role that reads the proposals may not read the parts: it is told so, and the rest stands.
+      // at a text that has moved with no rebuild since has no mark at all. The pass's own read (partsStanding),
+      // keyless here as the stale proposals' above: a failed claim under any decide-mode key of the pass places a
+      // part, and its key is named, where a decide-mode pass's --status and preflight read the pass's key alone
+      // (review pass 2; a judge-mode key's failed claim places none, since no decide run skips a thought for it:
+      // review pass 3). A role that reads the proposals may not read the parts: it is told so, and the rest stands.
       const [partsStore] = (await sql.unsafe(PARTS_STORE_SQL)) as { has: boolean; reads: boolean }[];
       if (partsStore.has && !partsStore.reads) out(`  parts:       ${PARTS_UNREAD}`);
       else if (partsStore.has) {
-        const [w] = (await sql.unsafe(partsStandingSql())) as PartsStanding[];
-        const waits = partsWaitWords(w);
+        const standing = partsStanding("any");
+        const [w] = (await sql.unsafe(standing.sql)) as PartsStanding[];
+        const waits = standing.words(w);
         out(`  parts:       ${w.stale} stale (a text moved under the settled part), ${w.moved} pending at a text that has moved since, which no rebuild has seen${waits ? ` — ${waits}` : ""}`);
       }
       const pools = (await sql`SELECT work_type AS w, count(*)::int AS n FROM thought_work_claims WHERE status = 'pending' GROUP BY 1 ORDER BY 1`) as { w: string; n: number }[];

@@ -5091,9 +5091,9 @@ tier gives each pair's verdict, not the judge:
   - **Judged again after an edit:** a pending part whose text moves after it
     was recorded is no longer a judgement of its texts. Nothing runs a
     rebuild after an edit, so each run finds such parts itself and pools
-    their thoughts again; it records in the part's place the statement the
-    writer names again, and removes a part it names no more (Parts whose
-    text has moved, under `consolidate.ts` below).
+    their thoughts again; it records again, in the part's place, a
+    statement the writer names again, and removes a part it does not record
+    again (Parts whose text has moved, under `consolidate.ts` below).
   - **Reported:**
     - The summary has a line for the writer's calls: with a settled part,
       with no part named, with parts named and none that stands, unparsed,
@@ -5376,22 +5376,26 @@ ticket's later cuts.
   moved, where a proposal's records it (SMD-4480); an undecided part judged
   again once stale, or at other texts, is replaced by another row, where a
   stale proposal is rewritten in place, so a decision by a part's id cannot
-  land on another judgement (SMD-4477); and an undecided part the pass no
-  longer names is removed, row and lineage, where a stale proposal is
-  rejected with the pass's note (`settle_stale_part`, next). No index serves
-  a listing of parts: the review
+  land on another judgement (SMD-4477); and an undecided part that is no
+  longer a judgement of its texts, and that the pass does not record again,
+  is removed, row and lineage, where a stale proposal is rejected with the
+  pass's note (`settle_stale_part`, next). No index serves a listing of
+  parts: the review
   surface brings the one its listing needs. `judged_at` is when the write's
   transaction began, not the order rows commit in.
 - **What an operator sees.** A run of the pass counts the parts it reads
   and what became of each (Decide mode, above), and the parts of a moved
   text it met (Parts whose text has moved, under `consolidate.ts` below);
   its dump holds the parts read. The parts that wait are counted and placed
-  in three places, by one read (`partsStandingSql`):
+  in three places, by one read (`partsStanding`):
   - `db/consolidate.ts --status`, on its `settled parts:` line, beside the
     pending, accepted and rejected counts;
   - `db/rebuild.ts --status`, on its `parts:` line;
-  - preflight's `lineage` row, in its coverage. It reads at most 10,001
-    parts, in no order, and says so where the store holds more.
+  - preflight's `lineage` row, in its coverage. Its read has two bounds:
+    it tests at most 10,001 pending parts for a moved text and places at
+    most 10,001 that wait, in no order, and says so where either is
+    reached. It still reads every part's row once at each start, no index
+    serving the status (SMD-4560).
 
   Each counts the stale parts and the pending ones at a text that has moved
   with no rebuild since, and says how many a decide-mode run takes up: their
@@ -5401,11 +5405,13 @@ ticket's later cuts.
   text that none has set stale), or `--retry-failed` (the thought's claim
   failed).
   - **A failed claim is read under the pass's key** by the pass and by
-    preflight, which know it: that is the claim the pool step skips and
-    `--retry-failed` returns. `db/rebuild.ts` knows no key. It reads a
-    failed claim under any consolidation key and names the keys, as it does
-    for a stale proposal: one under a retired key does not keep a run from
-    pooling the thought.
+    preflight where that key is decide mode's: that is the claim the pool
+    step skips and `--retry-failed` returns. `db/rebuild.ts` knows no key,
+    and neither does a pass or a server run in judge mode, whose own key no
+    decide-mode run reads. Each of those reads a failed claim under any
+    decide-mode key of the pass and names the keys: one under a retired key
+    does not keep a run from pooling the thought, and one under a judge-mode
+    key places no part at all.
   - **Where preflight's role may not read `thought_work_claims`,** as a
     server's may not unless extraction or the subject pool is on, it places
     the parts by the rest and says the claims were not read.
@@ -5662,24 +5668,42 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
   judged though `--k` leaves it out, where it still meets the candidate
   rule. A thought in hand reads its own parts that wait as it is judged, a
   part recorded a moment before a put-back among them.
-- **A statement the writer names again** is recorded in the part's place,
-  by the part's own write (`replaced`).
-- **A part the judgement does not name is removed** (`settle_stale_part`,
-  at the fingerprints of the texts judged). A judgement that asks no writer
-  names none: the tier's verdict is no outdates, an outdates is under the
-  floor, or the link step caps the pair.
+- **A statement the judgement records again** takes the part's place, by
+  the part's own write (`replaced`).
+- **A part the judgement does not record again is removed**
+  (`settle_stale_part`, at the fingerprints of the texts judged). That is a
+  statement the writer names no more. A judgement that asks no writer names
+  none: the tier's verdict is no outdates, an outdates is under the floor,
+  or the link step caps the pair. It is also a statement the writer names
+  again in a form that is no part of these texts: its quotes fail the
+  check, or its words are not read back in the thought's own characters.
+  Such an item is read whole and makes no row by the pass's own rule, so
+  the earlier row goes too, though its own words may still stand in the
+  texts. The check refused 6 of the 49 parts a first judgement named in
+  SMD-3340's measurement; how often it refuses a statement named again is
+  not measured. Whether such a part should be kept instead is put to the
+  maintainer.
 - **Not removed:**
   - a part of a pair whose judgement is not recorded: a text moved while it
     was judged, a thought is gone, or the store refused a part's write;
   - a part of a pair whose call failed: the claim fails, for
     `--retry-failed`;
-  - a part of a pair whose answer could not be read, the writer's or the
-    link step's. The claim fails saying so: a removal is for good, and an
-    answer that names the statement again may be among the unread. Nothing
-    more of that judgement is recorded either: the pair's stale proposal,
-    where it holds one, stays stale, so `--retry-failed` asks the pair
-    again. Without a part that waits such an answer is recorded as before
-    (SMD-4518);
+  - a part of a pair whose answer was not read, the writer's or the link
+    step's, or not read whole: an item of the writer's list that was no
+    part, or one past the twelve an answer is read to, of which the pass
+    cannot say what it names. The claim fails saying so: a removal is for
+    good, and an answer that names the statement again may be among the
+    unread. Nothing more of that judgement is recorded either: the pair's
+    stale proposal, where it holds one, stays stale, so `--retry-failed`
+    asks the pair again. The writer is asked at temperature 0 unless
+    `OB1_METADATA_TEMPERATURE` says otherwise, so the same texts are likely
+    to draw the same answer, and the retry to fail the same way after
+    asking every pair of the thought. What ends it: a
+    decision on the part (`review_settled_part`; the review surface is
+    PR 3), or a reviewer's decision on the pair's stale proposal where it
+    holds one; then `--retry-failed`. An edit of either text has the writer
+    asked about new texts. Without a part that waits such an answer is
+    recorded as before (SMD-4518);
   - a part a reviewer decided meanwhile, which stands.
 - **A pair that is not judged again** has such a part removed too, where
   nothing will judge it again: the candidate rule no longer admits the
@@ -5700,12 +5724,17 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
   db/rebuild.ts --input <id>` for either thought of the pair. For a pending
   proposal, `bun db/consolidate.ts --list` marks the side whose text moved
   `EDITED SINCE JUDGED` and prints its id.
-- **A text that moves again** between the judgement and the removal leaves
-  the part as it was (`EDITED_SINCE`). The claim succeeds, and the next run
-  pools the thought again. Nothing more of that pair's judgement is
-  recorded: it is of a text that is no longer there, and its stale
-  proposal, where the pair holds one, stays stale to be judged with the
-  part.
+- **A text that moves again** between the pass's read and the removal
+  leaves the part as it was (`EDITED_SINCE`), and the thought goes back to
+  the pool, as where a part's write finds a text moved: within the same
+  bound of two put-backs running, past which the claim fails saying so.
+  Nothing more of that pair's judgement is recorded: it is of a text that
+  is no longer there, and its stale proposal, where the pair holds one,
+  stays stale to be judged with the part. For a pair that is not judged
+  again the removal comes before the settle of the pair's stale proposal,
+  which compares no text, so no proposal is settled at a text the store
+  has just said is gone. Judged again, the thought has every pair asked
+  again (SMD-4535).
 - **A removal the store refuses fails the claim,** with the store's own
   words: its refusal above READ COMMITTED, or an answer this pass does not
   know. The part waits on, and no run pools the thought for it again until
@@ -5717,12 +5746,13 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
   pairs each. The read of the parts that wait joins every part to both its
   thoughts, at each poll and at each of the scheduler's reads (SMD-4560).
 - **The summary** has a `parts whose text moved:` line for those the run met
-  and did not name again, each once by its last outcome: removed (judged
-  again and named no more, or on a pair that is not judged again), waiting
-  on a vector, left for a rebuild, decided by a reviewer meanwhile, gone,
-  left for a text that moved again, refused by the store, and kept for an
-  unread answer. One named again is counted with the parts recorded, in
-  place of an earlier judgement.
+  and did not record again, each once by its last outcome: removed (judged
+  again and not recorded again, or on a pair that is not judged again),
+  waiting on a vector, left for a rebuild, decided by a reviewer meanwhile,
+  gone, left where a text moved again (the thought put back, or its claim
+  failed past the bound), refused by the store, and kept for an answer that
+  was unread or not read whole. One recorded again is counted with the
+  parts recorded, in place of an earlier judgement.
 - **A run that would judge refuses at its start** on a brain without
   `settle_stale_part`, naming migration 153. `--status` and `--dry-run` go
   on: `--status` counts and places the parts on a `settled parts:` line,
@@ -5822,8 +5852,10 @@ and calls the function once per thought. `--status` is the census: rows per
 kind, the stale-by-fingerprint count, the marked count, the orphans, the
 legacy rows, the stale proposals and where each stands against the judge
 pools (067), the settled parts that wait (151: the stale ones, and the
-pending ones at a text that has moved with no rebuild since, each placed as
-the pass's `--status` places it), and the pools with pending rows.
+pending ones at a text that has moved with no rebuild since, each placed by
+the read the pass's `--status` makes, a failed claim read under any
+decide-mode key and the key named, where a decide-mode pass reads its own),
+and the pools with pending rows.
 `--dry-run` runs the call inside a transaction and rolls it back: the report
 is the function's own and nothing is kept. The tool calls no model and holds
 no lease. Exit 0 ran; 1 the function refused as a value (`NOT_FOUND`,

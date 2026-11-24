@@ -32,7 +32,7 @@ import { EGRESS_UNITS, KEYED_UNITS, hostOf, localKnob, type EgressTerm, type Egr
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
-import { consolidatePassKey, partsStandingSql, partsWaitWords } from "./consolidate-decide.ts";
+import { consolidatePassKey, partsClaimsFor, partsStanding, type PartsStanding } from "./consolidate-decide.ts";
 import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, PRIORITY_GRANT_FIX, priorityFindingsRow, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
@@ -2724,9 +2724,13 @@ if (configFailed) {
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
             const readsParts = bodies.has_parts && bodies.reads_parts;
             // Where the parts stand is read against the pass's key as this server's settings give it, the key the
-            // consolidate pass row calls current; and with no claim read where this role may read none.
-            const partsClaims = bodies.reads_claims ? "key" as const : "unread" as const;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; thread_edges: number; thread_edge_ids: string[] | null; subjects: number; subject_ids: string[] | null; parts: number; part_ids: string[] | null; parts_stale: number; parts_moved: number; parts_vector: number; parts_held: number; parts_failed: number; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; te_read: number; sj_read: number; pa_read: number };
+            // consolidate pass row calls current, where that key is decide mode's: a judge-mode server reads as one
+            // that knows no key, since no decide run skips a thought for a judge-mode claim (partsClaimsFor, review
+            // pass 3). And with no claim read where this role may read none.
+            const passKey = consolidatePassKey(resolvedEmbed);
+            const partsClaims = bodies.reads_claims ? partsClaimsFor(passKey, "$1") : "unread" as const;
+            const partsRead = partsStanding(partsClaims, BOUND);
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; thread_edges: number; thread_edge_ids: string[] | null; subjects: number; subject_ids: string[] | null; parts: number; part_ids: string[] | null; parts_wait: PartsStanding; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; te_read: number; sj_read: number; pa_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -2768,18 +2772,20 @@ if (configFailed) {
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'subject' AND d.artifact_id = s.id)),
                    -- 151 (SMD-4446): a settled part and its lineage row, written with it by record_settled_part: the validity
                    -- read takes a part by that row, so a part without one stands unseen. And the parts that wait
-                   -- (partsStandingSql, the pass's own read, bounded as this census is): the stale ones, the pending
-                   -- ones at a text that has moved with no rebuild since, which no lineage row marks, and how many of
-                   -- them a decide-mode run does not judge again as things are. Where the store stands and this role
-                   -- may read it.
+                   -- (partsStanding, the pass's own read): the stale ones, the pending ones at a text that has moved
+                   -- with no rebuild since, which no lineage row marks, and how many of them a decide-mode run does
+                   -- not take up as things are. Not bounded as this census is: it reads every part's row once, no
+                   -- index serving the status (SMD-4560), and bounds the pending parts it tests for a moved text and
+                   -- the waiting parts it places; its cut column says whether either bound was reached. Where the store
+                   -- stands and this role may read it.
                    ${readsParts
                      ? `pa_s AS (SELECT id FROM public.settled_parts LIMIT ${BOUND}),
                    pa AS (SELECT s.id FROM pa_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'part' AND d.artifact_id = s.id)),
-                   pw AS (${partsStandingSql(BOUND, partsClaims === "key" ? { under: "$1" } : "unread")}),`
+                   pw AS (${partsRead.sql}),`
                      : `pa_s AS (SELECT NULL::uuid AS id WHERE false),
                    pa AS (SELECT NULL::uuid AS id WHERE false),
-                   pw AS (SELECT 0 AS stale, 0 AS moved, 0 AS vector, 0 AS held, 0 AS failed),`}
+                   pw AS (SELECT 0 AS stale, 0 AS moved, 0 AS vector, 0 AS held, 0 AS failed, ARRAY[]::text[] AS failed_keys, false AS cut),`}
                    md_s AS (SELECT t.id FROM public.thoughts t
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
@@ -2823,8 +2829,8 @@ if (configFailed) {
                      (SELECT count(*)::int FROM te) AS thread_edges, (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM te LIMIT 3) s) AS thread_edge_ids,
                      (SELECT count(*)::int FROM sj) AS subjects,  (SELECT array_agg(id::text) FROM (SELECT id FROM sj LIMIT 3) s) AS subject_ids,
                      (SELECT count(*)::int FROM pa) AS parts,     (SELECT array_agg(id::text) FROM (SELECT id FROM pa LIMIT 3) s) AS part_ids,
-                     (SELECT stale FROM pw) AS parts_stale, (SELECT moved FROM pw) AS parts_moved,
-                     (SELECT vector FROM pw) AS parts_vector, (SELECT held FROM pw) AS parts_held, (SELECT failed FROM pw) AS parts_failed,
+                     -- The read's row whole, as the pass's --status takes it: no count is carried by hand.
+                     (SELECT to_jsonb(pw) FROM pw) AS parts_wait,
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM lp) AS lineage_pairs, (SELECT array_agg(id::text) FROM (SELECT id FROM lp LIMIT 3) s) AS lineage_pair_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
@@ -2839,7 +2845,7 @@ if (configFailed) {
                      (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read,
                      (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read, (SELECT count(*)::int FROM te_s) AS te_read,
                      (SELECT count(*)::int FROM sj_s) AS sj_read, (SELECT count(*)::int FROM pa_s) AS pa_read`,
-              readsParts && partsClaims === "key" ? [consolidatePassKey(resolvedEmbed)] : [])) as Census[];
+              readsParts && typeof partsClaims === "object" ? [passKey] : [])) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2875,9 +2881,13 @@ if (configFailed) {
               // are the part's own, so the row can be written again as the part holds it.
               + (Number(c.parts) ? " A settled part's row is written with it by 151's record_settled_part: record the row again from the part (SELECT ob1_record_derivation('part', s.id, ARRAY[s.older_id, s.newer_id], ARRAY[s.older_fingerprint, s.newer_fingerprint], s.judge_key, '{\"deterministic\": false}'::jsonb, s.canonical_agent_id) FROM settled_parts s WHERE s.id = '<part id>'), which keeps a reviewer's decision on it; the recipe it was judged under is not known again." : "");
             // Where the parts that wait stand (review pass 1: the clause said a run judges every one's pair again).
-            const partsWaits = partsWaitWords({ stale: c.parts_stale, moved: c.parts_moved, vector: c.parts_vector, held: c.parts_held, failed: c.parts_failed }, partsClaims);
+            const pw = c.parts_wait;
+            const partsWaits = partsRead.words(pw);
+            // The read's two bounds, said only where one was reached (review pass 3: said wherever the store held the
+            // bound's number of parts of any status, so over exact counts on any brain with that many decided parts).
+            const partsCut = pw.cut === true ? `of the settled parts, where more than 10,000 are pending or wait (${BOUND.toLocaleString("en-US")} pending ones tested for a moved text and ${BOUND.toLocaleString("en-US")} that wait placed, at most, in no order), ` : "";
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)${
-              readsParts ? `; ${Number(c.pa_read) >= BOUND ? `of the ${BOUND.toLocaleString("en-US")} settled parts read, in no order, where the store holds more, ` : ""}${c.parts_stale} settled part(s) stale and ${c.parts_moved} pending at a text that has moved since${partsWaits ? ` (${partsWaits})` : ""}`
+              readsParts ? `; ${partsCut}${pw.stale} settled part(s) stale and ${pw.moved} pending at a text that has moved since${partsWaits ? ` (${partsWaits})` : ""}`
               : bodies.has_parts ? "; the settled parts not read (this role holds no SELECT on settled_parts, the server group's since 151)" : ""}`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
