@@ -5485,6 +5485,11 @@ stayed: stale, or pending at fingerprints that are no longer its texts'.
   the others. Its validity and review axes read no part: the mark for an
   accepted part comes with the review surfaces (PR 3).
 
+The file also amends three of 151's catalog comments in place, which named
+no removal: the table's, the status column's and `rebuild_derived`'s. A
+re-apply appends nothing again, and 151 applied by hand over it writes its
+own back.
+
 Needs 149 and all it reads, and 151. No table, column, trigger or grant, and
 no row is written at apply time. 149 applied by hand over it puts back the
 read with no arm; where the parts' table stands, preflight's by-hand remedy

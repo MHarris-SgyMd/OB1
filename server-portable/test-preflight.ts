@@ -3647,6 +3647,8 @@ else {
       try { noAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { await claims.unsafe("GRANT SELECT ON thought_audit TO ob1_pf_capture"); }
       // The parts' table is among them since the stale parts' file (SMD-4446): the read takes a part's lineage row by its part.
       let noParts: { out: string };
+      /** The stale parts' migration as the tree names it: preflight's remedy must name this very file. */
+      const STALE_PARTS_FILE = readdirSync(join(HERE, "..", "db", "migrations")).find((n) => n.endsWith("_stale_parts.sql")) ?? "no _stale_parts.sql";
       const heldParts = Boolean((await claims`SELECT has_table_privilege('ob1_pf_capture', 'settled_parts', 'SELECT') AS r`)[0].r);
       await claims.unsafe("REVOKE SELECT ON settled_parts FROM ob1_pf_capture");
       try { noParts = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { if (heldParts) await claims.unsafe("GRANT SELECT ON settled_parts TO ob1_pf_capture"); }
@@ -3688,8 +3690,10 @@ else {
              && /✗  validity\s+migration 149's thought_validity\(uuid\[\]\) missing though the ledger records 149; the validity tool faults on every call/.test(noFn.out)
              && /!  validity\s+thought_validity\(uuid\[\]\) missing, and .*so whether migration 149 is recorded is unknown/.test(noFnUnread.out)
              // The by-hand remedy names the stale parts' file after 149 (SMD-4446): it last defines the read, and 149 alone
-             // would put back one with no arm for a settled part's row. By the file's name: renumbered when main takes its number.
-             && /Apply db\/migrations\/149_thought_validity\.sql, then db\/migrations\/\d{3}_stale_parts\.sql — \d{3} last defines thought_validity \(149's, with an arm for a settled part's lineage row\), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided\./.test(noFnUnread.out)
+             // would put back one with no arm for a settled part's row. The file's name is read from the tree, so a
+             // file renumbered when main takes its number fails this row until the remedy names it (review pass 1: a
+             // pattern for any number passed a remedy that named a file no longer there).
+             && noFnUnread.out.includes(`Apply db/migrations/149_thought_validity.sql, then db/migrations/${STALE_PARTS_FILE} — ${STALE_PARTS_FILE.slice(0, 3)} last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.`)
              && /!  validity\s+thought_validity\(uuid\[\]\) missing, and /.test(noFnNoParts.out) && /Apply db\/migrations\/149_thought_validity\.sql\./.test(noFnNoParts.out) && !/_stale_parts\.sql/.test(noFnNoParts.out),
              `…and the validity row names a table its read cannot SELECT, a warning, the settled parts' among them; with every table readable, ok; the function gone while the ledger records 149, a failure, and to a role that cannot read the ledger a warning whose by-hand remedy names the stale parts' file after 149, and on a brain without the parts' table 149 alone (${validityLine(noAudit.out)} | ${validityLine(noParts.out)} | ${validityLine(missingBoth.out)} | ${validityLine(noFn.out)} | ${validityLine(noFnUnread.out)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
