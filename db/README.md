@@ -138,6 +138,18 @@ Pending files in the same ordered transaction, because a ledger hole (a row
 deleted or misspelt by hand) would otherwise have an earlier-numbered file apply
 *after* the re-run, over the later definitions it had just restored. Every file
 is idempotent, so the run restores the latest definition of everything. One
+kind of statement is left out of the re-run, because run again it would refuse
+the brain's own rows: a rule a later file loosened (SMD-3149). That is a file's
+`ADD CONSTRAINT … CHECK`, with its `VALIDATE`, where a later file defines the
+constraint again (064's, 084's and 111's lists of lineage kinds; 059's search
+arms), and a file's `CREATE UNIQUE INDEX` where a later file drops the index
+(111's one standing subject a thought). A `COMMENT` on such a constraint or
+index is left out with it. The file that decides the rule last makes it, in
+the same transaction, and the run says so beside each file it left a statement
+out of, as `--dry-run` does. Only a statement of the file's own in exactly one
+of those shapes is left out; one inside a `DO` block guards itself. Before it
+commits the run looks for every constraint it left an `ADD` out for, and
+fails, rolled back, if one is not there. One
 transaction, so a failure part-way — a lock not granted within 10 s included —
 rolls back and the schema is as it was. `--dry-run` says what would re-run and
 judges the pgvector floor as the run does.
@@ -874,7 +886,8 @@ from upstream's `schemas/wiki-pages` (`pages`, not `wiki_pages`), whose
 directory retires with this file: a brain that applied it by hand keeps its
 tables untouched. The new `pages` grant group is what a role needs beside
 `capture` (the grants table). Additive; no arity moves; no seed row; a
-re-apply is idempotent (it re-validates the kind CHECK and moves no row).
+re-apply is idempotent (it re-validates the kind CHECK and moves no row; under
+`--reapply` the CHECK is left to the file that defines it last, §5).
 test-schema [59], test-live [32], test-upgrade [20p];
 `server-portable/test-preflight.ts` drives the census, the remedy and the
 repair arms.
@@ -1950,8 +1963,7 @@ restart board-sync), a demoted Duplicate says `↓ Ranked ×0.25 — duplicate`,
 the stated-status label prints its word, Duplicate. A Duplicate whose original
 is still open reads finished, as a cancel does. Refuses by name without 058 or
 071; a re-apply is a no-op. An older tree's `--reapply` over a 105 brain puts
-058's six back: run this tree's `--reapply` after it (which fails at 064 on a
-brain holding a judged relation until SMD-3149). test-schema [94] (the sets, a
+058's six back: run this tree's `--reapply` after it. test-schema [94] (the sets, a
 Duplicate settled and its blocker cleared, both under 058's sets as before, the
 mirror rebuilt), test-upgrade [20aw] (a session's cached plan reaching the new
 sets among it), test-live [41] (the poster's refusals without 058's set and
@@ -2882,9 +2894,9 @@ thread by its rows, not as 0.5% of the table. A thought in several threads
 counts in each of `threads.ts --status`'s and `brain_info`'s thought counts, a
 place in each thread. Nothing finds a set yet: the rules and the judge's
 question that do are PR 7a-3b. Needs 111, 113 and 120; a re-apply is a no-op. A
-re-apply of 111 makes its index again until 130 runs, and fails once a thought
-holds a set (so does `--reapply`, which already fails at 064 on any brain
-holding a subject, SMD-3149). test-schema [116], test-upgrade [20bt], test-live
+re-apply of 111 by hand makes its index again until 130 runs, and fails once a
+thought holds a set; `--reapply` leaves 111's index out (§5, SMD-3149).
+test-schema [116], test-upgrade [20bt], test-live
 [47] and [48], test-rest-sql [16].
 
 Migration 129 gives the agenda an order (SMD-4192). `priority`, the default, is
