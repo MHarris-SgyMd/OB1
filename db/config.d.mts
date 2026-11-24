@@ -494,6 +494,10 @@ export function grantRows(groups?: readonly RoleGrantGroup[]): { group: RoleGran
 export function grantVerifySql(role: string, merged: readonly { kind: string; name: string; privileges: readonly string[] }[]): string;
 /** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */
 export function stripSqlComments(text: string): string;
+/** A statement `--reapply` leaves to the migration that decides its rule last: a CHECK's ADD or VALIDATE, or a unique index's CREATE (SMD-3149). */
+export type SupersededStatement = { action: "ADD" | "VALIDATE" | "CREATE UNIQUE INDEX"; table: string; name: string; by: string };
+/** By file name, each migration with a statement of its own that makes a rule a later file loosens — an `ADD CONSTRAINT … CHECK` or `VALIDATE CONSTRAINT` of a constraint a later file defines again, a `CREATE UNIQUE INDEX` a later file drops: its text with those statements blanked (newlines kept), and what was left to which file (SMD-3149). */
+export function supersededStatements(files: readonly { name: string; sql: string }[]): Map<string, { sql: string; left: SupersededStatement[] }>;
 /** What a .sql file may not run in Daemonic Brain: each rule's name, regex (matched over the whole comment-stripped text) and reason (SMD-1796). */
 export const SUPABASE_SQL_RULES: readonly { name: string; re: RegExp; msg: string }[];
 /** Every SUPABASE_SQL_RULES hit in `text`, comments excepted, with the source line number. */

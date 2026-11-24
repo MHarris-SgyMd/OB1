@@ -3284,6 +3284,150 @@ export function stripSqlComments(text) {
 }
 
 /**
+ * Comment-stripped SQL with the inside of every string literal and
+ * dollar-quoted body blanked, newlines kept: what is left is the file's own
+ * statements, so a `;` in it ends one and a word in it is not a literal's or a
+ * function body's. Quoted identifiers are kept.
+ */
+function maskSqlBodies(code) {
+  const blank = (s) => s.replace(/[^\n]/g, " ");
+  let out = "";
+  let i = 0;
+  const n = code.length;
+  while (i < n) {
+    const c = code[i];
+    if (c === "'" || c === '"') {
+      const escaped = c === "'" && /[Ee]$/.test(out) && !/\w[Ee]$/.test(out);
+      let j = i + 1;
+      while (j < n) {
+        if (escaped && code[j] === "\\") { j += 2; continue; }
+        if (code[j] === c) { if (code[j + 1] === c) { j += 2; continue; } break; }
+        j++;
+      }
+      const end = Math.min(j, n - 1);
+      out += c === '"' ? code.slice(i, end + 1) : c + blank(code.slice(i + 1, end)) + code.slice(end, end + 1);
+      i = end + 1;
+      continue;
+    }
+    if (c === "$") {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(code.slice(i, i + 64));
+      const end = m ? code.indexOf(m[0], i + m[0].length) : -1;
+      if (m && end !== -1) {
+        out += m[0] + blank(code.slice(i + m[0].length, end)) + m[0];
+        i = end + m[0].length;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+const CHECK_TABLE = String.raw`ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(\S+)`;
+const CHECK_ADD = new RegExp(String.raw`^${CHECK_TABLE}\s+ADD\s+CONSTRAINT\s+"?(\w+)"?\s+CHECK\s*(\(.*\))\s*(?:NOT\s+VALID)?$`, "is");
+const CHECK_VALIDATE = new RegExp(String.raw`^${CHECK_TABLE}\s+VALIDATE\s+CONSTRAINT\s+"?(\w+)"?$`, "i");
+const UNIQUE_INDEX_CREATE = /^CREATE\s+UNIQUE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?\s+ON\s+(?:ONLY\s+)?"?([\w.]+)"?/i;
+const INDEX_DROP = /^DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?"?(\w+)"?(?:\s+(?:CASCADE|RESTRICT))?$/i;
+
+/** True when the text is one parenthesised group: its first `(` closes at its last character. */
+function oneGroup(text) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    else if (text[i] === ")" && --depth === 0) return i === text.length - 1;
+  }
+  return false;
+}
+
+/**
+ * The rules a migration makes that a later migration loosens, and each such
+ * file's text with those statements blanked (SMD-3149).
+ *
+ * `migrate.ts --reapply` runs every file again, in order. A file that makes a
+ * rule a later file loosened would make its own narrower one again and refuse
+ * the rows the later one admits, and released migrations are frozen. Two
+ * shapes of it:
+ *
+ *   - a CHECK over a list a later file widened (064's lineage kinds, which
+ *     084, 111 and 151 each widen; 059's search arms, which 106 widens);
+ *   - a unique index a later file drops (111's one standing subject a
+ *     thought, which 130 replaces with one a thought and key).
+ *
+ * So the re-run leaves such a rule to the file that decides it last: the
+ * earlier file's statement is blanked in the text the re-run runs, newlines
+ * kept so an error's line is still the file's.
+ *
+ * Read narrowly, so nothing else is struck: a statement of the file's own (not
+ * one inside a DO block or a function body, which guards itself), that is
+ * `ALTER TABLE <t> ADD CONSTRAINT <c> CHECK (…) [NOT VALID]` and nothing more,
+ * `ALTER TABLE <t> VALIDATE CONSTRAINT <c>`, or `CREATE UNIQUE INDEX <i> ON
+ * <t> …`. A later file defines the constraint when its text outside comments
+ * says `ADD CONSTRAINT <c>`, in a block or not; it drops the index when a
+ * statement of its own is `DROP INDEX <i>` (one inside a block is guarded, as
+ * 120's drop of 084's index is, and 084's CREATE … IF NOT EXISTS then finds
+ * the later shape standing). A file's drop of the old constraint still runs;
+ * the last definer adds it back in the same transaction.
+ *
+ * @param files the migrations in order, each with its substituted SQL
+ * @returns by file name, for each file with a statement left out: the text to
+ *          run, and what was left to which file
+ */
+export function supersededStatements(files) {
+  const read = files.map(({ name, sql }) => {
+    const code = stripSqlComments(sql);
+    const top = maskSqlBodies(code);
+    const defines = new Set([...code.matchAll(/\bADD\s+CONSTRAINT\s+"?(\w+)"?/gi)].map((m) => m[1].toLowerCase()));
+    const indexes = new Set([...code.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?\s+ON\b/gi)].map((m) => m[1].toLowerCase()));
+    const drops = new Set();
+    const statements = [];
+    let from = 0;
+    for (let at = top.indexOf(";"); at !== -1; at = top.indexOf(";", from)) {
+      const raw = top.slice(from, at);
+      const text = raw.trim();
+      const add = CHECK_ADD.exec(text);
+      const index = UNIQUE_INDEX_CREATE.exec(text);
+      const dropped = INDEX_DROP.exec(text);
+      if (dropped) drops.add(dropped[1].toLowerCase());
+      // [action, table, name]
+      const hit = add && oneGroup(add[3]) ? ["ADD", add[1], add[2]]
+        : CHECK_VALIDATE.test(text) ? ["VALIDATE", ...CHECK_VALIDATE.exec(text).slice(1, 3)]
+        : index ? ["CREATE UNIQUE INDEX", index[2], index[1]]
+        : null;
+      if (hit) {
+        statements.push({
+          action: hit[0],
+          table: hit[1].replace(/"/g, "").replace(/^public\./i, "").toLowerCase(),
+          name: hit[2].toLowerCase(),
+          start: from + (raw.length - raw.trimStart().length),
+          end: at + 1,
+        });
+      }
+      from = at + 1;
+    }
+    return { name, sql, defines, indexes, drops, statements };
+  });
+  const out = new Map();
+  read.forEach((file, i) => {
+    const left = [];
+    let text = file.sql;
+    for (const s of file.statements) {
+      const after = read.slice(i + 1);
+      // A CHECK: the later files that define it. An index: only where a later file drops it, and then the last
+      // file to drop it or make it decides.
+      const later = s.action === "CREATE UNIQUE INDEX"
+        ? (after.some((f) => f.drops.has(s.name)) ? after.filter((f) => f.drops.has(s.name) || f.indexes.has(s.name)) : [])
+        : after.filter((f) => f.defines.has(s.name));
+      if (later.length === 0) continue;
+      left.push({ action: s.action, table: s.table, name: s.name, by: later[later.length - 1].name });
+      text = text.slice(0, s.start) + text.slice(s.start, s.end).replace(/[^\n]/g, " ") + text.slice(s.end);
+    }
+    if (left.length > 0) out.set(file.name, { sql: text, left });
+  });
+  return out;
+}
+
+/**
  * What a `.sql` file may not run in Daemonic Brain, each with the reason
  * (SMD-1796). Matched over the whole comment-stripped text, one hit per rule
  * and line, so a statement broken across lines is one hit — string literals

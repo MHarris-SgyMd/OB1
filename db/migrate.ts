@@ -87,6 +87,7 @@ import {
   pluginLoginPassword,
   pluginLoginUrl,
   migrationNameProblem,
+  supersededStatements,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
@@ -1300,13 +1301,33 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     const progress: { current: Migration | null } = { current: null };
     /** What a file said beside its line, by name — 021's, with the acceptances out of its sight. */
     const notes = new Map<string, string>();
+    // A rule a later file loosens is that file's to decide (SMD-3149): 064's
+    // list of lineage kinds, run again, would refuse the rows 084's, 111's and
+    // 151's kinds admit, 059's search arms the ones 106's does, and 111's one
+    // standing subject a thought the sets 130 admits. The earlier file's
+    // statement is left out of the text run here, and said beside its line. A
+    // plain run applies each file whole: no row the later rule admits can stand
+    // before the file that admits it.
+    const superseded = supersededStatements(migrations);
     try {
       await begin(async (tx: SQL) => {
         if (ledgerInTransaction) await tx.unsafe(LEDGER_DDL);
         for (const m of migrations) {
           progress.current = m;
-          const note = await applyShadowed(tx, m);
+          const without = superseded.get(m.name);
+          const note = await applyShadowed(tx, without ? { ...m, sql: without.sql } : m);
           if (note !== null) notes.set(m.name, note);
+          if (without) {
+            // One line a rule: a CHECK's ADD and its VALIDATE read as one thing left.
+            const byName = new Map<string, { by: string; actions: string[] }>();
+            for (const l of without.left) {
+              const seen = byName.get(l.name) ?? { by: l.by, actions: [] };
+              seen.actions.push(l.action);
+              byName.set(l.name, seen);
+            }
+            const lines = [...byName].map(([n, x]) => `  ·  ${n} is left to ${x.by}, which decides it last: this file's ${x.actions.join(" and ")} did not run`);
+            notes.set(m.name, [notes.get(m.name), ...lines].filter((x) => x !== undefined).join("\n"));
+          }
           if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
         }
       });

@@ -31,7 +31,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, ROLE_GRANT_GROUPS, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey } from "./config.mjs";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, ROLE_GRANT_GROUPS, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey, supersededStatements } from "./config.mjs";
 import { sweepSubjects } from "./subject-sweep.ts";
 
 /**
@@ -8036,6 +8036,95 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
     await admin.unsafe("DROP SCHEMA IF EXISTS tu_ahead CASCADE; DROP SCHEMA IF EXISTS tu_brain CASCADE; DROP SCHEMA IF EXISTS tu_rails CASCADE");
     await admin.close();
   }
+  // Leave the database clean and migrated, as the blocks before this one do.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, OPTS);
+}
+
+console.log("\n[24] --reapply on a brain holding rows a later migration's rule admits — a judged relation, an own subject, a settled part, a literal search and a set of two subjects: an earlier file's narrower CHECK or unique index is left to the file that decides it last, said beside its line; every row stands, both CHECKs stand validated as they were and 111's index stays dropped (SMD-3149)");
+{
+  // The schema is whole here ([23] leaves it migrated). 064, 084 and 111 each add the lineage kind CHECK with the
+  // kinds they knew, and 059 the search arms it knew; 111 makes the index that held one standing subject a
+  // thought, which 130 drops. Run again as written, each refuses the rows below.
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+    const fp = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+    const O = await thought("reapply 24: the importer ships on Friday");
+    const N = await thought("reapply 24: the importer shipped on Thursday");
+    await sql`SELECT ob1_record_derivation('relation', gen_random_uuid(), ARRAY[${O}::uuid, ${N}::uuid], ARRAY['x', 'y'], 'consolidate:stub@p24', '{"deterministic": false}'::jsonb)`;
+    await sql`SELECT ob1_record_derivation('subject', gen_random_uuid(), ARRAY[${O}::uuid], ARRAY['x'], 'subject:stub@p24', '{"deterministic": true}'::jsonb)`;
+    await sql`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'the importer ships on Friday', 'the importer shipped on Thursday', 'updates', 'the later note reports it done', 'consolidate:stub@p24', ${await fp(O)}, ${await fp(N)}, '{"deterministic": false}'::jsonb)`;
+    await sql`INSERT INTO query_log (kind, tool, arm, query) VALUES ('search', 'search', 'literal', 'reapply 24: a literal search')`;
+    const S = await thought("reapply 24: a session on two tickets");
+    await sql`SELECT record_thought_subjects(${S}::uuid, ARRAY['ticket:XYZ-1', 'ticket:XYZ-2']::text[], 'model', 'subject:stub@p24set', NULL::uuid, ${await fp(S)}::text, NULL::jsonb)`;
+    const rows = async () => JSON.stringify((await sql`
+      SELECT (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'relation') AS relation,
+             (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'subject' AND produced_by = 'subject:stub@p24') AS subject,
+             (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'part') AS part,
+             (SELECT count(*)::int FROM query_log WHERE arm = 'literal') AS literal,
+             (SELECT count(*)::int FROM thought_facets WHERE thought_id = ${S}::uuid AND kind = 'subject' AND valid_until IS NULL) AS "setOf"`)[0]);
+    const subjectIndexes = async () => ((await sql`SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'thought_facets_subject_%uniq' ORDER BY 1`) as { indexname: string }[]).map((r) => r.indexname).join(", ");
+    const checks = async () => JSON.stringify(await sql`
+      SELECT conname, convalidated, pg_get_constraintdef(oid) AS def FROM pg_constraint
+       WHERE conname IN ('derivations_artifact_kind_check', 'query_log_arm_check') ORDER BY conname`);
+    const rowsBefore = await rows(), checksBefore = await checks();
+    const indexesBefore = await subjectIndexes();
+    assert(rowsBefore === '{"relation":1,"subject":1,"part":1,"literal":1,"setOf":2}', `the brain holds one row of each later kind and a set of two subjects before the re-run (${rowsBefore})`);
+
+    const run = await migrate("--reapply");
+    // Applied or re-applied: test-support's applyMigrations, which built this schema, records nothing in the ledger.
+    const ran = run.out.split("\n").filter((l) => /^ {2}✓ {2}\d{3}_\S+\.sql {2}(?:re-)?applied$/.test(l)).length;
+    assert(run.code === 0 && ran === MIGRATIONS.length, `--reapply exits 0 over them, every migration run again (${ran} of ${MIGRATIONS.length}) ${shown(run)}`);
+    const kindLines = run.out.split("\n").filter((l) => /^ {2}· {2}derivations_artifact_kind_check is left to \d{3}_\S+\.sql, which decides it last: this file's ADD and VALIDATE did not run$/.test(l));
+    const armLines = run.out.split("\n").filter((l) => /^ {2}· {2}query_log_arm_check is left to \d{3}_\S+\.sql, which decides it last: this file's ADD did not run$/.test(l));
+    const indexLines = run.out.split("\n").filter((l) => /^ {2}· {2}thought_facets_subject_active_uniq is left to \d{3}_\S+\.sql, which decides it last: this file's CREATE UNIQUE INDEX did not run$/.test(l));
+    assert(kindLines.length >= 3 && armLines.length >= 1 && indexLines.length === 1,
+           `the run says which files' narrower rules it left to the file that decides each last: ${kindLines.length} of the lineage kinds (064, 084 and 111 at least), ${armLines.length} of the search arms (059 at least), ${indexLines.length} of the one-subject index (111's)`);
+    assert((await rows()) === rowsBefore, `every row stands after it (${await rows()})`);
+    const indexesAfter = await subjectIndexes();
+    assert(indexesAfter === indexesBefore && indexesAfter === "thought_facets_subject_key_uniq", `111's one-subject index stays dropped and 130's stands (${indexesAfter})`);
+    const checksAfter = await checks();
+    assert(checksAfter === checksBefore && (JSON.parse(checksAfter) as { convalidated: boolean }[]).every((c) => c.convalidated) && /'part'/.test(checksAfter) && /'literal'/.test(checksAfter),
+           `both CHECKs stand validated with every kind and arm, as before the run${checksAfter === checksBefore ? "" : `: ${checksAfter}`}`);
+  } finally {
+    await sql.close();
+  }
+
+  // What is struck, read narrowly: a statement of the file's own that adds or validates a CHECK a later file defines
+  // again, or makes a unique index a later file's own statement drops.
+  const A = "ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (kind IN ('a', 'b;c')) NOT VALID;";
+  const V = "ALTER TABLE t VALIDATE CONSTRAINT t_kind_check;";
+  const LATER = "ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (kind IN ('a', 'b;c', 'd'));\n";
+  const IX = "CREATE UNIQUE INDEX IF NOT EXISTS t_one_uniq\n  ON t (kind)\n  WHERE kind <> 'x;y';";
+  const struck = (first: string, second = LATER) => {
+    const got = supersededStatements([{ name: "001_a.sql", sql: first }, { name: "002_b.sql", sql: second }]);
+    return { first: got.get("001_a.sql") ?? null, second: got.get("002_b.sql") ?? null };
+  };
+  const plain = struck(`CREATE TABLE IF NOT EXISTS t (kind text);\n-- the list\n${A}\n${V}\nSELECT 1;\n`);
+  assert(plain.first !== null && plain.second === null && plain.first.left.map((l) => `${l.action} ${l.table}.${l.name} by ${l.by}`).join("; ") === "ADD t.t_kind_check by 002_b.sql; VALIDATE t.t_kind_check by 002_b.sql"
+           && plain.first.sql === `CREATE TABLE IF NOT EXISTS t (kind text);\n-- the list\n${" ".repeat(A.length)}\n${" ".repeat(V.length)}\nSELECT 1;\n`,
+         "an earlier file's ADD and VALIDATE of a CHECK a later file defines are blanked in place, a `;` in a literal not ending the statement, every other line as it was; the last definer is whole");
+  const untouched: [string, string, string?][] = [
+    ["the one file that defines it", `${A}\n${V}\n`, "SELECT 1;\n"],
+    ["a later file that names it only in a comment", `${A}\n`, `-- ${LATER}SELECT 1;\n`],
+    ["an ADD inside a DO block, which guards itself", `DO $x$\nBEGIN\n  ${A}\nEND\n$x$;\n`],
+    ["an ALTER that does more than add the CHECK", "ALTER TABLE t ADD COLUMN IF NOT EXISTS kind text, ADD CONSTRAINT t_kind_check CHECK (kind IN ('a'));\n"],
+    ["two actions after the CHECK", "ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (kind IN ('a')), ADD CONSTRAINT t_other CHECK (kind <> '');\n"],
+    ["a constraint that is not a CHECK", "ALTER TABLE t ADD CONSTRAINT t_kind_check FOREIGN KEY (kind) REFERENCES k (kind);\n"],
+    ["a unique index no later file drops", `${IX}\n`, "SELECT 1;\n"],
+    ["a unique index a later file drops only inside a block, which guards itself", `${IX}\n`, "DO $x$\nBEGIN\n  DROP INDEX t_one_uniq;\nEND\n$x$;\n"],
+    ["an index that is not unique", "CREATE INDEX IF NOT EXISTS t_one_uniq ON t (kind);\n", "DROP INDEX IF EXISTS t_one_uniq;\n"],
+  ];
+  const droppedLater = struck(`${IX}\nSELECT 1;\n`, "CREATE UNIQUE INDEX IF NOT EXISTS t_two_uniq ON t (kind, other);\nDROP INDEX IF EXISTS t_one_uniq;\n");
+  assert(droppedLater.first !== null && droppedLater.second === null && droppedLater.first.left.map((l) => `${l.action} ${l.table}.${l.name} by ${l.by}`).join("; ") === "CREATE UNIQUE INDEX t.t_one_uniq by 002_b.sql"
+           && droppedLater.first.sql === `${IX.replace(/[^\n]/g, " ")}\nSELECT 1;\n`,
+         "an earlier file's unique index a later file's own statement drops is blanked in place, across its lines; the later file is whole");
+  const wronglyStruck = untouched.filter(([, first, second]) => struck(first, second).first !== null).map(([what]) => what);
+  assert(wronglyStruck.length === 0, `nothing else is struck: ${untouched.map(([what]) => what).join("; ")}${wronglyStruck.length ? ` — struck: ${wronglyStruck.join("; ")}` : ""}`);
+  const guardedLater = struck(`${A}\n`, `DO $x$\nBEGIN\n  IF true THEN\n    ${LATER.trim()}\n  END IF;\nEND\n$x$;\n`);
+  assert(guardedLater.first !== null && guardedLater.first.left.length === 1, "a later file that adds the CHECK inside a block still defines it last: the earlier file's ADD is left to it");
+
   // Leave the database clean and migrated, as the blocks before this one do.
   await dropSchema(URL_);
   await applyMigrations(URL_, OPTS);
