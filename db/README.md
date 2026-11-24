@@ -6734,8 +6734,14 @@ passes (PR 4a-1): an `onPass` that also hands over the abort of each worker's
 tags call in hand (the thought set back to the queue, nothing written), the
 admit gate before the pool and each claim, session settings for its own
 connections, `banner` and `summary` false, and `onStart`, told the start went
-through or a refusal by its kind. Not yet: `--follow` (PR 4a-2) and the sleep
-pass (PR 4b). test-live [29] drives it against a stub chat endpoint.
+through or a refusal by its kind. `--follow [SECONDS]` (PR 4a-2) polls after
+the first pass, on the shared follower helpers (SMD-2636): the model probed
+before any write, a provider that does not answer at start waited for, a
+database outage waited out, an outage mid-pass waited out on its heartbeat
+(`heartbeat:retag:<job>`, which preflight's workers and `retag pass` rows
+read), and the backlog pooled again at every pass — no capture trigger feeds
+the pool. Not yet: the sleep pass (PR 4b). test-live [29] drives it against a
+stub chat endpoint.
 
 ## Extensions
 

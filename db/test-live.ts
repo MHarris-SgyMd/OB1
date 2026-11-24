@@ -24527,9 +24527,15 @@ if (want("29")) {
     let heldSeen: () => void = () => {};
     let writeHeld: Promise<void> = Promise.resolve();
     let rebuiltDone = false;
+    /** The provider down for every call, the probe's included (SMD-2298 PR 4a-2's follower outage). */
+    let downAll = false;
+    /** The model not served, for every call, the probe's included (a 404 in Ollama's words). */
+    let missingAll = false;
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
       const body = await req.text();
       bodies.push(body);
+      if (downAll) return new Response("stub: the provider is down", { status: 503 });
+      if (missingAll) return Response.json({ error: { message: 'model "stub-meta" not found, try pulling it first' } }, { status: 404 });
       if (heldMarker && body.includes(heldMarker)) {
         heldMarker = "";
         heldSeen();
@@ -24925,6 +24931,121 @@ if (want("29")) {
       const usageRefused = await retag({ workers: 0, onStart: (r) => usageStarts.push(r) });
       assert(keyRefused.code === 2 && JSON.stringify(keyStarts) === '[{"ok":false,"refused":"key"}]' && usageRefused.code === 2 && JSON.stringify(usageStarts) === '[{"ok":false,"refused":"usage"}]',
         `onStart hears a refusal by its kind: the key's, the input's (${JSON.stringify(keyStarts)} ${JSON.stringify(usageStarts)})`);
+
+      // SMD-2298 PR 4a-2: --follow. The follower pools and re-tags the backlog, then polls: a thought moved and rebuilt
+      // between polls (150's requeue) is re-tagged by the next pass; its heartbeat:retag:<job> row is stamped while it
+      // runs and ended "stopped" at its stop, which exits 0.
+      const hbKey = stampKey("retag", JOB);
+      const beat = async (key = hbKey) => {
+        const v = ((await sql`SELECT value FROM ob1_config WHERE key = ${key}`) as { value: string }[])[0]?.value;
+        return v === undefined ? undefined : (JSON.parse(v) as { ended?: boolean; outcome?: string; refused?: string; waitingMidPass?: string[] });
+      };
+      const settledSoon = async (id: string, tries = 200) => {
+        for (let i = 0; i < tries; i++) {
+          if (settled(await tagsRow(id))) return true;
+          await Bun.sleep(50);
+        }
+        return false;
+      };
+      const F1 = await tagged("[29] F1, the follower's first pass");
+      await move(F1, "[29] F1, the follower's first pass, moved");
+      let fStop: PassStop | null = null;
+      const fRun = retag({ follow: 1, pausesMs: [10], onPass: (stop) => { fStop = stop; } });
+      const f1ok = await settledSoon(F1);
+      const F2 = await tagged("[29] F2, moved and rebuilt while the follower polls");
+      await move(F2, "[29] F2, moved and rebuilt while the follower polls, moved");
+      await sql`SELECT rebuild_derived(${F2}::uuid, 'live: moved while followed')`;
+      // And one moved raw, no rebuild: no requeue feeds it, so only the pass's pool, at every poll, finds it.
+      const F2R = await tagged("[29] F2R, moved raw while the follower polls");
+      await move(F2R, "[29] F2R, moved raw while the follower polls, moved");
+      const f2ok = await settledSoon(F2) && await settledSoon(F2R);
+      const beatRunning = await beat();
+      if (fStop) (fStop as PassStop)();
+      const fDone = await fRun;
+      const beatStopped = await beat();
+      assert(f1ok && f2ok && fDone.code === 0 && beatRunning !== undefined && beatRunning.ended !== true && beatStopped?.ended === true && beatStopped.outcome === "stopped",
+        `--follow re-tags the backlog, then a thought moved and rebuilt between polls and one moved raw (the pool at every pass); its heartbeat stamped while it runs, ended "stopped" at the stop, exit 0 (${f1ok}/${f2ok}; ${fDone.code}; ${JSON.stringify(beatStopped)})`);
+      // The provider down mid-follow: the worker pauses, the pass ends on the outage, and the follower waits it out on
+      // its heartbeat (waitingMidPass), probing; once the provider answers it polls again at once and re-tags.
+      // The follower starts with the provider answering (a start that cannot probe waits at its start, before its row);
+      // once its row is stamped, the provider goes down and a thought falls behind.
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      let oStop: PassStop | null = null;
+      const oRun = retag({ follow: 1, pausesMs: [10], onPass: (stop) => { oStop = stop; } });
+      for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      downAll = true;
+      const F3 = await tagged("[29] F3, re-tagged once the provider is back");
+      await move(F3, "[29] F3, re-tagged once the provider is back, moved");
+      let waitSeen: string[] | undefined;
+      for (let i = 0; i < 200 && waitSeen === undefined; i++) {
+        await Bun.sleep(50);
+        waitSeen = (await beat())?.waitingMidPass;
+      }
+      downAll = false;
+      const f3ok = await settledSoon(F3, 300);
+      if (oStop) (oStop as PassStop)();
+      const oDone = await oRun;
+      assert(JSON.stringify(waitSeen) === '["retag"]' && f3ok && oDone.code === 0 && /is not answering/.test(oDone.err) && /answers again/.test(oDone.out),
+        `the provider down mid-follow: the follower waits it out on its heartbeat, probing, and re-tags once it answers (${JSON.stringify(waitSeen)}; ${f3ok}; ${oDone.code})`);
+      // The model missing: at start, a follower refuses before it writes (kind "model"); mid-follow, it waits the model
+      // out as an outage, probing, and re-tags once it is served — where a one-shot run's rules would stop. Both raced:
+      // a follower that did neither would follow for ever.
+      const race = async (run: Promise<{ code: number; out: string; err: string }>, stop: () => PassStop | null) => {
+        const done = await Promise.race([run, Bun.sleep(15_000).then(() => null)]);
+        if (done !== null) return done;
+        stop()?.();
+        await run;
+        return { code: -1, out: "", err: "still following after 15 s" };
+      };
+      missingAll = true;
+      const missingStarts: StartResult[] = [];
+      let mStop: PassStop | null = null;
+      const missingAtStart = await race(retag({ follow: 1, pausesMs: [10], onStart: (r) => missingStarts.push(r), onPass: (stop) => { mStop = stop; } }), () => mStop);
+      missingAll = false;
+      assert(missingAtStart.code === 2 && JSON.stringify(missingStarts) === '[{"ok":false,"refused":"model"}]' && /does not serve stub-meta at start/.test(missingAtStart.err),
+        `the model missing at start: the follower refuses before it writes, kind model (${missingAtStart.code}; ${JSON.stringify(missingStarts)})`);
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      let m2Stop: PassStop | null = null;
+      const m2Run = retag({ follow: 1, pausesMs: [10], onPass: (stop) => { m2Stop = stop; } });
+      for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      missingAll = true;
+      const F5 = await tagged("[29] F5, re-tagged once the model is served");
+      await move(F5, "[29] F5, re-tagged once the model is served, moved");
+      let missingWait: string[] | undefined;
+      for (let i = 0; i < 200 && missingWait === undefined; i++) {
+        await Bun.sleep(50);
+        missingWait = (await beat())?.waitingMidPass;
+      }
+      missingAll = false;
+      const f5ok = await settledSoon(F5, 300);
+      if (m2Stop) (m2Stop as PassStop)();
+      const m2Done = await race(m2Run, () => null);
+      assert(JSON.stringify(missingWait) === '["retag"]' && f5ok && m2Done.code === 0,
+        `the model missing mid-follow: waited out as an outage on the heartbeat, probing, and the thought re-tagged once it is served (${JSON.stringify(missingWait)}; ${f5ok}; ${m2Done.code})`);
+      // check: the follower's start alone — through, nothing pooled.
+      const F4 = await tagged("[29] F4, behind its tags at the check");
+      await move(F4, "[29] F4, behind its tags at the check, moved");
+      const checkStarts: StartResult[] = [];
+      // Raced: a check that ran the pass would follow for ever, and hang the suite rather than fail it.
+      let checkStop: PassStop | null = null;
+      const checkRun = retag({ follow: 1, check: true, onStart: (r) => checkStarts.push(r), onPass: (stop) => { checkStop = stop; } });
+      const checkedOrNot = await Promise.race([checkRun, Bun.sleep(15_000).then(() => null)]);
+      if (checkedOrNot === null && checkStop) {
+        (checkStop as PassStop)();
+        await checkRun;
+      }
+      const checked = checkedOrNot ?? { code: -1, out: "", err: "the check ran the pass: still following after 15 s" };
+      const checkedPooled = (await claims()).some((c) => c.id === F4);
+      // A follower's start refusal ends its own row with the kind (SMD-3214): the key's, under another model's key.
+      const otherKey = retagKey("stub-meta-follow", METADATA_PROMPT_VERSION);
+      const refusedFollow = await retag({ follow: 1 }, { ...base, OB1_METADATA_MODEL: "stub-meta-follow" });
+      const refusedBeat = await beat(stampKey("retag", otherKey));
+      const checkNoFollow = await retag({ check: true });
+      assert(checked.code === 0 && JSON.stringify(checkStarts) === '[{"ok":true,"provider":"up"}]' && !checkedPooled
+          && refusedFollow.code === 2 && refusedBeat?.ended === true && refusedBeat.refused === "key"
+          && checkNoFollow.code === 2 && /check is a follower run's start/.test(checkNoFollow.err),
+        `check is the follower's start alone, through, nothing pooled; a follower's start refusal ends its row with the kind; check without follow refused (${JSON.stringify(checkStarts)}; ${checkedPooled}; ${JSON.stringify(refusedBeat)})`);
+      await sql`DELETE FROM ob1_config WHERE key IN (${hbKey}, ${stampKey("retag", otherKey)})`;
 
       // --switch-key (PR 3b): the key is the tags' target recipe, and every tags row made under another is behind it.
       // A dry run under another model counts them (every row: none is under the new key yet); the switch, cut short

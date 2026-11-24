@@ -5210,9 +5210,10 @@ if (configFailed) {
          * stale tags row under that key (150). The re-embed and consolidate
          * rows' rule: a pass is unfinished while a row under its key is
          * pending, leased or failed. "Not yet in the pool" is the worker's own
-         * backlog, db/config.mjs's RETAG_BACKLOG_SQL, one definition. No
-         * follower or sleep pass runs it yet (SMD-2298 PR 4), so a live lease
-         * is a run in progress, and pending rows wait for a run: one that
+         * backlog, db/config.mjs's RETAG_BACKLOG_SQL, one definition. A live
+         * lease, or a follower's fresh heartbeat for the key (PR 4a-2), is a
+         * run in progress; no sleep pass runs it yet (PR 4b), so otherwise
+         * pending rows wait for a run: one that
          * stopped, or a text move's rebuild requeued them (150), which nothing
          * here tells apart. An earlier key's pool is no worker's and counts as
          * nothing unfinished. With nothing unfinished, a backlog waiting for a
@@ -5292,9 +5293,25 @@ if (configFailed) {
               c.thoughts = c.succeeded + c.failed + c.claimed + c.pending + c.unpooled;
               const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts pooled or behind their tags — ");
               const l = leases.get(key) ?? NO_LEASES;
-              if (l.live > 0) {
+              // A follower of this key (SMD-2298 PR 4a-2), as the consolidate row reads one (SMD-2423, SMD-2261 item 7):
+              // running while it holds a live lease or its fresh heartbeat has not ended — between its polls it holds
+              // none. One killed outright leaves its claims' leases live while its row goes stale: the row is the
+              // fresher word, so the follower reads gone, not running.
+              const beat = facts.workers?.heartbeats.find((h) => h.worker === "retag" && h.job === key);
+              const follower = beat && !beat.stale && !beat.ended ? beat : undefined;
+              if (beat && !follower && l.live > 0) {
                 unfinished++;
-                const r = runningRow(key, c, `${key}: ${counts} — ${runningWords(l, c)}`);
+                add("retag pass", "warn",
+                    `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC`,
+                    `Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool (work_type ${key}, include_live with the worker_id worker_status names) returns them now.`);
+                continue;
+              }
+              if (l.live > 0 || follower) {
+                unfinished++;
+                const followerWords = follower
+                  ? `a follower is running this key (stamped ${ago(follower.ageS)} ago${follower.running && follower.waitingMidPass?.length ? ", waiting for the provider mid-pass" : ""}): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
+                  : "";
+                const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`);
                 add("retag pass", r.status, r.detail, r.fix);
                 continue;
               }
@@ -5309,7 +5326,10 @@ if (configFailed) {
               const how = runUnder(key);
               // The flag in a sentence of its own, so the command pastes as it is (review pass 1).
               const failedNote = c.failed ? ` Once their cause is fixed, --retry-failed returns the ${c.failed} failed row(s) to the pool first.` : "";
+              // A follower of this key that stopped or went stale: the workers row names its restart, which finishes the
+              // pass — a one-shot run here as well would be a second worker (the consolidate row's rule).
               const finish = "words" in how ? how.words
+                : beat ? `Its follower is not running: start it again as the workers row says; it finishes the pass.${failedNote}`
                 : `Finish it: cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL; ${how.prefix}bun retag.ts --url $DATABASE_URL --status shows where it stands.${failedNote}`;
               const waiting = c.pending > 0
                 ? `${c.pending} pending row(s) wait for a run under this key: one that stopped, or a text move's rebuild requeued them`

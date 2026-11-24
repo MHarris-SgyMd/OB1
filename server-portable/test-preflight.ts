@@ -2474,6 +2474,20 @@ else {
          `the server tagging captures with another model than the recorded key's is said, ok — it may be meant — and not where the keys agree (PR 3b; ${keyLine(rtOther.out).row})`);
   assert(/Finish it: cd db && OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL --status/.test(fix(rtOther.out, "retag pass")),
          `…under the key's own model where the server's knob names another, since a run under that one is refused (${fix(rtOther.out, "retag pass").trim()})`);
+  // A follower of the key (SMD-2298 PR 4a-2): its fresh heartbeat reads running between its polls, ok, with no remedy;
+  // ended, the row's restart, not a one-shot run beside where it would be a second worker.
+  const rtBeat = (extra: Record<string, unknown>) =>
+    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${RT}`}, ${JSON.stringify({ v: 1, job: RT, every_s: 60, running: false, outcome: "ok", ...extra })}, now() - interval '10 seconds')
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  await rtBeat({});
+  const rtFollowed = await run(RENV);
+  await rtBeat({ ended: true, outcome: "stopped" });
+  const rtFollowerGone = await run(RENV);
+  await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${RT}`}`;
+  assert(new RegExp(`^\\s*✓\\s+retag pass\\s+${rx(RT)}: .* — a follower is running this key \\(stamped 1\\d s ago\\): 1 pending between its polls\\s*$`, "m").test(rtFollowed.out)
+      && !/Finish it/.test(fix(rtFollowed.out, "retag pass"))
+      && /^\s*→ Its follower is not running: start it again as the workers row says; it finishes the pass\.\s*$/.test(fix(rtFollowerGone.out, "retag pass")),
+         `a follower's fresh heartbeat for the key reads running between its polls, no remedy; ended, its restart, not a second worker (PR 4a-2; ${row(rtFollowed.out, "retag pass")} | ${fix(rtFollowerGone.out, "retag pass").trim()})`);
   // A live lease: a run going, ok, no remedy; expired: a worker that died, the reclaim before the finish.
   await claims`SELECT claim_thoughts(${RT}, 'preflight-live', 1)`;
   const rtLive = await run(RENV);

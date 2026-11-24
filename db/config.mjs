@@ -516,6 +516,9 @@ export function restartCommand(worker, job) {
   // would be refused once the model is switched (review pass 1); a backfill
   // key is given as it was.
   if (worker === "reembed") return `cd db && bun reembed.ts --url $DATABASE_URL --follow${job && poolModelFor(job) === null ? ` --job ${job}` : ""}`;
+  // No compose service runs a re-tag follower (SMD-2298 PR 4a-2): its key follows OB1_METADATA_MODEL and the prompt
+  // version, so the job is named beside it, never pinned (a writing run under another recipe is refused).
+  if (worker === "retag") return `cd db && bun retag.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_METADATA_MODEL and the prompt version)` : ""}`;
   if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
   return `${service}cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL)` : ""}`;
 }

@@ -66,7 +66,7 @@ import { modelCallTallies } from "../server-portable/model-call.ts";
 export const TRIGGER_SIGNAL = "SIGWINCH" as const;
 
 /** The workers that stamp, as the key and preflight's row name them. */
-export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep", "reembed"] as const;
+export const STAMPING_WORKERS = ["board-sync", "extract", "consolidate", "sleep", "reembed", "retag"] as const;
 export type StampingWorker = (typeof STAMPING_WORKERS)[number];
 
 /** The shortest gap a worker promises between stamps: a 15-second follower stamps every pass, and is judged against a minute. */
