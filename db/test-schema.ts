@@ -24011,22 +24011,8 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
            && again2.changed === false && again2.mapped === 0 && again2.thoughts === 0,
       `the repository standing, set again, maps a bare key a raw write left, writing no setting; once none stands it maps nothing (${JSON.stringify(repair).slice(0, 160)}; ${JSON.stringify(again2).slice(0, 60)})`);
 
-    // The guard reads the setter's frame schema-qualified too: a session whose search_path shows another function of
-    // its name first calls public.set_subject_repo by its schema, and PL/pgSQL names its frame public.set_subject_repo.
-    await db.exec(`CREATE SCHEMA ob1_shadow_138; CREATE FUNCTION ob1_shadow_138.set_subject_repo(p_repo text, p_actor jsonb) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$`);
-    let shadowed: Record<string, unknown>[] = [];
-    const pathBefore = (await one<{ p: string }>(`SELECT current_setting('search_path') AS p`)).p;  // the suite's own, which RESET would lose
-    try {
-      await db.exec(`SET search_path = ob1_shadow_138, ${pathBefore}`);
-      for (const repo of ["o/q", "o/r"]) shadowed.push((await one<{ r: Record<string, unknown> }>(`SELECT public.set_subject_repo($1, $2::jsonb) AS r`, [repo, JSON.stringify(OP)])).r);
-    } catch (e) {
-      shadowed = [{ threw: String((e as Error).message).split("\n")[0] }];
-    } finally {
-      await db.query(`SELECT set_config('search_path', $1, false)`, [pathBefore]);
-      await db.exec(`DROP FUNCTION ob1_shadow_138.set_subject_repo(text, jsonb); DROP SCHEMA ob1_shadow_138`);
-    }
-    assert(shadowed.length === 2 && shadowed.every((r) => r.ok === true && r.changed === true) && (await repoNow()) === "o/r",
-      `the setter, called by its schema where its name is another's on the path, writes its setting past the guard (${JSON.stringify(shadowed).slice(0, 160)})`);
+    // The guard's schema-qualified frame is test-upgrade [20cp]'s: this suite's one connection compiled the setter long
+    // before, under its unqualified name (review pass 4).
 
     // A clear is a NULL passed on purpose: a call naming the actor alone matches no function (review pass 1).
     const actorOnly = await failure(`SELECT set_subject_repo(p_actor => $1::jsonb)`, [JSON.stringify(OP)]);

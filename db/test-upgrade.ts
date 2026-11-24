@@ -7735,6 +7735,27 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
     assert(set.ok === true && set.mapped === 3 && set.keys === 2 && (await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await edges("pr:12")) === 0 && (await edges("pr:o/r#12")) === 1,
       `an operator's setting maps the three standing keys to two scoped ones, and the thread's edge closes under the bare key and stands under the scoped one (${JSON.stringify(set)}; ${await keys()})`);
 
+    // The settings guard reads the setter's frame schema-qualified too (review pass 4): in a fresh session whose path
+    // shows another function of its name first, PL/pgSQL compiles public.set_subject_repo, called by its schema, under
+    // a qualified name. A session that compiled it before keeps the name it compiled, so the call needs its own.
+    await sql.unsafe(`CREATE SCHEMA ob1_shadow_153; CREATE FUNCTION ob1_shadow_153.set_subject_repo(p_repo text, p_actor jsonb) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$`);
+    const fresh = new SQL({ url: URL_, max: 1 });
+    let shadowed: string[] = [];
+    try {
+      await fresh.unsafe(`SET search_path = ob1_shadow_153, public`);
+      for (const repo of ["o/q", "o/r"]) {
+        const r = (await fresh`SELECT public.set_subject_repo(${repo}, (${JSON.stringify({ name: "upgrade-153-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; changed: boolean };
+        shadowed.push(`${r.ok}:${r.changed}`);
+      }
+    } catch (e) {
+      shadowed = [`threw: ${(e as Error).message.slice(0, 120)}`];
+    } finally {
+      await fresh.close();
+      await sql.unsafe(`DROP FUNCTION ob1_shadow_153.set_subject_repo(text, jsonb); DROP SCHEMA ob1_shadow_153`);
+    }
+    assert(shadowed.join(",") === "true:true,true:true" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r",
+      `the setter, called by its schema in a fresh session where its name is another's on the path, writes its setting past the guard (${shadowed.join(", ")})`);
+
     // A re-apply with a setting standing is a no-op.
     await applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 });
     assert((await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r" && (await grants()) === "SELECT | SELECT,INSERT,UPDATE | SELECT | ",
