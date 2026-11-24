@@ -61,7 +61,7 @@ export type PrBodyInput = {
  */
 const scrubDetail = (s: string): string =>
   maskTokens(s)
-    .replace(/gh[pousr]_[A-Za-z0-9]{20,}/g, "gh_…")
+    .replace(/gh[pousr]_[A-Za-z0-9._-]{20,}/g, "gh_…")
     .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "github_pat_…");
 
 /** A thrown value as a short one-line string for an owed step's `why`; `scrubDetail` is still applied before it is recorded. */

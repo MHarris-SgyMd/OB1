@@ -133,6 +133,10 @@ export async function selfCheck(): Promise<number> {
     const g = stubFetch((m, u) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ repositories: [{ full_name: "someone/OB1" }] })));
     await installationToken(g.fetch, APP, PEM, NOW);
     ok(revoked(g.sent).join() === TOKEN, "a token refused for its repository is revoked too");
+    const future = `ghs_${"f".repeat(5000)}`;
+    const h = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ token: future })));
+    const t3 = await installationToken(h.fetch, APP, PEM, NOW);
+    ok(!t3.ok && revoked(h.sent).join() === future && !t3.detail.includes("fffff"), "a ghs_ token of a shape this code doesn't know is revoked before it is refused, and not shown");
     const two = await answer(tokenAnswer({ repositories: [{ full_name: "MHarris-SgyMd/OB1" }, { full_name: "MHarris-SgyMd/other" }] }));
     const other = await answer(tokenAnswer({ repositories: [{ full_name: "someone/OB1" }] }));
     const none = await answer(tokenAnswer({ repositories: undefined }));
@@ -177,6 +181,10 @@ export async function selfCheck(): Promise<number> {
     ok(!remote.ok && remote.final && remote.detail.includes("workflows permission"), "a remote rejection (a workflow file, a ruleset) is final, in GitHub's words");
     const failure = pushOutcome({ code: 1, stdout: `!\t${ref}\t[remote failure] (remote failed to report status)\n`, stderr: "" }, BRANCH);
     ok(!failure.ok && !failure.final, "a remote failure is retried");
+    const ise = pushOutcome({ code: 1, stdout: `!\t${ref}\t[remote rejected] (Internal Server Error)\n`, stderr: "" }, BRANCH);
+    ok(!ise.ok && !ise.final, "GitHub's passing error, though rejected remotely, is retried");
+    const nonff = pushOutcome({ code: 1, stdout: `!\t${ref}\t[rejected] (fetch first)\n`, stderr: "" }, BRANCH);
+    ok(!nonff.ok && nonff.final && nonff.detail.startsWith("the push was rejected"), "a non-fast-forward is final, and said as git's rejection, not GitHub's");
   });
 
   await section("pushOutcome: pushed, already there, refused (final), or failed (retry)", () => {
@@ -244,7 +252,8 @@ export async function selfCheck(): Promise<number> {
       ok(sh(["rev-parse", BRANCH], target) === tip, "the target has the branch at the run's commit");
       ok(sh(["tag", "-l"], target) === "" && sh(["for-each-ref", "--format=%(refname)"], target) === `refs/heads/${BRANCH}`, "no tag and no other branch went with it");
       ok(!existsSync(marker), "the source's pre-push hook did not run");
-      ok(seen.length === 1 && !seen[0].argv.join(" ").includes(TOKEN) && seen[0].env.GIT_CONFIG_VALUE_0.includes(Buffer.from(`x-access-token:${TOKEN}`).toString("base64")), "the token went in git's environment alone");
+      const pushes = seen.filter((x) => x.argv.includes("push"));
+      ok(pushes.length === 1 && seen.every((x) => !x.argv.join(" ").includes(TOKEN)) && pushes[0].env.GIT_CONFIG_VALUE_0.includes(Buffer.from(`x-access-token:${TOKEN}`).toString("base64")), "the token went in git's environment alone");
       ok(mints(mintRoute.sent) === 1 && revoked(mintRoute.sent).join() === TOKEN, "one token was minted for the push, and revoked once it was done");
       const again = await client.pushBranch({ branch: BRANCH });
       ok(again.ok, "a second push of the same commit is already there, not an error");
@@ -269,26 +278,48 @@ export async function selfCheck(): Promise<number> {
       const before = mintRoute.sent.length;
       const r = await client.pushBranch({ branch: "main" });
       ok(!r.ok && r.final === true && r.detail.includes("agent/smd-<n>-<slug>"), "main is refused, as final");
-      ok(mintRoute.sent.length === before && seen.length === 3, "no token minted, no git run");
+      ok(mintRoute.sent.length === before && seen.filter((x) => x.argv.includes("push")).length === 3, "no token minted, no push run");
+    });
+
+    await section("pushBranch: a bare repository whose config could redirect the token is refused before a token is minted", async () => {
+      for (const [key, value] of [["http.proxy", "http://127.0.0.1:9"], ["http.https://github.com/.sslVerify", "false"], ["url.https://evil.example/.insteadOf", "https://github.com/"], ["include.path", "/tmp/x"], ["core.sshCommand", "touch /tmp/pwn"]] as const) {
+        const tampered = join(root, `tampered-${key.replace(/[^a-z]/gi, "")}.git`);
+        sh(["clone", "-q", "--bare", source, tampered]);
+        sh(["-C", tampered, "config", key, value]);
+        const before = mints(mintRoute.sent);
+        const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: tampered, home, remote: target, now: () => NOW });
+        const r = await c.pushBranch({ branch: BRANCH });
+        ok(!r.ok && r.final === true && r.detail.toLowerCase().includes(key.toLowerCase().split(".")[0]) && mints(mintRoute.sent) === before, `${key}: refused as final, no token minted`);
+      }
+    });
+
+    await section("pushCommand's header reaches github.com alone (git's own URL matching)", () => {
+      const c = pushCommand({ bareRepo: source, remote: "https://github.com/MHarris-SgyMd/OB1.git", branch: BRANCH, token: TOKEN, home });
+      const at = (url: string): string => {
+        const r = Bun.spawnSync([git, "config", "--get-urlmatch", "http.extraheader", url], { env: c.env, cwd: "/", stdout: "pipe", stderr: "pipe" });
+        return r.stdout.toString().trim();
+      };
+      ok(at("https://github.com/MHarris-SgyMd/OB1.git").startsWith("AUTHORIZATION: basic "), "https://github.com/… gets it");
+      ok(at("https://github.com.evil.test/x.git") === "" && at("http://github.com/x.git") === "" && at("https://example.test/x.git") === "", "a look-alike host, plain http and another host don't");
     });
 
     await section("pushBranch: a token that can't be minted is a retry, and git doesn't run", async () => {
       const c = appClient({ app: APP, pem: PEM, fetch: stubFetch(() => json({ message: "Bad credentials" }, 401)).fetch, git: localGit, bareRepo: source, home, remote: target, now: () => NOW });
-      const before = seen.length;
+      const before = seen.filter((x) => x.argv.includes("push")).length;
       const r = await c.pushBranch({ branch: BRANCH });
-      ok(!r.ok && !r.final && r.detail.includes("401") && seen.length === before, "not pushed, not final, git not run");
+      ok(!r.ok && !r.final && r.detail.includes("401") && seen.filter((x) => x.argv.includes("push")).length === before, "not pushed, not final, no push run");
     });
 
     await section("pushBranch: git's own words are scrubbed of the token, in either form", async () => {
       const basic = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
-      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async () => ({ code: 128, stdout: "", stderr: `fatal: header AUTHORIZATION: basic ${basic} refused for ${TOKEN}` }), bareRepo: source, home, remote: target, now: () => NOW });
+      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => (argv.includes("push") ? { code: 128, stdout: "", stderr: `fatal: header AUTHORIZATION: basic ${basic} refused for ${TOKEN}` } : { code: 0, stdout: "core.bare\n", stderr: "" }), bareRepo: source, home, remote: target, now: () => NOW });
       const r = await c.pushBranch({ branch: BRANCH });
       const fragments = [TOKEN.slice(0, 40), TOKEN.slice(200, 240), basic.slice(0, 40), basic.slice(100, 140)];
       ok(!r.ok && !r.final && r.detail.includes("exited 128") && fragments.every((x) => !r.detail.includes(x)), "a failed push's detail carries no piece of the token or its basic-auth form, however git's words are cut");
     });
 
     await section("pushBranch: a throwing git is a result with the token scrubbed", async () => {
-      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async () => { throw new Error(`spawn failed near ${TOKEN}`); }, bareRepo: source, home, remote: target, now: () => NOW });
+      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => { if (argv.includes("push")) throw new Error(`spawn failed near ${TOKEN}`); return { code: 0, stdout: "core.bare\n", stderr: "" }; }, bareRepo: source, home, remote: target, now: () => NOW });
       const r = await c.pushBranch({ branch: BRANCH });
       ok(!r.ok && !r.final && r.detail.includes("git push threw") && !r.detail.includes(TOKEN), "a result, not thrown, the token gone");
     });
@@ -346,7 +377,11 @@ export async function selfCheck(): Promise<number> {
     const r2 = await none.c.openDraftPr(OPEN);
     ok(!r2.ok && r2.final === true && r2.detail.includes("422") && r2.detail.includes("Validation Failed; No commits between"), "no commits between: final, in GitHub's words from errors[]");
     const badHead = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ resource: "PullRequest", field: "head", code: "invalid" }] }, 422) : null)).c.openDraftPr(OPEN);
-    ok(!badHead.ok && badHead.final === true, "a head GitHub won't take: final");
+    ok(!badHead.ok && !badHead.final, "a head GitHub doesn't take yet (just after the push): retried");
+    const badBase = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ resource: "PullRequest", field: "base", code: "invalid" }] }, 422) : null)).c.openDraftPr(OPEN);
+    ok(!badBase.ok && badBase.final === true, "a base GitHub won't take: final");
+    const theirs = await prClient((m, u) => (m === "GET" && u === LIST ? json([prRow({ user: { login: "MHarris-SgyMd" } })]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "A pull request already exists for MHarris-SgyMd:agent/smd-1234-fix-the-thing." }] }, 422) : null)).c.openDraftPr(OPEN);
+    ok(!theirs.ok && theirs.final === true && theirs.detail.includes("not the App's"), "a PR from the branch that someone else opened: final, saying so, not retried forever");
     const spam = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ message: "was submitted too quickly" }] }, 422) : null)).c.openDraftPr(OPEN);
     ok(!spam.ok && !spam.final && spam.detail.includes("too quickly"), "any other 422 (an abuse limit) is retried");
     let calls = 0;

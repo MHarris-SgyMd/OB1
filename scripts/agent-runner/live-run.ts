@@ -41,7 +41,7 @@ import { hostNow, stampReport } from "./install.ts";
 import { PROBES, STAMP_FILE, developerGit, hostStamp, stampProblem } from "./probes.ts";
 import type { Commitlint, GitRun, ScanSecrets } from "./gate.ts";
 
-/** The commit identity a run's sessions use. The real bot (SMD-4089's GitHub machine account) is cut 3; until then a run commits as this placeholder and never publishes, so no real identity is needed. */
+/** The commit identity a run's sessions use: a placeholder until the wiring (cut 3b-2) sets the runner's GitHub App's own; until then a run never publishes. */
 export const BOT = { name: "Agent Runner", email: "agent-runner@runner.invalid" } as const;
 
 /** The runner's state, outside every checkout: the bare repository it clones per run, and the run records (docs, "Records"). */

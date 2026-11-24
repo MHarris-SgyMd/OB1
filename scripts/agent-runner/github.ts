@@ -12,9 +12,11 @@
  * so none outlives the step by its hour.
  *
  * What the App can't do, by GitHub's own rules and not this code's: it holds no `workflows` permission, so a push that
- * touches `.github/workflows/` is refused; a tag ruleset keeps `v*` tags (and so `release.yml`) the maintainer's; and
- * main's ruleset, once SMD-4090 requires an approving review, keeps a merge the maintainer's. Those three are the
- * design's prerequisites for the first live publish, checked by `setup.ts check-github-app`.
+ * touches `.github/workflows/` is refused; a tag ruleset (`.github/rulesets/tags.json`) keeps `v*` tags, and so
+ * `release.yml`, the maintainer's; and a ruleset locking `main` to repository admins (`main-merge.json`) keeps a merge
+ * the maintainer's whatever approvals the App holds. Those three are the design's prerequisites for the first live
+ * publish, checked by `setup.ts check-github-app`. The bare repository's own config is checked before each push, so a
+ * proxy, TLS or URL-rewrite setting there can't redirect the token.
  *
  * What this code adds:
  *   - only a branch under the runner's prefix (`agent/smd-<n>-<slug>`) is pushed, by an explicit refspec, with no tags,
@@ -111,11 +113,11 @@ async function refusalOf(res: Response, what: string): Promise<Refusal> {
 const refusal = async (res: Response, what: string): Promise<string> => (await refusalOf(res, what)).text;
 
 /**
- * Whether GitHub's 422 to opening a PR is one no retry mends: no commits between the branch and its base, or a head or
- * base it won't take. Any other 422 (an abuse limit among them) is retried.
+ * Whether GitHub's 422 to opening a PR is one no retry mends: no commits between the branch and its base, or a base it
+ * won't take. Any other 422 is retried: an abuse limit, or a head GitHub doesn't see yet just after the push.
  */
 export function prRefusalFinal(r: Refusal): boolean {
-  return r.errors.some((e) => /no commits between/i.test(e.message) || e.field === "head" || e.field === "base") || /no commits between/i.test(r.text);
+  return r.errors.some((e) => /no commits between/i.test(e.message) || e.field === "base") || /no commits between/i.test(r.text);
 }
 
 /** Revoke an installation token (DELETE /installation/token, with the token itself). Best-effort: a failure leaves it to expire within its hour. Never throws. */
@@ -187,7 +189,11 @@ export async function installationToken(fetchImpl: Fetch, app: App, pem: string,
   const body = await jsonOf(res);
   if (body === NOT_JSON || !body || typeof body !== "object") return { ok: false, detail: "GitHub answered the token request with a body that isn't a JSON object" };
   const b = body as { token?: unknown; expires_at?: unknown; permissions?: unknown; repositories?: unknown };
-  if (typeof b.token !== "string" || !INSTALLATION_TOKEN.test(b.token)) return { ok: false, detail: "GitHub's answer carried no installation token of the expected shape" };
+  if (typeof b.token !== "string" || !INSTALLATION_TOKEN.test(b.token)) {
+    // A token of a shape this code doesn't know is still a live token: revoke it before refusing it.
+    if (typeof b.token === "string" && b.token.startsWith("ghs_") && !/[\s]/.test(b.token)) await revokeToken(fetchImpl, b.token);
+    return { ok: false, detail: "GitHub's answer carried no installation token of the expected shape" };
+  }
   const perms = b.permissions && typeof b.permissions === "object" ? (b.permissions as Record<string, unknown>) : null;
   const extra = perms === null ? ["(none listed)"] : Object.entries(perms).filter(([k, v]) => ALLOWED_BACK[k] !== v).map(([k, v]) => `${k}: ${String(v)}`);
   const missing = perms === null ? [] : Object.entries(TOKEN_PERMISSIONS).filter(([k, v]) => perms[k] !== v).map(([k]) => k);
@@ -203,6 +209,13 @@ export async function installationToken(fetchImpl: Fetch, app: App, pem: string,
   const exp = typeof b.expires_at === "string" ? Date.parse(b.expires_at) : NaN;
   return { ok: true, token: b.token, expiresAt: Number.isFinite(exp) ? exp : nowMs + 3_000_000 };
 }
+
+/**
+ * The bare repository's own config keys a push would read that could send the token elsewhere or run code: a proxy or
+ * TLS setting (`http.*`), a URL rewrite (`url.*`), an include, a credential helper, a transport rule, a command git
+ * would run. The runner writes none of these; finding one means the repository was tampered with.
+ */
+export const RISKY_REPO_CONFIG = /^(http\.|url\.|include\.|includeif\.|credential\.|protocol\.|core\.(sshcommand|askpass|gitproxy|hookspath|fsmonitor)$|remote\.[^.]+\.(proxy|pushurl|receivepack|uploadpack)$)/i;
 
 /** One git invocation's result. */
 export type GitOut = { code: number; stdout: string; stderr: string };
@@ -247,7 +260,10 @@ export function pushOutcome(out: GitOut, branch: string): { ok: true } | { ok: f
   if (out.code === 0 && (flag === "*" || flag === " " || flag === "=")) return { ok: true };
   if (flag === "!") {
     const why = oneLine(line?.split("\t")[2] ?? "rejected", 160);
-    return { ok: false, final: !/^\[remote failure\]/.test(why), detail: `GitHub refused the push of ${branch}: ${why}` };
+    // GitHub's own refusal (a ruleset, a workflow file, a hook) is final; its passing errors and a remote failure are retried.
+    const passing = /^\[remote failure\]/.test(why) || /internal server error|timed? ?out|try again|temporarily|unavailable/i.test(why);
+    const local = /^\[rejected\]/.test(why);
+    return { ok: false, final: !passing, detail: `${local ? "the push was rejected" : "GitHub refused the push"} of ${branch}: ${why}` };
   }
   return { ok: false, final: false, detail: `git push of ${branch} exited ${out.code}: ${oneLine(out.stderr || out.stdout, 200)}` };
 }
@@ -304,6 +320,16 @@ export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => P
     mintToken,
     async pushBranch({ branch }) {
       if (!PUSH_BRANCH.test(branch)) return { ok: false, final: true, detail: `refusing to push ${JSON.stringify(oneLine(branch, 80))}: the runner pushes only agent/smd-<n>-<slug>` };
+      // The bare repository's own config is read by the push: refuse one that could redirect the token, before minting it.
+      let keys: GitOut;
+      try {
+        keys = await d.git(["-C", d.bareRepo, "config", "--local", "--no-includes", "--name-only", "--list"], gitEnv(d.home));
+      } catch (e) {
+        return { ok: false, detail: `reading the bare repository's config threw: ${oneLine(String((e as Error)?.message ?? e), 160)}` };
+      }
+      if (keys.code !== 0) return { ok: false, detail: `reading the bare repository's config exited ${keys.code}: ${oneLine(keys.stderr, 160)}` };
+      const risky = keys.stdout.split("\n").map((k) => k.trim()).filter((k) => k && RISKY_REPO_CONFIG.test(k));
+      if (risky.length) return { ok: false, final: true, detail: `refusing to push from a bare repository whose config sets ${risky.slice(0, 5).join(", ")}: the runner writes none of these, so it was tampered with` };
       const t = await mintToken();
       if (!t.ok) return { ok: false, detail: t.detail };
       try {
@@ -340,6 +366,8 @@ export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => P
           const after = await findOpenPr(d.fetch, d.app, t.token, head);
           if ("error" in after) return { ok: false, detail: `${why}; then the lookup for an open PR failed: ${scrubToken(after.error, t.token)}` };
           if (after.found) return { ok: true, ...after.found };
+          // A PR from the branch is open, but not the App's: a person opened one, or githubAppSlug names another App.
+          if (refused.errors.some((e) => /already exists/i.test(e.message))) return { ok: false, final: true, detail: `${why}; the open PR from ${head} is not the App's (${d.app.botLogin}): a person opened one, or githubAppSlug is wrong` };
           return prRefusalFinal(refused) ? { ok: false, final: true, detail: why } : { ok: false, detail: why };
         }
         return { ok: false, detail: why };

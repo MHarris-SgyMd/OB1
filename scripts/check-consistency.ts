@@ -11768,7 +11768,7 @@ const NAME_EXCEPTIONS = new Map<string, Partial<Record<NameKind, CountedExceptio
   ["docs/02-companion-prompts.md", { name: [{ why: KEPT.UPSTREAM, lines: 1 }, { why: KEPT.CREDIT, lines: 1 }] }],
   ["docs/04-ai-assisted-setup.md", { name: { why: KEPT.CREDIT, lines: 1 } }],
   ["docs/agent-memory-portability.md", { fork: { why: KEPT.SENSE, lines: 1 } }],
-  ["docs/agent-runner.md", { fork: { why: KEPT.SENSE, lines: 10 }, name: { why: KEPT.BOARD, lines: 1 } }],
+  ["docs/agent-runner.md", { fork: { why: KEPT.SENSE, lines: 9 }, name: { why: KEPT.BOARD, lines: 1 } }],
   ["docs/event-log-as-truth.md", { fork: { why: KEPT.SENSE, lines: 3 } }],
   ["docs/one-brain-per-stack.md", { name: { why: KEPT.RECORD, lines: 2 } }],
   ["docs/open-brain-assistant-gpt-context.md", { name: { why: KEPT.NBJ, lines: 3 } }],
