@@ -8257,17 +8257,25 @@ if (want("10")) {
   // A key moved back with nothing returned — a switch before this rule, or the record set by hand: B's three finished
   // rows are of thoughts A has read since. --status counts them and the next run returns them, with no flag; the
   // edited note, pending under B since its edit, is read with them, and the two B failed stay failed.
+  // One of the three was edited after A read it: A's row is pending again, so it is no finished row later than B's, and
+  // the sign left is A's lineage on the thought's entities (review pass 2).
+  await sql`SELECT update_thought(${back.lapsed}::uuid, 'The last switchback note, edited.', NULL::jsonb, NULL::vector)`;
+  const lapsedUnderA = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${back.lapsed}::uuid`)[0].status;
   await sql`UPDATE ob1_config SET value = ${KEY_B} WHERE key = 'entity_extraction_key'`;
+  const [{ t0: mendFrom }] = await sql`SELECT clock_timestamp() AS t0`;
   const callsBeforeMend = calls;
   const statusMend = await extractInProcess({ status: true, env: envB });
   const mend = await extractInProcess({ env: envB });
   const mendCalls = calls - callsBeforeMend;
   const mendAgain = await extractInProcess({ env: envB });
-  assert(statusMend.stdout.includes("3 finished row(s) are of thoughts another extraction key read since: the next run returns them to the pool")
-      && mend.code === 1 && mend.stdout.includes(`3 finished row(s) returned to the pool: another extraction key read their thoughts after ${KEY_B} did`) && !/--switch-key:/.test(mend.stdout)
+  const mendDatedNow = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY_B} AND enqueued_at >= ${mendFrom}
+                                          AND thought_id = ANY(${sql.array([back.read, back.failed, back.lapsed], "TEXT")}::uuid[])`)[0].c);
+  assert(lapsedUnderA === "pending" && mendDatedNow === 3
+      && statusMend.stdout.includes("3 finished row(s) are of thoughts another extraction key read since: the next run returns them to the pool")
+      && mend.code === 1 && mend.stdout.includes(`3 finished row(s) returned to the pool, behind what is pending: another extraction key read their thoughts after ${KEY_B} did`) && !/--switch-key:/.test(mend.stdout)
       && mendCalls === 4 && (await readings()) === `1 Aurora under ${KEY}, 4 Borealis under ${KEY_B}` && (await readingOf(back.kept)) === "Aurora" && (await rowsUnder(KEY_B)) === "2 failed, 4 succeeded"
       && calls === callsBeforeMend + 4 && !/returned to the pool/.test(mendAgain.stdout),
-         `a key moved back with nothing returned is mended by its next run: --status counts the three finished rows another key read since, the run returns and reads them with no flag, and the run after it returns none (exit ${mend.code}; ${mendCalls} call(s); ${await readings()}; ${await rowsUnder(KEY_B)}; ${lineOf(mend.stdout, /finished row\(s\) returned/)})`);
+         `a key moved back with nothing returned is mended by its next run: --status counts the three finished rows another key read since, one of them known only by the other key's lineage on its entities, the run returns them behind what is pending and reads them with no flag, and the run after it returns none (exit ${mend.code}; ${mendCalls} call(s); ${await readings()}; ${await rowsUnder(KEY_B)}; ${lineOf(mend.stdout, /finished row\(s\) returned/)})`);
   // The record moved by another run between this run's read of it and its switch: read again under the lock, the
   // switch is not made twice. A follower, since it alone waits at its start for a provider that is away.
   {

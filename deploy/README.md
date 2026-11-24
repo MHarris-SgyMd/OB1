@@ -2927,7 +2927,8 @@ switching the brain to it and back: the trial's thoughts are read twice more.
 
 A brain whose key was moved back before this rule, or by hand, holds the
 other model's entities under rows that read done. Its next run returns the
-finished rows another key read since, with no flag; `--status` counts them.
+finished rows another key read since, with no flag and behind what is
+pending; `--status` counts them.
 
 Consolidation's key follows its judge model (`OB1_JUDGE_MODEL`, else the
 metadata model) and prompt version, with no switch to refuse: a new one is a
