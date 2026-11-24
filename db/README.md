@@ -143,10 +143,13 @@ the brain's own rows: a rule a later file loosened (SMD-3149). That is a file's
 `ADD CONSTRAINT … CHECK`, with its `VALIDATE`, where a later file defines the
 constraint again (064's, 084's and 111's lists of lineage kinds; 059's search
 arms), and a file's `CREATE UNIQUE INDEX` where a later file drops the index
-(111's one standing subject a thought). The file that decides the rule last
-makes it, in the same transaction, and the run says so beside each file it
-left a statement out of. Only a statement of the file's own in exactly one of
-those shapes is left out; one inside a `DO` block guards itself. One
+(111's one standing subject a thought). A `COMMENT` on such a constraint or
+index is left out with it. The file that decides the rule last makes it, in
+the same transaction, and the run says so beside each file it left a statement
+out of, as `--dry-run` does. Only a statement of the file's own in exactly one
+of those shapes is left out; one inside a `DO` block guards itself. Before it
+commits the run looks for every constraint it left an `ADD` out for, and
+fails, rolled back, if one is not there. One
 transaction, so a failure part-way — a lock not granted within 10 s included —
 rolls back and the schema is as it was. `--dry-run` says what would re-run and
 judges the pgvector floor as the run does.

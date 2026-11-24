@@ -27,7 +27,8 @@
  */
 
 import { SQL } from "bun";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
@@ -8087,6 +8088,29 @@ console.log("\n[24] --reapply on a brain holding rows a later migration's rule a
     const checksAfter = await checks();
     assert(checksAfter === checksBefore && (JSON.parse(checksAfter) as { convalidated: boolean }[]).every((c) => c.convalidated) && /'part'/.test(checksAfter) && /'literal'/.test(checksAfter),
            `both CHECKs stand validated with every kind and arm, as before the run${checksAfter === checksBefore ? "" : `: ${checksAfter}`}`);
+
+    // --dry-run says the same of each file, as what would not run.
+    const dry = await migrate("--reapply", "--dry-run");
+    const dryLines = dry.out.split("\n").filter((l) => /^ {2}· {2}\w+ is left to \d{3}_\S+\.sql, which decides it last: this file's .+ would not run$/.test(l));
+    const liveLines = run.out.split("\n").filter((l) => /^ {2}· {2}\w+ is left to /.test(l));
+    assert(dry.code === 0 && dryLines.length === liveLines.length && dryLines.join("\n") === liveLines.join("\n").replace(/did not run$/gm, "would not run"),
+           `--reapply --dry-run names the same ${liveLines.length} statements as what would not run ${shown(dry)}`);
+
+    // A constraint left out for a later file that then does not add it: the reader cannot see a guard that does
+    // not fire, so the migrator looks before it commits. The tree's files copied, one more after them.
+    const copy = mkdtempSync(join(tmpdir(), "ob1-upgrade-migrations-"));
+    try {
+      cpSync(join(HERE, "migrations"), copy, { recursive: true });
+      writeFileSync(join(copy, "999_guarded_arm.sql"),
+        "DO $g$\nBEGIN\n  IF false THEN\n    ALTER TABLE query_log ADD CONSTRAINT query_log_arm_check CHECK (arm IS NULL);\n  END IF;\nEND\n$g$;\n");
+      const short = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_TEST_MIGRATIONS_DIR: copy }, "--reapply");
+      const ledger999 = (await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '999%'`)[0].c as number;
+      assert(short.code === 1 && /--reapply {2}FAILED: the re-run would end without query_log_arm_check on query_log \(left to 999_guarded_arm\.sql\)/.test(short.out) && /it rolled back/.test(short.out)
+               && (await checks()) === checksBefore && ledger999 === 0,
+             `a re-run that would end without a constraint it left out fails, naming it and the file it was left to, and rolls back: both CHECKs as they were, the file not recorded (exit ${short.code}, ${ledger999} recorded)`);
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
   } finally {
     await sql.close();
   }
@@ -8108,6 +8132,8 @@ console.log("\n[24] --reapply on a brain holding rows a later migration's rule a
   const untouched: [string, string, string?][] = [
     ["the one file that defines it", `${A}\n${V}\n`, "SELECT 1;\n"],
     ["a later file that names it only in a comment", `${A}\n`, `-- ${LATER}SELECT 1;\n`],
+    ["a later file that names it only in a string literal", `${A}\n`, "COMMENT ON TABLE t IS 'to widen it: ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (…)';\n"],
+    ["a later file that adds a constraint of that name to another table", `${A}\n`, "ALTER TABLE u ADD CONSTRAINT t_kind_check CHECK (kind <> '');\n"],
     ["an ADD inside a DO block, which guards itself", `DO $x$\nBEGIN\n  ${A}\nEND\n$x$;\n`],
     ["an ALTER that does more than add the CHECK", "ALTER TABLE t ADD COLUMN IF NOT EXISTS kind text, ADD CONSTRAINT t_kind_check CHECK (kind IN ('a'));\n"],
     ["two actions after the CHECK", "ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (kind IN ('a')), ADD CONSTRAINT t_other CHECK (kind <> '');\n"],
@@ -8124,6 +8150,23 @@ console.log("\n[24] --reapply on a brain holding rows a later migration's rule a
   assert(wronglyStruck.length === 0, `nothing else is struck: ${untouched.map(([what]) => what).join("; ")}${wronglyStruck.length ? ` — struck: ${wronglyStruck.join("; ")}` : ""}`);
   const guardedLater = struck(`${A}\n`, `DO $x$\nBEGIN\n  IF true THEN\n    ${LATER.trim()}\n  END IF;\nEND\n$x$;\n`);
   assert(guardedLater.first !== null && guardedLater.first.left.length === 1, "a later file that adds the CHECK inside a block still defines it last: the earlier file's ADD is left to it");
+
+  // A comment on a struck rule goes with it, in its file and in any before the file that decides the rule last.
+  const CC = "COMMENT ON CONSTRAINT t_kind_check ON t IS 'the kinds; a list';";
+  const CI = "COMMENT ON INDEX t_one_uniq IS 'one a kind';";
+  const three = supersededStatements([
+    { name: "001_a.sql", sql: `${CC}\n${A}\n${CC}\n${IX}\n${CI}\n` },
+    { name: "002_b.sql", sql: `${CC}\n${CI}\nSELECT 1;\n` },
+    { name: "003_c.sql", sql: `${LATER}${CC}\nDROP INDEX IF EXISTS t_one_uniq;\n` },
+    { name: "004_d.sql", sql: `${CC}\n` },
+  ]);
+  const leftOf = (name: string) => (three.get(name)?.left ?? []).map((l) => `${l.action} ${l.table}.${l.name} by ${l.by}`).join("; ");
+  assert(leftOf("001_a.sql") === "COMMENT t.t_kind_check by 003_c.sql; ADD t.t_kind_check by 003_c.sql; COMMENT t.t_kind_check by 003_c.sql; CREATE UNIQUE INDEX t.t_one_uniq by 003_c.sql; COMMENT t.t_one_uniq by 003_c.sql"
+           && leftOf("002_b.sql") === "COMMENT t.t_kind_check by 003_c.sql; COMMENT t.t_one_uniq by 003_c.sql" && !three.has("003_c.sql") && !three.has("004_d.sql")
+           && three.get("002_b.sql")!.sql === `${" ".repeat(CC.length)}\n${" ".repeat(CI.length)}\nSELECT 1;\n`,
+         `a COMMENT on a struck constraint or index is left out with it, in its file and in one before the file that decides it last, and stands in that file and after (${leftOf("001_a.sql")} | ${leftOf("002_b.sql")})`);
+  const lone = struck(`${A}\n${CC}\n${IX}\n${CI}\n`, "SELECT 1;\n");
+  assert(lone.first === null, "a COMMENT on a constraint or index nothing later redefines or drops stands");
 
   // Leave the database clean and migrated, as the blocks before this one do.
   await dropSchema(URL_);

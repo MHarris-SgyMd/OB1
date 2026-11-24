@@ -3287,9 +3287,11 @@ export function stripSqlComments(text) {
  * Comment-stripped SQL with the inside of every string literal and
  * dollar-quoted body blanked, newlines kept: what is left is the file's own
  * statements, so a `;` in it ends one and a word in it is not a literal's or a
- * function body's. Quoted identifiers are kept.
+ * function body's. Quoted identifiers are kept. With `bodies` false a
+ * dollar-quoted body is kept and read the same way (its literals blanked): the
+ * file's code, a DO block's and a function's included, without its prose.
  */
-function maskSqlBodies(code) {
+function maskSqlBodies(code, bodies = true) {
   const blank = (s) => s.replace(/[^\n]/g, " ");
   let out = "";
   let i = 0;
@@ -3313,7 +3315,8 @@ function maskSqlBodies(code) {
       const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(code.slice(i, i + 64));
       const end = m ? code.indexOf(m[0], i + m[0].length) : -1;
       if (m && end !== -1) {
-        out += m[0] + blank(code.slice(i + m[0].length, end)) + m[0];
+        const inside = code.slice(i + m[0].length, end);
+        out += m[0] + (bodies ? blank(inside) : maskSqlBodies(inside, false)) + m[0];
         i = end + m[0].length;
         continue;
       }
@@ -3328,6 +3331,8 @@ const CHECK_TABLE = String.raw`ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(\
 const CHECK_ADD = new RegExp(String.raw`^${CHECK_TABLE}\s+ADD\s+CONSTRAINT\s+"?(\w+)"?\s+CHECK\s*(\(.*\))\s*(?:NOT\s+VALID)?$`, "is");
 const CHECK_VALIDATE = new RegExp(String.raw`^${CHECK_TABLE}\s+VALIDATE\s+CONSTRAINT\s+"?(\w+)"?$`, "i");
 const UNIQUE_INDEX_CREATE = /^CREATE\s+UNIQUE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?\s+ON\s+(?:ONLY\s+)?"?([\w.]+)"?/i;
+const CONSTRAINT_COMMENT = /^COMMENT\s+ON\s+CONSTRAINT\s+"?(\w+)"?\s+ON\s+(\S+)\s+IS\b/i;
+const INDEX_COMMENT = /^COMMENT\s+ON\s+INDEX\s+(?:"?public"?\.)?"?(\w+)"?\s+IS\b/i;
 const INDEX_DROP = /^DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?"?(\w+)"?(?:\s+(?:CASCADE|RESTRICT))?$/i;
 
 /** True when the text is one parenthesised group: its first `(` closes at its last character. */
@@ -3362,23 +3367,42 @@ function oneGroup(text) {
  * one inside a DO block or a function body, which guards itself), that is
  * `ALTER TABLE <t> ADD CONSTRAINT <c> CHECK (…) [NOT VALID]` and nothing more,
  * `ALTER TABLE <t> VALIDATE CONSTRAINT <c>`, or `CREATE UNIQUE INDEX <i> ON
- * <t> …`. A later file defines the constraint when its text outside comments
- * says `ADD CONSTRAINT <c>`, in a block or not; it drops the index when a
- * statement of its own is `DROP INDEX <i>` (one inside a block is guarded, as
- * 120's drop of 084's index is, and 084's CREATE … IF NOT EXISTS then finds
- * the later shape standing). A file's drop of the old constraint still runs;
- * the last definer adds it back in the same transaction.
+ * <t> …`. A later file defines the constraint when its code — a block's or a
+ * function's included, comments and string literals not — has an `ALTER TABLE
+ * <t> … ADD CONSTRAINT <c>` on the same table; so a file that only names the
+ * constraint in a message, or adds one of that name to another table, defines
+ * nothing here. It drops the index when a statement of its own is `DROP INDEX
+ * <i>` (one inside a block is guarded, as 120's drop of 084's index is, and
+ * 084's CREATE … IF NOT EXISTS then finds the later shape standing). A file's
+ * drop of the old constraint still runs; the last definer adds it back in the
+ * same transaction. Whether it did is not this reader's to know — a later
+ * file may add the constraint under a guard — so the migrator looks before it
+ * commits (migrate.ts).
+ *
+ * A struck rule's own `COMMENT ON CONSTRAINT` or `COMMENT ON INDEX`, a
+ * statement of the same file or of one before the file that decides the rule
+ * last, is struck with it: the thing it comments on is not there at that
+ * point of the re-run.
  *
  * @param files the migrations in order, each with its substituted SQL
  * @returns by file name, for each file with a statement left out: the text to
  *          run, and what was left to which file
  */
 export function supersededStatements(files) {
+  const tableOf = (t) => t.replace(/"/g, "").replace(/^public\./i, "").toLowerCase();
   const read = files.map(({ name, sql }) => {
     const code = stripSqlComments(sql);
     const top = maskSqlBodies(code);
-    const defines = new Set([...code.matchAll(/\bADD\s+CONSTRAINT\s+"?(\w+)"?/gi)].map((m) => m[1].toLowerCase()));
-    const indexes = new Set([...code.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?\s+ON\b/gi)].map((m) => m[1].toLowerCase()));
+    // The constraints this file adds, by table and name, wherever its code does: the table is the nearest
+    // ALTER TABLE before the ADD in the same statement.
+    const prose = maskSqlBodies(code, false);
+    const defines = new Set();
+    for (const m of prose.matchAll(/\bADD\s+CONSTRAINT\s+"?(\w+)"?/gi)) {
+      const statement = prose.slice(prose.lastIndexOf(";", m.index) + 1, m.index);
+      const tables = [...statement.matchAll(new RegExp(CHECK_TABLE, "gi"))];
+      if (tables.length > 0) defines.add(`${tableOf(tables[tables.length - 1][1])}.${m[1].toLowerCase()}`);
+    }
+    const indexes = new Set([...prose.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?\s+ON\b/gi)].map((m) => m[1].toLowerCase()));
     const drops = new Set();
     const statements = [];
     let from = 0;
@@ -3386,19 +3410,29 @@ export function supersededStatements(files) {
       const raw = top.slice(from, at);
       const text = raw.trim();
       const add = CHECK_ADD.exec(text);
+      const validate = CHECK_VALIDATE.exec(text);
       const index = UNIQUE_INDEX_CREATE.exec(text);
+      const onConstraint = CONSTRAINT_COMMENT.exec(text);
+      const onIndex = INDEX_COMMENT.exec(text);
       const dropped = INDEX_DROP.exec(text);
       if (dropped) drops.add(dropped[1].toLowerCase());
-      // [action, table, name]
+      // [action, table, name, the rule's key]
       const hit = add && oneGroup(add[3]) ? ["ADD", add[1], add[2]]
-        : CHECK_VALIDATE.test(text) ? ["VALIDATE", ...CHECK_VALIDATE.exec(text).slice(1, 3)]
+        : validate ? ["VALIDATE", validate[1], validate[2]]
         : index ? ["CREATE UNIQUE INDEX", index[2], index[1]]
+        : onConstraint ? ["COMMENT", onConstraint[2], onConstraint[1]]
+        : onIndex ? ["COMMENT ON INDEX", "", onIndex[1]]
         : null;
       if (hit) {
+        const table = tableOf(hit[1]);
+        const name = hit[2].toLowerCase();
+        const ofIndex = hit[0] === "CREATE UNIQUE INDEX" || hit[0] === "COMMENT ON INDEX";
         statements.push({
-          action: hit[0],
-          table: hit[1].replace(/"/g, "").replace(/^public\./i, "").toLowerCase(),
-          name: hit[2].toLowerCase(),
+          action: hit[0] === "COMMENT ON INDEX" ? "COMMENT" : hit[0],
+          comment: hit[0].startsWith("COMMENT"),
+          key: ofIndex ? `index ${name}` : `${table}.${name}`,
+          table,
+          name,
           start: from + (raw.length - raw.trimStart().length),
           end: at + 1,
         });
@@ -3407,22 +3441,42 @@ export function supersededStatements(files) {
     }
     return { name, sql, defines, indexes, drops, statements };
   });
-  const out = new Map();
+  // The rules struck, each from the first file that loses a statement to the file that decides it last.
+  const rules = new Map();
+  const struck = read.map(() => []);
   read.forEach((file, i) => {
-    const left = [];
-    let text = file.sql;
     for (const s of file.statements) {
-      const after = read.slice(i + 1);
+      if (s.comment) continue;
+      const after = read.map((f, j) => ({ f, j })).slice(i + 1);
       // A CHECK: the later files that define it. An index: only where a later file drops it, and then the last
       // file to drop it or make it decides.
       const later = s.action === "CREATE UNIQUE INDEX"
-        ? (after.some((f) => f.drops.has(s.name)) ? after.filter((f) => f.drops.has(s.name) || f.indexes.has(s.name)) : [])
-        : after.filter((f) => f.defines.has(s.name));
+        ? (after.some(({ f }) => f.drops.has(s.name)) ? after.filter(({ f }) => f.drops.has(s.name) || f.indexes.has(s.name)) : [])
+        : after.filter(({ f }) => f.defines.has(s.key));
       if (later.length === 0) continue;
-      left.push({ action: s.action, table: s.table, name: s.name, by: later[later.length - 1].name });
+      const by = later[later.length - 1].j;
+      struck[i].push({ s, by });
+      const rule = rules.get(s.key);
+      if (!rule) rules.set(s.key, { first: i, by, table: s.table });
+      else rule.by = Math.max(rule.by, by);
+    }
+  });
+  read.forEach((file, i) => {
+    for (const s of file.statements) {
+      const rule = s.comment ? rules.get(s.key) : undefined;
+      if (rule && i >= rule.first && i < rule.by) struck[i].push({ s: { ...s, table: s.table || rule.table }, by: rule.by });
+    }
+  });
+  const out = new Map();
+  read.forEach((file, i) => {
+    if (struck[i].length === 0) return;
+    let text = file.sql;
+    const left = [];
+    for (const { s, by } of struck[i].sort((x, y) => x.s.start - y.s.start)) {
+      left.push({ action: s.action, table: s.table, name: s.name, by: read[by].name });
       text = text.slice(0, s.start) + text.slice(s.start, s.end).replace(/[^\n]/g, " ") + text.slice(s.end);
     }
-    if (left.length > 0) out.set(file.name, { sql: text, left });
+    out.set(file.name, { sql: text, left });
   });
   return out;
 }
