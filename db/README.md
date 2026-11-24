@@ -3184,7 +3184,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
-| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; decide version 6 writes them): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. Since 153 it is the settle's too: `settle_stale_part` removes an undecided part the pass no longer names. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
+| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; decide version 6 writes them): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. Since 153 it is the settle's too: `settle_stale_part` removes an undecided part that is no longer a judgement of its texts and that the pass does not record again. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
 | | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks, and `sleep.ts` at its start and each poll for a migration (SMD-3379 PR 1c-1); without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -5093,8 +5093,8 @@ tier gives each pair's verdict, not the judge:
     sets the part stale and queues the thought, and the next run records the
     statement again in place of the stale row where the pair is still a
     candidate. Nothing runs a rebuild after an edit. The re-pool that needs
-    none, and the settle of a part the pass no longer names, are the ticket's
-    next cut (PR 2b).
+    none, and the settle of a part the pass does not record again, are the
+    ticket's next cut (PR 2b).
   - **Reported:**
     - The summary has a line for the writer's calls: with a settled part,
       with no part named, with parts named and none that stands, unparsed,
