@@ -169,9 +169,11 @@ export const SECRET_SHAPES: readonly (readonly [string, RegExp])[] = [
   // agent under the key that holds it. The 64-hex rule never sees it — its lookbehind refuses a run after `_` — and
   // the entropy rule skips hex (SMD-3615). Read on the raw text, a URL's included. An underscore beside it does not
   // excuse it (markdown's `_…_`, a `claim_` prefix), nor upper case (a model may echo one so): the token is the run.
-  // Nor does a letter or digit glued before it (SMD-4544: `xwc_…`, `%3Dwc_…` went out, a lookbehind refusing them):
-  // `wc_` and 64 hex after a word's other letters is no digest's or identifier's spelling.
-  ["work-claim token", /wc\\?_[0-9a-f]{64}(?![0-9a-f])/i], // `wc\_` as markdown escapes it (SMD-3602)
+  // Nor does a letter or digit glued before it (SMD-4544: `xwc_…`, `%3Dwc_…` went out, a lookbehind refusing them), nor
+  // a hex character glued after it (review pass 1: `wc_<hex>expires`, `…Done`, `…2026` went out, a guard reading 65
+  // hex as no token): the run of 64 or more is the token, blanked whole. A name ending in `wc` right before `_` and a
+  // digest is unlikely, and a shorter run is still no token.
+  ["work-claim token", /wc\\?_[0-9a-f]{64,}/i], // `wc\_` as markdown escapes it (SMD-3602)
   ["64-hex token (a raw key, or a digest out of its context)", /(?<![0-9a-f])(?<!:(?:read|write|capture|forward):)(?<!sha-?256\s*[:=]\s*)(?<!--sha-?256\s+)(?<![A-Za-z0-9_-])(?:0x)?[0-9a-f]{64}(?![0-9a-f])(?!(?<=(?:^|\n)[ \t]*(?:0x)?[0-9a-f]{64})\s{2}\S)/i],
 ];
 /** The hook's URL_BLIND: the rules that read the text with its URLs and base64 payloads blanked, as the hook runs them (a hex id in a URL's path is an address). */
