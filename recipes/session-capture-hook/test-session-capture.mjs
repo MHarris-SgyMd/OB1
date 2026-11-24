@@ -1328,6 +1328,70 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const bsAgain = scanSummary(bsDry.ep, bsDry.text);
   assert(bsDry.redactions.map((r) => r.in).join() === "prompt 1,the text,the text" && /https:\/\/u:\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(bsDry.text) && !/3f9a3f9a/.test(bsDry.text) && bsAgain.length === 1 && /^64-hex token .* in prompt 1$/.test(bsAgain[0].reason),
     `…the source round took the password, the text round the digest the un-URL'd path then showed (title and ask); the prompt, read whole and unclipped, still carries it, and that is the hit (${bsDry.redactions.map((r) => r.in).join()})`);
+
+  // SMD-4542: three shapes of password the rule let by, each blanked in a prompt and in the outcome, and found nowhere
+  // in the payload or the dry run: a second keyword taken as the value, a getter's default, a quoted value whose first
+  // word is short. A bare reference and unquoted prose stay as they were.
+  const pwShapes = [
+    ["the db line reads password: password = Tr0ub4dor3x now", "Tr0ub4dor3x"],
+    ['I changed it to password = os.environ.get("DB_PASSWORD", "Kp7mWq2zR9") so it falls back locally', "Kp7mWq2zR9"],
+    ["PASSWORD = os.getenv('DB_PASS', 'Zx8vBn3mQw') for the local run", "Zx8vBn3mQw"],
+    ['set password="Kp7m Wq2z R9x" in the vault', "Wq2z R9x"],
+    // Review pass 4: a value that only begins with a keyword is a value (the lookahead needs the keyword's `:` or `=`),
+    // and `env.get` and `ENV.fetch` are stepped over as `os.environ.get` is.
+    ["the db line reads password: Password-2024! now", "Password-2024!"],
+    ['const password = Deno.env.get("DB_PW", "Qw3rTy9Uio") ?? "";', "Qw3rTy9Uio"],
+    ['password = ENV.fetch("DB_PW", "Mn4bVc8Xzl")', "Mn4bVc8Xzl"],
+  ];
+  const pwBlanked = pwShapes.map(([text, secret]) => {
+    const inPrompt = redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]);
+    const inOutcome = redactEpisode(segment([{ t: "prompt", text: "tidy the vault notes" }, { t: "outcome", text }]).episodes[0]);
+    return { secret, prompt: !inPrompt.text.includes(secret) && /\[redacted:password assignment/.test(inPrompt.text), outcome: !inOutcome.text.includes(secret) && /\[redacted:password assignment/.test(inOutcome.text) };
+  });
+  // Unquoted words with digits and a quote later on the line: the quoted branch applies only after an opening quote.
+  const pwKept = ['the password: ab12 cd34 "x" later', 'password: Kp7m Wq2z "x"'].map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text.includes(text));
+  // A quoted value stops at its line's end: run on, it would be a block the episode is refused for (SMD-4543's).
+  pwKept.push(scanForSecrets('password="Kp7m Wq2z\nlater "x"', { every: true }).length === 0);
+  assert(pwBlanked.every((b) => b.prompt && b.outcome) && pwKept.every(Boolean),
+    `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; unquoted short words before a later quote, and a quoted value cut by its line's end, are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
+  // Review pass 3: a bare reference stays a value, as main read it, so a line naming one with a fallback after it is
+  // found and refused under refuse (an exclusion of references sent these whole, and the model's excerpt with them).
+  const pwRefs = ['const password = process.env.DB_PASSWORD || "Kp7mWq2zR9";', 'password = os.environ.get("DB_PASSWORD") or "Kp7mWq2zR9"', 'PGPASSWORD = os.environ.get("PGPASS") or "Kp7mWq2zR9"', 'const POSTGRESPASSWORD = process.env.PG_PW ?? "Kp7mWq2zR9";']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0; });
+  // …and a getter whose default is blanked is not found again by the second scan (the end-to-end case below), while a
+  // password glued onto a getter's name is not read as its receiver: blanked, as before, with the default.
+  const pwGlued = redactEpisode(segment([{ t: "prompt", text: 'password=hunter22os.getenv("PW", "Kp7mWq2zR9")' }, { t: "outcome", text: "ok" }]).episodes[0]).text;
+  assert(pwRefs.every(Boolean) && !/hunter22/.test(pwGlued),
+    `a bare reference with a fallback after it is found and refused under refuse, as before, and a password glued onto a getter is blanked (SMD-4542 review pass 3) (${JSON.stringify([pwRefs, pwGlued])})`);
+  // Review pass 4: the second scan passes a getter's blanked default, and only a whole marker ending the
+  // argument: one with more after it, unclosed or unquoted, is found, as main found the call (a text that already carried one).
+  // Review passes 5 and 6: a nested or expression default, a bare name and unpaired quotes are read as main read them,
+  // so a secret-free line is not refused.
+  const pwSecond = ['PASSWORD = getenv("PW", Kp7mWq2zR9x)', "password = os.environ.get('PW', 'Kp7mWq2zR9')", 'password = os.getenv("DB_PASSWORD", os.getenv("PGPASSWORD", ""))', 'password = os.getenv("DB_PASSWORD", "changeme" if DEBUG else None)', 'password = os.getenv("DB_PASSWORD", DEFAULTS["password"])',
+    // Review pass 6: a bare-name default with more after the call, and a default whose quotes do not pair.
+    'password = os.environ.get("DB_PASSWORD", DEFAULT_PASSWORD).encode("utf-8")', 'conn = connect(password=os.getenv("PW", DEFAULT_PW),host="db")', 'password = os.getenv("X", \u201cKp7mWq2z hunter")']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; const c = cleanEpisode(ep, "redact"); return gateFindings(c, c.text).length; });
+  const pwMarked = ['PGPASSWORD=os.getenv("X", "[redacted:x]Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", "[redacted:pw Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", [redacted:x])']
+    .map((text) => scanForSecrets(text, { every: true }).length);
+  assert(pwSecond.every((n) => n === 0) && pwMarked.every((n) => n > 0),
+    `the second scan passes a getter's blanked default, and a bare-name, unpaired, nested or expression default read as before; a marker with more after it, unclosed or unquoted does not hide the call (SMD-4542 review passes 4 to 6) (${JSON.stringify([pwSecond, pwMarked])})`);
+  // Review pass 1 (secrets adversary): a password given as a `${VAR:-<it>}` default is blanked, as main blanked it (an
+  // exclusion of `${` sent it); and quoted prose or a placeholder is read as main read it, blanked nowhere and refusing
+  // nothing under refuse (the quoted branch had widened to them).
+  const pwDefaults = ["POSTGRES_PASSWORD: ${POSTGRES_PW:-Kp7mWq2zR9}", "export PGPASSWORD=${PGPASS:-Kp7mWq2zR9}", 'password: "${DB_PASS:-Kp7mWq2zR9}"', "password=${PW:-hunter22} now"]
+    .map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text);
+  const pwProse = ['errors = { password: "is too short (minimum is 8 characters)" }', 'password: "Enter your password"', 'password: "<your password>"', 'POSTGRES_PASSWORD: "set me"', 'the error said password: "too weak" so I changed it', 'password: "*** ***"', 'password = "xx yy zz"', 'password: "{{ db_pass_2 }}"', 'password: "<pw 1>"', 'password: "${ PW1 }"']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return { kept: redactEpisode(ep).text.includes(text), refused: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0 }; });
+  assert(pwDefaults.every((t) => !/Kp7mWq2zR9|hunter22/.test(t) && /\[redacted:password assignment/.test(t)) && pwProse.every((p) => p.kept && !p.refused),
+    `a password as a \${VAR:-…} default is blanked as before; quoted prose and a placeholder are not blanked, and refuse nothing (SMD-4542 review pass 1) (${JSON.stringify(pwProse)})`);
+  writeFileSync(join(TMP, "pw-shapes.jsonl"), [user(pwShapes[0][0], { origin: { kind: "human" } }), user(pwShapes[1][0], { origin: { kind: "human" } }), user(pwShapes[3][0], { origin: { kind: "human" } }), assistant([{ type: "text", text: pwShapes[2][0] }])].join("\n"));
+  const shapePrep = prepare({ ...base, session_id: "s-pw-shapes", transcript_path: join(TMP, "pw-shapes.jsonl") });
+  const shapePayload = shapePrep.payloadPath ? readFileSync(shapePrep.payloadPath, "utf8") : "";
+  const shapeDry = await spawnScript(["--dry-run", join(TMP, "pw-shapes.jsonl")]);
+  const shapeLeft = pwShapes.map(([, secret]) => secret).filter((x) => shapePayload.includes(x) || shapeDry.out.includes(x) || shapeDry.err.includes(x));
+  assert(shapePrep.code === 0 && shapePayload && shapeDry.code === 0 && shapeLeft.length === 0,
+    `…and none of the four passwords is in the payload written or the dry run's output (SMD-4542) (${shapePrep.code} ${shapeDry.code} ${JSON.stringify(shapeLeft)})`);
+  if (shapePrep.payloadPath) unlinkSync(shapePrep.payloadPath);
 }
 
 // ── [6] Posting ──────────────────────────────────────────────────────────────
