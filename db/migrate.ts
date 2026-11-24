@@ -37,7 +37,12 @@
  * row deleted or misspelt by hand) would otherwise have an earlier-numbered file
  * apply AFTER the re-run and put its definitions over the later ones the re-run
  * had just restored. Every file is idempotent, so the run restores the latest
- * definition of everything. One transaction, so a failure part-way leaves the
+ * definition of everything. One kind of statement is left out: a rule a later
+ * file loosened — a CHECK a later file adds again, a unique index a later file
+ * drops — which run again would refuse the brain's own rows (SMD-3149,
+ * config.mjs's supersededStatements); the run says so beside the file's line,
+ * and fails, rolled back, if a constraint it left out is not there at the end.
+ * One transaction, so a failure part-way leaves the
  * schema as it was rather than with some objects at an older definition than
  * before. What a re-run repeats from the CURRENT shell, and refuses to change
  * silently: 006 and 013 re-record ob1_config (refused when the record differs
@@ -87,6 +92,8 @@ import {
   pluginLoginPassword,
   pluginLoginUrl,
   migrationNameProblem,
+  supersededStatements,
+  type SupersededStatement,
   DB_LEVEL_SETTINGS_SQL,
   EMBEDDING_DIM,
   EMBEDDING_MODEL,
@@ -1294,10 +1301,35 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
     );
   }
 
+  // A rule a later file loosens is that file's to decide (SMD-3149): 064's
+  // list of lineage kinds, run again, would refuse the rows 084's, 111's and
+  // 151's kinds admit, 059's search arms the ones 106's does, and 111's one
+  // standing subject a thought the sets 130 admits. The earlier file's
+  // statement is left out of the text a re-run runs, and said beside its line,
+  // by --dry-run too. A plain run applies each file whole: no row the later
+  // rule admits can stand before the file that admits it.
+  const superseded = reapply ? supersededStatements(migrations) : new Map<string, { sql: string; left: SupersededStatement[] }>();
+  /**
+   * The lines beside a file the re-run leaves a statement out of. One a rule: a
+   * CHECK's ADD and its VALIDATE read as one thing left. A rule is its table,
+   * its name and whether it is a constraint or an index, so two of one name
+   * are two lines.
+   */
+  const leftLines = (name: string, would: boolean): string[] => {
+    const byRule = new Map<string, { name: string; by: string; actions: string[] }>();
+    for (const l of superseded.get(name)?.left ?? []) {
+      const key = `${l.rule} ${l.table} ${l.name}`;
+      const seen = byRule.get(key) ?? { name: l.name, by: l.by, actions: [] };
+      seen.actions.push(l.action);
+      byRule.set(key, seen);
+    }
+    return [...byRule.values()].map((x) => `  ·  ${x.name} is left to ${x.by}, which decides it last: this file's ${x.actions.join(" and ")} ${would ? "would not run" : "did not run"}`);
+  };
+
   if (reapply && !dryRun) {
     // An object, not a `let`: an assignment inside the callback is invisible to
     // the type checker's flow analysis, which would narrow a `let` to null.
-    const progress: { current: Migration | null } = { current: null };
+    const progress: { current: Migration | null; short: boolean } = { current: null, short: false };
     /** What a file said beside its line, by name — 021's, with the acceptances out of its sight. */
     const notes = new Map<string, string>();
     try {
@@ -1305,9 +1337,31 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
         if (ledgerInTransaction) await tx.unsafe(LEDGER_DDL);
         for (const m of migrations) {
           progress.current = m;
-          const note = await applyShadowed(tx, m);
+          const without = superseded.get(m.name);
+          const note = await applyShadowed(tx, without ? { ...m, sql: without.sql } : m);
           if (note !== null) notes.set(m.name, note);
+          if (without) notes.set(m.name, [notes.get(m.name), ...leftLines(m.name, false)].filter((x) => x !== undefined).join("\n"));
           if (!applied.has(m.name)) await tx`INSERT INTO schema_migrations (name, sha256) VALUES (${m.name}, ${m.sha})`;
+        }
+        // Every constraint a file's ADD was left out for stands, or nothing is
+        // committed: the reader cannot tell whether the file it was left to added
+        // it (an ADD under a guard that did not fire), and the earlier file's drop
+        // ran. Without this the re-run would end, green, a rule short.
+        progress.current = null;
+        const lost = new Set<string>();
+        for (const [, { left }] of superseded) {
+          for (const l of left) {
+            if (l.action !== "ADD") continue;
+            const [{ stands }] = (await tx`SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = to_regclass(${l.table}) AND conname = ${l.name} AND contype = 'c') AS stands`) as { stands: boolean }[];
+            if (!stands) lost.add(`${l.name} on ${l.table} (left to ${l.by})`);
+          }
+        }
+        if (lost.size > 0) {
+          progress.short = true;
+          throw new Error(
+            `the re-run would end without ${[...lost].join(", ")}: an earlier file's ADD was left out for the file that defines the constraint last, and that file did not add it. ` +
+              "This is the migrator's reading of the files (config.mjs's supersededStatements), not the database's fault"
+          );
         }
       });
     } catch (caught) {
@@ -1315,7 +1369,8 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       for (const line of explainFailure(caught, progress.current, "reapply")) err(line);
       err(
         "  The re-run is one transaction: it rolled back, nothing was re-applied or applied, and the schema is as it was.\n" +
-          "  Fix the cause and run --reapply again."
+          // Not the operator's to fix: no file failed, the migrator read one wrongly.
+          (progress.short ? "  Nothing here is yours to fix, and running it again ends the same: report it, with the line above." : "  Fix the cause and run --reapply again.")
       );
       return 1;
     }
@@ -1369,6 +1424,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       }
       const version = versionForMigration(Number(m.name.slice(0, 3)), releases) ?? "Unreleased";
       out(`  →  ${m.name}  would ${prior ? "re-apply" : "apply"} (${m.sha}) · ${version}`);
+      for (const line of leftLines(m.name, true)) out(line);
       if (prior) reapplied++;
       else ran++;
       continue;
