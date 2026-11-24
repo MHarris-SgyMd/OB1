@@ -8197,43 +8197,94 @@ if (want("10")) {
 
   // --switch-key back to a key the brain used before (SMD-2607): key A, then
   // B, then A again. Each key's model names its own entity, so the graph says
-  // whose reading it holds; one thought fails under A, so A's rows are two
-  // finished and one failed when the brain comes back to it.
+  // whose reading it holds. Six thoughts, one for each way a row of A's can
+  // stand when the brain comes back to it:
+  //   read     A read it, then B did                      -> returned (another key read it since)
+  //   failed   A failed it, B read it                     -> returned (failed)
+  //   kept     A read it, B failed it                     -> LEFT: A's reading stands, at the text it holds
+  //   empty    A read it and named nothing, B failed it   -> returned (no lineage row vouches for it)
+  //   moved    A read it, B failed it, then it was edited -> returned (its lineage is of other text)
+  //   lapsed   A read it, B read it, A's row left leased  -> returned (a lease expired with no holder)
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const KEY_B = "extract:stub-other@p2";
   const envB = { ...env, OB1_METADATA_MODEL: "stub-other" };
-  const backIds = [await seed("The first switchback note."), await seed("The second switchback note."), await seed("The switchfail entry of the switchback set.")];
+  const back = {
+    read: await seed("The first switchback note."),
+    failed: await seed("The switchfail entry of the switchback set."),
+    kept: await seed("A switchkeep switchback note."),
+    empty: await seed("A switchkeep note that names nothing."),
+    moved: await seed("A switchkeep switchback note that will move."),
+    lapsed: await seed("The last switchback note."),
+  };
   const readings = async () => (await sql`
     SELECT e.name, te.extraction_key AS key, count(*)::int AS c FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id
-     WHERE te.thought_id = ANY(${sql.array(backIds, "TEXT")}::uuid[]) GROUP BY 1, 2 ORDER BY 1, 2`).map((r: { name: string; key: string; c: number }) => `${r.c} ${r.name} under ${r.key}`).join(", ");
+     WHERE te.thought_id = ANY(${sql.array(Object.values(back), "TEXT")}::uuid[]) GROUP BY 1, 2 ORDER BY 1, 2`).map((r: { name: string; key: string; c: number }) => `${r.c} ${r.name} under ${r.key}`).join(", ");
+  const readingOf = async (id: string) => (await sql`SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${id}::uuid`).map((r: { name: string }) => r.name).join(",") || "nothing";
   const rowsUnder = async (k: string) => (await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${k} GROUP BY 1 ORDER BY 1`).map((r: { status: string; c: number }) => `${r.c} ${r.status}`).join(", ");
-  const line = (text: string, re: RegExp) => text.split("\n").find((l) => re.test(l))?.trim().slice(0, 220);
+  const recordedNow = async () => String((await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0]?.value);
+  const lineOf = (text: string, re: RegExp) => text.split("\n").find((l) => re.test(l))?.trim().slice(0, 260);
   proseKeys.add("switchfail");
   const underA = await extractInProcess();
   proseKeys.delete("switchfail");
-  assert(underA.code === 1 && (await readings()) === `2 Aurora under ${KEY}` && (await rowsUnder(KEY)) === "1 failed, 2 succeeded",
-         `key A's first run extracts two notes as its model reads them and fails the third (exit ${underA.code}; ${await readings()}; ${await rowsUnder(KEY)})`);
+  assert(underA.code === 1 && (await readings()) === `4 Aurora under ${KEY}` && (await rowsUnder(KEY)) === "1 failed, 5 succeeded",
+         `key A's first run reads five notes as its model does, one of them naming nothing, and fails the sixth (exit ${underA.code}; ${await readings()}; ${await rowsUnder(KEY)})`);
+  proseKeys.add("switchkeep");
   const toB = await extractInProcess({ switchKey: true, env: envB });
-  assert(toB.code === 0 && (await readings()) === `3 Borealis under ${KEY_B}` && (await rowsUnder(KEY)) === "1 failed, 2 succeeded" && toB.stdout.includes(`--switch-key: no row under ${KEY_B} to return to the pool`) && /pool: 3 thought\(s\) added/.test(toB.stdout),
-         `a switch to a key never used is the switch as it was: every thought pooled and read by B's model, nothing returned, A's rows left as they ended (exit ${toB.code}; ${await readings()}; ${line(toB.stdout, /--switch-key:/)})`);
+  proseKeys.delete("switchkeep");
+  assert(toB.code === 1 && (await readings()) === `2 Aurora under ${KEY}, 3 Borealis under ${KEY_B}` && (await rowsUnder(KEY)) === "1 failed, 5 succeeded" && (await rowsUnder(KEY_B)) === "3 failed, 3 succeeded"
+      && toB.stdout.includes(`ob1_config.entity_extraction_key = ${KEY_B}, in place of ${KEY}`) && toB.stdout.includes(`--switch-key: none of ${KEY_B}'s rows to return to the pool`) && /pool: 6 thought\(s\) added/.test(toB.stdout),
+         `a switch to a key never used is the switch as it was: every thought pooled, none returned, B's model reading the three it can and A's rows left as they ended (exit ${toB.code}; ${await readings()}; ${lineOf(toB.stdout, /--switch-key:/)})`);
+  // While B is the recorded key: one note edited (016's trigger pools it under B alone), and one of A's rows left leased by a worker long gone.
+  await sql`SELECT update_thought(${back.moved}::uuid, 'A switchkeep switchback note that has moved.', NULL::jsonb, NULL::vector)`;
+  await sql`UPDATE thought_work_claims SET status = 'claimed', ttl_expires_at = now() - interval '1 hour', finished_at = NULL WHERE work_type = ${KEY} AND thought_id = ${back.lapsed}::uuid`;
   // Back to A, asked first: --status and --dry-run count what the switch returns, and write nothing.
   const callsBeforeBack = calls;
   const statusBack = await extractInProcess({ status: true });
-  const dryBack = await extractInProcess({ dryRun: true, switchKey: true });
-  assert(statusBack.code === 0 && statusBack.stdout.includes(`the brain used ${KEY} before: a --switch-key run returns its 3 finished, failed or lapsed row(s) to the pool`)
-      && dryBack.code === 0 && dryBack.stdout.includes(`record ${KEY} in ob1_config so new captures enqueue; return the 3 finished, failed or lapsed row(s) this key holds from an earlier use to the pool; add 0 thoughts to the pool; send 3 thought(s) to stub-meta`)
-      && (await rowsUnder(KEY)) === "1 failed, 2 succeeded" && (await readings()) === `3 Borealis under ${KEY_B}` && calls === callsBeforeBack
-      && (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].value === KEY_B,
-         `--status and --dry-run under the earlier key count the three rows a switch returns, and write and send nothing (${line(dryBack.stdout, /would:/)})`);
-  const backToA = await extractInProcess({ switchKey: true });
-  assert(backToA.code === 0 && backToA.stdout.includes(`--switch-key: the brain used ${KEY} before — its 3 finished, failed or lapsed row(s) returned to the pool, each extracted again in place of ${KEY_B}'s reading`)
-      && calls === callsBeforeBack + 3 && (await readings()) === `3 Aurora under ${KEY}` && (await rowsUnder(KEY)) === "3 succeeded"
-      && (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].value === KEY,
-         `--switch-key back to the earlier key returns its rows to the pool and extracts every thought again: three calls, the graph A's reading, the failed row among them (exit ${backToA.code}; ${calls - callsBeforeBack} call(s); ${await readings()}; ${await rowsUnder(KEY)}; ${line(backToA.stdout, /--switch-key:/)})`);
+  const dryBack = await extractInProcess({ dryRun: true, switchKey: true, retryFailed: true });
+  assert(statusBack.code === 0 && statusBack.stdout.includes(`the brain used ${KEY} before: a --switch-key run returns 5 of its row(s) to the pool`)
+      && dryBack.code === 0 && dryBack.stdout.includes(`record ${KEY} in ob1_config so new captures enqueue; return 5 of this key's row(s) from an earlier use to the pool (failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds); add 0 thoughts to the pool; send 5 thought(s) to stub-meta`)
+      && (await rowsUnder(KEY)) === "1 claimed, 1 failed, 4 succeeded" && (await readings()) === `2 Aurora under ${KEY}, 3 Borealis under ${KEY_B}` && calls === callsBeforeBack && (await recordedNow()) === KEY_B,
+         `--status and --dry-run under the earlier key count the five rows a switch returns, the failed one once beside --retry-failed, and write and send nothing (${lineOf(dryBack.stdout, /would:/)})`);
+  const backToA = await extractInProcess({ switchKey: true, retryFailed: true });
+  assert(backToA.code === 0 && backToA.stdout.includes(`--switch-key: the brain used ${KEY} before — 5 of its row(s) returned to the pool (failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds)`)
+      && backToA.stdout.includes(`ob1_config.entity_extraction_key = ${KEY}, in place of ${KEY_B}`) && backToA.stdout.includes("--retry-failed: the switch returned this key's failed rows with the rest")
+      && calls === callsBeforeBack + 5 && (await readings()) === `5 Aurora under ${KEY}` && (await readingOf(back.empty)) === "nothing" && (await rowsUnder(KEY)) === "6 succeeded" && (await recordedNow()) === KEY,
+         `--switch-key back to the earlier key returns the five rows it cannot vouch for and reads them again — the one B read, the failed, the one that named nothing, the edited and the lapsed — and leaves the sixth, whose reading stands: five calls, the graph A's (exit ${backToA.code}; ${calls - callsBeforeBack} call(s); ${await readings()}; ${await rowsUnder(KEY)}; ${lineOf(backToA.stdout, /--switch-key:/)})`);
   const settledA = await extractInProcess();
-  assert(settledA.code === 0 && calls === callsBeforeBack + 3 && !/--switch-key:/.test(settledA.stdout) && (await rowsUnder(KEY)) === "3 succeeded",
-         `…and a run under the key now recorded returns nothing: no call, the rows left finished (exit ${settledA.code}; ${calls - callsBeforeBack - 3} call(s))`);
+  assert(settledA.code === 0 && calls === callsBeforeBack + 5 && !/returned to the pool/.test(settledA.stdout) && (await rowsUnder(KEY)) === "6 succeeded",
+         `…and a run under the key now recorded returns nothing: no call, the rows left finished (exit ${settledA.code}; ${calls - callsBeforeBack - 5} call(s))`);
+  // A key moved back with nothing returned — a switch before this rule, or the record set by hand: B's three finished
+  // rows are of thoughts A has read since. --status counts them and the next run returns them, with no flag; the
+  // edited note, pending under B since its edit, is read with them, and the two B failed stay failed.
+  await sql`UPDATE ob1_config SET value = ${KEY_B} WHERE key = 'entity_extraction_key'`;
+  const callsBeforeMend = calls;
+  const statusMend = await extractInProcess({ status: true, env: envB });
+  const mend = await extractInProcess({ env: envB });
+  const mendCalls = calls - callsBeforeMend;
+  const mendAgain = await extractInProcess({ env: envB });
+  assert(statusMend.stdout.includes("3 finished row(s) are of thoughts another extraction key read since: the next run returns them to the pool")
+      && mend.code === 1 && mend.stdout.includes(`3 finished row(s) returned to the pool: another extraction key read their thoughts after ${KEY_B} did`) && !/--switch-key:/.test(mend.stdout)
+      && mendCalls === 4 && (await readings()) === `1 Aurora under ${KEY}, 4 Borealis under ${KEY_B}` && (await readingOf(back.kept)) === "Aurora" && (await rowsUnder(KEY_B)) === "2 failed, 4 succeeded"
+      && calls === callsBeforeMend + 4 && !/returned to the pool/.test(mendAgain.stdout),
+         `a key moved back with nothing returned is mended by its next run: --status counts the three finished rows another key read since, the run returns and reads them with no flag, and the run after it returns none (exit ${mend.code}; ${mendCalls} call(s); ${await readings()}; ${await rowsUnder(KEY_B)}; ${lineOf(mend.stdout, /finished row\(s\) returned/)})`);
+  // The record moved by another run between this run's read of it and its switch: read again under the lock, the
+  // switch is not made twice. A follower, since it alone waits at its start for a provider that is away.
+  {
+    const lines: string[] = [];
+    const ac = new AbortController();
+    downUntil = Date.now() + 60_000;
+    down = "503";
+    const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, switchKey: true, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+    const readIt = await pollUntil(async () => lines.some((l) => l.includes(`ob1_config.entity_extraction_key is ${KEY_B}; this run uses ${KEY}`)), 20_000);
+    await sql`UPDATE ob1_config SET value = ${KEY} WHERE key = 'entity_extraction_key'`;
+    downUntil = 0;
+    const said = await pollUntil(async () => lines.some((l) => l.includes(`ob1_config.entity_extraction_key was ${KEY} by the time this run came to record it`)), 60_000);
+    ac.abort();
+    const code = await running;
+    assert(readIt && said && !lines.some((l) => /--switch-key:/.test(l)) && (await recordedNow()) === KEY,
+           `a switch whose key another run recorded while it waited for the provider says so and returns nothing of its own (exit ${code}; ${lines.find((l) => /by the time/.test(l))?.trim().slice(0, 160)})`);
+  }
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
