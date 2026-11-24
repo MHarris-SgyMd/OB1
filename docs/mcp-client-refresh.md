@@ -162,3 +162,51 @@ This is one machine and an idle stack, with no collector running.
 - A one-turn run cannot wait long: the headless session refuses a long sleep in the foreground. `sleep 110` was not run at all; `sleep 50` the model ran in the background, and waited. A two-turn run waits outside the session.
 - Twenty-two sessions in all: the eighteen in the tables, two of them interactive, each case once but the 20-second 502 and the 500; two spoiled; and the two made while the interactive script was being mended. Sixteen timed restarts of the stack. The 7-second busy run's script was edited while it ran and ended with a shell error after its second turn; the probe's log of the run is whole.
 - Not measured: an outage between 12 and 20 seconds behind a 502; a closed port for longer than 60 seconds interactive, or 180 headless; what the `/mcp` panel shows while a server is held as failed; a client whose own path to the server drops; more than one outage in a session, and so the five reopens an hour; a stream held through the stack's forwarder and proxy, or one a proxy drops; the edge's 503 for a token while the authorization server is away; any other client; the brain's own server, which holds no stream yet. `docs/mcp-listen-streams.md` is the decision this was measured for.
+
+## The server ending one stream and serving on, measured 2026-11-24 (SMD-4493)
+
+A dated addition, for the gate of SMD-4493's second PR (`docs/mcp-listen-streams.md`, "A stream whose client or key is gone"). Every stream above was ended by the SDK's handler, which ends them all at once, or by a server that then was away. The brain is to end one caller's streams and go on serving, and may then refuse that caller. This records what Claude Code 2.1.331 on macOS does then: headless, two turns, on loopback to the probe.
+
+The probe holds each listen stream by what can end it alone, and ends it one of three ways, changing its tool set without saying so and going on serving:
+
+- **clean:** the stream's request aborted on the server's side, so the body ends whole with no closing frame;
+- **reset:** the stream's body errored, so the connection is reset;
+- **frame:** a closing frame written by hand, the same bytes as the SDK's own, and then the body's end.
+
+Times are seconds from the end of the stream.
+
+| The stream was ended | Runs | `subscriptions/listen` after | Lists again? |
+| --- | --- | --- | --- |
+| by the SDK's own close, with its frame (the control) | 4 | 6.0: opened | Yes, in each. |
+| clean | 3 | 1.0: opened | Yes, in each. |
+| reset | 3 | 1.0: opened | Yes, in each. |
+| frame | 3 | 6.0, 6.0 and 6.2: opened | Yes, in each. |
+
+And with a refusal for the 40 seconds after the end, the probe serving again from then and the second turn 20 seconds later:
+
+| The stream was ended | Refused for 40 s | Runs | `subscriptions/listen` after | Lists again? |
+| --- | --- | --- | --- | --- |
+| clean | every request, as a revoked caller is: HTTP 200, JSON-RPC -32001 | 3 | 1.0, 3.0, 7.0: refused. None after | No. Its tool call in the second turn was served, on the old list. |
+| frame | the same | 3 | 6.0, 8.0, 12.0: refused. None after | No. The same. |
+| clean | every request, in the words for a key not known: the same shape | 3 | 1.0, 3.0, 7.0: refused. None after | No. The same. |
+| clean | a listen alone, as at a bound: HTTP 200, JSON-RPC -32603, every other request served | 3 | 1.0, 3.0, 7.0: refused. None after | No. The same. |
+| frame | the same | 3 | 6.0, 8.0, 12.0: refused. None after | No. The same. |
+
+Two further sessions, each once:
+
+- **Five minutes after a refusal.** A listen alone refused for 20 seconds after a clean end, then 280 seconds of serving, then a second turn. After its three refused attempts the client asked for no stream and no list in those 280 seconds or in that turn, whose tool call was served.
+- **Seven clean ends in one session, 15 seconds apart.** The first five were each opened again 1.0 second on, and listed. The sixth was not: no listen in the 75 seconds watched, a second turn among them. The seventh end found no stream.
+
+What that shows:
+
+- **No way of ending strands the client.** It opens its stream again after each, and lists. Without a closing frame it does so as after a drop, a second on; with one, six seconds on, whether the SDK wrote the frame or the server did by hand.
+- **A refusal is an attempt used up, whatever its shape.** A caller refused everything, in either wording, and a listen refused alone while calls are served, each end it after three: the same three attempts a 502 and a busy answer use up, above.
+- **Once stopped it stays stopped.** Five minutes of serving and a new turn did not start it again. Its calls are served and its list is the old one.
+- **Five reopens, and no sixth.** The limit its documentation gives, five reopens in an hour, was met in about a minute: the sixth end, 75 seconds after the first, was not opened again. The six hours it is said to wait were not watched.
+
+How, and what is thin:
+
+- The probe's controls `end/WAY`, `revoked/WAY/N`, `unknown/WAY/N` and `nolisten/WAY/N` (`evals/mcp-clients/probe.ts`). `selfcheck.ts` holds: that each way ends two held streams as it says, and that the probe then serves on, holds none, and holds a listen made after; that the frame written by hand is the SDK's own, byte for byte; what a call, a listen and a notification are each answered under the two refusals of a caller, in the brain's words; and that under the third a call is served and a listen refused. The refusals' shapes and words are copied from the brain's code, and nothing holds the copies to it.
+- Thirty sessions: thirteen in the first table, of which three controls and the nine ends were one batch and the first control was run alone before it; fifteen in the second; the two after. All headless, all on 2.1.331, all on loopback with no proxy between: whether a reset at the MCP server reaches a client through the stack's proxy as a reset was not run.
+- Each refusal lasted 40 seconds, longer than the client's three attempts. A refusal shorter than those attempts was not run: by the table of restarts above, one success among the three is enough.
+- Not measured: an interactive session; what the `/mcp` panel shows of a server whose stream the client has stopped asking for; what starts a stopped client again short of a new session; a sign-in again after a grant is revoked, which needs the authorization server; a stream that ends again within 10 seconds of being opened, for which its documentation gives three reopens; and any other client.

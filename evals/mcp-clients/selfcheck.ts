@@ -163,6 +163,77 @@ await client.close();
     }
     // Three more changes of the tool set: one more puts it back on A for what follows.
     await control("toggle-quiet");
+    // The server ending one stream of its own accord, and serving on (SMD-4493): three ways, and what follows each.
+    const state = async (): Promise<{ held: number }> => (await (await fetch(`${base}/control/state`)).json()) as { held: number };
+    const closing = (text: string): string => text.split("\n\n").filter((frame) => frame.includes('"resultType":"complete"')).pop() ?? "";
+    /** What a listen is answered when it is not held: the status, the error's code and its words. */
+    const listenSaid = async (): Promise<string> => {
+      const r = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-07-28", "mcp-method": "subscriptions/listen" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "probe-selfcheck", version: "0" }, "io.modelcontextprotocol/clientCapabilities": {} } } }),
+      });
+      const type = (r.headers.get("content-type") ?? "none").split(";")[0];
+      if (type !== "application/json") {
+        void r.body?.cancel();
+        return `${r.status} ${type}`;
+      }
+      const body = (await r.json().catch(() => null)) as { id?: unknown; error?: { code?: number; message?: string } } | null;
+      return `${r.status} ${body?.error?.code} id ${body?.id} ${body?.error?.message}`;
+    };
+    const words = async (): Promise<string> => {
+      const r = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" }) });
+      return ((await r.json().catch(() => null)) as { error?: { message?: string } } | null)?.error?.message ?? "";
+    };
+    // The SDK's own closing frame, to hold the one written by hand to.
+    const own = await held();
+    await control("drop");
+    const sdkFrame = closing(await own.read());
+    row(sdkFrame !== "", "drop: the SDK's own closing frame is read");
+    for (const [way, ends] of [["clean", "[ended]"], ["reset", "[dropped]"], ["frame", "[ended]"]] as const) {
+      const stream = await held();
+      const other = await held();
+      row((await state()).held === 2, `end/${way}: the probe holds the two streams opened (${(await state()).held})`);
+      const before = await set();
+      await control(`end/${way}`);
+      const got = await stream.read();
+      const too = await other.read();
+      const framed = got.includes('"resultType":"complete"');
+      row(got.includes("notifications/subscriptions/acknowledged") && got.endsWith(ends) && too.endsWith(ends) && framed === (way === "frame"), `end/${way}: each held stream ${way === "reset" ? "is dropped" : "ends whole"}, ${way === "frame" ? "after its closing frame" : "with no closing frame"} (${got.slice(-40).replace(/\n/g, " ")})`);
+      if (way === "frame") row(closing(got) === sdkFrame, `end/frame: the frame written by hand is the SDK's own, byte for byte (${closing(got).length} and ${sdkFrame.length} characters)`);
+      row((await mcp()) === 200 && (await set()) !== before && (await state()).held === 0, `end/${way}: the probe serves on, the tool set changed, and it holds no stream`);
+      const next = await held();
+      row((await state()).held === 1, `end/${way}: a listen made after it is held`);
+      await control("drop");
+      row((await next.read()).endsWith("[ended]"), `end/${way}: and the SDK's own close still ends that one`);
+    }
+    for (const how of ["revoked", "unknown"] as const) {
+      const stream = await held();
+      await control(`${how}/clean/2`);
+      const got = await stream.read();
+      const call = await said();
+      const said2 = await words();
+      const listen = await listenSaid();
+      row(got.endsWith("[ended]") && !got.includes('"resultType":"complete"'), `${how}/clean/2: the held stream is ended first, with no frame`);
+      row(call === "200 -32001 id 7 retry-after null application/json" && said2.includes(how === "revoked" ? "has been revoked" : "missing or invalid") && listen.startsWith("200 -32001 id 9 "), `${how}/clean/2: a call and a listen are each answered 200 with -32001, in the brain's words (${call}; ${said2})`);
+      const noted = await fetch(`${base}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+      row(noted.status === 202 && (await noted.text()) === "", `${how}/clean/2: a notification is answered 202 with no body (${noted.status})`);
+      await Bun.sleep(2200);
+      row((await mcp()) === 200, `${how}/clean/2: serving again after its two seconds`);
+    }
+    {
+      const stream = await held();
+      await control("nolisten/frame/2");
+      const got = await stream.read();
+      row(got.endsWith("[ended]") && closing(got) === sdkFrame, "nolisten/frame/2: the held stream is ended first, with the frame written by hand");
+      const listen = await listenSaid();
+      row((await mcp()) === 200 && listen === "200 -32603 id 9 Subscription limit reached: this caller holds as many listen streams as one caller may", `nolisten/frame/2: a call is served and a listen refused as at a bound (${listen})`);
+      await Bun.sleep(2200);
+      const again = await held();
+      row((await state()).held === 1, "nolisten/frame/2: a listen is held again after its two seconds");
+      await control("end/clean");
+      row((await again.read()).endsWith("[ended]"), "nolisten/frame/2: and that one is ended in its turn");
+    }
   } else {
     const off = await held();
     const said = await off.read();
