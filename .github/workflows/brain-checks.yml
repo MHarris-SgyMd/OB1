@@ -4234,9 +4234,10 @@ jobs:
           persist-credentials: false
 
       # portable-server's step after its checkout has why (SMD-2435). With
-      # --watch: this job's containers are handed paths of the checkout, and a
-      # read through a read-only bind mount moves no access time. The watch
-      # has every open of a tracked folder or of a file in one (PR 3c-1).
+      # --watch: this job runs containers, and one handed a path of the
+      # checkout reads it through a read-only bind mount, where no access
+      # time moves. The watch is told of each open of a tracked folder, or of
+      # a file in one by its name there (PR 3c-1).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
         run: bash .github/ci/reads.sh mark --watch
@@ -5086,9 +5087,10 @@ jobs:
           persist-credentials: false
 
       # portable-server's step after its checkout has why (SMD-2435). With
-      # --watch: this job's containers are handed paths of the checkout, and a
-      # read through a read-only bind mount moves no access time. The watch
-      # has every open of a tracked folder or of a file in one (PR 3c-1).
+      # --watch: this job runs containers, and one handed a path of the
+      # checkout reads it through a read-only bind mount, where no access
+      # time moves. The watch is told of each open of a tracked folder, or of
+      # a file in one by its name there (PR 3c-1).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
         run: bash .github/ci/reads.sh mark --watch
@@ -5486,9 +5488,10 @@ jobs:
           persist-credentials: false
 
       # portable-server's step after its checkout has why (SMD-2435). With
-      # --watch: this job's containers are handed paths of the checkout, and a
-      # read through a read-only bind mount moves no access time. The watch
-      # has every open of a tracked folder or of a file in one (PR 3c-1).
+      # --watch: this job runs containers, and one handed a path of the
+      # checkout reads it through a read-only bind mount, where no access
+      # time moves. The watch is told of each open of a tracked folder, or of
+      # a file in one by its name there (PR 3c-1).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
         run: bash .github/ci/reads.sh mark --watch

@@ -648,9 +648,10 @@
  *      and failing no job; and
  *      the job that runs changes.sh's cases runs reads.sh's, where a runner
  *      that records no access times fails (SMD-2435 PR 3b-1); and a job
- *      READS_WATCHED names, whose containers read the checkout through mounts
- *      where no access time moves, marks with --watch, and no other does
- *      (PR 3c-1). Its probe pins what it refuses and passes
+ *      READS_WATCHED names, which runs containers, where a read through a
+ *      read-only mount of the checkout moves no access time, marks with
+ *      --watch, and no other does (PR 3c-1). Its probe pins what it refuses
+ *      and passes
  *  56. .github/ci/changes.sh's MAP_LISTS — the lists of what main's jobs
  *      read that a pull request's jobs may skip by — names gated jobs alone,
  *      a matrix job by every one of its cells and no other; every gated job
@@ -11977,14 +11978,17 @@ checkProductName();
 // its job: the script exits 0, and the upload continues on its error. The job that
 // runs changes.sh's cases runs reads.sh's, where a runner whose filesystem
 // records no access times fails. A job READS_WATCHED names marks with
-// --watch, and no other does (PR 3c-1): its containers read the checkout
-// through mounts where no access time moves, and the watch has those opens.
+// --watch, and no other does (PR 3c-1): it runs containers, and one handed
+// a path of the checkout reads it through a read-only bind mount, where no
+// access time moves and the watch is told of the open.
 const READS_SCRIPT = ".github/ci/reads.sh";
 const READS_MARK = `bash ${READS_SCRIPT} mark`;
 const READS_WATCH = `${READS_MARK} --watch`;
+const READS_WAIT = "READS_WATCH_WAIT";
 /**
- * The jobs whose marker also watches (PR 3c-1): each hands paths of the checkout to containers, and a read through a
- * read-only bind mount moves no access time. Named here and not read off the workflow, so a `--watch` taken off a
+ * The jobs whose marker also watches (PR 3c-1): each runs containers, and a read through a read-only bind mount of
+ * the checkout moves no access time (deploy-stack-auth binds three tracked paths so today; the other two none, and
+ * would be whole without the watch until one did). Named here and not read off the workflow, so a `--watch` taken off a
  * marker is a failure, not a job that quietly watches no longer. The other two jobs that run the compose stack do
  * not watch: each reads most of the tree, so its list would skip it for almost no pull request (SMD-2435's replay,
  * 2026-11-23: 3 and 2 of 100).
@@ -12007,6 +12011,8 @@ function readsProblems(text: string, gated: readonly string[], selfCheckJob: str
   const jobs = mapping(mapping(doc)?.jobs);
   if (!jobs) return ["has no `jobs:` map check 55 can read (SMD-2435)"];
   const problems: string[] = [];
+  // reads.sh's own cases shorten the marker's wait for its watch by this name; set in a job, no watch would be heard from in time.
+  if (text.includes(READS_WAIT)) problems.push(`names ${READS_WAIT} — how long a marker waits for its watch is ${READS_SCRIPT}'s own cases' to set; in the workflow it would leave every watching job's list saying watch=none (check 55, SMD-2435)`);
   const stepsOf = (job: Record<string, unknown> | null) => (Array.isArray(job?.steps) ? job.steps : []).map((s) => mapping(s) ?? {});
   const runOf = (step: Record<string, unknown>) => (typeof step.run === "string" ? step.run.trim() : null);
   const extraKeys = (step: Record<string, unknown>, allowed: string[]) => Object.keys(step).filter((k) => !allowed.includes(k));
@@ -12018,7 +12024,7 @@ function readsProblems(text: string, gated: readonly string[], selfCheckJob: str
     if (checkouts.length !== 1) { problems.push(`job ${key} has ${checkouts.length} actions/checkout steps, not one — the marker follows the one checkout, and a second rewrites the files and the access times the list reads (check 55, SMD-2435)`); continue; }
     const mark = steps[checkouts[0] + 1];
     const wantMark = watched.includes(key) ? READS_WATCH : READS_MARK;
-    if (mark && runOf(mark) === READS_MARK && wantMark === READS_WATCH) problems.push(`job ${key}'s marker step runs \`${READS_MARK}\`, not \`${READS_WATCH}\`, and READS_WATCHED names it — its containers read through mounts where no access time moves, so its list is whole only with the watch (check 55, SMD-2435)`);
+    if (mark && runOf(mark) === READS_MARK && wantMark === READS_WATCH) problems.push(`job ${key}'s marker step runs \`${READS_MARK}\`, not \`${READS_WATCH}\`, and READS_WATCHED names it — it runs containers, and a read through a read-only mount of the checkout moves no access time, so its list is known whole only with the watch (check 55, SMD-2435)`);
     else if (mark && runOf(mark) === READS_WATCH && wantMark === READS_MARK) problems.push(`job ${key}'s marker step runs \`${READS_WATCH}\`, and READS_WATCHED does not name it — a job watches by name, so a marker that stops watching is seen; add the job there, or take --watch off (check 55, SMD-2435)`);
     else if (!mark || runOf(mark) !== wantMark) problems.push(`job ${key}'s step after its checkout is not \`${wantMark}\` — a read before the marker is in no list, so the marker is the first thing after the checkout (check 55, SMD-2435)`);
     else if (extraKeys(mark, ["name", "id", "run"]).length) problems.push(`job ${key}'s marker step sets ${extraKeys(mark, ["name", "id", "run"]).join(", ")} — name, id and run alone, since an if: or a working-directory can leave no marker, or one outside the checkout (check 55, SMD-2435)`);
@@ -12113,6 +12119,9 @@ function checkReadsRecorded() {
     ["a job that watches and is not named", wf(lint(), watching("a"), watching("b")), ["job a's marker step runs `bash .github/ci/reads.sh mark --watch`, and READS_WATCHED does not name it"]],
     ["a watching marker with a word more", wf(lint(), good("a"), job("b", CHECKOUT + WATCH.replace("--watch", "--watch --quiet") + RUN + LIST("b") + KEEP("reads-b"))), ["job b's step after its checkout is not `bash .github/ci/reads.sh mark --watch`"]],
     ["a second marker that watches", wf(lint(), good("a"), job("b", CHECKOUT + WATCH + RUN + `      - run: ${READS_WATCH}\n` + LIST("b") + KEEP("reads-b"))), ["job b marks its reads again in step 4"]],
+    ["a watching marker under an if:", wf(lint(), good("a"), job("b", CHECKOUT + WATCH.replace("        run:", "        if: always()\n        run:") + RUN + LIST("b") + KEEP("reads-b"))), ["job b's marker step sets if"]],
+    ["a watching marker with no id", wf(lint(), good("a"), job("b", CHECKOUT + WATCH.replace(`        id: ${READS_MARK_ID}\n`, "") + RUN + LIST("b") + KEEP("reads-b"))), ["job b's marker step has id null"]],
+    ["the wait for a watch set in a job", wf(lint(), good("a"), job("b", CHECKOUT + WATCH + RUN + TEARDOWN + LIST("b") + KEEP("reads-b"), `    env:\n      ${READS_WAIT}: "0"\n`)), [`names ${READS_WAIT}`]],
   ];
   const wrongWatch = watchCases.map(([why, text, says]) => ({ why, says, got: readsProblems(text, ["a", "b"], "lint", ["b"]) }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
