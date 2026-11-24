@@ -582,7 +582,8 @@ export function scanSummary(s, text) {
   // no redaction could clear, at an offset into a join nobody sees.
   const sources = [...distinctPrompts(s.prompts).map((p, i) => [promptLabel(i), p]), ["the outcome", s.outcome ?? ""], ["the title", s.title ?? ""]];
   for (const [where, full] of sources) {
-    for (const f of scanForSecrets(full)) if (!found.some((g) => g.reason.replace(/ in (?:prompt \d+(?: \(past the \d+ the text lists\))?|the outcome|the title)$/, "") === f.reason)) found.push({ ...f, reason: `${f.reason} in ${where}` });
+    // The outcome keeps its lines in the summary, so it is read soft-wrapped too, as its redaction reads it (SMD-4543).
+    for (const f of scanForSecrets(full, { softWrap: where === "the outcome" })) if (!found.some((g) => g.reason.replace(/ in (?:prompt \d+(?: \(past the \d+ the text lists\))?|the outcome|the title)$/, "") === f.reason)) found.push({ ...f, reason: `${f.reason} in ${where}` });
   }
   return found;
 }
@@ -621,10 +622,11 @@ export function assistantExcerpt(ep) {
   // Where the first message the clip reaches begins: the scan reads it whole, and every message after it.
   let reached = 0;
   for (let i = 0, at = 0; i < messages.length; at += messages[i].length + SEP.length, i++) if (at + messages[i].length > from) { reached = at; break; }
-  let hit = scanForSecrets(joined.slice(reached))[0], hitAt = hit ? reached + hit.at : 0;
+  // Read soft-wrapped too (SMD-4543): a quoted value a wrap cut is still a value.
+  let hit = scanForSecrets(joined.slice(reached), { softWrap: true })[0], hitAt = hit ? reached + hit.at : 0;
   for (let i = 0, at = 0; !hit && i < messages.length; at += messages[i].length + SEP.length, i++) {
     if (at < reached) continue;
-    const own = scanForSecrets(messages[i])[0];
+    const own = scanForSecrets(messages[i], { softWrap: true })[0];
     if (own) { hit = own; hitAt = at + own.at; }
   }
   if (hit) return { withheld: `${hit.reason} at char ${hitAt} in the assistant messages` };
@@ -651,17 +653,19 @@ export function redactEpisode(ep) {
   for (const p of ep.prompts) addBlocks(p, "a prompt");
   addBlocks(ep.outcome, "the outcome");
   addBlocks(ep.title, "the title");
-  const take = (text, place, skip) => {
+  const take = (text, place, skip, softWrap = false) => {
     if (typeof text !== "string" || !text) return text;
-    const r = redactSecrets(text, { skip });
+    const r = redactSecrets(text, { skip, softWrap });
     for (const sp of r.spans) redactions.push({ reason: sp.reasons.join(", "), at: sp.at, in: place });
     return r.text;
   };
   // The DISTINCT prompts, as the summary lists them: a retried prompt is one
   // line in the text and one redaction in the count.
   // The title as the summary shows it, on one line, as the prompts are (SMD-4292 review pass 2, secrets adversary: blanked
-  // as written, a quoted value whose closing quote is on the next line was cut there, and the rest shown).
-  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome"), title: take(typeof ep.title === "string" ? oneLine(ep.title) : ep.title, "the title") };
+  // as written, a quoted value whose closing quote is on the next line was cut there, and the rest shown). The outcome
+  // keeps its lines in the summary, so it is blanked as written AND read soft-wrapped, a lone line break as spaces, the
+  // blank where the text has it (SMD-4543: `password = "correct horse⏎battery staple 42"` sent its second line).
+  const redacted = { ...ep, prompts: distinctPrompts(ep.prompts).map((p, i) => take(p, promptLabel(i))), outcome: take(ep.outcome, "the outcome", [], true), title: take(typeof ep.title === "string" ? oneLine(ep.title) : ep.title, "the title") };
   // The rendered text's own pass blanks what reaches it from elsewhere (a path, a link) and what a blanking above
   // exposed, and leaves each run a clip cut as the passes above judged it whole (SMD-4502).
   const rendered = renderSummary(redacted);
