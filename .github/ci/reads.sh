@@ -19,9 +19,9 @@
 # list holds differs since. So a row is a claim a skip rests on: by_map
 # reads the header's job, cell, commit, status, sight and counts, and each
 # row's kind and path, and takes a list whose rows are not as many as its
-# header counts for no list at all. It reads no watch= word yet: a header
-# that ends with one is no list to it, whatever the word, and changes.sh's
-# cases hold that until PR 3c-2 reads it.
+# header counts for no list at all. Of a job its WATCHED names (PR 3c-2) it
+# takes only a list whose header ends watch=ok, below; of any other job,
+# only one that says nothing of a watch.
 #
 # A list's rows, under its header line:
 #   f<TAB>path    a tracked file opened since the marker;
