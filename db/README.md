@@ -6733,9 +6733,9 @@ recorded one (PR 3b). Its engine takes what a caller like the sleep scheduler
 passes (PR 4a-1): an `onPass` that also hands over the abort of each worker's
 tags call in hand (the thought set back to the queue, nothing written), the
 admit gate before the pool and each claim, session settings for its own
-connections, `banner` and `summary` false, and `onStart`, told a refusal by its
-kind. Not yet: `--follow` (PR 4a-2) and the sleep pass (PR 4b). test-live [29]
-drives it against a stub chat endpoint.
+connections, `banner` and `summary` false, and `onStart`, told the start went
+through or a refusal by its kind. Not yet: `--follow` (PR 4a-2) and the sleep
+pass (PR 4b). test-live [29] drives it against a stub chat endpoint.
 
 ## Extensions
 

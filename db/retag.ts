@@ -182,7 +182,8 @@ const LIST_TAGS: ReadonlySet<string> = new Set(["people", "action_items", "dates
  * for the model, the endpoints, the egress policy and the worker key:
  * process.env when absent. `signal` is a first stop (the thought in hand
  * finishes, the rest go back to the pool); `onPass` is handed the pass's stop
- * as the pass begins, where the CLI installs its signal handlers.
+ * and its InHandAbort as the pass begins, where the CLI installs its signal
+ * handlers.
  */
 export interface RetagOptions {
   url?: string;
@@ -202,7 +203,7 @@ export interface RetagOptions {
   writer?: Writer;
   signal?: AbortSignal;
   /**
-   * Called once as the pass begins, with its stop (db/lease.ts's PassStop) and its InHandAbort (SMD-2298 PR 4a): the
+   * Called once as the pass begins, with its stop (db/lease.ts's PassStop) and its InHandAbort (SMD-2298 PR 4a-1): the
    * caller aborts each worker's tags call in hand, and the thought goes to the back of the queue (setBackAborted),
    * the worker going on with its next claim — the sleep scheduler's, while a live call wants the model server.
    */
@@ -215,9 +216,13 @@ export interface RetagOptions {
   admit?: Admit;
   /** Postgres settings the run's own client opens every connection with (connect.ts's `session`): the sleep scheduler's per-pass budget (SMD-2679). Refused beside `sql`, a caller's client, which it would not reach. */
   session?: SessionSettings;
-  /** False leaves out the start's banner — the job, model and egress lines — for a pass a scheduler drives, which says them once (SMD-2752). */
+  /** False leaves out the start's banner — the job, model and egress lines and the agent line or the no-key warning — for a pass a scheduler drives, which says them once (SMD-2752). */
   banner?: boolean;
-  /** False leaves out the end-of-run summary — the counts and the failed rows — for a pass a scheduler drives (SMD-2752). */
+  /**
+   * False leaves out the end-of-run summary — the counts, the failed rows and the still-leased and still-pending
+   * lines — for a pass a scheduler drives (SMD-2752). A stop on the request itself still lists the failed rows its
+   * line points at (review pass 1).
+   */
   summary?: boolean;
   /** How the start went (worker-bootstrap.ts's StartResult), called once: a refusal by its kind, or through (SMD-2752). */
   onStart?: (r: StartResult) => void;
@@ -322,7 +327,7 @@ type Outcome =
   | { outcome: "lostClaim" }
   /** In hand at the hard stop: nothing written, no longer this worker's. */
   | { outcome: "abandoned" }
-  /** Its call aborted by the pass's caller (abortInHand): to the back of the queue, nothing written (setBackAborted); `gone`, not this worker's to set back. */
+  /** Its call aborted by the pass's caller (abortInHand), or by the first stop as it waited for a slot (abortWaiting): to the back of the queue, nothing written (setBackAborted); `gone`, not this worker's to set back. */
   | { outcome: "setBack"; gone?: "deleted" | "lost" };
 
 type Counts = { pending: number; claimed: number; succeeded: number; failed: number };
@@ -516,7 +521,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   }
   if (stoppedEarly()) return 130;
   // The admit gate before the pool's writes, as the other claim workers' passes take it (SMD-3379 PR 1b): a stop while
-  // it waits ends the run with nothing pooled (SMD-2298 PR 4a).
+  // it waits ends the run with nothing pooled (SMD-2298 PR 4a-1).
   if (ADMIT && !(await admitted(ADMIT, opts.signal ?? new AbortController().signal))) {
     err(STOPPED_EARLY);
     return 130;
@@ -540,7 +545,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   let hardStopped = false;
   let hardRelease: Promise<unknown> | null = null;
   const onStop = new AbortController();
-  /** Wakes a worker pausing on the provider: the first stop, or the provider's refusal. */
+  /** Wakes a worker pausing on the provider, or waiting at the admit gate: the run stopping (the first stop, the provider's refusal, the shape streak, a throw). */
   const halt = new AbortController();
   let retagged = 0, changedTags = 0, current = 0, failed = 0, refused = 0, changedMeanwhile = 0, vanished = 0, lost = 0, beats = 0, calls = 0;
   let configError = null as string | null;
@@ -553,9 +558,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   const limitReached = (): boolean => LIMIT > 0 && taken.size + claiming.n >= LIMIT;
   const outage = new ProviderOutage(undefined, undefined, true);
   const unreturned = new Unreturned((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`);
-  /** Each worker's tags call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2; SMD-2298 PR 4a). */
+  /** Each worker's tags call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2; SMD-2298 PR 4a-1). */
   const inCall = inHandCalls(() => detach.aborted || stopping);
-  // At the first stop a call waiting for a slot goes back to the pool rather than the stop waiting out others' calls (PR 2b-1).
+  // At the first stop a call waiting for a slot goes back to the pool rather than the stop waiting out others' calls
+  // (SMD-3379 PR 2b-1).
   onStop.signal.addEventListener("abort", () => inCall.abortWaiting(), { once: true });
   /** The hard stop's abort for the calls in hand: nothing written, the thought abandoned. */
   const onHardStop = new AbortController();
@@ -580,7 +586,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     out(line);
   }
 
-  /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read. */
+  /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read; a call aborted in hand, as AbortedInHand. */
   async function retagRow(row: Row, workerId: string): Promise<Outcome> {
     if (!row.due) return { outcome: "current" };
     // update_thought merges no patch into SQL NULL (NULL || patch) and grows a non-object into an array (review pass 1):
@@ -601,7 +607,8 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     try {
       answer = await extractMetadata(row.content, subject, cfg, AbortSignal.any([onHardStop.signal, call.abort.signal]));
     } catch (e) {
-      // The hard stop aborted it: abandoned, not failed. The pass's caller did (abortInHand): the worker sets it back.
+      // The hard stop aborted it: abandoned, not failed. The pass's caller did (abortInHand), or the first stop as it
+      // waited for a slot (abortWaiting): the worker sets it back.
       if (hardStopped) return { outcome: "abandoned" };
       if (call.aborted) throw new AbortedInHand();
       throw e;
@@ -722,9 +729,9 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
               outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId)), () => retagRow(row, workerId));
             } catch (e) {
               if (hardStopped) return "stop";
-              // The pass's caller aborted the call in hand: the thought to the back of the queue, nothing written, and
-              // the worker goes on with its next claim; a set-back the database refuses leaves the claim for the
-              // finally's release (SMD-3379 PR 1b-2's rule; SMD-2298 PR 4a).
+              // The pass's caller aborted the call in hand (or the first stop its wait for a slot): the thought to the
+              // back of the queue, nothing written, and the worker goes on with its next claim; a set-back the database
+              // refuses leaves the claim for the finally's release (SMD-3379 PR 1b-2's rule; SMD-2298 PR 4a-1).
               if (e instanceof AbortedInHand) {
                 const back = await setBackAborted(faults, { id: b.thought_id, workerId, hb }, "tags call");
                 if (back === "stop") return "stop";
@@ -746,7 +753,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
           }
         }
         if (outcome.outcome === "abandoned") return "stop";
-        // Set back by the caller's abort; one deleted or no longer this worker's meanwhile is counted so (review pass 1).
+        // Set back by its call's abort; one deleted or no longer this worker's meanwhile is counted so (review pass 1).
         if (outcome.outcome === "setBack") {
           if (outcome.gone === "deleted") vanished++;
           else if (outcome.gone === "lost") lost++;

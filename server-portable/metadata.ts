@@ -95,7 +95,7 @@ export function tagsOverExisting(answer: Record<string, unknown>): Record<string
 }
 
 /**
- * The tags' call. `signal`, a caller's (db/retag.ts's call in hand, SMD-2298 PR 4a): aborted, the call is, and its
+ * The tags' call. `signal`, a caller's (db/retag.ts's call in hand, SMD-2298 PR 4a-1): aborted, the call is, and its
  * error is thrown, never read as tags — it is no ProviderError, which the catch below reads.
  */
 export async function extractMetadata(text: string, subject: EgressSubject, cfg: EmbedConfig, signal?: AbortSignal): Promise<Record<string, unknown>> {

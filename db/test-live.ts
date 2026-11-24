@@ -24837,9 +24837,9 @@ if (want("29")) {
       assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
         `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
 
-      // SMD-2298 PR 4a: the options a caller like the sleep scheduler passes. abortInHand aborts the tags call in hand:
-      // the thought goes to the back of the queue, nothing written, and the run re-tags it after; onStart hears the
-      // start; banner and summary false keep their lines out; session settings reach the run's own connections.
+      // SMD-2298 PR 4a-1: the options a caller like the sleep scheduler passes. abortInHand aborts the tags call in
+      // hand: the thought goes to the back of the queue, nothing written, and the run re-tags it after; onStart hears
+      // the start; banner and summary false keep their lines out; session settings reach the run's own connections.
       const AB = await tagged("[29] AB, its call aborted in hand");
       await move(AB, "[29] AB, its call aborted in hand, moved");
       SPECIAL.set("[29] AB", "slow");
@@ -24847,8 +24847,8 @@ if (want("29")) {
       const starts: StartResult[] = [];
       const abRun = retag({ pausesMs: [10], onPass: (_stop, abort) => { abortInHand = abort; }, onStart: (r) => starts.push(r), banner: false, summary: false, session: { application_name: "retag-29-session" } });
       for (let i = 0; i < 200 && !bodies.some((b) => b.includes("[29] AB")); i++) await Bun.sleep(25);
-      // The abort at once, while the slow answer is out; the session's connections read after it, still open (review pass 2:
-      // the read before it could outlast the stub's window on a loaded box).
+      // The abort at once, while the slow answer is out; the session's connections read after it, still open
+      // (review pass 2: the read before it could outlast the stub's window on a loaded box).
       const abortedN = abortInHand ? (abortInHand as InHandAbort)() : -1;
       const sessions = Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'retag-29-session'`) as { n: number }[])[0].n);
       SPECIAL.delete("[29] AB");
@@ -24880,8 +24880,9 @@ if (want("29")) {
       const gDone = await gRun;
       assert(!gPooledShut && !gSentShut && asksShut === 1 && admitAsks === 3 && gDone.code !== 2 && settled(await tagsRow(G)) && (await claims()).find((c) => c.id === G)?.status === "succeeded",
         `the admit gate shut: nothing pooled or sent; opened, the run pools and re-tags, the gate asked before the pool and each claim (${gPooledShut}/${gSentShut}; ${admitAsks} ask(s); ${line(gDone.out, "re-tagged (")})`);
-      // abortInHand counts only a call that is out (review pass 1): a worker writing — its update_thought held behind a
-      // row lock the test takes as the answer goes back — has no call to abort, and the thought is written, not set back.
+      // abortInHand counts only a call that is out (review pass 1): a worker writing — its update_thought held behind
+      // a row lock the test takes as the answer goes back — has no call to abort, and the thought is written, not set
+      // back.
       const W = await tagged("[29] W, written while abortInHand is asked");
       await move(W, "[29] W, written while abortInHand is asked, moved");
       let releaseAnswer: () => void = () => {};
