@@ -8082,7 +8082,8 @@ console.log("\n[24] --reapply on a brain holding rows a later migration's rule a
     const indexLines = run.out.split("\n").filter((l) => /^ {2}· {2}thought_facets_subject_active_uniq is left to \d{3}_\S+\.sql, which decides it last: this file's CREATE UNIQUE INDEX did not run$/.test(l));
     assert(kindLines.length >= 3 && armLines.length >= 1 && indexLines.length === 1,
            `the run says which files' narrower rules it left to the file that decides each last: ${kindLines.length} of the lineage kinds (064, 084 and 111 at least), ${armLines.length} of the search arms (059 at least), ${indexLines.length} of the one-subject index (111's)`);
-    assert((await rows()) === rowsBefore, `every row stands after it (${await rows()})`);
+    const rowsAfter = await rows();
+    assert(rowsAfter === rowsBefore, `every row stands after it (${rowsAfter})`);
     const indexesAfter = await subjectIndexes();
     assert(indexesAfter === indexesBefore && indexesAfter === "thought_facets_subject_key_uniq", `111's one-subject index stays dropped and 130's stands (${indexesAfter})`);
     const checksAfter = await checks();

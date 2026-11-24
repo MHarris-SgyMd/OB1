@@ -3416,22 +3416,22 @@ export function supersededStatements(files) {
       const onIndex = INDEX_COMMENT.exec(text);
       const dropped = INDEX_DROP.exec(text);
       if (dropped) drops.add(dropped[1].toLowerCase());
-      // [action, table, name, the rule's key]
-      const hit = add && oneGroup(add[3]) ? ["ADD", add[1], add[2]]
-        : validate ? ["VALIDATE", validate[1], validate[2]]
-        : index ? ["CREATE UNIQUE INDEX", index[2], index[1]]
-        : onConstraint ? ["COMMENT", onConstraint[2], onConstraint[1]]
-        : onIndex ? ["COMMENT ON INDEX", "", onIndex[1]]
+      // [action, the kind of rule, table, name]. A comment on an index names no table: it takes the index's.
+      const hit = add && oneGroup(add[3]) ? ["ADD", "constraint", add[1], add[2]]
+        : validate ? ["VALIDATE", "constraint", validate[1], validate[2]]
+        : index ? ["CREATE UNIQUE INDEX", "index", index[2], index[1]]
+        : onConstraint ? ["COMMENT", "constraint", onConstraint[2], onConstraint[1]]
+        : onIndex ? ["COMMENT", "index", "", onIndex[1]]
         : null;
       if (hit) {
-        const table = tableOf(hit[1]);
-        const name = hit[2].toLowerCase();
-        const ofIndex = hit[0] === "CREATE UNIQUE INDEX" || hit[0] === "COMMENT ON INDEX";
+        const [action, rule] = hit;
+        const table = tableOf(hit[2]);
+        const name = hit[3].toLowerCase();
         statements.push({
-          action: hit[0] === "COMMENT ON INDEX" ? "COMMENT" : hit[0],
-          comment: hit[0].startsWith("COMMENT"),
-          rule: ofIndex ? "index" : "constraint",
-          key: ofIndex ? `index ${name}` : `${table}.${name}`,
+          action,
+          comment: action === "COMMENT",
+          rule,
+          key: rule === "index" ? `index ${name}` : `${table}.${name}`,
           table,
           name,
           start: from + (raw.length - raw.trimStart().length),
