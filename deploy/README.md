@@ -2054,11 +2054,12 @@ or its connection ends, and not before: a caller at its bound has that many
 streams open, or left open. Restarting `mcp` ends every stream, and is no lever
 to pull twice. What a client does when its stream ends is its own: Claude Code
 asks again 6, 8 and 12 seconds on and then stops asking (measured, SMD-4347),
-its documentation says five reopens in an hour make it wait about six hours
-(measured as far as the sixth, SMD-4493: in each of two sessions, its stream
-ended every 15 seconds in one and every 20 in the other, it opened its stream
-again five times and then made no attempt), and no other client has been
-measured.
+its documentation says five reopens in an hour make it wait about six hours,
+and no other client has been measured. Measured of that, against a probe
+(SMD-4493): with its stream ended every 15 seconds, and in another session
+every 20, it opened a stream again five times, and after the sixth end made
+no attempt in the 75 and the 90 seconds watched. The six hours were not
+watched.
 
 On a server that holds listen streams, a stream's end writes a line of its own
 (SMD-4459), where the request lines go:
@@ -2142,9 +2143,9 @@ A client that has stopped asking (above) leaves a `client` end with no
 session; another session of that key asks under the same name. A client that
 closed its stream and left reads the same, and its other requests tell the
 two apart: one that gave up and works on still writes lines under its name
-with no listen among them, and one that left writes none. The lines seen of a
-client that had given up were its `tools/call`s, and no `tools/list`
-(measured, SMD-4493).
+with no listen among them, and one that left writes none. Against a probe,
+the requests a client that had given up went on sending were its
+`tools/call`s, and no `tools/list` (measured, SMD-4493).
 
 A stop writes a `stop` line for each stream that was open, in the log of the
 container that stopped; its own two lines count them too, as it began ("N
