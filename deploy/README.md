@@ -556,21 +556,24 @@ free:
   - Without `ps`, two of the 40 searches were answered by exact matches
     alone, the embedder not answering in time.
 
-  Two brains backlogged at once, on the same Mac (SMD-3379 PR 3c-3). Each
-  run below was made once, except the two on one model, which were made
-  twice: the first pair was disturbed, and the second is shown. Each
-  brain had the share `chat=1,embed=1` with no broker, or both were on
-  the broker with `ps`. A run is 20 minutes. For its first 12 no live
-  write reached either brain, since a live write pauses its own brain's
-  sleep. In those 12 minutes a probe sent each brain a search every
-  30 s, and sent the model server, from outside any brain and any
-  broker, the metadata call a capture makes. From minute 12 a harness
-  timed captures on both brains at once. These runs were made on the
-  build before a sleep's judge-model passes yielded to extraction
-  (SMD-4495, the sleep's `yield:` line), a rule that applies to brains
-  set up as these were. With it a backlogged brain asks for the judge
-  model less while extraction has work, and the runs on two models were
-  not made again. The table is of the first 12 minutes:
+  Two brains backlogged at once, on the same Mac (SMD-3379 PR 3c-3 and
+  3c-4). Each brain had the share `chat=1,embed=1` with no broker, or
+  both were on the broker with `ps`. A run is 20 minutes. For its first
+  12 no live write reached either brain, since a live write pauses its
+  own brain's sleep. In those 12 minutes a probe sent each brain a
+  search every 30 s, and sent the model server, from outside any brain
+  and any broker, the metadata call a capture makes. From minute 12 a
+  harness timed captures on both brains at once. The first four rows
+  show one run each, on the build before a sleep's judge-model passes
+  yielded to extraction (SMD-4495, the sleep's `yield:` line). The two
+  on one model were made twice, the first pair disturbed, and the second
+  is shown. The last two rows are the runs on two models made again 16
+  to 19 hours later, on a build with that yield, which applies to brains
+  set up as these were. The one on the broker was made twice, and its
+  cells give the first of those runs, then the second. The runs in
+  those rows differ from the ones above them, and from each other, by
+  more than the yield, as the fourth bullet says. The table is of the
+  first 12 minutes, and its medians are of every call the probe sent:
 
   | Background asks for | Shares | Search, median | Metadata call, median | Judge model listed, of 720 s | Thoughts extracted, the two brains |
   |---|---|---|---|---|---|
@@ -578,6 +581,8 @@ free:
   | one model | broker | 0.1 s | 3.2 s | not asked for | 104 |
   | two models | fixed | 46 of 48 not answered by their embedding | 3.2 s | 0 | 72 |
   | two models | broker | 18.9 s | 15.0 s | 438 | 27 |
+  | two models, later, with the yield | fixed | 46 of 48 not answered by their embedding | 3.5 s | 0 | 92 |
+  | two models, later, with the yield | broker, two runs | 51.2 s, then 22.4 s; 12, then 4 of 48 not answered by their embedding | 65.3 s, then 30.3 s; 6, then 2 of 24 timed out | 454, then 380 | 17, then 40 |
 
   - **On one model, fixed shares and the broker were alike.** Each
     brain's background held one of the server's three slots
@@ -587,11 +592,14 @@ free:
     which ended the thoughts they had in hand over the next minute:
     captures timed beside those took 2.8 to 7.0 s, and captures after
     them 2.3 to 3.7 s. Why the broker's brains extracted more was not
-    established. All of this held while no other caller asked for
-    another model. In the first run under fixed shares a third brain on
-    the server asked for the judge model after minute 12, and 24 of the
-    next 32 searches waited 120 s and were answered by exact matches
-    alone; in the first run on the broker no third brain asked.
+    established: the model server generated a fifth faster in that run
+    than in the fixed-shares one, and between the two fixed-shares runs
+    on two models its speed differed by more. All of this held while no
+    other caller asked for another model. In the first run under fixed
+    shares a third brain on the server asked for the judge model after
+    minute 12, and 24 of the next 32 searches waited 120 s and were
+    answered by exact matches alone; in the first run on the broker no
+    third brain asked.
   - **On two models, fixed shares left the judge model and the embedder
     unloaded.** A share is per model, so both brains kept the metadata
     model busy while each also asked for the judge model. Ollama decided
@@ -613,15 +621,68 @@ free:
     granted. The probe's metadata call is not a brain's: the broker
     never saw it, and it was itself a third caller asking for the
     metadata model every 30 s, so neither its 15.0 s nor its part in the
-    other figures is a brain's own.
+    other figures is a brain's own. The next bullet has the two later
+    runs of this setup, on the newer build.
+  - **Made again on a build with the yield, each later run stands under
+    its own conditions.** The yield makes a brain's consolidation and
+    sweep calls wait while one of its own extraction calls is asked for
+    or running, 60 s at most in one stretch unless `OB1_SLEEP_MAX_WAIT`
+    says otherwise; it does not see another brain's extraction. It shows
+    in the broker's lines: in those 12 minutes a sweep's next ask for
+    the judge model came 14 to 49 s after its last call ended, where in
+    the earlier run it had come at once. What the yield did for
+    extraction or cost a live call is not shown either way, since more
+    than the build differed:
+    - **Fixed shares** left the judge model and the embedder unloaded
+      again. One brain's ordinary call of the judge model, admitted in
+      the instant the pause of the notes' load ended, before that
+      brain's own extraction had called, was enough: the load began 18
+      minutes after Ollama decided it. Of the two brains only one was
+      asking for the judge model in those 12 minutes. The run's 150
+      notes loaded with 6 of each brain's saved without a vector or
+      without tags, where 16 had been.
+    - **The broker's first later run** had a busy machine (a load
+      average of 18, then 11, against 7 and 2 in the earlier run) and
+      the server's other brains (stable and a canary) at work beside
+      it. Its 150 notes took twice as long to load as in the earlier
+      run, and 4 of each brain's were saved without a vector or without
+      tags, where none had been. A search took 51.2 s at the median and
+      12 of 48 were answered by exact matches alone; 6 of 24 metadata
+      calls timed out.
+    - **The broker's second later run** had a quieter machine (11, then
+      5.5), no other brain calling in its 12 minutes, and 150 notes that
+      loaded as quickly as in the earlier run, all clean. A search took
+      22.4 s at the median and 4 of 48 were answered by exact matches
+      alone; those and its 2 timed-out metadata calls were all sent in
+      its first minute, the first of them as a load of the judge model
+      was granted.
+
+    In all three later runs the 30 notes that go in before the 150 took
+    six to nine times as long to load as the same setup's had, and 4 to
+    8 of each brain's 30 were saved without a vector or without tags. A
+    request for the judge model stood in Ollama's queue for four to five
+    minutes of that load each time. In one run it matches, to the
+    second, a brain's own start-up call of the judge model, sent about
+    two seconds before the notes began; in the earlier run on the
+    broker, the broker had held that call until the notes were in. In
+    the other two the logs do not show whose request it was.
   - **Fixed shares bound the slots a brain's background takes, not which
     models stay loaded.** Three models were in use here, the embedder
     with the two the background asked for, on a server that keeps two
-    loaded. On these single runs, brains whose calls between them, live
-    and background, use more models than the server keeps loaded belong
-    on the broker with `ps`. A raised `OB1_SLEEP_MAX_WAIT`, which cost
-    live calls least in the runs above with one brain backlogged, was
-    not tried with two.
+    loaded. On the two-model runs, two under fixed shares and three on
+    the broker, brains whose calls between them, live and background,
+    use more models than the server keeps loaded belong on the broker
+    with `ps`: under fixed shares 46 of 48 searches were answered by
+    exact matches alone both times, where on the broker 12 at most were.
+    That advice rests on the searches alone. The broker's price, run by
+    run, is in the table: a search of tens of seconds at the median, a
+    metadata call slower than fixed shares' 3.2 and 3.5 s, some metadata
+    calls timed out in the two later runs, and less extraction than
+    under fixed shares, whose judge model did no work. A raised
+    `OB1_SLEEP_MAX_WAIT`, which cost live calls least in the runs above
+    with one brain backlogged, before the yield, was not tried with two;
+    since the yield that setting is also the most one stretch of a
+    brain's extraction calls holds its judge-model passes back.
 
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
@@ -1995,8 +2056,12 @@ turns them on; none does yet) says how many are open, in two places (SMD-4458).
 A server that holds none sends no such series and has no such field. A stream
 is open from the answer that holds it until its connection ends or the server
 stops. Whether its client still reads it, and whether its key still stands, are
-not asked: a client that has gone quiet without closing keeps its place, and so
-does a key revoked since.
+not asked. A client that is frozen keeps its place. A client that has vanished
+keeps it until whatever faces it gives up on it: a quarter of an hour where
+that was a Linux kernel or a podman machine's network proxy, and not measured
+for a tunnel or a TLS proxy (below). A key revoked since keeps the places of
+the streams opened under it: its name stays among `listen`'s callers until its
+clients go or `mcp` restarts.
 
 As a metric, `ob1.mcp.listen_streams`: the total, with no label of its own, an
 up-down counter, `ob1_mcp_listen_streams` in the profile's Prometheus (measured
@@ -2076,7 +2141,7 @@ from the stream's opening to its end. `end` says how it ended.
 
 | `end` | What ended the stream |
 | -- | -- |
-| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one kind here. That was measured with the client at the server; behind the proxy the server's peer is the proxy, and what it passes on of a client's leaving, and how soon, was not measured. Nor was the proxy's access log, which writes a line for a request at `/mcp`: what that line holds for a stream held open, and of how it ended |
+| `client` | Its client's side went: its client closed it, or its connection dropped. The server is told the same of both (measured on Bun 1.4.3 on macOS and in a Linux container, on loopback: a request aborted, its reader's cancel, the client's exit, its kill, and a socket half-closed, destroyed or reset each reach the server as "The connection was closed"), so they are one kind here. That was measured with the client at the server. Through the stack's published port from the machine it runs on (the engine's own port relay, a podman machine's, then the forwarder and the proxy), a client's close and a killed client's leaving each reached the server within 0.2 s; from a container on the forwarder's own network, 7 ms and within 0.2 s; through a quick tunnel, 40 ms and within 0.2 s (measured, each once, SMD-4493). That tunnel ran as a container on the forwarder's network; on the host, as `docs/01-getting-started.md` runs it, it dials the published port, and that path whole was not run. The proxy's access log, which writes a line for a request at `/mcp`, was not measured: what that line holds for a stream held open, and of how it ended |
 | `stop` | The server's stop closed it, or was about to: a stream still open as the stop's drain ends is the stop's, though its client may leave in the moment before it is closed. The line is written as the stop's drain ends, before its flush, so that a collector has it; the stream itself is closed after that flush where the drain finished. So `held_ms` is short of the real close by the flush: milliseconds as a rule, and up to 5 s where a collector is slow to answer |
 | `server` | The server ended it itself: a listen that asks for nothing this server sends is acknowledged and closed at once |
 
@@ -2087,7 +2152,8 @@ connection dropped alike, and what follows it tells which.
 A stream that keeps dropping (a tunnel that cuts streams, a proxy's timeout, a
 client that reopens in a loop) is `client` ends under one name, each a short
 `held_ms` after an `ok` line, for as long as its client asks again, where the
-drop reaches the server (not measured through the proxy, above); a healthy
+drop reaches the server (a client's close and its kill do, above, and so did
+a quick tunnel taken down, once; a proxy's timeout was not measured); a healthy
 stream is held until its client goes or the server restarts. Sessions that
 come and go on one key are `client` ends under one name too, and a line has no
 session to tell them by. What marks a cut on a timer is `held_ms` near one
@@ -2097,17 +2163,37 @@ every 1.5 s read 1471, 1499 and 1504 where two sessions opening and closing
 by hand read 517, 3959 and 7078. A drop that keeps no rhythm cannot be told
 from sessions ending.
 
-A connection that goes silent, with no close and no reset, may end late: a
-client frozen for 2 s, and one for 20, had no end until it was killed
-(measured; a path that drops in silence was not, SMD-4493), so an end's
-`held_ms` can run past its client's leaving. And where a client's leaving
-never reaches the server and the client asks again, there is no end at all:
-`ok` lines under one name with none between them, `listen`'s count for that
-name climbing, and at its bound a `LISTEN_CALLER_FULL` for each further ask,
-until a stop writes them all as `stop`. That was seen with a relay that
-dropped the client's side and kept the server's; whether the stack's proxy
-does so is the thing not measured, and it decides which of the two pictures
-an operator sees.
+A connection that goes silent, with no close and no reset, ends late, so an
+end's `held_ms` can run past its client's leaving (measured, SMD-4493). A
+client that vanishes (its machine asleep, its network gone) acknowledges
+nothing, and its stream ends when whatever faces it gives up retransmitting.
+A Linux kernel at its default took 16 minutes (16 min 0 s with the client on
+the forwarder's network, 16 min 4 s on the MCP server's), and the network
+proxy of a podman machine's VM 13 min 28 s. What faces a real client is
+seldom the stack: a client on the stack's machine cannot vanish apart from
+it, and a remote one is faced by the TLS proxy or the tunnel in front, whose
+own time decides. A tunnel vendor's was not measured. Nothing in the stack
+shortens it: a vanished client is accepted, as a frozen one is. A client that
+is frozen still acknowledges what it is sent, and has no end while it is
+frozen: one was still held after 21 min, and when thawed it read its stream
+again, still held.
+
+Until such a stream ends it keeps its place: at most 32 for each caller's
+name, and the server's 256 across names. Nothing on the server tells it from
+a live stream that is idle, and a healthy caller's count in `listen` does not
+fall either while its sessions are open. What tells is a count above the
+sessions that caller is known to have, or a count that climbs to its bound, as
+follows. A caller whose sessions vanish and ask again by another path
+holds an old stream's place beside each new one, and at its bound is
+refused: `ok` lines under one name with no end between them, `listen`'s
+count for that name climbing, then a `LISTEN_CALLER_FULL` for each further
+ask. With a relay that hid a client's leaving from the server altogether, a
+caller reached its bound of 32 in 22 s (SMD-4459's third review); a close
+and a kill were hidden by none of a podman machine's port relay, the stack's
+forwarder, its proxy and a quick tunnel, each tried once. The one lever is
+restarting `mcp`, which ends every stream: each session's client is left to
+open its stream again, one of its reopens in the hour, and it is no lever to
+pull twice (above).
 
 A client that has stopped asking (above) leaves a `client` end with no
 `subscriptions/listen` line after it under its name, where its key has one

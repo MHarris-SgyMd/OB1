@@ -2513,6 +2513,12 @@ export const ROLE_GRANTS = Object.freeze({
     // citations that name the row and, detaching, writes them. A role without
     // these cannot delete any thought, cited or not.
     Object.freeze({ table: "thought_facets", privileges: Object.freeze(["SELECT", "UPDATE"]),                     since: "042" }),
+    // 153's subject-key repository (SMD-3887): 153's record_thought_subjects,
+    // run as the caller, reads the operator's setting to scope a bare pr: or
+    // version: key it writes, and the thread read will resolve a bare key by it
+    // (SMD-3887 PR 3b). Read only; the setter's writes are the structure
+    // group's.
+    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT"]),                        since: "153" }),
     // 046's audit trigger runs as the caller on EVERY write that carries an
     // actor: it reads the key's kind from ob1_agents (by id, else by name). A
     // role without SELECT there fails every capture, edit and delete inside the
@@ -2703,6 +2709,11 @@ export const ROLE_GRANTS = Object.freeze({
   structure: Object.freeze([
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),
+    // 153's subject-key repository (SMD-3887): a subject writer reads the
+    // operator's setting to scope its keys (record_thought_subjects since 153,
+    // the sweep itself in SMD-3887 PR 3b), and the operator's setter writes it
+    // and maps the standing keys, as a writer of subjects.
+    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),  since: "153" }),
     // board-sync's findings step (SMD-2681, db/board-findings.ts) records what
     // it posted: read for the cap and "not posted again", inserted after Linear
     // answers. Never updated or deleted — a failed post rolls the claim back.
@@ -2842,6 +2853,10 @@ export const ROLE_GRANTS = Object.freeze({
     // does not need (review pass 2).
     Object.freeze({ sequence: "deliverable_events_seq_seq", privileges: Object.freeze(["USAGE"]), since: "134" }),
     Object.freeze({ table: "thought_facets",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "042" }),
+    // 153 (SMD-3887) carries SELECT on the subject-key repository to every role reading or writing thought_facets, this
+    // group's among them, so a role provisioned from this list holds what one carried at the upgrade does (review pass 2).
+    // Its INSERT and UPDATE are the structure group's alone: a deliverables writer never sets the repository.
+    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT"]), since: "153" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`
@@ -3280,6 +3295,205 @@ export function stripSqlComments(text) {
     out += c;
     i++;
   }
+  return out;
+}
+
+/**
+ * Comment-stripped SQL with the inside of every string literal and
+ * dollar-quoted body blanked, newlines kept: what is left is the file's own
+ * statements, so a `;` in it ends one and a word in it is not a literal's or a
+ * function body's. Quoted identifiers are kept. With `bodies` false a
+ * dollar-quoted body is kept and read the same way (its literals blanked): the
+ * file's code, a DO block's and a function's included, without its prose.
+ */
+function maskSqlBodies(code, bodies = true) {
+  const blank = (s) => s.replace(/[^\n]/g, " ");
+  let out = "";
+  let i = 0;
+  const n = code.length;
+  while (i < n) {
+    const c = code[i];
+    if (c === "'" || c === '"') {
+      const escaped = c === "'" && /[Ee]$/.test(out) && !/\w[Ee]$/.test(out);
+      let j = i + 1;
+      while (j < n) {
+        if (escaped && code[j] === "\\") { j += 2; continue; }
+        if (code[j] === c) { if (code[j + 1] === c) { j += 2; continue; } break; }
+        j++;
+      }
+      const end = Math.min(j, n - 1);
+      out += c === '"' ? code.slice(i, end + 1) : c + blank(code.slice(i + 1, end)) + code.slice(end, end + 1);
+      i = end + 1;
+      continue;
+    }
+    if (c === "$") {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(code.slice(i, i + 64));
+      const end = m ? code.indexOf(m[0], i + m[0].length) : -1;
+      if (m && end !== -1) {
+        const inside = code.slice(i + m[0].length, end);
+        out += m[0] + (bodies ? blank(inside) : maskSqlBodies(inside, false)) + m[0];
+        i = end + m[0].length;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+const CHECK_TABLE = String.raw`ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(\S+)`;
+const CHECK_ADD = new RegExp(String.raw`^${CHECK_TABLE}\s+ADD\s+CONSTRAINT\s+"?(\w+)"?\s+CHECK\s*(\(.*\))\s*(?:NOT\s+VALID)?$`, "is");
+const CHECK_VALIDATE = new RegExp(String.raw`^${CHECK_TABLE}\s+VALIDATE\s+CONSTRAINT\s+"?(\w+)"?$`, "i");
+const UNIQUE_INDEX_CREATE = /^CREATE\s+UNIQUE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?\s+ON\s+(?:ONLY\s+)?"?([\w.]+)"?/i;
+const CONSTRAINT_COMMENT = /^COMMENT\s+ON\s+CONSTRAINT\s+"?(\w+)"?\s+ON\s+(\S+)\s+IS\b/i;
+const INDEX_COMMENT = /^COMMENT\s+ON\s+INDEX\s+(?:"?public"?\.)?"?(\w+)"?\s+IS\b/i;
+const INDEX_DROP = /^DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?"?(\w+)"?(?:\s+(?:CASCADE|RESTRICT))?$/i;
+
+/** True when the text is one parenthesised group: its first `(` closes at its last character. */
+function oneGroup(text) {
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    else if (text[i] === ")" && --depth === 0) return i === text.length - 1;
+  }
+  return false;
+}
+
+/**
+ * The rules a migration makes that a later migration loosens, and each such
+ * file's text with those statements blanked (SMD-3149).
+ *
+ * `migrate.ts --reapply` runs every file again, in order. A file that makes a
+ * rule a later file loosened would make its own narrower one again and refuse
+ * the rows the later one admits, and released migrations are frozen. Two
+ * shapes of it:
+ *
+ *   - a CHECK over a list a later file widened (064's lineage kinds, which
+ *     084, 111 and 151 each widen; 059's search arms, which 106 widens);
+ *   - a unique index a later file drops (111's one standing subject a
+ *     thought, which 130 replaces with one a thought and key).
+ *
+ * So the re-run leaves such a rule to the file that decides it last: the
+ * earlier file's statement is blanked in the text the re-run runs, newlines
+ * kept so an error's line is still the file's.
+ *
+ * Read narrowly, so nothing else is struck: a statement of the file's own (not
+ * one inside a DO block or a function body, which guards itself), that is
+ * `ALTER TABLE <t> ADD CONSTRAINT <c> CHECK (…) [NOT VALID]` and nothing more,
+ * `ALTER TABLE <t> VALIDATE CONSTRAINT <c>`, or `CREATE UNIQUE INDEX <i> ON
+ * <t> …`. A later file defines the constraint when its code — a block's or a
+ * function's included, comments and string literals not — has an `ALTER TABLE
+ * <t> … ADD CONSTRAINT <c>` on the same table; so a file that only names the
+ * constraint in a message, or adds one of that name to another table, defines
+ * nothing here. It drops the index when a statement of its own is `DROP INDEX
+ * <i>` (one inside a block is guarded, as 120's drop of 084's index is, and
+ * 084's CREATE … IF NOT EXISTS then finds the later shape standing). A file's
+ * drop of the old constraint still runs; the last definer adds it back in the
+ * same transaction. Whether it did is not this reader's to know — a later
+ * file may add the constraint under a guard — so the migrator looks before it
+ * commits (migrate.ts).
+ *
+ * A struck rule's own `COMMENT ON CONSTRAINT` or `COMMENT ON INDEX`, a
+ * statement of the same file or of one before the file that decides the rule
+ * last, is struck with it: the thing it comments on is not there at that
+ * point of the re-run.
+ *
+ * @param files the migrations in order, each with its substituted SQL
+ * @returns by file name, for each file with a statement left out: the text to
+ *          run, and what was left to which file
+ */
+export function supersededStatements(files) {
+  const tableOf = (t) => t.replace(/"/g, "").replace(/^public\./i, "").toLowerCase();
+  const read = files.map(({ name, sql }) => {
+    const code = stripSqlComments(sql);
+    const top = maskSqlBodies(code);
+    // The constraints this file adds, by table and name, wherever its code does: the table is the nearest
+    // ALTER TABLE before the ADD in the same statement.
+    const prose = maskSqlBodies(code, false);
+    const defines = new Set();
+    for (const m of prose.matchAll(/\bADD\s+CONSTRAINT\s+"?(\w+)"?/gi)) {
+      const statement = prose.slice(prose.lastIndexOf(";", m.index) + 1, m.index);
+      const tables = [...statement.matchAll(new RegExp(CHECK_TABLE, "gi"))];
+      if (tables.length > 0) defines.add(`${tableOf(tables[tables.length - 1][1])}.${m[1].toLowerCase()}`);
+    }
+    const indexes = new Set([...prose.matchAll(/\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)"?\s+ON\b/gi)].map((m) => m[1].toLowerCase()));
+    const drops = new Set();
+    const statements = [];
+    let from = 0;
+    for (let at = top.indexOf(";"); at !== -1; at = top.indexOf(";", from)) {
+      const raw = top.slice(from, at);
+      const text = raw.trim();
+      const add = CHECK_ADD.exec(text);
+      const validate = CHECK_VALIDATE.exec(text);
+      const index = UNIQUE_INDEX_CREATE.exec(text);
+      const onConstraint = CONSTRAINT_COMMENT.exec(text);
+      const onIndex = INDEX_COMMENT.exec(text);
+      const dropped = INDEX_DROP.exec(text);
+      if (dropped) drops.add(dropped[1].toLowerCase());
+      // [action, the kind of rule, table, name]. A comment on an index names no table: it takes the index's.
+      const hit = add && oneGroup(add[3]) ? ["ADD", "constraint", add[1], add[2]]
+        : validate ? ["VALIDATE", "constraint", validate[1], validate[2]]
+        : index ? ["CREATE UNIQUE INDEX", "index", index[2], index[1]]
+        : onConstraint ? ["COMMENT", "constraint", onConstraint[2], onConstraint[1]]
+        : onIndex ? ["COMMENT", "index", "", onIndex[1]]
+        : null;
+      if (hit) {
+        const [action, rule] = hit;
+        const table = tableOf(hit[2]);
+        const name = hit[3].toLowerCase();
+        statements.push({
+          action,
+          comment: action === "COMMENT",
+          rule,
+          key: rule === "index" ? `index ${name}` : `${table}.${name}`,
+          table,
+          name,
+          start: from + (raw.length - raw.trimStart().length),
+          end: at + 1,
+        });
+      }
+      from = at + 1;
+    }
+    return { name, sql, defines, indexes, drops, statements };
+  });
+  // The rules struck, each from the first file that loses a statement to the file that decides it last.
+  const rules = new Map();
+  const struck = read.map(() => []);
+  read.forEach((file, i) => {
+    for (const s of file.statements) {
+      if (s.comment) continue;
+      const after = read.map((f, j) => ({ f, j })).slice(i + 1);
+      // A CHECK: the later files that define it. An index: only where a later file drops it, and then the last
+      // file to drop it or make it decides.
+      const later = s.action === "CREATE UNIQUE INDEX"
+        ? (after.some(({ f }) => f.drops.has(s.name)) ? after.filter(({ f }) => f.drops.has(s.name) || f.indexes.has(s.name)) : [])
+        : after.filter(({ f }) => f.defines.has(s.key));
+      if (later.length === 0) continue;
+      const by = later[later.length - 1].j;
+      struck[i].push({ s, by });
+      const rule = rules.get(s.key);
+      if (!rule) rules.set(s.key, { first: i, by, table: s.table });
+      else rule.by = Math.max(rule.by, by);
+    }
+  });
+  read.forEach((file, i) => {
+    for (const s of file.statements) {
+      const rule = s.comment ? rules.get(s.key) : undefined;
+      if (rule && i >= rule.first && i < rule.by) struck[i].push({ s: { ...s, table: s.table || rule.table }, by: rule.by });
+    }
+  });
+  const out = new Map();
+  read.forEach((file, i) => {
+    if (struck[i].length === 0) return;
+    let text = file.sql;
+    const left = [];
+    for (const { s, by } of struck[i].sort((x, y) => x.s.start - y.s.start)) {
+      left.push({ action: s.action, rule: s.rule, table: s.table, name: s.name, by: read[by].name });
+      text = text.slice(0, s.start) + text.slice(s.start, s.end).replace(/[^\n]/g, " ") + text.slice(s.end);
+    }
+    out.set(file.name, { sql: text, left });
+  });
   return out;
 }
 
