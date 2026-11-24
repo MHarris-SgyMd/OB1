@@ -941,8 +941,9 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     assert(f.some((x) => x.reason === name), `caught: ${name}`);
   }
   assert(SECRET_PATTERNS.every(([name]) => probes.some((p) => p[0] === name)), "every named pattern has a probe above");
-  // …and a near miss is not a claim token (SMD-3615): 63 digits, a longer run, or `wc_` inside a word.
-  for (const near of ["wc_" + "a".repeat(63), "wc_" + "a".repeat(65), "xwc_" + "a".repeat(64), "9wc_" + "a".repeat(64)]) {
+  // …and a near miss is not a claim token (SMD-3615): 63 digits or a longer run. `wc_` glued to a word's letters or
+  // digits is one since SMD-4544 (below), where SMD-3615 had read it as a word's.
+  for (const near of ["wc_" + "a".repeat(63), "wc_" + "a".repeat(65)]) {
     assert(!scanForSecrets(`the summary says ${near} and goes on`).some((x) => x.reason === "work-claim token"), `not a work-claim token: ${near.slice(0, 8)}… (${near.length - 3} after the prefix)`);
   }
   const highEntropy = "kQ7vX2pL9mN4rT8wZ1yB6cF3hJ5gD0sA";
@@ -1450,6 +1451,19 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(wrapPrep.code === 0 && wrapPayload && wrapDry.code === 0 && wrapLeft.length === 0,
     `…and neither the payload written nor the dry run's output holds the wrapped password (SMD-4543) (${wrapPrep.code} ${wrapDry.code} ${JSON.stringify(wrapLeft)})`);
   if (wrapPrep.payloadPath) unlinkSync(wrapPrep.payloadPath);
+
+  // SMD-4544: a work-claim token glued to a letter or digit before it is found — after `x`, after a URL-encoded `=`
+  // (`%3D`), after a digit, in upper case — blanked in a prompt and in the outcome, and the model's excerpt withheld
+  // for it; where no rule took it, it went to the brain and the model whole.
+  const claimHex = "3f".repeat(16) + "a1b2c3d4".repeat(4);
+  const glued = [`see xwc_${claimHex} there`, `?q=1%3Dwc_${claimHex}&x=2`, `id 9wc_${claimHex} ok`, `XWC_${claimHex.toUpperCase()} now`].map((text) => {
+    const inPrompt = cleanEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0], "redact");
+    const inOutcome = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text }]).episodes[0], "redact");
+    const exc = assistantExcerpt({ assistant: [text] });
+    return { prompt: !inPrompt.text.toLowerCase().includes(claimHex) && /\[redacted:work-claim token/.test(inPrompt.text), outcome: !inOutcome.text.toLowerCase().includes(claimHex) && /\[redacted:work-claim token/.test(inOutcome.text), gate: gateFindings(inPrompt, inPrompt.text).length + gateFindings(inOutcome, inOutcome.text).length, withheld: /work-claim token/.test(exc.withheld ?? "") };
+  });
+  assert(glued.every((g) => g.prompt && g.outcome && g.gate === 0 && g.withheld),
+    `a work-claim token glued to a letter or digit is blanked in a prompt and the outcome, and withholds the model's excerpt (SMD-4544) (${JSON.stringify(glued)})`);
 }
 
 // ── [6] Posting ──────────────────────────────────────────────────────────────
