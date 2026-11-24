@@ -16,7 +16,7 @@
  * the payload is sent, which a later hook may do; its stamp names the hook
  * that prepared the model's input.
  */
-export const HOOK_VERSION = "1.11.4";
+export const HOOK_VERSION = "1.11.6";
 /** A version's shape, three numbers: the only stamp `postCapture` sends. The suite holds HOOK_VERSION to it. */
 export const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
