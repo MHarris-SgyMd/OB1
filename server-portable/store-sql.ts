@@ -1098,11 +1098,17 @@ export class SqlStore implements ThoughtStore {
     let rows: Record<string, unknown>[];
     try {
       rows = await this.sql`
-        SELECT id, issue, piece, holder, holder_agent_id, holder_kind, label, claimed_at, renewed_at, expires_at,
-               released_at, released_by, released_by_kind, release_reason, state, page_key, remaining
+        SELECT l.id, l.issue, l.piece, l.holder, l.holder_agent_id, l.holder_kind, l.label, l.claimed_at, l.renewed_at, l.expires_at,
+               l.released_at, l.released_by, l.released_by_kind, l.release_reason, l.state, l.page_key, l.remaining,
+               -- 152's count (SMD-4540) beside the listing: list_work_claims keeps 143's columns, as 143's CREATE OR REPLACE,
+               -- re-applied, would refuse a new one. Through the row's jsonb, so a brain before 152 lists with null, not a missing
+               -- column (review pass 1); by the claim's id, the primary key, not a hash of every claim's row (pass 2).
+               (SELECT (to_jsonb(w) ->> 'renewals')::int FROM work_claims w WHERE w.id = l.id) AS renewals
           FROM list_work_claims(${opts.issue === undefined ? null : this.sql.array([opts.issue], "TEXT")}::text[], ${opts.holder ?? null}::text,
                                 ${opts.includeEnded === true}::boolean, ${opts.limit ?? 100}::int,
-                                ${a?.issue ?? null}::text, ${a?.pieceKey ?? null}::text, ${a?.claimedAt ?? null}::timestamptz, ${a?.id ?? null}::uuid)` as Record<string, unknown>[];
+                                ${a?.issue ?? null}::text, ${a?.pieceKey ?? null}::text, ${a?.claimedAt ?? null}::timestamptz, ${a?.id ?? null}::uuid)
+               WITH ORDINALITY AS l
+         ORDER BY l.ordinality` as Record<string, unknown>[];
     } catch (e) {
       // list_thoughts' rule (SMD-2995): a time cast that failed is read alone, and only a cursor time Postgres cannot
       // read is the caller's, refused; anything else is the store's fault.

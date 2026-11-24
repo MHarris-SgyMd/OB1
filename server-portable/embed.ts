@@ -757,6 +757,7 @@ export type EmbedConfig = {
    * the judge's model then only writing the proposals it calls and, since decide version 4, answering the mediated-pair
    * test's link step (consolidate-decide.ts, SMD-3203); "" when the judge decides.
    * The pass key names it with the judge's model (consolidatePassKey), so turning it on starts a fresh pass.
+   * Since decide version 6 (SMD-4446) what the judge's model writes of such a pair is its settled parts.
    */
   decider: string;
   metadataTemperature: number;

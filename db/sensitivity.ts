@@ -135,7 +135,27 @@ export const SECRET_SHAPES: readonly (readonly [string, RegExp])[] = [
   ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"'`‘’“”«»]*\d)[^\s"'`‘’“”«»]{16,})/di],
   ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"'`‘’“”«»]{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\[)[^\s"'`‘’“”«»]{6,})/di],
+  // SMD-4542: a second keyword is no value (`password: password = <it>` takes the second's); a getter's call is
+  // stepped over to its default (`os.environ.get("X", "<it>")`); and after an opening quote a value that reads as a
+  // token — a digit in it, no whole word of three letters or more — runs to its closing quote on the line, spaces and
+  // all, though its first word is short (`password="Kp7m Wq2z R9x"`).
+  // - Review pass 1: `${…}` stays a value, as before, since an exclusion sent `${PG_PW:-<it>}`'s default; and quoted
+  //   prose or a placeholder (`"Enter your password"`, `"<your password>"`) is read as before, not blanked.
+  // - Review pass 2: nor does the quoted branch start a value at a placeholder's `{`, `<` or `$` (`"{{ db_pass_2 }}"`,
+  //   `"<pw 1>"`), which db/sensitivity.ts's own password rule skips too.
+  // - Review pass 3: a bare reference (`process.env.X`, `os.environ[…]`, `getenv(…)`) stays a value, as before.
+  //   Excluding it left `password = process.env.X || "<it>"` with no finding, so refuse sent it whole, the model's
+  //   excerpt carried it, and the brain read `PGPASSWORD=process.env.X` standard. The getter's receiver is dotted names
+  //   of letters (`os.`, `process.`), so a password glued onto the getter (`<it>getenv(`) is not taken for one.
+  // - Review pass 4: a getter's call whose default is already a whole marker, the argument's last, is no value, or the
+  //   second scan would find the call once the first had blanked its default.
+  // - Review pass 5: the step-over applies only when the default ends the argument. A nested call or an expression
+  //   there (`getenv("A", getenv("B"))`, `"<it>" + SUFFIX`) is read as before, the outer call blanked, not half-blanked
+  //   into a line the second scan would refuse.
+  // - Review pass 6: the default is a quoted literal closed by its own quote's partner, then `,` or `)`. A bare name
+  //   (`getenv("X", DEFAULT_PW).encode()`) let the value run past the call's `)`, and a mismatched quote past the
+  //   default's end, each into a line the second scan refused; both are read as before, the call blanked.
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*(?=(?:"[^"'`‘’“”«»\n]*"|'[^"'`‘’“”«»\n]*'|`[^"'`‘’“”«»\n]*`|‘[^"'`‘’“”«»\n]*’|“[^"'`‘’“”«»\n]*”|«[^"'`‘’“”«»\n]*»)\s*[,)]))?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*["'`‘“«]\[redacted:[^\]\n]*\]["'`’”»]\s*[,)])(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»{<$][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
   // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
   // their digests — told apart only by where they sit: a digest follows
   // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key

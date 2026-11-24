@@ -16,10 +16,22 @@
  * the payload is sent, which a later hook may do; its stamp names the hook
  * that prepared the model's input.
  */
-export const HOOK_VERSION = "1.11.2";
+export const HOOK_VERSION = "1.11.5";
 /** A version's shape, three numbers: the only stamp `postCapture` sends. The suite holds HOOK_VERSION to it. */
 export const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
+/**
+ * The harnesses, and what differs between them: the label a message uses,
+ * where the printed hook is pasted, and the timeout a pinned hook carries —
+ * Claude Code raises SessionEnd's shared 1.5 s budget to a hook's own (≤ 60),
+ * Codex allows at most 3 s (fifth review pass: the 3-or-10, the labels and the
+ * paths were ternaries beside the events' table).
+ */
+export const HARNESS = Object.assign(Object.create(null), {
+  "claude-code": { label: "Claude Code", settings: "~/.claude/settings.json (or .claude/settings.json in a project)", timeoutSec: 10 },
+  codex: { label: "Codex", settings: "~/.codex/hooks.json", timeoutSec: 3 },
+});
+export const HARNESSES = Object.keys(HARNESS);
 /**
  * The events this hook runs on, in one table (SMD-2012; second review pass:
  * the same three names were spelled in four structures that had to agree).
@@ -38,18 +50,6 @@ export const VERSION_RE = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
  * not the hook's: prepare() skips it, since SubagentStop or UserPromptSubmit
  * would post a final-looking summary of a session still running.
  */
-/**
- * The harnesses, and what differs between them: the label a message uses,
- * where the printed hook is pasted, and the timeout a pinned hook carries —
- * Claude Code raises SessionEnd's shared 1.5 s budget to a hook's own (≤ 60),
- * Codex allows at most 3 s (fifth review pass: the 3-or-10, the labels and the
- * paths were ternaries beside the events' table).
- */
-export const HARNESS = Object.assign(Object.create(null), {
-  "claude-code": { label: "Claude Code", settings: "~/.claude/settings.json (or .claude/settings.json in a project)", timeoutSec: 10 },
-  codex: { label: "Codex", settings: "~/.codex/hooks.json", timeoutSec: 3 },
-});
-export const HARNESSES = Object.keys(HARNESS);
 // A null prototype, and eventSpec() by own property: on a plain object
 // `EVENTS["constructor"]` is Object's, and "toString" passed every check as an
 // event — printed as a hook that never fires, captured as an end (third review pass).
