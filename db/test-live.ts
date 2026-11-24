@@ -63,7 +63,7 @@ import { writeReport as writeLintReport } from "./lint-sweep.ts";
 import { drainer, sweepOrphans } from "./rebuild.ts";
 import type { Admit, InHandAbort, PassStop } from "./lease.ts";
 import { CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, consolidateKey, DEFAULT_CANDIDATES, PASS_SETTLED_PREFIX, passSettledNote } from "../server-portable/consolidate.ts";
-import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PARTS_HEAD, PARTS_RULES } from "../server-portable/consolidate-decide.ts";
+import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PARTS_HEAD, PARTS_RULES, waitingPartsSql } from "../server-portable/consolidate-decide.ts";
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe } from "../server-portable/lineage.ts";
 import { METADATA_PROMPT_VERSION, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
@@ -20004,7 +20004,7 @@ if (want("16")) {
           : /gateway/.test(both) ? { unrelated: 0.02, related: 0.15, evolves: 0.1, duplicate: 0.03, outdates: 0.7 }
           : /pager/.test(both) ? { unrelated: 0.05, related: 0.2, evolves: 0.6, duplicate: 0.05, outdates: 0.1 }
           // Decide version 6's pairs (SMD-4446), each an outdates at the floor the writer names a part of.
-          : /audit export|rota|badge|locker|vault|kiosk|ferry|gazebo|harbor|marina|orchard|paddock|quarry|silo|jetty|grove|meadow|lagoon|canal|quay crane|slipway winch|pier lamp|wharf office|depot roof|hangar door|kiln vent|mill wheel|yard gate|causeway|belfry|cistern|dovecote|easel|foundry|granary|gantry|hayloft|icehouse|kennel|larder|mews|nave|oast|pantry|quire|rood|sacristy|tannery/.test(both) ? { unrelated: 0.03, related: 0.15, evolves: 0.1, duplicate: 0.02, outdates: 0.7 }
+          : /audit export|rota|badge|locker|vault|kiosk|ferry|gazebo|harbor|marina|orchard|paddock|quarry|silo|jetty|grove|meadow|lagoon|canal|quay crane|slipway winch|pier lamp|wharf office|depot roof|hangar door|kiln vent|mill wheel|yard gate|causeway|belfry|cistern|dovecote|easel|foundry|granary|gantry|hayloft|icehouse|kennel|larder|mews|nave|oast|pantry|quire|rood|sacristy|tannery|wyvern|griffin|kraken/.test(both) ? { unrelated: 0.03, related: 0.15, evolves: 0.1, duplicate: 0.02, outdates: 0.7 }
           : { unrelated: 0.9, related: 0.05, evolves: 0.02, duplicate: 0.01, outdates: 0.02 };
         const probabilities: Record<string, number> = { ...Object.fromEntries(d.options.map((o) => [o.id, p[o.id] ?? 0])), __insufficient_evidence__: 0 };
         const ids = Object.keys(probabilities);
@@ -20016,7 +20016,7 @@ if (want("16")) {
     // id set once its pair is seeded, and how many times it was asked about each pair (`calls`, by the pair's name).
     // `siloMoves` names the calls during which the silo pair's newer text moves, and `siloHides` the one during which
     // its older thought's vector leaves the pair's axis. `probeCalls`, above, counts the pass's one-token calls.
-    const parts6 = { rotaOld: "", badgeNew: "", lockerOld: "", vaultNew: "", kioskOld: "", jettyNew: "", lagoonNew: "", canalOld: "", quayNew: "", slipNew: "", pierNew: "", wharfNew: "", depotNew: "", hangarNew: "", kilnNew: "", millNew: "", yardNew: "", siloOld: "", siloNew: "", siloMoves: [] as number[], siloHides: 0, easelNew: "", granaryNew: "", sacristyNew: "", calls: {} as Record<string, number> };
+    const parts6 = { rotaOld: "", badgeNew: "", lockerOld: "", vaultNew: "", kioskOld: "", jettyNew: "", lagoonNew: "", canalOld: "", quayNew: "", slipNew: "", pierNew: "", wharfNew: "", depotNew: "", hangarNew: "", kilnNew: "", millNew: "", yardNew: "", siloOld: "", siloNew: "", siloMoves: [] as number[], siloHides: 0, easelNew: "", granaryNew: "", sacristyNew: "", krakenNew: "", calls: {} as Record<string, number> };
     /** While set, the writer's next proposal call is refused 401, and the tier's address answers 404 from then on, as an address that is no tier (SMD-4352). */
     let writerRefusesAsTierMoves = false;
     let tierIsGone = false;
@@ -20308,6 +20308,22 @@ if (want("16")) {
         } else if (/sacristy/.test(both)) {
           // …and its first pair: a part at the first judgement, and none after.
           if (called("sacristy") === 1) answer = { parts: [partOf("door is locked", "door was unlocked in May", "resolves", "the door was unlocked")], a_falls: "no", b_falls: "no" };
+        } else if (/wyvern/.test(both)) {
+          // A whole, shown by its part, at the first judgement; then an answer that is no JSON; then no part and no whole.
+          const n = called("wyvern");
+          if (n === 1) answer = { parts: [partOf("arch is cracked", "arch was shored in May", "resolves", "the arch was shored")], a_falls: "yes", b_falls: "no" };
+          if (n === 2) answer = "The arch was shored, so the first note is out of date.";
+        } else if (/kraken/.test(both)) {
+          // A whole, shown by its part, at the first judgement; after it no part and no whole, the thought's own text
+          // moving during the second.
+          const n = called("kraken");
+          if (n === 1) answer = { parts: [partOf("net is torn", "net was mended in May", "resolves", "the net was mended")], a_falls: "yes", b_falls: "no" };
+          if (n === 2) await move(parts6.krakenNew, "[16d] The kraken net was mended in May, in hemp, and tarred since.");
+        } else if (/griffin/.test(both)) {
+          // The same two answers, on a pair whose part a reviewer has decided by the second.
+          const n = called("griffin");
+          if (n === 1) answer = { parts: [partOf("vane is bent", "vane was straightened in May", "resolves", "the vane was straightened")], a_falls: "yes", b_falls: "no" };
+          if (n === 2) answer = "The vane was straightened, so the first note is out of date.";
         } else if (/larder/.test(both)) {
           // Its part at every judgement.
           called("larder");
@@ -21027,11 +21043,11 @@ if (want("16")) {
           const wouldLine = (out: string) => out.split("\n").find((l) => /^ {2}would: /.test(l))?.trim().slice(0, 150) ?? "no would line";
           const ticketsLine = (out: string) => out.split("\n").find((l) => /^ {2}tickets: /.test(l))?.trim().slice(0, 90) ?? "no tickets line";
           const pendingBefore = Object.values(await lifeParts()).flat().filter((r) => r.status !== "pending").map((r) => r.statement).join();
-          const WAIT_BEFORE = "a decide-mode run of the pass (bun db/consolidate.ts) judges the pair of 10 again; 2 wait for a vector; 2 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale";
+          const WAIT_BEFORE = "a decide-mode run of the pass (bun db/consolidate.ts) takes up 10, the pair judged again or, where nothing will judge it again, the part removed; 2 wait for a vector; 2 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale";
           assert(new RegExp(`^settled parts: \\d+ pending \\(13 of them at a text that has moved since\\), 1 stale, \\d+ accepted, \\d+ rejected — of the 14 that wait, ${WAIT_BEFORE.replace(/[()]/g, "\\$&")}$`).test(partsLine(lifeStatus.out))
               && partsLine(lifeDry.out) === partsLine(lifeStatus.out)
               && rebuildBefore === `parts:       1 stale (a text moved under the settled part), 13 pending at a text that has moved since, which no rebuild has seen — ${WAIT_BEFORE}`,
-            `both --status commands count the parts that wait, the pending ones at a moved text by each text's own fingerprint where the stored one differs, and place them: those a run judges again, those that wait for a vector and those held for a rebuild (${partsLine(lifeStatus.out)}; rebuild: ${rebuildBefore})`);
+            `both --status commands count the parts that wait, the pending ones at a moved text by each text's own fingerprint where the stored one differs, and place them: those a run takes up, its pair judged again or the part removed where nothing will judge the pair, those that wait for a vector and those held for a rebuild (${partsLine(lifeStatus.out)}; rebuild: ${rebuildBefore})`);
           assert(/^would: add 0 thoughts to the pool and re-pool 9 for settled parts whose text has moved; judge 9 thought\(s\) /.test(wouldLine(lifeDry.out))
               && /^tickets: \d+ judge call\(s\) fewer over the 9 thought\(s\) still to judge/.test(ticketsLine(lifeDry.out))
               && new RegExp(`^consolidate \\(${DKEY.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\): \\d+ in flight, 0 pending, 9 not yet in the pool, \\d+ failed`).test(sleepBefore) && !/drained/.test(sleepBefore)
@@ -21065,10 +21081,20 @@ if (want("16")) {
           const secondClaims = await lifeClaims();
           // While the lines after the run are read, the granary thought holds a failed claim of another pass's, under an
           // extraction key: it places no part behind --retry-failed, which returns a consolidation claim alone.
-          await sql`INSERT INTO thought_work_claims (thought_id, work_type) VALUES (${parts6.granaryNew}::uuid, 'extract:for-this-row') ON CONFLICT DO NOTHING`;
-          await sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'for this row' WHERE thought_id = ${parts6.granaryNew}::uuid AND work_type = 'extract:for-this-row'`;
+          // …and one under another consolidation key, as a decide version before this one leaves (review pass 2). The
+          // pass's own status, which knows its key, places no part behind it, as its pool step skips none for it; and
+          // db/rebuild.ts, which knows no key, places the part there and names the key. (Read under any key by both,
+          // the part stood behind a --retry-failed that returns nothing, beside a dry run that pools its thought.)
+          const OTHER_KEY = "consolidate:for-this-row@p4d5";
+          await sql`INSERT INTO thought_work_claims (thought_id, work_type) SELECT ${parts6.granaryNew}::uuid, k FROM unnest(ARRAY['extract:for-this-row', ${OTHER_KEY}]) AS k ON CONFLICT DO NOTHING`;
+          await sql`UPDATE thought_work_claims SET status = 'failed', finished_at = now(), last_error = 'for this row' WHERE thought_id = ${parts6.granaryNew}::uuid AND work_type IN ('extract:for-this-row', ${OTHER_KEY})`;
+          // …and a held part's thought holds one under a third key: that claim places no part, the part being held,
+          // so its key is not among those named.
+          const HELD_KEY = "consolidate:for-a-held-part@p4d5";
+          await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at, last_error) VALUES (${naveNew}::uuid, ${HELD_KEY}, 'failed', now(), 'for this row') ON CONFLICT DO NOTHING`;
           const [rebuildAfter, statusAfter, dryAfter] = [await rebuildParts(), partsLine((await decide(denv, "--status")).out), wouldLine((await decide(denv, "--dry-run")).out)];
-          await sql`DELETE FROM thought_work_claims WHERE thought_id = ${parts6.granaryNew}::uuid AND work_type = 'extract:for-this-row'`;
+          await sql`DELETE FROM thought_work_claims WHERE thought_id = ${parts6.granaryNew}::uuid AND work_type IN ('extract:for-this-row', ${OTHER_KEY})`;
+          await sql`DELETE FROM thought_work_claims WHERE thought_id = ${naveNew}::uuid AND work_type = ${HELD_KEY}`;
           assert(poolLine(lifeSecondRun.out) === "pool: 0 thought(s) added (9 more re-pooled for settled parts whose text has moved)"
               && /^ {2}11 thought\(s\) judged, 2 failed, 0 deleted mid-pass/m.test(lifeSecondRun.out)
               && secondClaims === lifeNames.map((n) => `${n} ${n === "quire" || n === "rood" ? "failed" : "succeeded"}`).join(", "),
@@ -21101,11 +21127,13 @@ if (want("16")) {
           assert(/decide: 2 settled part\(s\) read — 2 recorded for review \(2 in place of an earlier judgement of the statement\), 0 already held, 0 with a quote that did not check out$/m.test(lifeSecondRun.out)
               && partsMovedLine(lifeSecondRun.out) === "parts whose text moved: 4 removed by the pass (1 judged again and named no more, 3 on a pair that is not judged again); 2 wait on a vector the reembed pool writes (re-pooled by the run after it lands); 2 left for a rebuild, their pair holding a proposal at a moved text that none has set stale; 1 decided by a reviewer meanwhile; 1 left, a text having moved again under the pass (re-pooled by the next run); 2 kept, their pair's answer unread (each said on its thought's claim, which failed)",
             `the run's summary says what became of each part that waited: the two named again among the parts recorded, and the rest on a line of their own, each once (${said(lifeSecondRun.out).split(" | ").find((l) => /settled part\(s\) read/.test(l)) ?? "no parts line"}; ${partsMovedLine(lifeSecondRun.out)})`);
-          const WAIT_AFTER = "a decide-mode run of the pass (bun db/consolidate.ts) judges the pair of 1 again; 2 wait for a vector; 2 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale; 2 wait for --retry-failed, their thought's claim having failed";
-          assert(rebuildAfter === `parts:       0 stale (a text moved under the settled part), 7 pending at a text that has moved since, which no rebuild has seen — ${WAIT_AFTER}`
+          const WAIT_REST = "2 wait for a vector; 2 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale";
+          const WAIT_AFTER = `a decide-mode run of the pass (bun db/consolidate.ts) takes up 1, the pair judged again or, where nothing will judge it again, the part removed; ${WAIT_REST}; 2 wait for --retry-failed, their thought's claim under the pass's key having failed`;
+          const WAIT_AFTER_KEYLESS = `a decide-mode run of the pass (bun db/consolidate.ts) takes up none as things stand; ${WAIT_REST}; 3 wait behind a claim of their thought that failed in a pass under ${[OTHER_KEY, DKEY].sort().join(", ")} (bun db/consolidate.ts --retry-failed with that judge's model)`;
+          assert(rebuildAfter === `parts:       0 stale (a text moved under the settled part), 7 pending at a text that has moved since, which no rebuild has seen — ${WAIT_AFTER_KEYLESS}`
               && new RegExp(`^settled parts: \\d+ pending \\(7 of them at a text that has moved since\\), 0 stale, \\d+ accepted, \\d+ rejected — of the 7 that wait, ${WAIT_AFTER.replace(/[()]/g, "\\$&")}$`).test(statusAfter)
               && /^would: add 0 thoughts to the pool and re-pool 1 for settled parts whose text has moved; judge 1 thought\(s\) /.test(dryAfter),
-            `after the run both --status commands place the seven parts that still wait: one a run judges again, a failed claim of another pass's on its thought counting for nothing, two waiting for a vector, two for a rebuild and two for --retry-failed; and a dry run counts the one thought a run would pool (rebuild: ${rebuildAfter}; the pass: ${statusAfter}; ${dryAfter.slice(0, 110)})`);
+            `after the run both --status commands place the seven parts that still wait, two waiting for a vector, two for a rebuild and two behind this pass's failed claims. The seventh, whose thought holds a failed claim under an extraction key and one under another consolidation key, is a run's to the pass, which reads its own key and whose dry run counts that thought to pool; to db/rebuild.ts, which knows no key, it stands behind the other key's claim, named, where a third key's failed claim on a held part's thought places nothing and is not named (rebuild: ${rebuildAfter}; the pass: ${statusAfter}; ${dryAfter.slice(0, 110)})`);
 
           // The vectors are back. The next run pools the foundry, gantry and granary thoughts itself, for the part
           // each still holds, judges each pair again and removes the three parts, named no more. The run after that
@@ -21150,6 +21178,188 @@ if (want("16")) {
           assert(kennelFirst !== undefined && /^ {2}1 thought\(s\) judged, 0 failed, 0 deleted mid-pass/m.test(keptRun.out) && parts6.calls.kennel === 2
               && kennelKept.length === 1 && kennelKept[0].id === kennelFirst.id && kennelKept[0].status === "pending" && partsMovedLine(keptRun.out) === "no moved parts line",
             `a pending part at the texts as they stand, named no more by a later judgement of them, is kept: the pass removes a judgement of other texts alone (writer calls ${parts6.calls.kennel}; ${plain(kennelKept)}; ${partsMovedLine(keptRun.out)})`);
+
+          // Review pass 2: an answer that could not be read, on a pair whose proposal is stale. Nothing of the pair's
+          // judgement is recorded: the proposal stays stale, the part is kept and the claim fails. (Settled there, the
+          // proposal closed the pair: the retry was never offered it, and the part was kept from then on as held for a
+          // rebuild, which reopened nothing.) Asked again, the pair is judged again: it names neither now, so its
+          // part is removed and its proposal settled.
+          const wyOld = await seed("[16d] The wyvern arch is cracked.", 122, 3, ["wyvern"]);
+          const wyNew = await seed("[16d] The wyvern arch was shored in May.", 122, 0, ["wyvern"]);
+          // …and a twin whose part a reviewer rejects before the edit, so that no part of its pair waits: there an
+          // unread answer is recorded as it was before (SMD-4518 has that such an answer is never asked again).
+          const grOld = await seed("[16d] The griffin vane is bent.", 130, 3, ["griffin"]);
+          const grNew = await seed("[16d] The griffin vane was straightened in May.", 130, 0, ["griffin"]);
+          await decide(denv);
+          const [wyFirst, wyPropFirst] = [await partsOf(wyOld, wyNew), await proposalOf(wyOld, wyNew)];
+          const [{ r: grDecided }] = (await sql`SELECT review_settled_part(s.id, 'reject', 'not a statement of the thought', NULL, false, 'pending') AS r FROM settled_parts s WHERE s.older_id = ${grOld}::uuid AND s.newer_id = ${grNew}::uuid`) as { r: { ok: boolean } }[];
+          await moveText(wyNew, "[16d] The wyvern arch was shored in May, in oak.");
+          await moveText(grNew, "[16d] The griffin vane was straightened in May, by the smith.");
+          const [{ r: wyRebuilt }] = (await sql`SELECT rebuild_derived(${wyNew}::uuid, 'live: the edit') AS r`) as { r: { stale_proposals: number; stale_parts?: number } }[];
+          const [{ r: grRebuilt }] = (await sql`SELECT rebuild_derived(${grNew}::uuid, 'live: the edit') AS r`) as { r: { stale_proposals: number; stale_parts?: number } }[];
+          const wyUnreadRun = await decide(denv);
+          const [wyKept, wyPropKept, wyClaimKept] = [await partsOf(wyOld, wyNew), await proposalOf(wyOld, wyNew), await claim6(wyNew)];
+          const [grParts, grProp, grClaim] = [await partsOf(grOld, grNew), await proposalOf(grOld, grNew), await claim6(grNew)];
+          const wyCallsKept = parts6.calls.wyvern;
+          await sql`SELECT requeue_thought_work(${DKEY}, ${wyNew}::uuid)`;
+          const wyAgainRun = await decide(denv);
+          const [wyAfter, wyPropAfter, wyClaimAfter] = [await partsOf(wyOld, wyNew), await proposalOf(wyOld, wyNew), await claim6(wyNew)];
+          assert(wyFirst.length === 1 && wyPropFirst?.status === "pending" && wyRebuilt.stale_proposals === 1 && wyRebuilt.stale_parts === 1
+              && wyCallsKept === 2 && wyKept.length === 1 && wyKept[0].id === wyFirst[0].id && wyKept[0].status === "stale" && wyPropKept?.status === "stale" && wyClaimKept?.status === "failed"
+              && wyClaimKept.last_error === `a settled part of a moved text was not removed — the answer for its pair with ${wyOld} could not be read, and the part is kept`
+              && partsMovedLine(wyUnreadRun.out) === "parts whose text moved: 1 kept, their pair's answer unread (each said on its thought's claim, which failed)"
+              && parts6.calls.wyvern === 3 && wyAfter.length === 0 && wyPropAfter?.status === "rejected" && wyClaimAfter?.status === "succeeded"
+              && partsMovedLine(wyAgainRun.out) === "parts whose text moved: 1 removed by the pass (1 judged again and named no more)",
+            `an answer that could not be read, on a pair whose proposal is stale, records nothing of the pair: the proposal stays stale, the part is kept and the claim fails; asked again, the pair is judged again, its part removed and its proposal settled (after the unread answer: ${wyKept.map((r) => r.status).join() || "no part"}, proposal ${wyPropKept?.status}, claim ${JSON.stringify(wyClaimKept ?? null)}, writer calls ${wyCallsKept}, ${partsMovedLine(wyUnreadRun.out)}; asked again: ${wyAfter.length} part(s), proposal ${wyPropAfter?.status}, claim ${wyClaimAfter?.status}, writer calls ${parts6.calls.wyvern}, ${partsMovedLine(wyAgainRun.out)})`);
+          assert(grDecided.ok && grRebuilt.stale_proposals === 1 && grRebuilt.stale_parts === 0 && parts6.calls.griffin === 2
+              && grParts.length === 1 && grParts[0].status === "rejected" && grProp?.status === "rejected" && grClaim?.status === "succeeded",
+            `…and where no part of the pair waits, its one part decided by a reviewer, an unread answer is recorded as before: the pair's stale proposal is settled and the claim succeeds (rebuilt: ${JSON.stringify([grRebuilt.stale_proposals, grRebuilt.stale_parts])}; writer calls ${parts6.calls.griffin}; part ${grParts.map((r) => r.status).join() || "none"}, proposal ${grProp?.status}, claim ${JSON.stringify(grClaim ?? null)})`);
+          await sql`DELETE FROM thoughts WHERE id IN (${wyOld}::uuid, ${wyNew}::uuid, ${grOld}::uuid, ${grNew}::uuid)`;
+
+          // Review pass 2: a text that moves while a pair is judged, found by the removal of a part the judgement names no
+          // more (the store's EDITED_SINCE), on a pair whose proposal is stale. Nothing more of that judgement is
+          // recorded: the proposal stays stale and the part waits, the claim succeeded, and the next run pools the
+          // thought itself and judges the pair at the text as it stands. (The proposal was settled on the judgement of
+          // the text that had gone, which closed the pair: the part then waited for a rebuild beside the rejection.)
+          const krOld = await seed("[16d] The kraken net is torn.", 131, 3, ["kraken"]);
+          parts6.krakenNew = await seed("[16d] The kraken net was mended in May.", 131, 0, ["kraken"]);
+          await decide(denv);
+          const [krFirst, krPropFirst] = [await partsOf(krOld, parts6.krakenNew), await proposalOf(krOld, parts6.krakenNew)];
+          await moveText(parts6.krakenNew, "[16d] The kraken net was mended in May, in hemp.");
+          const [{ r: krRebuilt }] = (await sql`SELECT rebuild_derived(${parts6.krakenNew}::uuid, 'live: the edit') AS r`) as { r: { stale_proposals: number; stale_parts?: number } }[];
+          const krMovedRun = await decide(denv);
+          const [krKept, krPropKept, krClaimKept, krCallsKept] = [await partsOf(krOld, parts6.krakenNew), await proposalOf(krOld, parts6.krakenNew), await claim6(parts6.krakenNew), parts6.calls.kraken];
+          const krAgainRun = await decide(denv);
+          const [krAfter, krPropAfter, krClaimAfter] = [await partsOf(krOld, parts6.krakenNew), await proposalOf(krOld, parts6.krakenNew), await claim6(parts6.krakenNew)];
+          assert(krFirst.length === 1 && krPropFirst?.status === "pending" && krRebuilt.stale_proposals === 1 && krRebuilt.stale_parts === 1
+              && krCallsKept === 2 && krKept.length === 1 && krKept[0].id === krFirst[0].id && krKept[0].status === "stale" && krPropKept?.status === "stale" && krClaimKept?.status === "succeeded"
+              && partsMovedLine(krMovedRun.out) === "parts whose text moved: 1 left, a text having moved again under the pass (re-pooled by the next run)"
+              && poolLine(krAgainRun.out) === "pool: 0 thought(s) added (1 more re-pooled for stale proposals)" && parts6.calls.kraken === 3 && krAfter.length === 0 && krPropAfter?.status === "rejected" && krClaimAfter?.status === "succeeded"
+              && partsMovedLine(krAgainRun.out) === "parts whose text moved: 1 removed by the pass (1 judged again and named no more)",
+            `a text that moves under the removal of a part, on a pair whose proposal is stale, leaves the pair as it was: the proposal stale, the part waiting, the claim succeeded; and the next run pools the thought itself and judges the pair at the text as it stands, the part removed and the proposal settled (after the move: ${krKept.map((r) => r.status).join() || "no part"}, proposal ${krPropKept?.status}, claim ${krClaimKept?.status}, writer calls ${krCallsKept}, ${partsMovedLine(krMovedRun.out)}; the next run: ${poolLine(krAgainRun.out)}, ${krAfter.length} part(s), proposal ${krPropAfter?.status}, writer calls ${parts6.calls.kraken}, ${partsMovedLine(krAgainRun.out)})`);
+          await sql`DELETE FROM thoughts WHERE id IN (${krOld}::uuid, ${parts6.krakenNew}::uuid)`;
+
+          // Review pass 2: what the pass does with a part beside a closed pair agrees with what a rebuild would do with
+          // the pair's proposal. Seven pairs, each built with the store's own calls; a rejection of the pass's is made
+          // by the pass's own settle (settle_supersession_proposal), which records the texts it judged in the
+          // proposal's lineage row and leaves the row's two fingerprints as first proposed. (The pass read those two:
+          // a part beside a rejection settled at the texts as they stand was held for a rebuild that reopens nothing,
+          // and one beside a rejection whose text was put back as first proposed was removed though a rebuild
+          // reopens its pair.)
+          //   one:   a pending proposal and its part; the newer text moves. Held: a rebuild sets the proposal stale.
+          //   two:   a part at an earlier text beside a pending proposal at the texts as they stand. Removed.
+          //   three: the pass settled the pair's stale proposal at the texts as they stand; a part of the earlier
+          //          text is left, as a version before the settle left one. Removed.
+          //   four:  as three with its part at the texts settled at; then the newer text moves again. Held.
+          //   five:  as four, the newer text put back as the proposal first had it. Held.
+          //   six:   a reviewer rejected the proposal; the newer text moves. Removed: a person's decision stands.
+          //   seven: as three, the older text the one that moved. Removed.
+          const fpNow = async (id: string) => ((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`) as { f: string }[])[0].f;
+          const HELD_RECIPE = { deterministic: false, model: "for-this-row", prompt_version: 6 };
+          type HeldCell = { name: string; o: string; n: string; q: string | null };
+          const heldCells: HeldCell[] = [];
+          const heldBuilt: boolean[] = [];
+          const judgedOnce = (id: string) => sql`INSERT INTO thought_work_claims (thought_id, work_type, status, finished_at) VALUES (${id}::uuid, ${DKEY}, 'succeeded', now())
+                                                  ON CONFLICT (thought_id, work_type) DO UPDATE SET status = 'succeeded', finished_at = now(), ttl_expires_at = NULL`;
+          const heldCell = async (name: string, axis: number): Promise<HeldCell> => {
+            const o = await seed(`[16d] The ${name} survey is due on Friday.`, axis, 3, [name]);
+            const n = await seed(`[16d] The ${name} survey was filed on Thursday.`, axis, 0, [name]);
+            await judgedOnce(o);
+            await judgedOnce(n);
+            const c: HeldCell = { name, o, n, q: null };
+            heldCells.push(c);
+            return c;
+          };
+          const cellPart = async (c: HeldCell) => {
+            const [{ r }] = (await sql`SELECT record_settled_part(${c.o}::uuid, ${c.n}::uuid, 'older', 'survey is due on Friday', 'survey was filed on Thursday', 'resolves', 'the survey was filed', ${DKEY}, ${await fpNow(c.o)}, ${await fpNow(c.n)}, ${HELD_RECIPE}::jsonb) AS r`) as { r: { action?: string } }[];
+            heldBuilt.push(r.action === "recorded");
+          };
+          const cellProposal = async (c: HeldCell) => {
+            const [{ id }] = (await sql`SELECT record_supersession_proposal(${c.o}::uuid, ${c.n}::uuid, 'newer_supersedes_older', 0.9, 'for this row', 0.7, ${DKEY}, NULL, ${await fpNow(c.o)}, ${await fpNow(c.n)}, ${HELD_RECIPE}::jsonb) AS id`) as { id: string | null }[];
+            c.q = id;
+            heldBuilt.push(id !== null);
+          };
+          const cellRebuild = async (id: string) => ((await sql`SELECT rebuild_derived(${id}::uuid, 'live: for this row') AS r`) as { r: { stale_proposals: number } }[])[0].r.stale_proposals;
+          /** The pass's settle of the pair's stale proposal at the texts as they stand, its thought's claim ended as after that run. */
+          const cellSettle = async (c: HeldCell) => {
+            const [{ r }] = (await sql`SELECT settle_supersession_proposal(${c.q}::uuid, ${passSettledNote("judged again after a text moved — related", DKEY)}, NULL::jsonb, ${DKEY}, ${await fpNow(c.o)}, ${await fpNow(c.n)}, ${HELD_RECIPE}::jsonb, NULL::uuid) AS r`) as { r: { ok: boolean; settled?: boolean } }[];
+            heldBuilt.push(r.ok && r.settled === true);
+            await judgedOnce(c.n);
+          };
+          {
+            const c = await heldCell("heldone", 123);
+            await cellPart(c);
+            await cellProposal(c);
+            await moveText(c.n, "[16d] The heldone survey was filed on Thursday, by post.");
+          }
+          {
+            const c = await heldCell("heldtwo", 124);
+            await cellPart(c);
+            await moveText(c.n, "[16d] The heldtwo survey was filed on Thursday, by post.");
+            await cellProposal(c);
+          }
+          {
+            const c = await heldCell("heldthree", 125);
+            await cellProposal(c);
+            await cellPart(c);
+            await moveText(c.n, "[16d] The heldthree survey was filed on Thursday, by post.");
+            heldBuilt.push(await cellRebuild(c.n) === 1);
+            await cellSettle(c);
+          }
+          {
+            const c = await heldCell("heldfour", 126);
+            await cellProposal(c);
+            await moveText(c.n, "[16d] The heldfour survey was filed on Thursday, by post.");
+            heldBuilt.push(await cellRebuild(c.n) === 1);
+            await cellPart(c);
+            await cellSettle(c);
+            await moveText(c.n, "[16d] The heldfour survey was filed on Thursday, by post, and logged.");
+          }
+          {
+            const c = await heldCell("heldfive", 127);
+            await cellProposal(c);
+            await moveText(c.n, "[16d] The heldfive survey was filed on Thursday, by post.");
+            heldBuilt.push(await cellRebuild(c.n) === 1);
+            await cellPart(c);
+            await cellSettle(c);
+            await moveText(c.n, "[16d] The heldfive survey was filed on Thursday.");
+          }
+          {
+            const c = await heldCell("heldsix", 128);
+            await cellPart(c);
+            await cellProposal(c);
+            const [{ r }] = (await sql`SELECT review_supersession_proposal(${c.q}::uuid, 'reject') AS r`) as { r: { ok: boolean } }[];
+            heldBuilt.push(r.ok);
+            await moveText(c.n, "[16d] The heldsix survey was filed on Thursday, by post.");
+          }
+          {
+            const c = await heldCell("heldseven", 129);
+            await cellProposal(c);
+            await cellPart(c);
+            await moveText(c.o, "[16d] The heldseven survey is due on Friday, or on Monday.");
+            heldBuilt.push(await cellRebuild(c.o) === 1);
+            await cellSettle(c);
+          }
+          const heldSaid: { waits: number; held: boolean }[] = [];
+          for (const c of heldCells) heldSaid.push(((await sql.unsafe(`SELECT count(*)::int AS waits, COALESCE(bool_or(w.held), false) AS held FROM (${waitingPartsSql()}) w WHERE w.newer_id = $1::uuid`, [c.n])) as { waits: number; held: boolean }[])[0]);
+          const closedRun = await decide(denv);
+          const heldLeft: number[] = [];
+          for (const c of heldCells) heldLeft.push((await partsOf(c.o, c.n)).length);
+          // What a rebuild of each thought does to the pair's proposal: the rule the pass's read is held to.
+          const heldReopened: boolean[] = [];
+          for (const c of heldCells) {
+            await cellRebuild(c.n);
+            await cellRebuild(c.o);
+            heldReopened.push(((await sql`SELECT status FROM supersession_proposals WHERE id = ${c.q}::uuid`) as { status: string }[])[0]?.status === "stale");
+          }
+          const heldTable = heldCells.map((c, i) => `${c.name.slice(4)} ${heldSaid[i].waits} waiting, ${heldSaid[i].held ? "held" : "not held"}, ${heldLeft[i]} left by the run, a rebuild ${heldReopened[i] ? "reopens" : "leaves"} its proposal`).join("; ");
+          assert(heldBuilt.every(Boolean) && heldSaid.every((h) => h.waits === 1)
+              && heldCells.map((c, i) => `${c.name.slice(4)} ${heldSaid[i].held ? "held" : "free"}`).join(", ") === "one held, two free, three free, four held, five held, six free, seven free"
+              && heldCells.every((_, i) => heldSaid[i].held === heldReopened[i] && (heldLeft[i] === 1) === heldSaid[i].held)
+              && poolLine(closedRun.out) === "pool: 0 thought(s) added (4 more re-pooled for settled parts whose text has moved)"
+              && partsMovedLine(closedRun.out) === "parts whose text moved: 4 removed by the pass (4 on a pair that is not judged again)",
+            `a part beside a closed pair is held exactly where a rebuild would set the pair's proposal stale, read from the proposal's lineage row: held beside a pending proposal at a moved text and beside a rejection of the pass's whose text moved after its settle, back to the text first proposed too; removed beside a pending proposal at the texts as they stand, beside a rejection the pass settled at them, whichever text had moved, and beside a reviewer's (${heldBuilt.filter(Boolean).length} of ${heldBuilt.length} built; ${heldTable}; ${poolLine(closedRun.out)}; ${partsMovedLine(closedRun.out)})`);
+          await sql`DELETE FROM thoughts WHERE id = ANY(${sql.array(heldCells.flatMap((c) => [c.o, c.n]), "TEXT")}::uuid[])`;
 
           // The store's own refusal (review pass 1): a role whose sessions default to REPEATABLE READ, where
           // record_settled_part refuses every call by name. Each refused part is counted, the pair is one problem on the

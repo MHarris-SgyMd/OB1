@@ -455,8 +455,9 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       // 151 (SMD-4446): the settled parts that wait, where the store stands, and where each stands. The lineage
       // rows above do not count them: a part's row is left out of `stale`, as a proposal's is, and a pending part
       // at a text that has moved with no rebuild since has no mark at all. The pass's own read (partsStandingSql),
-      // so this command, the pass's --status and preflight say the same of one brain. A role that reads the
-      // proposals may not read the parts: it is told so, and the rest stands.
+      // keyless here as the stale proposals' above: a failed claim under any consolidation key places a part,
+      // and its key is named, where the pass's --status and preflight read the pass's key alone (review pass 2).
+      // A role that reads the proposals may not read the parts: it is told so, and the rest stands.
       const [partsStore] = (await sql.unsafe(PARTS_STORE_SQL)) as { has: boolean; reads: boolean }[];
       if (partsStore.has && !partsStore.reads) out(`  parts:       ${PARTS_UNREAD}`);
       else if (partsStore.has) {

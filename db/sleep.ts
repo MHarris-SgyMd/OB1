@@ -1151,8 +1151,10 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
   // They are counted with the thoughts not yet in the pool, so a period begins for them, and none ends before the
   // pass has pooled them (unread, no period began for one on an idle brain, and a period could end between the
   // pass's start and its first pool step). Read BEFORE the claims: a thought the pass pools between the two reads
-  // is then counted twice for a poll, where the other order counted it nowhere and the pool read drained. A
-  // judge-mode pass pools nothing for a part, so its key reads none; nor does a claims-only read.
+  // is then counted twice for a poll, where the other order counted it nowhere and the pool read drained. So is
+  // a thought with no claim under the key yet that holds such a part, by this read and by the pool's, until the
+  // pass has pooled it: the number said is one high for it, and the period begins all the same. A judge-mode pass
+  // pools nothing for a part, so its key reads none; nor does a claims-only read.
   let forParts = 0;
   if (pass === "consolidate" && !claimsOnly && isDecideKey(job)) {
     const [store] = (await sql.unsafe(PARTS_STORE_SQL)) as { has: boolean; reads: boolean }[];

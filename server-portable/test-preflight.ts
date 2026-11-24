@@ -1610,7 +1610,7 @@ else {
   // …and placed (review pass 1: the clause said a run judges every one's pair again): these two thoughts were
   // captured with no vector, so the one part that waits is said to wait for a vector, and a run to judge none.
   const waiting = (out: string) => {
-    const m = /; (\d+) settled part\(s\) stale and (\d+) pending at a text that has moved since( \(a decide-mode run of the pass \(bun db\/consolidate\.ts\) judges the pair of 0 again; 1 wait for a vector\))?/.exec(out);
+    const m = /; (\d+) settled part\(s\) stale and (\d+) pending at a text that has moved since( \(a decide-mode run of the pass \(bun db\/consolidate\.ts\) takes up none as things stand; 1 wait for a vector\))?/.exec(out);
     return m === null ? "no parts clause" : `${m[1]}/${m[2]}${m[3] === undefined ? "" : " placed"}`;
   };
   await ctx.unsafe(`SELECT rebuild_derived('${partO}'::uuid, 'preflight: the text moved')`);
@@ -1627,6 +1627,25 @@ else {
   assert(noPartRow.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 settled part\\(s\\) \\(${part151b.id}\\)`).test(noPartRow.out) && /A settled part's row is written with it by 151's record_settled_part/.test(noPartRow.out)
       && partRemedy !== "" && /✓  lineage\s+every derived row has its lineage row/.test(partRowBack.out) && waiting(partRowBack.out) === "1/0 placed",
          `a settled part without its lineage row does not start, the part named, and the remedy is the part's own; followed as printed, the check is ok again (exit ${noPartRow.code}: ${noPartRow.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 200)}; then ${partRowBack.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 80)})`);
+  // The census reads at most 10,001 parts, in no order (review pass 2). Where the store holds more, its counts are of
+  // the parts read, and the coverage says so. (It said so only when the count of the parts that wait itself reached
+  // the bound: a part at a moved text among the rows not read was counted as none, and nothing said.) 10,001 more
+  // parts on this pair, at the texts as they stand, each with its lineage row.
+  await ctx.unsafe(`WITH made AS (
+                      INSERT INTO settled_parts (older_id, newer_id, holder, statement, shown_by, word, reason, older_fingerprint, newer_fingerprint, judge_key)
+                      SELECT '${partO}'::uuid, '${partN}'::uuid, 'older', 'pf bound part ' || i, 'shown', 'resolves', 'for this row',
+                             (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partO}'::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${partN}'::uuid), 'pf-bound-parts'
+                        FROM generate_series(1, 10001) i
+                      RETURNING id, older_id, newer_id, older_fingerprint, newer_fingerprint)
+                    INSERT INTO derivations (artifact_kind, artifact_id, input_ids, input_fingerprints, produced_by, recipe)
+                    SELECT 'part', id, ARRAY[older_id, newer_id], ARRAY[older_fingerprint, newer_fingerprint], 'pf-bound-parts', '{"deterministic": false}'::jsonb FROM made`);
+  const boundParts = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
+  await ctx.unsafe(`DELETE FROM settled_parts WHERE judge_key = 'pf-bound-parts'`);
+  const boundPartsLine = boundParts.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "";
+  const [{ n: boundPartsLeft }] = (await ctx.unsafe(`SELECT count(*)::int AS n FROM derivations WHERE produced_by = 'pf-bound-parts'`)) as { n: number }[];
+  assert(/; of the 10,001 settled parts read, in no order, where the store holds more, \d+ settled part\(s\) stale and \d+ pending at a text that has moved since/.test(boundPartsLine)
+         && !/settled parts read, in no order/.test(partRowBack.out) && boundPartsLeft === 0,
+         `where the store holds more settled parts than the census reads, the coverage says its counts are of the parts read, in no order; under the bound it says nothing of that (${boundPartsLine.trim().slice(0, 120)} … ${boundPartsLine.slice(boundPartsLine.indexOf("; of the 10,001 settled parts"), boundPartsLine.indexOf("; of the 10,001 settled parts") + 190)})`);
   await ctx.unsafe(`SELECT delete_thought('${partN}'::uuid)`);
   await ctx.unsafe(`SELECT delete_thought('${partO}'::uuid)`);
   // 120's edge (SMD-3306): a work thread's standing edge without its lineage
@@ -3196,8 +3215,12 @@ else {
   // The remedy where the settled parts' table stands (SMD-4446, review pass 5): 067, then the parts' file, which last
   // defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, all
   // three put back by 063 re-applied by hand. It stands in 150's place in the remedy: it carries 150's body.
-  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql, then db\/migrations\/151_settled_parts\.sql — 151 last defines rebuild_derived \(on 150's body, and so 067's\), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused \(bun migrate\.ts --reapply runs every file in order\)\./.test(fix(pre067.out, "lineage")),
-         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 then the settled parts' file as the remedy, the last definer of the three bodies 063 put back (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)}; ${fix(pre067.out, "lineage").trim().slice(0, 240)})`);
+  // …and then the stale parts' file (review pass 2): 151 applied by hand writes its three catalog comments as it first
+  // had them, and that file amends them. Its name is read from the tree, as the remedy for 149 is held to it.
+  const STALE_PARTS_067 = readdirSync(join(HERE, "..", "db", "migrations")).find((n) => n.endsWith("_stale_parts.sql")) ?? "no _stale_parts.sql";
+  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out)
+         && fix(pre067.out, "lineage").includes(`Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql, then db/migrations/${STALE_PARTS_067} — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused; and ${STALE_PARTS_067.slice(0, 3)} amends three catalog comments 151 writes, which 151 alone leaves naming no removal of a part (bun migrate.ts --reapply runs every file in order).`),
+         `063 re-applied over 067 is a warning on rebuild_derived, naming 067, then the settled parts' file, the last definer of the three bodies 063 put back, then the stale parts' file, which amends three comments that file writes (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)}; ${fix(pre067.out, "lineage").trim().slice(0, 300)})`);
   // On a brain from before the parts' file, where the migrator applies it in its turn, the remedy is 067 then 150,
   // which last defines rebuild_derived there (SMD-2298).
   const parts067 = new SQL({ url: LIVE, max: 1 });
@@ -3689,6 +3712,33 @@ else {
       assert(heldParts && lineageLine(noParts.out).includes(unreadParts) && !/not checked — this role cannot read settled_parts/.test(noParts.out) && /settled part\(s\) stale and \d+ pending at a text that has moved since/.test(lineageLine(missingBoth.out))
              && !/settled part/.test(lineageLine(noFnNoParts.out)) && lineageLine(noFnNoParts.out).slice(0, 12) === lineageLine(missingBoth.out).slice(0, 12),
              `the lineage row reads the settled parts where the role may, says they were not read where it may not, the check standing, and says nothing of them on a brain without their table (${lineageLine(missingBoth.out).slice(-150)} | ${lineageLine(noParts.out).slice(-120)} | ${lineageLine(noFnNoParts.out).slice(-90)})`);
+      // …and the work claims (review pass 2), which place a waiting part behind a failed one: a server's role holds no
+      // SELECT there unless extraction or the subject pool is on. One part is made to wait, between two thoughts with
+      // no vector, and the role's SELECT taken back: the check stands and counts the part, places it by what needs no
+      // claim, and says the claims were not read. (Read unasked, the whole row was a skip naming a grant.)
+      const [wO, wN] = [crypto.randomUUID(), crypto.randomUUID()];
+      await claims.unsafe(`INSERT INTO thoughts (id, content, content_fingerprint, created_at) VALUES ('${wO}', 'preflight-claims older: the gate is open', content_fingerprint_of('preflight-claims older: the gate is open'), now() - interval '3 days'),
+                                                                                       ('${wN}', 'preflight-claims newer: the gate was shut', content_fingerprint_of('preflight-claims newer: the gate was shut'), now())`);
+      const [{ r: wPart }] = (await claims.unsafe(`SELECT record_settled_part('${wO}'::uuid, '${wN}'::uuid, 'older', 'the gate is open', 'the gate was shut', 'resolves', 'the gate was shut', 'consolidate:for-this-row@p4d6',
+                                                                              content_fingerprint_of('preflight-claims older: the gate is open'), content_fingerprint_of('preflight-claims newer: the gate was shut'), '{"deterministic": false}'::jsonb) AS r`)) as { r: { action?: string } }[];
+      await claims.unsafe(`UPDATE thoughts SET content = 'preflight-claims newer: the gate was shut and locked', content_fingerprint = content_fingerprint_of('preflight-claims newer: the gate was shut and locked') WHERE id = '${wN}'::uuid`);
+      const readsClaims = async () => Boolean((await claims`SELECT has_table_privilege('ob1_pf_capture', 'thought_work_claims', 'SELECT') AS r`)[0].r);
+      const heldClaims = await readsClaims();
+      let noClaims: { out: string }, withClaims: { out: string }, claimsGone = false;
+      await claims.unsafe("REVOKE SELECT ON thought_work_claims FROM ob1_pf_capture");
+      try {
+        claimsGone = !(await readsClaims());
+        noClaims = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      } finally {
+        if (heldClaims) await claims.unsafe("GRANT SELECT ON thought_work_claims TO ob1_pf_capture");
+      }
+      withClaims = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      await claims.unsafe(`DELETE FROM thoughts WHERE id IN ('${wO}'::uuid, '${wN}'::uuid)`);
+      const WAITS_UNREAD = "1 pending at a text that has moved since (a decide-mode run of the pass (bun db/consolidate.ts) takes up none as things stand; 1 wait for a vector; a claim that failed is not read (this role holds no SELECT on thought_work_claims), and a part behind one is counted the run's)";
+      const WAITS_READ = "1 pending at a text that has moved since (a decide-mode run of the pass (bun db/consolidate.ts) takes up none as things stand; 1 wait for a vector)";
+      assert(wPart.action === "recorded" && heldClaims && claimsGone && !/not checked — this role cannot read/.test(lineageLine(noClaims.out)) && lineageLine(noClaims.out).includes(WAITS_UNREAD)
+             && lineageLine(withClaims.out).includes(WAITS_READ) && !lineageLine(withClaims.out).includes("is not read"),
+             `…and where the role may not read the work claims the check stands all the same: the part that waits is counted and placed by what needs no claim, and the coverage says the claims were not read; with them readable it says nothing of that (${lineageLine(noClaims.out).slice(-330)} | ${lineageLine(withClaims.out).slice(-170)})`);
       assert(/!  validity\s+the server's role cannot SELECT thought_audit: the validity read answers the axes resting on them unknown, naming them in unread/.test(noAudit.out)
              && heldParts && /!  validity\s+the server's role cannot SELECT settled_parts: the validity read answers the axes resting on them unknown, naming them in unread/.test(noParts.out)
              && /✓  validity\s+thought_validity present; the server's role reads every table it reads/.test(missingBoth.out)

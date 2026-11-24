@@ -26,7 +26,7 @@ import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, isDecideKey, partsWaitWords, repooled, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, isDecideKey, partsStandingSql, partsWaitWords, repooled, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
 import { askOwnSubject, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
@@ -2610,14 +2610,30 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
       && unsettledWords(["settle_stale_part: first", "the answer could not be read"]) === "2 settled parts of a moved text were not removed — settle_stale_part: first",
     "a thought's waiting parts that were not removed are one clause of its claim's error: how many, and why for the first; none is no clause");
   // Where the parts that wait stand, in the status lines' words (partsWaitWords, review pass 1): how many a
-  // decide-mode run judges again, then those that wait for something else, each with what it waits for; nothing where
-  // none waits.
-  const waitsAll = partsWaitWords({ stale: 2, moved: 5, vector: 1, held: 2, failed: 3 });
-  assert(partsWaitWords({ stale: 0, moved: 0, vector: 0, held: 0, failed: 0 }) === ""
-      && partsWaitWords({ stale: 0, moved: 4, vector: 0, held: 0, failed: 0 }) === "a decide-mode run of the pass (bun db/consolidate.ts) judges the pair of 4 again"
-      && partsWaitWords({ stale: 1, moved: 0, vector: 1, held: 0, failed: 0 }) === "a decide-mode run of the pass (bun db/consolidate.ts) judges the pair of 0 again; 1 wait for a vector"
-      && waitsAll === "a decide-mode run of the pass (bun db/consolidate.ts) judges the pair of 1 again; 1 wait for a vector; 2 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale; 3 wait for --retry-failed, their thought's claim having failed",
-    `the parts that wait are placed in words: those a run judges again, then those waiting for a vector, a rebuild or --retry-failed, and nothing where none waits (${waitsAll})`);
+  // decide-mode run takes up, then those that wait for something else, each with what it waits for; nothing where
+  // none waits. A run judges the pair of a part it takes up, or removes the part where nothing will judge its pair,
+  // and the words say both (review pass 2: "judges the pair of 0 again", and "judges" of a part removed unjudged).
+  const RUN = "a decide-mode run of the pass (bun db/consolidate.ts)";
+  const waitsAll = partsWaitWords({ stale: 2, moved: 5, vector: 1, held: 2, failed: 3 }, "key");
+  assert(partsWaitWords({ stale: 0, moved: 0, vector: 0, held: 0, failed: 0 }) === "" && partsWaitWords({ stale: 0, moved: 0, vector: 0, held: 0, failed: 0 }, "unread") === ""
+      && partsWaitWords({ stale: 0, moved: 4, vector: 0, held: 0, failed: 0 }) === `${RUN} takes up 4, the pair judged again or, where nothing will judge it again, the part removed`
+      && partsWaitWords({ stale: 1, moved: 0, vector: 1, held: 0, failed: 0 }) === `${RUN} takes up none as things stand; 1 wait for a vector`
+      && waitsAll === `${RUN} takes up 1, the pair judged again or, where nothing will judge it again, the part removed; 1 wait for a vector; 2 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale; 3 wait for --retry-failed, their thought's claim under the pass's key having failed`,
+    `the parts that wait are placed in words: those a run takes up, its pair judged again or the part removed, then those waiting for a vector, a rebuild or --retry-failed, and nothing where none waits (${waitsAll})`);
+  // A failed claim by how the read read it (review pass 2): under the pass's key; under any consolidation key, the
+  // keys named, for a reader that knows none; or not read at all, said so, for a role that may not read the claims.
+  const waitsAny = partsWaitWords({ stale: 0, moved: 3, vector: 0, held: 0, failed: 2, failed_keys: ["consolidate:a@p4d5", "consolidate:b@p4d6"] });
+  const waitsUnread = partsWaitWords({ stale: 0, moved: 3, vector: 1, held: 0, failed: 0, failed_keys: [] }, "unread");
+  assert(waitsAny === `${RUN} takes up 1, the pair judged again or, where nothing will judge it again, the part removed; 2 wait behind a claim of their thought that failed in a pass under consolidate:a@p4d5, consolidate:b@p4d6 (bun db/consolidate.ts --retry-failed with that judge's model)`
+      && waitsUnread === `${RUN} takes up 2, the pair judged again or, where nothing will judge it again, the part removed; 1 wait for a vector; a claim that failed is not read (this role holds no SELECT on thought_work_claims), and a part behind one is counted the run's`,
+    `…a failed claim read under any key names the keys, and one not read is said to be not read (${waitsAny} | ${waitsUnread})`);
+  // …and the read itself: under the pass's key it compares the key given, under any it reads by the prefix and
+  // gathers the keys, and unread it names no claims table at all, so a role without SELECT there can run it.
+  const [standKey, standAny, standUnread] = [partsStandingSql(undefined, { under: "$1" }), partsStandingSql(), partsStandingSql(5, "unread")];
+  assert(/c\.work_type = \$1 AND c\.status = 'failed'/.test(standKey) && !/LIKE 'consolidate:%'/.test(standKey) && /ARRAY\[\]::text\[\] AS failed_keys/.test(standKey)
+      && (standAny.match(/c\.work_type LIKE 'consolidate:%' AND c\.status = 'failed'/g) ?? []).length === 2 && /array_agg\(DISTINCT c\.work_type ORDER BY c\.work_type\)/.test(standAny)
+      && !/thought_work_claims/.test(standUnread) && !/'failed' END/.test(standUnread) && /ELSE 'next' END AS standing/.test(standUnread) && /LIMIT 5\b/.test(standUnread),
+    "the standing read places a part behind a failed claim under the key it is given, or under any consolidation key with the keys gathered, or reads no claim, naming no claims table");
   // A decide key by its shape (isDecideKey): the sleep scheduler reads the parts' work under such a key alone.
   assert(isDecideKey(decideKey("h2o", "writer")) && !isDecideKey(consolidateKey("judge")) && !isDecideKey(`extract:m@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION}`) && !isDecideKey(`${decideKey("h2o", "writer")}x`) && !isDecideKey(""),
     "a decide-mode key is known by its prefix and its two versions, and no judge key, other pass's key or longer key is one");

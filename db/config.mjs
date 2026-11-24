@@ -2597,7 +2597,8 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "supersession_proposals", privileges: Object.freeze(["SELECT", "UPDATE"]), since: "029" }),
     // A settled part (SMD-4446) is listed and decided as a proposal is, by
     // 151's SECURITY INVOKER review_settled_part, which updates the row as
-    // the caller. No server code reads the table yet: the listing and the
+    // the caller. The server reads the table in preflight's lineage census
+    // and through thought_validity (153); the listing and the
     // decision arrive with the ticket's review surfaces, and 151 carries
     // this grant to the roles that hold the proposals' (SELECT and UPDATE
     // both) so those surfaces need no grant of their own. An accept reads both thoughts' texts, which is

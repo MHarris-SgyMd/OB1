@@ -629,9 +629,11 @@ const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
  * remedy names that file after it, in place of 150, whose body it carries.
  * On a brain from before the file the remedy is APPLY_067's, and the
  * migrator applies the file in its turn: its guard would refuse a hand
- * apply ahead of 114.
+ * apply ahead of 114. The stale parts' file is named after it (review pass
+ * 2): 151 applied by hand writes its three catalog comments as it first had
+ * them, naming no removal of a part, and that file amends them.
  */
-const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused (bun migrate.ts --reapply runs every file in order).";
+const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql, then db/migrations/153_stale_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused; and 153 amends three catalog comments 151 writes, which 151 alone leaves naming no removal of a part (bun migrate.ts --reapply runs every file in order).";
 /**
  * 149's thought_validity is last defined by the stale parts' file (SMD-4446),
  * which carries it whole with an arm for a settled part's lineage row. 149
@@ -2697,6 +2699,10 @@ if (configFailed) {
                      -- …and whether this role may read it: the server group's and the worker group's since 151. The census
                      -- reads the parts only then, and says so otherwise: unasked, a role without it lost the whole check.
                      COALESCE(has_table_privilege(to_regclass('public.settled_parts'), 'SELECT'), false) AS reads_parts,
+                     -- …and the work claims, which place a waiting part behind a failed one. A server's role holds no SELECT
+                     -- there unless extraction or the subject pool is on (EXTRACTION_TRIGGER_WRITES): read unasked, the
+                     -- whole check was skipped for it, naming a grant the role is not due (review pass 2).
+                     COALESCE(has_table_privilege(to_regclass('public.thought_work_claims'), 'SELECT'), false) AS reads_claims,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
                      -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
@@ -2712,11 +2718,14 @@ if (configFailed) {
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; reads_parts: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; reads_parts: boolean; reads_claims: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
             const readsParts = bodies.has_parts && bodies.reads_parts;
+            // Where the parts stand is read against the pass's key as this server's settings give it, the key the
+            // consolidate pass row calls current; and with no claim read where this role may read none.
+            const partsClaims = bodies.reads_claims ? "key" as const : "unread" as const;
             type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; thread_edges: number; thread_edge_ids: string[] | null; subjects: number; subject_ids: string[] | null; parts: number; part_ids: string[] | null; parts_stale: number; parts_moved: number; parts_vector: number; parts_held: number; parts_failed: number; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; te_read: number; sj_read: number; pa_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
@@ -2767,7 +2776,7 @@ if (configFailed) {
                      ? `pa_s AS (SELECT id FROM public.settled_parts LIMIT ${BOUND}),
                    pa AS (SELECT s.id FROM pa_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'part' AND d.artifact_id = s.id)),
-                   pw AS (${partsStandingSql(BOUND)}),`
+                   pw AS (${partsStandingSql(BOUND, partsClaims === "key" ? { under: "$1" } : "unread")}),`
                      : `pa_s AS (SELECT NULL::uuid AS id WHERE false),
                    pa AS (SELECT NULL::uuid AS id WHERE false),
                    pw AS (SELECT 0 AS stale, 0 AS moved, 0 AS vector, 0 AS held, 0 AS failed),`}
@@ -2829,7 +2838,8 @@ if (configFailed) {
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
                      (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read,
                      (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read, (SELECT count(*)::int FROM te_s) AS te_read,
-                     (SELECT count(*)::int FROM sj_s) AS sj_read, (SELECT count(*)::int FROM pa_s) AS pa_read`)) as Census[];
+                     (SELECT count(*)::int FROM sj_s) AS sj_read, (SELECT count(*)::int FROM pa_s) AS pa_read`,
+              readsParts && partsClaims === "key" ? [consolidatePassKey(resolvedEmbed)] : [])) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2865,9 +2875,9 @@ if (configFailed) {
               // are the part's own, so the row can be written again as the part holds it.
               + (Number(c.parts) ? " A settled part's row is written with it by 151's record_settled_part: record the row again from the part (SELECT ob1_record_derivation('part', s.id, ARRAY[s.older_id, s.newer_id], ARRAY[s.older_fingerprint, s.newer_fingerprint], s.judge_key, '{\"deterministic\": false}'::jsonb, s.canonical_agent_id) FROM settled_parts s WHERE s.id = '<part id>'), which keeps a reviewer's decision on it; the recipe it was judged under is not known again." : "");
             // Where the parts that wait stand (review pass 1: the clause said a run judges every one's pair again).
-            const partsWaits = partsWaitWords({ stale: c.parts_stale, moved: c.parts_moved, vector: c.parts_vector, held: c.parts_held, failed: c.parts_failed });
+            const partsWaits = partsWaitWords({ stale: c.parts_stale, moved: c.parts_moved, vector: c.parts_vector, held: c.parts_held, failed: c.parts_failed }, partsClaims);
             const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)${
-              readsParts ? `; ${Number(c.parts_stale) + Number(c.parts_moved) >= BOUND ? `of the first ${BOUND.toLocaleString("en-US")} settled parts that wait, ` : ""}${c.parts_stale} settled part(s) stale and ${c.parts_moved} pending at a text that has moved since${partsWaits ? ` (${partsWaits})` : ""}`
+              readsParts ? `; ${Number(c.pa_read) >= BOUND ? `of the ${BOUND.toLocaleString("en-US")} settled parts read, in no order, where the store holds more, ` : ""}${c.parts_stale} settled part(s) stale and ${c.parts_moved} pending at a text that has moved since${partsWaits ? ` (${partsWaits})` : ""}`
               : bodies.has_parts ? "; the settled parts not read (this role holds no SELECT on settled_parts, the server group's since 151)" : ""}`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
