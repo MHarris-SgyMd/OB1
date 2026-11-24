@@ -7183,6 +7183,66 @@ counted. Samples taken before SMD-4382 kept the pending and claimed rows alone,
 under every `extract:` key, and are read as before:
 `extraction rows pending or claimed`.
 
+### claim-report.ts
+
+How long work claims run, from claim to release (SMD-4540 PR 2): each claim's
+ending read from its release, its hours, and since migration 152 how many of its
+renewals landed, so SMD-4541 can decide whether a claim should state when its
+work will be done. It reads `list_claims`' answers with `include_ended` (any
+client holding a read key, no database credentials) or `work_claims` itself.
+
+- **`--from`:** walk `list_claims` to its end, `include_ended: true`, each page's
+  `cursor` as the next call's `after`, and save the pages as one JSON array.
+  A page is REST's `GET /v1/claims` body, or an MCP tool result as a client
+  saves it (its `structuredContent`, else its text; a JSON-RPC answer's
+  `result`), or a list of claims. A last page that says `truncated` is refused,
+  the rest of the brain missing; pages holding fewer entries than the first
+  page counted are warned of; a read of live claims alone says `include_ended`
+  was likely left off; entries with no `renewals` at all (`list_work_claims`'
+  own rows) are warned of as uncounted.
+- **`--sizes`:** `gh pr list --state merged --limit 500 --json
+  number,additions,deletions > sizes.json`, as it prints it, or an object of
+  `{ additions, deletions }` by PR number. Raise `--limit` once the oldest PR a
+  claim names falls outside it: the "size unknown" count shows it.
+- **`--now`:** give a saved dump the time it was read, an ISO time with its
+  zone (`2026-11-23T19:00:00Z`; one without is refused): unset, the clock reads a
+  claim live then whose lease has since ended as lapsed. A claim made after it
+  is left out, a release after it unread. A row keeps only its last lease and
+  count, so a claim renewed after `--now` reads with them.
+- **`--url`:** needs SELECT on `work_claims`' columns (the `claims` group's, by
+  `bun migrate.ts --grant <role> --groups claims`); a role without it is told
+  so. Before migration 152 every claim reads uncounted.
+
+```bash
+bun claim-report.ts --from claims.json [--sizes sizes.json] [--now 2026-11-23T19:00:00Z] [--json]
+bun claim-report.ts --url "$DATABASE_URL" [--sizes sizes.json]
+bun claim-report.ts --self-check
+```
+
+- **Endings:** merged (its holder released it saying "merged", in a clause, to
+  the next `.`, `;`, `:` or `,`, that doesn't first deny it with "not", "never",
+  "without", "unless", "until", "yet", "be" or "n't"; a merge of something else,
+  "merged main into the branch", reads as one too), closed by board-sync (by the
+  server's own `closedBySync`), taken over, force-released (another key's
+  release, an operator's after a merge included), released (other: a split into
+  pieces, a drop, a test), and lapsed, never released (timed to its lease's
+  end). Live claims are left out.
+- **Merged claims** are grouped by client (the label's first word before `@`,
+  else the key's name), by shape (a whole ticket or one piece) and, with
+  `--sizes`, by the merged PRs' changed lines. A merged claim's PRs are its
+  reason's first sentence's `OB1 PR N`, with any list after one (`OB1 PR 705,
+  PR 710 and PR 719`), their sizes summed; else its last `PR N`. Other wordings
+  (`OB1 PR 705, 710 and 719`, `OB1 PR 832/847`) read the first PR alone.
+- **What it cannot see** it says under the table, and `--json` carries as
+  `notSeen`: a claim runs to its release, at its merge, so its hours hold the
+  waits for review and for the word to merge, not work alone; a claim made
+  late, just before its merge, reads short; a PR that closed two claims is
+  counted under each; a renewal count says how often, not when, and each client
+  renews at its own pace, so counts compare within one client; a claim made
+  before 152 is uncounted; a claim taken over hides the work before its lapse; a
+  claim board-sync closed is timed to that pass, not its merge, and left out of
+  the merged tables.
+
 ### bench-querylog.ts
 
 The two `query_log` costs SMD-1492 settles with numbers rather than prose. It ages
