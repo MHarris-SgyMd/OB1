@@ -1,0 +1,352 @@
+/**
+ * github-check.ts — the offline self-check of the runner's GitHub App client (github.ts, SMD-4087 cut 3b-1), with no
+ * key of the App's and no network. CI runs it (`bun scripts/agent-runner/github-check.ts --self-check`). It covers:
+ *
+ *   - the JWT: RS256, verifiable by the key's public half, issued a minute back and good for nine;
+ *   - the installation token: asked for this repo alone with the two write permissions, and refused unused when it
+ *     comes back with more, with less, or for another repository; a refusal says GitHub's status and message, never
+ *     the token;
+ *   - the push: a real `git push` from a bare repository into a local one, of the one branch, with no tags and no
+ *     hooks; the token in git's environment and in no argument; a second push answered as already there; a branch
+ *     moved on the remote refused as final, never forced; a branch outside `agent/smd-<n>-<slug>` refused unpushed;
+ *   - the draft PR: an open PR the App already opened from the branch is the answer (no second PR); a 422 whose PR
+ *     turns up is the PR, any other 422 is final; any other failure is retried, its words scrubbed of the token.
+ *
+ *   bun scripts/agent-runner/github-check.ts --self-check
+ */
+
+import { createVerify, generateKeyPairSync } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Fetch } from "./facts.ts";
+import { fixtureGit } from "./fixture-git.ts";
+import { branchFor } from "./record.ts";
+import { PEM_SHAPE, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
+
+const NOW = Date.parse("2026-11-24T12:00:00Z");
+const TOKEN = `ghs_${"T0k3n".repeat(8)}`;
+const APP: App & { botLogin: string } = { appId: "123456", installationId: "7890", repo: "MHarris-SgyMd/OB1", botLogin: "ob1-agent-runner[bot]" };
+const BRANCH = "agent/smd-1234-fix-the-thing";
+
+type Sent = { url: string; init: RequestInit };
+const json = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+const tokenAnswer = (over: Record<string, unknown> = {}): Response =>
+  json({ token: TOKEN, expires_at: "2026-11-24T13:00:00Z", permissions: { ...TOKEN_PERMISSIONS, metadata: "read" }, repository_selection: "selected", repositories: [{ full_name: "MHarris-SgyMd/OB1" }], ...over }, 201);
+const prRow = (over: Record<string, unknown> = {}) => ({ number: 901, html_url: "https://github.com/MHarris-SgyMd/OB1/pull/901", user: { login: "ob1-agent-runner[bot]" }, head: { ref: BRANCH, repo: { full_name: "MHarris-SgyMd/OB1" } }, ...over });
+
+/** A stand-in GitHub API: answers by route from `routes`, recording each request. */
+function stubFetch(routes: (method: string, url: string, body: unknown) => Response | Promise<Response>): { fetch: Fetch; sent: Sent[] } {
+  const sent: Sent[] = [];
+  const fetch: Fetch = async (url, init = {}) => {
+    sent.push({ url, init });
+    const method = init.method ?? "GET";
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
+    return routes(method, url, body);
+  };
+  return { fetch, sent };
+}
+
+export async function selfCheck(): Promise<number> {
+  let passed = 0;
+  let failed = 0;
+  const ok = (cond: unknown, what: string): void => {
+    if (cond) passed++;
+    else failed++;
+    console.log(`  ${cond ? "✓" : "✗"} ${what}`);
+  };
+  const section = async (name: string, fn: () => void | Promise<void>): Promise<void> => {
+    console.log(name);
+    try {
+      await fn();
+    } catch (e) {
+      failed++;
+      console.log(`  ✗ ${name}: it threw (${String((e as Error)?.stack ?? (e as Error)?.message ?? e).slice(0, 300)})`);
+    }
+  };
+
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs1", format: "pem" } });
+  const pkcs8 = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+  const PEM = privateKey.trim();
+  const tokenRoute = (method: string, url: string): Response | null => (method === "POST" && url === "https://api.github.com/app/installations/7890/access_tokens" ? tokenAnswer() : null);
+
+  await section("the key's shape, and the branches the runner pushes", () => {
+    ok(PEM_SHAPE.test(PEM) && PEM_SHAPE.test(pkcs8.trim()), "a PKCS#1 key, as GitHub hands it out, and a PKCS#8 key are taken");
+    ok(!PEM_SHAPE.test("ghp_" + "a".repeat(36)) && !PEM_SHAPE.test(`${PEM}\nX-Evil: 1`) && !PEM_SHAPE.test(PEM.replace("PRIVATE KEY-----\n", "PUBLIC KEY-----\n")), "a token, a key with a line after it, and a public key are refused");
+    ok(PUSH_BRANCH.test(branchFor("SMD-4087", "Fix the thing")) && PUSH_BRANCH.test(BRANCH), "a branch record.ts names is one the runner pushes");
+    ok(["main", "agent/smd-0-x", "agent/smd-12-", "agent/smd-12-x/../main", "refs/heads/agent/smd-1-x", "agent/smd-1-x:refs/tags/v1", "agent/smd-1-X", "v2.3.0", "agent/smd-1-x\n"].every((b) => !PUSH_BRANCH.test(b)), "main, a path out, a full ref, a refspec, upper case, a tag and a newline are refused");
+  });
+
+  await section("appJwt: RS256, verifiable, issued a minute back and good for nine", () => {
+    const jwt = appJwt("123456", PEM, NOW);
+    const [h, c, sig] = jwt.split(".");
+    const dec = (s: string) => JSON.parse(Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+    const head = dec(h);
+    const claims = dec(c);
+    ok(head.alg === "RS256" && head.typ === "JWT", "the header names RS256");
+    ok(claims.iss === "123456" && claims.iat === NOW / 1000 - 60 && claims.exp - claims.iat === 540, "issued by the App, a minute back, for nine minutes");
+    const v = createVerify("RSA-SHA256");
+    v.update(`${h}.${c}`);
+    ok(v.verify(publicKey, Buffer.from(sig.replace(/-/g, "+").replace(/_/g, "/"), "base64")), "the signature verifies with the key's public half");
+    ok(!jwt.includes("=") && !jwt.includes("+") && !jwt.includes("/"), "base64url, unpadded");
+  });
+
+  await section("installationToken: asked for this repo alone, with the two write permissions", async () => {
+    const f = stubFetch((m, u) => tokenRoute(m, u) ?? json({ message: "unrouted" }, 404));
+    const t = await installationToken(f.fetch, APP, PEM, NOW);
+    ok(t.ok && t.token === TOKEN && t.expiresAt === Date.parse("2026-11-24T13:00:00Z"), "a clean answer is the token, with its expiry");
+    const req = f.sent[0];
+    const body = JSON.parse(String(req.init.body));
+    ok(f.sent.length === 1 && req.init.method === "POST" && req.url === "https://api.github.com/app/installations/7890/access_tokens", "one POST to the installation's access_tokens");
+    ok(JSON.stringify(body) === JSON.stringify({ repositories: ["OB1"], permissions: { contents: "write", pull_requests: "write" } }), "it asks for this repo alone, contents and pull_requests write, nothing else");
+    const auth = (req.init.headers as Record<string, string>).Authorization;
+    ok(auth.startsWith("Bearer ") && auth.slice(7).split(".").length === 3, "the JWT goes in the Authorization header");
+    ok(req.init.redirect === "manual" && (req.init as { verbose?: boolean }).verbose === false, "no redirect followed, no headers logged (SAFE_REQUEST)");
+  });
+
+  await section("installationToken: a token with more, with less, or for another repo is refused unused", async () => {
+    const answer = async (r: Response) => installationToken(stubFetch(() => r).fetch, APP, PEM, NOW);
+    const cases: [string, Response, string][] = [
+      ["workflows", tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, metadata: "read", workflows: "write" } }), "more: workflows: write"],
+      ["administration", tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, metadata: "read", administration: "read" } }), "more: administration: read"],
+      ["metadata write", tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, metadata: "write" } }), "more: metadata: write"],
+      ["no pull_requests", tokenAnswer({ permissions: { contents: "write", metadata: "read" } }), "missing: pull_requests"],
+      ["contents read", tokenAnswer({ permissions: { contents: "read", pull_requests: "write" } }), "contents: read"],
+      ["no permissions", tokenAnswer({ permissions: null }), "(none listed)"],
+    ];
+    for (const [what, res, says] of cases) {
+      const t = await answer(res);
+      ok(!t.ok && t.detail.includes(says) && t.detail.includes("refused unused") && !t.detail.includes(TOKEN), `${what}: refused, saying ${JSON.stringify(says)}, the token unshown`);
+    }
+    const two = await answer(tokenAnswer({ repositories: [{ full_name: "MHarris-SgyMd/OB1" }, { full_name: "MHarris-SgyMd/other" }] }));
+    const other = await answer(tokenAnswer({ repositories: [{ full_name: "someone/OB1" }] }));
+    const none = await answer(tokenAnswer({ repositories: undefined }));
+    ok([two, other, none].every((t) => !t.ok && t.detail.includes("MHarris-SgyMd/OB1 alone")), "two repositories, another one, or none listed: refused");
+    const shape = await answer(tokenAnswer({ token: "ghp_notaninstallationtoken0000000000000000" }));
+    ok(!shape.ok && shape.detail.includes("expected shape") && !shape.detail.includes("ghp_"), "a token of another shape is refused, unshown");
+  });
+
+  await section("installationToken: GitHub's refusals and a broken transport come back as words, never thrown", async () => {
+    const r401 = await installationToken(stubFetch(() => json({ message: "A JSON web token could not be decoded", documentation_url: "x" }, 401)).fetch, APP, PEM, NOW);
+    ok(!r401.ok && r401.detail === "GitHub answered 401 (minting an installation token): A JSON web token could not be decoded", "a 401 says the status and GitHub's message");
+    const html = await installationToken(stubFetch(() => new Response("<html>secret-ish</html>", { status: 502 })).fetch, APP, PEM, NOW);
+    ok(!html.ok && html.detail === "GitHub answered 502 (minting an installation token)" , "a body that isn't JSON is not quoted");
+    const notJson = await installationToken(stubFetch(() => new Response("nope", { status: 201 })).fetch, APP, PEM, NOW);
+    ok(!notJson.ok && notJson.detail.includes("isn't a JSON object"), "a 201 that isn't JSON is refused");
+    const thrown = await installationToken(async () => { throw new Error("getaddrinfo ENOTFOUND api.github.com"); }, APP, PEM, NOW);
+    ok(!thrown.ok && thrown.detail.includes("ENOTFOUND"), "a transport failure is a result");
+    const badKey = await installationToken(stubFetch(() => tokenAnswer()).fetch, APP, "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----", NOW);
+    ok(!badKey.ok && badKey.detail.includes("couldn't sign"), "a key that can't sign is said, and nothing is sent");
+  });
+
+  await section("scrubToken: the token, its basic-auth form and any other GitHub token", () => {
+    const basic = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
+    const s = scrubToken(`a ${TOKEN} b AUTHORIZATION: basic ${basic} c ghp_${"x".repeat(36)} d github_pat_${"y_".repeat(15)}`, TOKEN);
+    ok(!s.includes(TOKEN) && !s.includes(basic) && !s.includes("ghp_x") && !s.includes("github_pat_y"), "none of them is left");
+  });
+
+  await section("pushCommand: the token in git's environment, in no argument; one refspec, no tags, no hooks, no force", () => {
+    const c = pushCommand({ bareRepo: "/r/repo.git", remote: "https://github.com/MHarris-SgyMd/OB1.git", branch: BRANCH, token: TOKEN, home: "/h" });
+    ok(!c.argv.join(" ").includes(TOKEN) && !c.argv.join(" ").includes("x-access-token"), "no argument carries the token");
+    ok(c.env.GIT_CONFIG_COUNT === "1" && c.env.GIT_CONFIG_KEY_0 === "http.https://github.com/.extraheader" && c.env.GIT_CONFIG_VALUE_0 === `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${TOKEN}`).toString("base64")}`, "the token is an extraheader scoped to https://github.com/, in the environment");
+    ok(c.argv.at(-1) === `refs/heads/${BRANCH}:refs/heads/${BRANCH}` && c.argv.at(-2) === "https://github.com/MHarris-SgyMd/OB1.git", "one explicit refspec, to the remote named");
+    ok(["--no-verify", "--no-follow-tags", "core.hooksPath=/dev/null", "protocol.allow=never", "credential.helper=", "http.followRedirects=false"].every((a) => c.argv.includes(a)), "hooks off, no tags, https only, no credential helper, no redirect");
+    ok(!c.argv.some((a) => a === "--force" || a === "-f" || a === "--tags" || a === "--mirror" || a === "--all" || a.startsWith("+")), "no force, no tags, no mirror");
+    ok(c.env.GIT_CONFIG_GLOBAL === "/dev/null" && c.env.GIT_CONFIG_NOSYSTEM === "1" && c.env.HOME === "/h", "no config of the maintainer's");
+  });
+
+  await section("pushOutcome: pushed, already there, refused (final), or failed (retry)", () => {
+    const ref = `refs/heads/${BRANCH}:refs/heads/${BRANCH}`;
+    const out = (flag: string, code = 0, stderr = "") => ({ code, stdout: `To x\n${flag}\t${ref}\t[note]\nDone\n`, stderr });
+    ok(pushOutcome(out("*"), BRANCH).ok && pushOutcome(out(" "), BRANCH).ok && pushOutcome(out("="), BRANCH).ok, "a new branch, a fast-forward and up to date are pushed");
+    const rej = pushOutcome(out("!", 1), BRANCH);
+    ok(!rej.ok && rej.final, "a rejection is final");
+    const forced = pushOutcome(out("+"), BRANCH);
+    ok(!forced.ok && !forced.final, "a forced update is never read as a push the runner made");
+    const down = pushOutcome({ code: 128, stdout: "", stderr: "fatal: unable to access 'https://github.com/…': Could not resolve host" }, BRANCH);
+    ok(!down.ok && !down.final && down.detail.includes("exited 128") && down.detail.includes("Could not resolve host"), "git failing before any ref is a retry, with git's words");
+    const otherRef = pushOutcome({ code: 0, stdout: `*\trefs/heads/x:refs/heads/x\t[new branch]\n`, stderr: "" }, BRANCH);
+    ok(!otherRef.ok, "a line for another ref doesn't count");
+  });
+
+  await section("realGitSpawn: runs /usr/bin/git from no repository", async () => {
+    const r = await realGitSpawn(["--version"], { PATH: "/usr/bin:/bin", HOME: tmpdir() });
+    ok(r.code === 0 && r.stdout.startsWith("git version"), "git answers its version");
+  });
+
+  const root = mkdtempSync(join(tmpdir(), "github-check-"));
+  try {
+    const git = fixtureGit();
+    const sh = (args: string[], cwd?: string): string => {
+      const r = Bun.spawnSync([git, ...args], { cwd, env: { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" }, stdout: "pipe", stderr: "pipe" });
+      if (r.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr.toString()}`);
+      return r.stdout.toString().trim();
+    };
+    const work = join(root, "work");
+    const source = join(root, "source.git");
+    const target = join(root, "target.git");
+    const home = join(root, "home");
+    mkdirSync(home);
+    sh(["init", "-q", "-b", "main", work]);
+    writeFileSync(join(work, "a.txt"), "a\n");
+    sh(["add", "a.txt"], work);
+    sh(["commit", "-q", "-m", "base"], work);
+    sh(["checkout", "-q", "-b", BRANCH], work);
+    writeFileSync(join(work, "b.txt"), "b\n");
+    sh(["add", "b.txt"], work);
+    sh(["commit", "-q", "-m", "the work"], work);
+    sh(["tag", "v9.9.9"], work);
+    sh(["clone", "-q", "--bare", work, source]);
+    sh(["init", "-q", "--bare", target]);
+    // A pre-push hook in the source would run on a push with hooks on: it must not.
+    const marker = join(root, "pre-push-ran");
+    writeFileSync(join(source, "hooks", "pre-push"), `#!/bin/sh\ntouch ${marker}\n`);
+    chmodSync(join(source, "hooks", "pre-push"), 0o755);
+    const tip = sh(["rev-parse", BRANCH], source);
+    // The local remote is a path: the self-check alone allows git's file transport, after GIT_SAFE's https-only.
+    const seen: { argv: string[]; env: Record<string, string> }[] = [];
+    const localGit: GitSpawn = async (argv, env) => {
+      seen.push({ argv, env });
+      const p = Bun.spawn([git, "-c", "protocol.file.allow=always", ...argv], { cwd: "/", env, stdout: "pipe", stderr: "pipe" });
+      const [stdout, stderr] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
+      return { code: (await p.exited) ?? -1, stdout, stderr };
+    };
+    const mintRoute = stubFetch((m, u) => tokenRoute(m, u) ?? json({ message: "unrouted" }, 404));
+    const client = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: source, home, remote: target, now: () => NOW });
+
+    await section("pushBranch: a real push of the one branch, no tags, no hooks; again is already there", async () => {
+      const r = await client.pushBranch({ branch: BRANCH });
+      ok(r.ok, "the push lands");
+      ok(sh(["rev-parse", BRANCH], target) === tip, "the target has the branch at the run's commit");
+      ok(sh(["tag", "-l"], target) === "" && sh(["for-each-ref", "--format=%(refname)"], target) === `refs/heads/${BRANCH}`, "no tag and no other branch went with it");
+      ok(!existsSync(marker), "the source's pre-push hook did not run");
+      ok(seen.length === 1 && !seen[0].argv.join(" ").includes(TOKEN) && seen[0].env.GIT_CONFIG_VALUE_0.includes(Buffer.from(`x-access-token:${TOKEN}`).toString("base64")), "the token went in git's environment alone");
+      ok(mintRoute.sent.length === 1, "one token was minted for the push");
+      const again = await client.pushBranch({ branch: BRANCH });
+      ok(again.ok, "a second push of the same commit is already there, not an error");
+    });
+
+    await section("pushBranch: a branch moved on the remote is refused as final, never forced", async () => {
+      const other = join(root, "other");
+      sh(["clone", "-q", "--branch", BRANCH, target, other]);
+      writeFileSync(join(other, "c.txt"), "c\n");
+      sh(["add", "c.txt"], other);
+      sh(["commit", "-q", "-m", "someone else's"], other);
+      sh(["push", "-q", "origin", BRANCH], other);
+      const moved = sh(["rev-parse", BRANCH], target);
+      const r = await client.pushBranch({ branch: BRANCH });
+      // The run's commit is now behind the remote's: pushing it would move the branch back, which git refuses unforced.
+      ok(!r.ok && r.final === true, "refused as final");
+      ok(sh(["rev-parse", BRANCH], target) === moved, "the remote's branch is untouched");
+      ok(!r.ok && !r.detail.includes(TOKEN), "the refusal carries no token");
+    });
+
+    await section("pushBranch: a branch outside the runner's prefix is refused before a token is minted", async () => {
+      const before = mintRoute.sent.length;
+      const r = await client.pushBranch({ branch: "main" });
+      ok(!r.ok && r.final === true && r.detail.includes("agent/smd-<n>-<slug>"), "main is refused, as final");
+      ok(mintRoute.sent.length === before && seen.length === 3, "no token minted, no git run");
+    });
+
+    await section("pushBranch: a token that can't be minted is a retry, and git doesn't run", async () => {
+      const c = appClient({ app: APP, pem: PEM, fetch: stubFetch(() => json({ message: "Bad credentials" }, 401)).fetch, git: localGit, bareRepo: source, home, remote: target, now: () => NOW });
+      const before = seen.length;
+      const r = await c.pushBranch({ branch: BRANCH });
+      ok(!r.ok && !r.final && r.detail.includes("401") && seen.length === before, "not pushed, not final, git not run");
+    });
+
+    await section("pushBranch: git's own words are scrubbed of the token, in either form", async () => {
+      const basic = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
+      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async () => ({ code: 128, stdout: "", stderr: `fatal: header AUTHORIZATION: basic ${basic} refused for ${TOKEN}` }), bareRepo: source, home, remote: target, now: () => NOW });
+      const r = await c.pushBranch({ branch: BRANCH });
+      ok(!r.ok && !r.final && r.detail.includes("exited 128") && !r.detail.includes(TOKEN) && !r.detail.includes(basic), "a failed push's detail carries neither the token nor its basic-auth form");
+    });
+
+    await section("pushBranch: a throwing git is a result with the token scrubbed", async () => {
+      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async () => { throw new Error(`spawn failed near ${TOKEN}`); }, bareRepo: source, home, remote: target, now: () => NOW });
+      const r = await c.pushBranch({ branch: BRANCH });
+      ok(!r.ok && !r.final && r.detail.includes("git push threw") && !r.detail.includes(TOKEN), "a result, not thrown, the token gone");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  /** A PR client over a routed stand-in, minting from the token route. */
+  const prClient = (route: (m: string, u: string, b: unknown) => Response | null) => {
+    const f = stubFetch((m, u, b) => tokenRoute(m, u) ?? route(m, u, b) ?? json({ message: "unrouted" }, 404));
+    const c = appClient({ app: APP, pem: PEM, fetch: f.fetch, git: async () => ({ code: 1, stdout: "", stderr: "" }), bareRepo: "/nowhere", home: "/nowhere", now: () => NOW });
+    return { c, sent: f.sent };
+  };
+  const LIST = `https://api.github.com/repos/MHarris-SgyMd/OB1/pulls?state=open&per_page=10&head=${encodeURIComponent(`MHarris-SgyMd:${BRANCH}`)}`;
+  const PULLS = "https://api.github.com/repos/MHarris-SgyMd/OB1/pulls";
+  const OPEN = { title: "[core] Fix the thing (SMD-1234)", head: BRANCH, base: "main", body: "the body" };
+
+  await section("openDraftPr: none open — a draft PR from the branch, to main, with the body", async () => {
+    let posted: Record<string, unknown> | null = null;
+    const { c, sent } = prClient((m, u, b) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? ((posted = b as Record<string, unknown>), json(prRow(), 201)) : null));
+    const r = await c.openDraftPr(OPEN);
+    ok(r.ok && r.number === 901 && r.url === "https://github.com/MHarris-SgyMd/OB1/pull/901", "the PR's number and URL");
+    ok(JSON.stringify(posted) === JSON.stringify({ title: OPEN.title, head: BRANCH, base: "main", body: "the body", draft: true }), "posted as a draft, head the branch of this repo, base main");
+    ok(sent.filter((s) => s.url.startsWith("https://api.github.com/repos/")).every((s) => (s.init.headers as Record<string, string>).Authorization === `Bearer ${TOKEN}`), "the installation token, not the JWT, goes to the repo's API");
+  });
+
+  await section("openDraftPr: the App's PR already open from the branch is the answer — no second PR", async () => {
+    const { c, sent } = prClient((m, u) => (m === "GET" && u === LIST ? json([prRow({ number: 900, html_url: "https://github.com/MHarris-SgyMd/OB1/pull/900" })]) : null));
+    const r = await c.openDraftPr(OPEN);
+    ok(r.ok && r.number === 900 && !sent.some((s) => s.init.method === "POST" && s.url === PULLS), "PR 900 is answered, nothing posted");
+  });
+
+  await section("openDraftPr: an open PR from the branch that isn't the App's, or isn't this repo's, isn't taken for it", async () => {
+    for (const [what, row] of [
+      ["someone else's", prRow({ user: { login: "MHarris-SgyMd" } })],
+      ["from another repo's branch", prRow({ head: { ref: BRANCH, repo: { full_name: "someone/OB1" } } })],
+      ["of another branch", prRow({ head: { ref: "agent/smd-1-other", repo: { full_name: "MHarris-SgyMd/OB1" } } })],
+      ["with a URL elsewhere", prRow({ html_url: "https://evil.example/pull/900" })],
+    ] as const) {
+      let postedN = 0;
+      const { c } = prClient((m, u) => (m === "GET" && u === LIST ? json([row]) : m === "POST" && u === PULLS ? (postedN++, json(prRow(), 201)) : null));
+      const r = await c.openDraftPr(OPEN);
+      ok(r.ok && r.number === 901 && postedN === 1, `${what}: passed over, and the App's own PR opened`);
+    }
+  });
+
+  await section("openDraftPr: a 422 whose PR turns up is the PR; any other 422 is final", async () => {
+    let lists = 0;
+    const lost = prClient((m, u) => (m === "GET" && u === LIST ? (lists++ === 0 ? json([]) : json([prRow()])) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ message: "A pull request already exists" }] }, 422) : null));
+    const r1 = await lost.c.openDraftPr(OPEN);
+    ok(r1.ok && r1.number === 901, "a lost answer: the PR is found after the 422");
+    const none = prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed: No commits between main and the branch" }, 422) : null));
+    const r2 = await none.c.openDraftPr(OPEN);
+    ok(!r2.ok && r2.final === true && r2.detail.includes("422") && r2.detail.includes("No commits between"), "no commits between: final, in GitHub's words");
+  });
+
+  await section("openDraftPr: other failures are retried, scrubbed, never thrown", async () => {
+    const r500 = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: `boom near ${TOKEN}` }, 500) : null)).c.openDraftPr(OPEN);
+    ok(!r500.ok && !r500.final && r500.detail.includes("500") && !r500.detail.includes(TOKEN), "a 500: a retry, the token scrubbed from GitHub's words");
+    const listFails = await prClient((m, u) => (m === "GET" && u === LIST ? json({ message: "Resource not accessible by integration" }, 403) : null)).c.openDraftPr(OPEN);
+    ok(!listFails.ok && !listFails.final && listFails.detail.includes("403") && listFails.detail.includes("not accessible"), "a refused lookup: a retry, nothing posted");
+    const f = stubFetch((m, u) => tokenRoute(m, u) ?? Promise.reject(new Error(`socket hang up ${TOKEN}`)));
+    const thrown = await appClient({ app: APP, pem: PEM, fetch: f.fetch, git: realGitSpawn, bareRepo: "/x", home: "/x", now: () => NOW }).openDraftPr(OPEN);
+    ok(!thrown.ok && !thrown.final && thrown.detail.includes("socket hang up") && !thrown.detail.includes(TOKEN), "a transport failure: a result, the token gone");
+    const weird = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json(prRow({ user: { login: "someone" } }), 201) : null)).c.openDraftPr(OPEN);
+    ok(!weird.ok && weird.detail.includes("isn't the App's"), "a 201 answering someone else's PR is not taken");
+  });
+
+  await section("openDraftPr: a head outside the runner's prefix is refused, nothing sent", async () => {
+    const { c, sent } = prClient(() => null);
+    const r = await c.openDraftPr({ ...OPEN, head: "MHarris-SgyMd:main" });
+    ok(!r.ok && r.final === true && sent.length === 0, "refused as final, no request");
+  });
+
+  console.log(`${passed} passed, ${failed} failed`);
+  console.log(failed ? `${failed} failed` : "all passed");
+  return failed ? 1 : 0;
+}
+
+if (import.meta.main) {
+  if (!process.argv.slice(2).includes("--self-check")) {
+    console.error("usage: bun scripts/agent-runner/github-check.ts --self-check");
+    process.exit(2);
+  }
+  process.exit(await selfCheck());
+}

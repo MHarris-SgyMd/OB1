@@ -315,9 +315,17 @@ jobs:
       # fence the model text can't break out of, the secret withholding, the token
       # masking and the body cap) and the publish sequence (the step-8 renew verdict,
       # the push, the draft PR and the PR-link comment) on stubs. No key, no network,
-      # no model; the real push and the live wiring need SMD-4089's GitHub identity (cut 3b).
+      # no model. The real client is github.ts (cut 3b-1); the live wiring is cut 3b-2.
       - name: The agent runner's publish step
         run: bun scripts/agent-runner/publish-check.ts --self-check
+      # SMD-4087 cut 3b-1: the runner's GitHub App client (github.ts) — the JWT,
+      # the installation token asked for with the least the publish needs and
+      # refused when it comes back with more, a real push into a local bare
+      # repository (one branch, no tags, no hooks, never forced, the token in git's
+      # environment alone) and the idempotent draft PR on a stand-in API. No key,
+      # no network.
+      - name: The agent runner's GitHub App client
+        run: bun scripts/agent-runner/github-check.ts --self-check
       # SMD-3614: the wiki's Test-counts page from the jobs' count lines, on
       # fixtures — the rows, their order, the jobs that did not succeed or
       # reported nothing. publish-test-counts writes it on a push to main.

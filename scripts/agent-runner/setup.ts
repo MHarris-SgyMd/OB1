@@ -1,6 +1,7 @@
 /**
- * setup.ts — place and check the runner's identities (SMD-4089): the agent-kind brain key, the Linear key, the bot's
- * GitHub token and the Anthropic API key, each in its own 0600 file under the runner's directory. Creating the accounts
+ * setup.ts — place and check the runner's identities (SMD-4089): the agent-kind brain key, the Linear key, the
+ * Anthropic API key, the GitHub App's private key, and an optional GitHub read token for the dry run's lookups, each in
+ * its own 0600 file under the runner's directory. Creating the accounts
  * and minting the keys is the maintainer's, on the brain host (CLAUDE.md, "Keys"); this tool only writes a minted
  * secret into the right file, by the key's own shape, without ever printing it, and verifies it through the runner's own
  * owner-only read (dry-run.ts) — so a value it accepts is one the runner will read. Rotation is the same two steps:
@@ -10,11 +11,13 @@
  *   bun scripts/agent-runner/setup.ts dirs                       # make the directory (0700), idempotent
  *   bun scripts/agent-runner/setup.ts install linear            # copy the key to the clipboard first; this reads it
  *   bun scripts/agent-runner/setup.ts install brain --stdin     # or read the key from stdin
- *   bun scripts/agent-runner/setup.ts verify [--bot <login>]    # each secret present, 0600, right shape (+ the fork),
+ *   bun scripts/agent-runner/setup.ts install github-app        # the App's private key (.pem), from the clipboard or --stdin
+ *   bun scripts/agent-runner/setup.ts verify                    # each secret present, 0600, right shape,
  *                                                               # and what the probe stamp says of its binary and install
  *   bun scripts/agent-runner/setup.ts claude <path>             # the runner's own copy of that Claude Code (SMD-4491)
  *   bun scripts/agent-runner/setup.ts checkout [--commit <sha>] # the runner's own checkout, made or moved (SMD-4491)
- *   bun scripts/agent-runner/setup.ts check-github <bot-login>  # the fork exists and the bot can't push here (needs gh)
+ *   bun scripts/agent-runner/setup.ts check-github-app          # the App as decision 13 needs it, and the rulesets
+ *                                                               # its first publish waits on (network; gh for rulesets)
  *   bun scripts/agent-runner/setup.ts --self-check              # offline
  *
  * Run it as the dry run is, reading no ambient config: bun --no-env-file --config=/dev/null scripts/agent-runner/setup.ts …
@@ -38,7 +41,9 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { KEY_FILES, KEY_SHAPES, parseConfig, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
+import { KEY_FILES, KEY_SHAPES, noRedirect, parseConfig, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
+import type { Config, Fetch } from "./facts.ts";
+import { APP_KEY_FILE, PEM_SHAPE, appJwt, installationToken, type App } from "./github.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import type { GitRun } from "./gate.ts";
 import { CLAUDE_DIR, INSTALL_DIR, claudeVersion, copyClaude, hostNow, makeInstall, stampReport } from "./install.ts";
@@ -46,20 +51,20 @@ import { STATE_DIR, ensureBareRepo, gitRunner, installDir } from "./live-run.ts"
 import { STAMP_FILE, type Host } from "./probes.ts";
 import { PROFILE_FILES, sha256Hex } from "./profile.ts";
 
-/** This repo, as the config's `repo` defaults to it: the upstream the bot forks and must not be able to push to. */
-const OWNER_REPO = "MHarris-SgyMd/OB1";
-
 /** The Anthropic key isn't one the runner reads (Claude Code reads it through apiKeyHelper), so it isn't in KEY_FILES; it lives beside the others. */
 const ANTHROPIC = { file: "anthropic.key", shape: /^sk-ant-[A-Za-z0-9_-]{16,}$/ } as const;
 
-/** Which identity: the three keys the runner reads, and the Anthropic key apiKeyHelper reads. */
-export type Which = keyof typeof KEY_FILES | "anthropic";
-export const WHICHES: Which[] = [...(Object.keys(KEY_FILES) as (keyof typeof KEY_FILES)[]), "anthropic"];
+/** Which identity: the three keys the runner reads at start, the Anthropic key apiKeyHelper reads, and the App's key the publish reads. */
+export type Which = keyof typeof KEY_FILES | "anthropic" | "github-app";
+export const WHICHES: Which[] = [...(Object.keys(KEY_FILES) as (keyof typeof KEY_FILES)[]), "anthropic", "github-app"];
+/** `github.token` is optional since the App (decision 13, amended 2026-11-24): a read token that raises the dry run's GitHub rate limit, nothing more. */
+export const OPTIONAL: Which[] = ["github"];
 
 /** A key's file, its shape, and how to describe the shape in a message (never a value). */
 export function spec(which: Which): { file: string; shape: RegExp; label: string } {
   if (which === "anthropic") return { file: ANTHROPIC.file, shape: ANTHROPIC.shape, label: "sk-ant-…" };
-  const label = which === "linear" ? "lin_api_… or lin_oauth_…" : which === "brain" ? "64 hex (keygen.ts)" : "ghp_… or github_pat_…";
+  if (which === "github-app") return { file: APP_KEY_FILE, shape: PEM_SHAPE, label: "the App's PEM private key" };
+  const label = which === "linear" ? "lin_api_… or lin_oauth_…" : which === "brain" ? "64 hex (keygen.ts)" : "a read token, ghp_… or github_pat_…";
   return { file: KEY_FILES[which], shape: KEY_SHAPES[which], label };
 }
 
@@ -82,11 +87,12 @@ export function readSecret(source: "clipboard" | "stdin"): string {
 /** Verify one identity through the runner's own owner-only read: present, 0600, one link, of the key's shape. Never throws, never shows the value. */
 export function verifyOne(dir: string, which: Which): { ok: boolean; detail: string } {
   try {
-    if (which === "anthropic") {
-      const text = readOwnedFile(join(dir, ANTHROPIC.file), true);
+    if (which === "anthropic" || which === "github-app") {
+      const s = spec(which);
+      const text = readOwnedFile(join(dir, s.file), true);
       if (text === null) return { ok: false, detail: "missing" };
-      if (!ANTHROPIC.shape.test(text.trim())) return { ok: false, detail: "present but not an sk-ant-… key (value not shown)" };
-      return { ok: true, detail: "present · 0600 · owner-only · sk-ant-… shape" };
+      if (!s.shape.test(text.trim())) return { ok: false, detail: `present but not ${which === "anthropic" ? "an sk-ant-… key" : "a PEM private key"} (value not shown)` };
+      return { ok: true, detail: `present · 0600 · owner-only · ${s.label}` };
     }
     const value = readKey(dir, which);
     if (value === null) return { ok: false, detail: "missing" };
@@ -129,34 +135,115 @@ export function install(dir: string, which: Which, source: "clipboard" | "stdin"
   return installValue(dir, which, readSecret(source));
 }
 
-/** With gh: the bot's fork exists and the bot can't push to this repo. Needs network and gh auth; not in the offline self-check. */
-export function checkGithub(bot: string): { ok: boolean; lines: string[] } {
+/** What `check-github-app` reads, gathered first so `appFindings` judges it offline. Each field null when it couldn't be read. */
+export type AppFacts = {
+  /** GET /app, with the App's JWT: its slug and the permissions it was given. */
+  app: { slug?: unknown; permissions?: unknown } | null;
+  /** GET /app/installations/<id>, with the JWT: which repositories it was installed on. */
+  installation: { repository_selection?: unknown } | null;
+  /** GET /installation/repositories, with an installation token: the repositories it reaches. */
+  repos: string[] | null;
+  /** The repo's rulesets, each read whole (with the maintainer's gh, which sees their bypass lists). */
+  rulesets: { name?: unknown; target?: unknown; enforcement?: unknown; conditions?: unknown; rules?: unknown; bypass_actors?: unknown }[] | null;
+};
+
+/** The permissions decision 13's App holds: these two writes, and the metadata read GitHub gives every App. */
+const APP_PERMISSIONS: Record<string, string> = { contents: "write", pull_requests: "write", metadata: "read" };
+
+/** A ruleset's include patterns, and whether one of them reaches `ref`'s kind ("~ALL", or a pattern naming it). */
+function includes(rs: AppFacts["rulesets"] extends (infer R)[] | null ? R : never): string[] {
+  const c = rs.conditions as { ref_name?: { include?: unknown } } | undefined;
+  return Array.isArray(c?.ref_name?.include) ? (c.ref_name.include as unknown[]).filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * Judge the App and the repo's rulesets against decision 13 as amended: the lines `check-github-app` prints, each
+ * ✓ or ✗, and whether all the required ones hold. Pure, so the self-check covers every verdict offline.
+ *   - the App is the configured one, holds contents and pull_requests write and nothing more (no `workflows`, no
+ *     `administration`), and is installed on this repo alone;
+ *   - an active tag ruleset restricts creating `v*` tags, and the App is not among those who may bypass it, so the
+ *     App can't start a release;
+ *   - main's active ruleset requires an approving review (SMD-4090), and the App can't bypass it, so the App can't
+ *     merge its own PR.
+ */
+export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: string; githubAppSlug: string }): { ok: boolean; lines: string[] } {
   const lines: string[] = [];
   let ok = true;
-  const col = spawnSync("gh", ["api", "-i", `repos/${OWNER_REPO}/collaborators/${bot}`], { encoding: "utf8", timeout: 20_000 });
-  if (col.error) return { ok: false, lines: [`gh isn't available (${col.error.message})`] };
-  const status = (col.stdout ?? "").match(/^HTTP\/[\d.]+ (\d{3})/m)?.[1] ?? "?";
-  if (status === "404") lines.push(`✓ ${bot} is not a collaborator on ${OWNER_REPO} (it can't push here)`);
-  else if (status === "204") {
-    ok = false;
-    lines.push(`✗ ${bot} is a collaborator on ${OWNER_REPO} — it should have no write access here`);
-  } else {
-    ok = false;
-    lines.push(`✗ the collaborator check returned HTTP ${status}, not 404 — could not confirm ${bot} has no write access to ${OWNER_REPO}`);
+  const say = (good: boolean, text: string): void => {
+    if (!good) ok = false;
+    lines.push(`${good ? "✓" : "✗"} ${text}`);
+  };
+  if (facts.app === null) say(false, "the App couldn't be read with its JWT (GET /app): check githubAppId and github-app.pem");
+  else {
+    say(facts.app.slug === cfg.githubAppSlug, `the App's slug is ${JSON.stringify(facts.app.slug)} (the config says ${cfg.githubAppSlug})`);
+    const perms = facts.app.permissions && typeof facts.app.permissions === "object" ? (facts.app.permissions as Record<string, unknown>) : {};
+    const extra = Object.entries(perms).filter(([k, v]) => APP_PERMISSIONS[k] !== v).map(([k, v]) => `${k}: ${String(v)}`);
+    const missing = ["contents", "pull_requests"].filter((k) => perms[k] !== "write");
+    say(extra.length === 0 && missing.length === 0, extra.length || missing.length ? `the App's permissions are not decision 13's: ${[...extra.map((e) => `more ${e}`), ...missing.map((m) => `missing ${m}: write`)].join(", ")}` : "the App holds contents and pull_requests write, metadata read, and nothing else (no workflows, no administration)");
   }
-  const fork = spawnSync("gh", ["api", `repos/${bot}/OB1`, "--jq", "[.fork, .parent.full_name] | @tsv"], { encoding: "utf8", timeout: 20_000 });
-  if (fork.status !== 0) {
-    ok = false;
-    lines.push(`✗ no readable fork ${bot}/OB1 (gh exit ${fork.status})`);
-  } else {
-    const [isFork, parent] = (fork.stdout ?? "").trim().split("\t");
-    if (isFork === "true" && parent === OWNER_REPO) lines.push(`✓ ${bot}/OB1 is a fork of ${OWNER_REPO}`);
-    else {
-      ok = false;
-      lines.push(`✗ ${bot}/OB1 is fork=${isFork || "?"} parent=${parent || "none"} (expected a fork of ${OWNER_REPO})`);
-    }
+  if (facts.installation === null) say(false, "the installation couldn't be read (GET /app/installations/<id>): check githubAppInstallationId");
+  else say(facts.installation.repository_selection === "selected", `the App is installed on selected repositories (it says ${JSON.stringify(facts.installation.repository_selection)})`);
+  if (facts.repos === null) say(false, "the installation's repositories couldn't be read with an installation token");
+  else say(facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase(), `the installation reaches ${facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase() ? `${cfg.repo} alone` : `${facts.repos.join(", ") || "nothing"}, not ${cfg.repo} alone`}`);
+
+  if (facts.rulesets === null) {
+    say(false, "the repo's rulesets couldn't be read (gh api repos/<repo>/rulesets)");
+    return { ok, lines };
   }
+  const active = facts.rulesets.filter((r) => r.enforcement === "active");
+  const appBypasses = (r: (typeof active)[number]): boolean =>
+    Array.isArray(r.bypass_actors) && (r.bypass_actors as { actor_type?: unknown; actor_id?: unknown }[]).some((a) => a?.actor_type === "Integration" && String(a?.actor_id) === cfg.githubAppId);
+  const ruleTypes = (r: (typeof active)[number]): string[] => (Array.isArray(r.rules) ? (r.rules as { type?: unknown }[]).map((x) => String(x?.type)) : []);
+  const tagGuard = active.find((r) => r.target === "tag" && includes(r).some((p) => p === "~ALL" || /^refs\/tags\/v?\*$/.test(p) || p === "refs/tags/v[0-9]*") && ruleTypes(r).includes("creation") && !appBypasses(r));
+  say(tagGuard !== undefined, tagGuard ? `the tag ruleset ${JSON.stringify(tagGuard.name)} restricts creating v* tags, and the App can't bypass it` : "no active tag ruleset restricts creating v* tags without the App among its bypass actors: the App could push a v* tag and start a release");
+  const mainRules = active.filter((r) => r.target === "branch" && includes(r).some((p) => p === "~DEFAULT_BRANCH" || p === "~ALL" || p === "refs/heads/main"));
+  const approving = mainRules.find((r) => !appBypasses(r) && Array.isArray(r.rules) && (r.rules as { type?: unknown; parameters?: { required_approving_review_count?: unknown } }[]).some((x) => x?.type === "pull_request" && Number(x.parameters?.required_approving_review_count) >= 1));
+  say(approving !== undefined, approving ? `main's ruleset ${JSON.stringify(approving.name)} requires an approving review, and the App can't bypass it (SMD-4090)` : "main's rulesets require no approving review the App can't bypass: the App could merge its own green PR (SMD-4090)");
+  if (mainRules.some(appBypasses)) say(false, "the App is a bypass actor on a ruleset of main");
   return { ok, lines };
+}
+
+/**
+ * `check-github-app`: read what `appFindings` judges — the App and its installation with the App's own key, the
+ * installation's repositories with a token it mints, and the rulesets with the maintainer's gh — then judge it. Needs
+ * the network; not in the offline self-check. Mints one installation token, used for one read; nothing is written.
+ */
+export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch): Promise<{ ok: boolean; lines: string[] }> {
+  if (!cfg.githubAppId || !cfg.githubAppInstallationId || !cfg.githubAppSlug) return { ok: false, lines: ["✗ the config names no GitHub App (githubAppId, githubAppInstallationId, githubAppSlug)"] };
+  const app: App = { appId: cfg.githubAppId, installationId: cfg.githubAppInstallationId, repo: cfg.repo };
+  const get = async (path: string, bearer: string): Promise<unknown> => {
+    try {
+      const res = await fetchImpl(`https://api.github.com${path}`, { headers: { Accept: "application/vnd.github+json", "User-Agent": "agent-runner-setup", Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(20_000) });
+      return res.ok ? await res.json() : null;
+    } catch {
+      return null;
+    }
+  };
+  let jwt: string | null = null;
+  try {
+    jwt = appJwt(app.appId, pem, Date.now());
+  } catch {
+    jwt = null;
+  }
+  const facts: AppFacts = { app: null, installation: null, repos: null, rulesets: null };
+  if (jwt) {
+    facts.app = (await get("/app", jwt)) as AppFacts["app"];
+    facts.installation = (await get(`/app/installations/${app.installationId}`, jwt)) as AppFacts["installation"];
+  }
+  const minted = await installationToken(fetchImpl, app, pem, Date.now());
+  const lines: string[] = [];
+  if (minted.ok) {
+    const listed = (await get("/installation/repositories?per_page=100", minted.token)) as { repositories?: { full_name?: unknown }[] } | null;
+    facts.repos = Array.isArray(listed?.repositories) ? listed.repositories.map((r) => String(r?.full_name)) : null;
+  } else lines.push(`✗ an installation token couldn't be minted: ${minted.detail}`);
+  const list = spawnSync("gh", ["api", `repos/${cfg.repo}/rulesets?includes_parents=true`, "--jq", ".[].id"], { encoding: "utf8", timeout: 20_000 });
+  if (!list.error && list.status === 0) {
+    const ids = (list.stdout ?? "").split("\n").map((x) => x.trim()).filter((x) => /^\d+$/.test(x));
+    const whole = ids.map((id) => spawnSync("gh", ["api", `repos/${cfg.repo}/rulesets/${id}`], { encoding: "utf8", timeout: 20_000 }));
+    if (whole.every((w) => !w.error && w.status === 0)) facts.rulesets = whole.map((w) => JSON.parse(w.stdout ?? "{}"));
+  }
+  const judged = appFindings(facts, { repo: cfg.repo, githubAppId: cfg.githubAppId, githubAppSlug: cfg.githubAppSlug });
+  return { ok: judged.ok && minted.ok, lines: [...lines, ...judged.lines] };
 }
 
 /**
@@ -228,6 +315,7 @@ export function selfCheck(): number {
     brain: "0123456789abcdef".repeat(4),
     github: `ghp_${"A".repeat(36)}`,
     anthropic: `sk-ant-${"A".repeat(28)}`,
+    "github-app": `-----BEGIN RSA PRIVATE KEY-----\n${"QUJD".repeat(16)}\n${"REVG".repeat(8)}==\n-----END RSA PRIVATE KEY-----`,
   };
   const root = mkdtempSync(join(tmpdir(), "obr-setup-"));
   try {
@@ -411,6 +499,41 @@ export function selfCheck(): number {
       ok(!noConfig.ok && noConfig.lines[0].startsWith("✗"), "with no config it says so and makes nothing");
     });
 
+    section("check-github-app's verdicts: the App as decision 13 needs it, and its fence (appFindings)", () => {
+      const cfgA = { repo: "MHarris-SgyMd/OB1", githubAppId: "123456", githubAppSlug: "ob1-agent-runner" };
+      const tagRs = { name: "tags", target: "tag", enforcement: "active", conditions: { ref_name: { include: ["refs/tags/v*"], exclude: [] } }, rules: [{ type: "creation" }, { type: "update" }, { type: "deletion" }], bypass_actors: [{ actor_type: "RepositoryRole", actor_id: 5 }] };
+      // main's ruleset as it reads today (0 approvals), and as SMD-4090 makes it.
+      const mainRs = (count: number, bypass: unknown[] = []) => ({ name: "main", target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } }, rules: [{ type: "deletion" }, { type: "pull_request", parameters: { required_approving_review_count: count } }], bypass_actors: bypass });
+      const good: AppFacts = {
+        app: { slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read" } },
+        installation: { repository_selection: "selected" },
+        repos: ["MHarris-SgyMd/OB1"],
+        rulesets: [tagRs, mainRs(1, [{ actor_type: "RepositoryRole", actor_id: 5 }])],
+      };
+      const judged = (over: Partial<AppFacts>) => appFindings({ ...good, ...over }, cfgA);
+      const all = judged({});
+      ok(all.ok && all.lines.length === 6 && all.lines.every((l) => l.startsWith("✓")), "the App, its installation, its repos, the tag ruleset and main's approving review: six ✓");
+      const says = (over: Partial<AppFacts>, text: string): boolean => {
+        const r = judged(over);
+        return !r.ok && r.lines.some((l) => l.startsWith("✗") && l.includes(text));
+      };
+      ok(says({ app: { slug: "other", permissions: good.app?.permissions } }, "slug"), "another App's slug is ✗");
+      ok(says({ app: { slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read", workflows: "write" } } }, "more workflows: write"), "a workflows permission is ✗");
+      ok(says({ app: { slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read", administration: "read" } } }, "more administration: read"), "an administration read is ✗");
+      ok(says({ app: { slug: "ob1-agent-runner", permissions: { contents: "write", metadata: "read" } } }, "missing pull_requests: write"), "no pull_requests write is ✗");
+      ok(says({ app: null }, "GET /app"), "an App that can't be read is ✗");
+      ok(says({ installation: { repository_selection: "all" } }, "selected"), "an App installed on every repository is ✗");
+      ok(says({ repos: ["MHarris-SgyMd/OB1", "MHarris-SgyMd/other"] }, "not MHarris-SgyMd/OB1 alone"), "an installation reaching two repositories is ✗");
+      ok(says({ rulesets: [mainRs(1)] }, "start a release"), "no tag ruleset is ✗");
+      ok(says({ rulesets: [{ ...tagRs, bypass_actors: [{ actor_type: "Integration", actor_id: 123456 }] }, mainRs(1)] }, "start a release"), "a tag ruleset the App can bypass is ✗");
+      ok(says({ rulesets: [{ ...tagRs, enforcement: "evaluate" }, mainRs(1)] }, "start a release"), "a tag ruleset only evaluating is ✗");
+      ok(says({ rulesets: [{ ...tagRs, rules: [{ type: "deletion" }] }, mainRs(1)] }, "start a release"), "a tag ruleset that doesn't restrict creation is ✗");
+      ok(judged({ rulesets: [{ ...tagRs, conditions: { ref_name: { include: ["~ALL"] } } }, mainRs(1)] }).ok, "a tag ruleset on every tag is ✓");
+      ok(says({ rulesets: [tagRs, mainRs(0)] }, "SMD-4090"), "main's ruleset as it reads today, 0 approvals, is ✗ naming SMD-4090");
+      ok(says({ rulesets: [tagRs, mainRs(1, [{ actor_type: "Integration", actor_id: 123456 }])] }, "SMD-4090"), "an approving review the App can bypass is ✗");
+      ok(says({ rulesets: null }, "rulesets couldn't be read"), "rulesets that can't be read are ✗");
+    });
+
     section("what the probe stamp says of its binary and its install (SMD-4491)", () => {
       const state = join(root, "state-stamp");
       const install = join(root, "an-install");
@@ -500,28 +623,20 @@ if (import.meta.main) {
   }
 
   if (cmd === "verify") {
-    const botIdx = rest.indexOf("--bot");
     const problem = privateDirProblem(RUNNER_DIR);
     console.log(problem ? `✗ dir: ${problem}` : `✓ dir: ${RUNNER_DIR} (0700, yours)`);
     let failed = problem ? 1 : 0;
     for (const which of WHICHES) {
       const r = verifyOne(RUNNER_DIR, which);
       const mark = r.ok ? "✓" : r.detail === "missing" ? "·" : "✗";
-      console.log(`${mark} ${spec(which).file}: ${r.detail}`);
-      if (!r.ok) failed++;
-    }
-    if (botIdx >= 0) {
-      const bot = rest[botIdx + 1];
-      if (!bot) fail("--bot needs a github login");
-      const g = checkGithub(bot as string);
-      for (const line of g.lines) console.log(line);
-      if (!g.ok) failed++;
+      console.log(`${mark} ${spec(which).file}: ${r.detail}${OPTIONAL.includes(which) && r.detail === "missing" ? " (optional)" : ""}`);
+      if (!r.ok && !(OPTIONAL.includes(which) && r.detail === "missing")) failed++;
     }
     // The probe stamp's binary and install, as they are now: what a run from this checkout would be refused for (SMD-4491).
     const report = stampReport(STATE_DIR, installDir(), await hostNow());
     for (const line of report.lines) console.log(`${line.ok ? "✓" : "✗"} stamp: ${line.text}`);
     failed += report.lines.filter((l) => !l.ok).length;
-    console.log(failed ? `${failed} not ready` : "all four identities present and valid, and the probe stamp covers a run from this checkout");
+    console.log(failed ? `${failed} not ready` : "every identity present and valid, and the probe stamp covers a run from this checkout");
     process.exit(failed ? 1 : 0);
   }
 
@@ -551,20 +666,30 @@ if (import.meta.main) {
     process.exit(done.ok ? 0 : 1);
   }
 
-  if (cmd === "check-github") {
-    const bot = rest[0];
-    if (!bot) fail("usage: check-github <bot-login>");
-    const g = checkGithub(bot);
-    for (const line of g.lines) console.log(line);
-    process.exit(g.ok ? 0 : 1);
+  if (cmd === "check-github-app") {
+    if (rest.length) fail("usage: check-github-app");
+    try {
+      const text = readOwnedFile(join(RUNNER_DIR, "config.json"), false);
+      if (text === null) fail(`no config at ${join(RUNNER_DIR, "config.json")}`);
+      const cfg = parseConfig(text as string, homedir());
+      if ("error" in cfg) fail(`the config: ${cfg.error}`);
+      const pem = readOwnedFile(join(RUNNER_DIR, APP_KEY_FILE), true);
+      if (pem === null || !PEM_SHAPE.test(pem.trim())) fail(`no App key at ${join(RUNNER_DIR, APP_KEY_FILE)} (setup.ts install github-app)`);
+      const g = await checkGithubApp(cfg as Config, (pem as string).trim(), noRedirect(fetch) as unknown as Fetch);
+      for (const line of g.lines) console.log(line);
+      process.exit(g.ok ? 0 : 1);
+    } catch (e) {
+      console.error(`✗ ${(e as Error).message}`);
+      process.exit(1);
+    }
   }
 
   fail(`usage:
   bun scripts/agent-runner/setup.ts dirs
   bun scripts/agent-runner/setup.ts install <${WHICHES.join("|")}> [--stdin]
-  bun scripts/agent-runner/setup.ts verify [--bot <login>]
+  bun scripts/agent-runner/setup.ts verify
   bun scripts/agent-runner/setup.ts claude <path to a Claude Code binary>
   bun scripts/agent-runner/setup.ts checkout [--commit <full commit id>]
-  bun scripts/agent-runner/setup.ts check-github <bot-login>
+  bun scripts/agent-runner/setup.ts check-github-app
   bun scripts/agent-runner/setup.ts --self-check`);
 }

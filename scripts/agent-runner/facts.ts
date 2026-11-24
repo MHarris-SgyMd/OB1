@@ -30,8 +30,13 @@ export type Config = {
   maintainerLinearId: string;
   /** owner/name of this repo on GitHub. */
   repo: string;
-  /** owner/name of the bot's own copy of the repo, once SMD-4089 makes it; null until then. */
-  botRepo: string | null;
+  /**
+   * The runner's GitHub App (decision 13, amended 2026-11-24): its id, its installation on this repo, and its slug,
+   * whose `<slug>[bot]` login its PRs carry. All three or none; null until SMD-4089 makes the App.
+   */
+  githubAppId: string | null;
+  githubAppInstallationId: string | null;
+  githubAppSlug: string | null;
   mainCheckout: string;
   /** The stable brain's REST core, as the host reaches it (its proxy's /api route); null until it is reachable. */
   restUrl: string | null;
@@ -219,8 +224,9 @@ export function parseWorktrees(out: string): Worktree[] {
 }
 
 /**
- * Branches on this repo and the bot's copy, read from GitHub with `ls-remote` from outside any repository (so no
- * repository's config applies) and no local fetch; and the main checkout's local branches and worktrees.
+ * Branches on this repo, read from GitHub with `ls-remote` from outside any repository (so no repository's config
+ * applies) and no local fetch; and the main checkout's local branches and worktrees. The runner's App pushes to this
+ * repo, so its branches are among these.
  */
 export async function readBranches(run: Runner, cfg: Config): Promise<{ branches: Branch[]; worktrees: Worktree[] }> {
   const must = async (cmd: string[], cwd?: string): Promise<string> => {
@@ -229,9 +235,7 @@ export async function readBranches(run: Runner, cfg: Config): Promise<{ branches
     return r.stdout;
   };
   const branches: Branch[] = [];
-  for (const repo of [cfg.repo, ...(cfg.botRepo ? [cfg.botRepo] : [])]) {
-    branches.push(...parseLsRemote(await must(["git", ...GIT_SAFE, "ls-remote", "--heads", `https://github.com/${repo}.git`], "/")));
-  }
+  branches.push(...parseLsRemote(await must(["git", ...GIT_SAFE, "ls-remote", "--heads", `https://github.com/${cfg.repo}.git`], "/")));
   branches.push(...parseLocalBranches(await must(["git", ...GIT_SAFE, "-C", cfg.mainCheckout, "for-each-ref", "--format=%(objectname) %(refname:lstrip=2)", "refs/heads"])));
   const worktrees = parseWorktrees(await must(["git", ...GIT_SAFE, "-C", cfg.mainCheckout, "worktree", "list", "--porcelain"]));
   return { branches, worktrees };

@@ -38,7 +38,7 @@ It reads:
 
   A token is optional, since this repo is public. Without `github.token`, GitHub allows 60 requests an hour, and the dry run names a spent limit as such.
 * **git:**
-  * this repo's branches, and the bot's own copy's once SMD-4089 makes it, through `git ls-remote` run from outside any repository, with no local fetch;
+  * this repo's branches, the runner's App's `agent/` branches among them, through `git ls-remote` run from outside any repository, with no local fetch;
   * the main checkout's local branches and worktrees.
 
   git runs with an environment built from nothing, no credential helper, https as its only transport, and no redirect followed. So a remote that refuses it can't make it use, or erase, a credential of yours. A transfer slower than 1 kB/s for 20 seconds is given up, and any git command still running after 60 seconds is ended.
@@ -87,31 +87,35 @@ The parentheses keep `umask 077` to those commands alone. Or use `setup.ts` ("Pr
 | `mainCheckout` | required | The maintainer's main checkout: its local branches and worktrees count as work in hand. |
 | `team` | `SMD` | The Linear team. |
 | `repo` | `MHarris-SgyMd/OB1` | This repo on GitHub, as owner/name. |
-| `botRepo` | `null` | The bot's own copy of this repo, as owner/name, once SMD-4089 makes it. |
+| `githubAppId` | `null` | The runner's GitHub App's id, as its settings page shows it, in a string (decision 13). |
+| `githubAppInstallationId` | `null` | The App's installation on this repo, the number at the end of the installation's settings URL, in a string. |
+| `githubAppSlug` | `null` | The App's slug, as its URL shows it. Its PRs carry the login `<slug>[bot]`, which counts as the bot's in "nobody's work". The three App keys come together: all of them, or none. |
 | `restUrl` | `null` | The stable brain's REST core, as this host reaches it. It must be http or https, with no credentials, query or fragment, and plain http only on a loopback address. Plain http proves nothing about the server: while stable is down, any process on this Mac that takes its port receives the key. |
 
 An unknown key is refused, and so is a file that isn't JSON. A refusal names the setting at fault and never quotes a value from the file. It counts unknown keys rather than naming them, since a name put there by mistake could be a secret. The labels' names are not config: they are SMD-4086's, fixed in the code.
 
 ## Provisioning and rotating the identities (SMD-4089)
 
-The runner acts as itself, never as the maintainer: its own agent-kind brain key, Linear key, Anthropic key and (from cut 3) a GitHub identity. **Creating the accounts and minting the keys is the maintainer's**, on the brain host — CLAUDE.md's "Keys" is clear that sessions do not change keys. `setup.ts` only places a minted secret into its file and checks it; it never creates a key, and it never prints one.
+The runner acts as itself, never as the maintainer: its own agent-kind brain key, Linear key, Anthropic key and GitHub App. **Creating the accounts and minting the keys is the maintainer's**, on the brain host — CLAUDE.md's "Keys" is clear that sessions do not change keys. `setup.ts` only places a minted secret into its file and checks it; it never creates a key, and it never prints one.
 
 ```bash
 bun scripts/agent-runner/setup.ts dirs                      # make the directory (0700), idempotent
 bun scripts/agent-runner/setup.ts install linear            # copy the key first; this reads it from the clipboard (pbpaste)
 bun scripts/agent-runner/setup.ts install brain --stdin     # or read the key from stdin
-bun scripts/agent-runner/setup.ts verify --bot <login>      # each secret present, 0600, right shape (and the fork); the probe stamp's binary and install
-bun scripts/agent-runner/setup.ts check-github <bot-login>  # the fork exists and the bot cannot push here (needs gh)
+bun scripts/agent-runner/setup.ts install github-app        # the App's private key (.pem), from the clipboard or --stdin
+bun scripts/agent-runner/setup.ts verify                    # each secret present, 0600, right shape; the probe stamp's binary and install
+bun scripts/agent-runner/setup.ts check-github-app          # the App and the rulesets its first publish waits on (network; gh for the rulesets)
 ```
 
-`install` reads the secret from the clipboard (or `--stdin`), checks it against the runner's own shape (the same `KEY_SHAPES` the dry run reads with), writes it `0600` without following a link, and reads it back through the same owner-only read the runner uses — so a value it stores is one the runner will read. It prints only a masked line, never the value. `verify` reports each secret's presence, mode and shape (and, with `--bot`, that the fork exists and the bot is not a collaborator here) without printing any value.
+`install` reads the secret from the clipboard (or `--stdin`), checks it against the runner's own shape (the same `KEY_SHAPES` the dry run reads with), writes it `0600` without following a link, and reads it back through the same owner-only read the runner uses — so a value it stores is one the runner will read. It prints only a masked line, never the value. `verify` reports each secret's presence, mode and shape without printing any value; `github.token` alone may be missing.
 
 **Rotating a key is the same two steps: install the new value, then revoke the old one at its provider.** The runner reads each file fresh on every run, so no runner restart is needed. Per identity:
 
 * **`brain.key` — the agent-kind brain key, on stable.** Mint it with the maintainer's "Keys" steps: `bun server-portable/keygen.ts --name agent-runner --scope write`, add the printed `agent-runner:write:<hash>` line to stable's `MCP_ACCESS_KEYS` (a line of its own — a repeated name stops the REST core), recreate the REST core so it re-reads the env (`compose … up -d --force-recreate api`), then `set_agent_kind('agent-runner','agent')` on stable's database so a claim reads `holderKind: "agent"`. Store the 64-hex key with `setup.ts install brain`. Rotate it only while the runner holds no live claims — a new name is a new agent id, which cannot renew or release the old key's claims (CLAUDE.md, "Keys") — then mint under a new name, install, recreate `api`, set the kind, and remove the old line once the runner has read the new key.
 * **`linear.key` — the runner's Linear key.** Create a Linear API key, `setup.ts install linear`, then revoke the old one in Linear. *Pilot (2026-11-11): this is the maintainer's own personal key, so the runner's Linear moves and its hand-back comment show as the maintainer. The SMD-4089 Verify bullet "a comment names the bot, not the maintainer" is deferred; to meet it, give the runner a separate Linear identity (a bot user or a Linear app) and install its key.*
 * **`anthropic.key` — the runner's Anthropic key.** Create a key in a Console workspace with a spend limit (the ceiling past the runner's own caps), `setup.ts install anthropic`, then revoke the old. Claude Code reads it through `apiKeyHelper` (`/bin/cat` of this file), so a rotation is just the install.
-* **`github.token` — the bot's GitHub token. Deferred to cut 3** (the first push; it is unused before then). When provisioned: a classic `public_repo` token on the bot account (decision 13: the bot pushes only to its own fork and opens the PR from there), `setup.ts install github`, then `setup.ts check-github <login>`. *The fork-versus-GitHub-App choice (decision 13 is a fork) is open and revisited at cut 3.* To rotate: mint a new token, install, revoke the old; an App would rotate its private key instead.
+* **`github-app.pem` — the runner's GitHub App's private key** (decision 13, amended 2026-11-24; see "The GitHub App" below). To rotate: generate a new private key on the App's settings page, `setup.ts install github-app`, run `setup.ts check-github-app`, then delete the old key there. The installation tokens it mints last an hour and are never stored.
+* **`github.token` — optional:** a read token, of any account and no scopes, that raises the dry run's GitHub limit from 60 requests an hour. It pushes nothing. To rotate: mint, `setup.ts install github`, revoke the old.
 
 `setup.ts --self-check` proves the shape gate, the `0600` write, the no-symlink write, the owner-only read and the directory check offline, on a temp directory — no clipboard, no network, no key. CI runs it.
 
@@ -248,16 +252,34 @@ The executor runs one ticket end to end with the real clients — the capstone o
 
 **The hand-back comment** is all a person reads of a run until cut 3 publishes, so it says only what the run left (SMD-4516). It names the branch, the bundle and the diff when the run kept the worker's bundle beside its record, which it does only once the branch's import landed. A run that kept none (it ended at prepare, on a worker session that did not finish, or on a bundle it refused) is told as having kept nothing to publish from, and the claim's release reason says the same. The comment does not say nothing was imported: a copy that failed after the import leaves a branch and no bundle. When the review session did not finish, the comment says the branch was not reviewed by the runner, in the PR body's words.
 
-The sessions commit as a placeholder bot until SMD-4089's GitHub identity (cut 3). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
+The sessions commit as a placeholder bot; the App's own commit identity comes with the wiring (cut 3b-2). The gate's commitlint runs `@commitlint/cli` in a private bunx cache (the shared cache can lose a dependency); its secret scan is the session hook's `scanForSecrets`. The offline logic — the brief-ticket builder, the bare repo, the commitlint parser and the session-path layout (record and config in subdirs so `pathsProblem` passes) — has a self-check (`bun scripts/agent-runner/live-run.ts --self-check`).
 
 ## The publish step (`publish.ts`)
 
-On a run that passed the gate, the runner publishes as the bot (cut 3a is the logic; the live client and the schedule are 3b and 3c). Two pieces, both offline-tested (`publish-check.ts`):
+On a run that passed the gate, the runner publishes as its GitHub App (cut 3a is the logic, 3b-1 the App's client; the wiring, reconcile and the schedule are 3b-2, 3b-3 and 3c). Two pieces, both offline-tested (`publish-check.ts`):
 
 * **`buildPrBody`** composes the PR body from the run's own computed fields — the ticket, the diff's stat, the gate, the sessions — then the worker's report and the review's open findings as model text. Each model section is masked of claim tokens, scanned with the session hook's `scanForSecrets`, and put in a code block whose fence is longer than any run of backticks inside it, so the model output can't break out of the block, render, link or mention anyone. A flagged section is withheld with a count, not shown; the whole body stays under GitHub's 65,536-character cap, and if two model sections would pass it they are dropped whole (never cut mid-fence) with a note pointing at the run record.
-* **`publish`** runs the sequence over an injected GitHub client: step 8's renew with the day lease to confirm the claim — published only on a clean renewal, else the publish is left owed (a retryable refusal) or the ticket handed to a person (it closed, or another claim took the work) — then the push to the bot's fork, the draft PR, the record of its number, the PR-link comment on the ticket (a Linear outage leaves the comment owed), and the claim's lease set to a week now the PR is open. It never throws.
+* **`publish`** runs the sequence over an injected GitHub client: step 8's renew with the day lease to confirm the claim — published only on a clean renewal, else the publish is left owed (a retryable refusal) or the ticket handed to a person (it closed, or another claim took the work) — then the push of its `agent/` branch, the draft PR, the record of its number, the PR-link comment on the ticket (a Linear outage leaves the comment owed), and the claim's lease set to a week now the PR is open. It never throws. A GitHub refusal no retry mends (a push that isn't a fast-forward, a PR GitHub won't open for a reason other than its already being open) hands the ticket to a person rather than leaving the publish owed.
 
-The real GitHub client (the push, the REST call that opens the PR), `publish` wired into the live run, and step 0's reconcile are cut 3b; the launchd schedule is 3c. Both need SMD-4089's GitHub identity, and the schedule needs SMD-3606.
+`publish` wired into the live run is cut 3b-2, step 0's reconcile 3b-3, and the launchd schedule 3c.
+
+## The GitHub App (`github.ts`)
+
+The runner pushes and opens PRs as a GitHub App of its own (decision 13, amended by the maintainer 2026-11-24, in place of a machine account's fork). `github.ts`'s `appClient` is publish.ts's GitHub client:
+
+* **The token.** The App's private key signs a JWT good for nine minutes, which buys an installation token good for an hour. Each push and each PR asks for its own, for this repo alone, with `contents: write` and `pull_requests: write`, and nothing more. A token that comes back with any other permission, or for any other repository, is refused unused: the App holds more than the design allows.
+* **The push.** One branch, `agent/smd-<n>-<slug>` (record.ts `branchFor`'s shape; any other is refused before a token is minted), from the runner's bare repository, by an explicit refspec, with no tags, no hooks and no force. The token rides in git's environment as an `http.extraheader` scoped to `https://github.com/`, so it is in no URL git could echo and no argument `ps` shows, and every word that comes back is scrubbed of it. A branch already on GitHub at a commit this one doesn't descend from is a refusal, handed to a person.
+* **The PR.** A draft, from the branch, to `main`. An open PR the App already opened from the branch is the answer, so a retry after a lost reply opens no second one; a 422 whose PR then turns up is the same. Any other 422 (no commits between, a bad base) is final.
+
+**Making the App, the maintainer's** (once):
+
+1. On GitHub, under the maintainer's account: Settings → Developer settings → GitHub Apps → New GitHub App. No webhook. Repository permissions: **Contents: Read and write**, **Pull requests: Read and write**, and nothing else (Metadata: Read-only is added by GitHub). Not **Workflows**, not **Administration**. Only on this account.
+2. Generate a private key, and install the App on **this repository only**.
+3. Put `githubAppId`, `githubAppInstallationId` and `githubAppSlug` in the runner's config, and the key in place: `setup.ts install github-app`.
+4. **The fence**, which the first live publish waits on: a tag ruleset on this repo, targeting `v*` (or every tag), restricting creations, updates and deletions, with the maintainer alone able to bypass it; and `main`'s ruleset requiring one approving review, with the maintainer as bypass actor (SMD-4090). The App is in neither bypass list.
+5. `setup.ts check-github-app`: the App's slug and permissions, its installation on this repo alone, a token minted and its repositories read, and both rulesets. It writes nothing.
+
+Its offline self-check (`bun scripts/agent-runner/github-check.ts --self-check`) runs the JWT against a key it makes, the token's checks against a stand-in API, a real `git push` into a local bare repository (one branch, no tag, no hook, a moved branch refused, the token in git's environment alone), and every PR answer. No key, no network.
 
 ## How a run reads a session's ending (`run.ts`, SMD-4490)
 
@@ -278,5 +300,5 @@ A worker's bundle is imported only when it finished. A review that did not finis
 Cut 2's local run is built: the sessions' profile and its probes (2a, SMD-4088), and the run's local steps on it (2b) — the record, the clone, the brief, the worker and review sessions, the bundle and its import, the gate, and the orchestrator (`run.ts`) that ties them into one run on the record. The orchestrator drives the two sessions through a seam, so its self-check (`run-check.ts`) runs whole runs over a real bare repository with the sessions stubbed, offline and with no key. Driving real sessions end to end needs a model (cut 2c).
 
 * **2c:** the outward steps, over the runner's own keys (SMD-4089): the claim and its release with a reason, and the ticket's moves on Linear. It also covers the brain's identity, CLAUDE.md's amendment for a runner (decision 6), and a first real run with a model.
-* **3:** publishing, reconciliation and the launchd schedule, in three PRs — **3a, the publish step (`publish.ts`), is built** (offline); **3b** the live GitHub client, the wiring into the live run and reconcile (needs SMD-4089's GitHub identity); **3c** the launchd schedule (needs SMD-3606).
+* **3:** publishing, reconciliation and the launchd schedule, in three PRs — **3a, the publish step (`publish.ts`), is built** (offline); **3b** in three: **3b-1, the App's client (`github.ts`), is built** (offline); **3b-2** the wiring into the live run; **3b-3** reconcile. A live publish needs the App (SMD-4089) and its fence (SMD-4090 and a tag ruleset). **3c** the launchd schedule (SMD-3606 is done).
 * **4:** the pilot and its report (SMD-4091).

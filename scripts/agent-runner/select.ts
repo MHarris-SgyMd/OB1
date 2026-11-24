@@ -77,7 +77,7 @@ export type OpenPr = { number: number; title: string; body: string; head: string
 
 /** What the dry run found beyond the board: branches and worktrees, open pull requests, claims, and a branch's PRs. */
 export type Facts = {
-  /** Every branch it read: this repo's, the bot's own copy's (once it exists), and the main checkout's local ones. */
+  /** Every branch it read: this repo's (the runner's App pushes there too) and the main checkout's local ones. */
   branches: Branch[];
   /** The main checkout's worktrees: each path, its branch when it has one, and its commit. */
   worktrees: Worktree[];

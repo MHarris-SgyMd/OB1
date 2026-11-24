@@ -1,8 +1,8 @@
 /**
  * publish.ts — the publish step (SMD-4087 cut 3a; docs/agent-runner.md, "A run, step by step" steps 8-9 and "What the
- * runner publishes"). On a run that passed the gate, the runner publishes as the bot: it confirms the claim with a
- * day-lease renewal (it must renew clean — no `ticketClosed`, no lapse another claim took over), pushes the one branch
- * from its bare repository to the bot's fork, opens a draft PR on this repo with a body it builds, comments the PR link
+ * runner publishes"). On a run that passed the gate, the runner publishes as its GitHub App: it confirms the claim with
+ * a day-lease renewal (it must renew clean — no `ticketClosed`, no lapse another claim took over), pushes the one
+ * branch from its bare repository to this repo under the runner's prefix (`agent/`), opens a draft PR with a body it builds, comments the PR link
  * on the ticket, and only then sets the claim's lease to a week. The maintainer reviews and merges (SMD-4090); the runner never merges.
  *
  * Two pieces, both pure of I/O but for injected dependencies, so the self-check (publish-check.ts) drives them offline:
@@ -16,9 +16,9 @@
  *     (claims.ts) and the Linear comment (board.ts). It never throws: a push or PR failure, or a renewal that couldn't
  *     land, comes back as a result the caller (cut 3b's live-run wiring) turns into a hand-back or a step left owed.
  *
- * The real GitHub client (git push to the fork, the REST call that opens the PR) and the wiring into the live run are
- * cut 3b, and need SMD-4089's GitHub identity. This cut is the logic and its offline self-check, with no token and no
- * network — the same shape cuts 2c-1 (claims.ts) and 2c-2 (board.ts) were built in before the live run called them.
+ * The real GitHub client is github.ts (cut 3b-1), the runner's GitHub App; the wiring into the live run is cut 3b-2.
+ * This module is the logic and its offline self-check, with no token and no network — the same shape cuts 2c-1
+ * (claims.ts) and 2c-2 (board.ts) were built in before the live run called them.
  */
 
 import { comment } from "./board.ts";
@@ -181,27 +181,29 @@ export function buildPrBody(input: PrBodyInput, scanSecrets: ScanSecrets): strin
 
 /** The short, computed comment the runner posts on the ticket with the PR link — no model text. */
 export function prLinkComment(ticket: string, pr: { number: number; url: string }): string {
-  return `**Agent runner — opened a draft PR for review: [#${pr.number}](${pr.url}).**\n\nThe branch was pushed to the bot's fork and the PR opened against this repo as a draft. CI runs on it; a maintainer reviews and merges (the runner does not merge). ${ticket} stays claimed by the runner while the PR is open.`;
+  return `**Agent runner — opened a draft PR for review: [#${pr.number}](${pr.url}).**\n\nThe runner's GitHub App pushed the branch to this repo and opened the PR as a draft. CI runs on it; a maintainer reviews and merges (the runner does not merge). ${ticket} stays claimed by the runner while the PR is open.`;
 }
 
 // ── The publish sequence ─────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * The GitHub operations the publish step needs, injected so the self-check stubs them; the real client (git push to the
- * fork, the REST call) is cut 3b. Neither operation's `detail`, nor any message it throws (which `publish` records in an
- * owed step), may carry the bot's GitHub token: the cut-3b client must authenticate without a token in a URL that git
- * could echo on a failed push, or scrub the token from its errors. The runner never writes a token to a record.
+ * The GitHub operations the publish step needs, injected so the self-check stubs them; the real client is github.ts's
+ * `appClient`. Neither operation's `detail`, nor any message it throws (which `publish` records in an owed step), may
+ * carry the App's token: github.ts authenticates without a token in a URL that git could echo on a failed push, and
+ * scrubs the token from its errors. The runner never writes a token to a record. A failure marked `final` is one no
+ * retry mends (GitHub refused the push as not a fast-forward, or refused the PR for a reason other than its already
+ * being open): the ticket goes to a person instead of the publish being left owed.
  */
 export type GitHubClient = {
-  /** Push the one branch from the runner's bare repository to the bot's fork (explicit refspec, no tags, hooks off). */
-  pushBranch: (opts: { branch: string }) => Promise<{ ok: true } | { ok: false; detail: string }>;
+  /** Push the one branch from the runner's bare repository to this repo (explicit refspec, no tags, hooks off, no force). */
+  pushBranch: (opts: { branch: string }) => Promise<{ ok: true } | { ok: false; detail: string; final?: boolean }>;
   /**
-   * Open a draft PR on this repo from the bot's fork, returning its number and URL. Must be idempotent: if a PR already
+   * Open a draft PR on this repo from the pushed branch, returning its number and URL. Must be idempotent: if a PR already
    * exists for this head, return it as `{ ok: true, number, url }` rather than failing — a publish that fails here is
    * retried whole (owed `publish`), so without this a lost response would loop on "a PR already exists" (422) or open a
    * duplicate. It should also not throw (a transport failure is `{ ok: false }`); `publish` guards a throw regardless.
    */
-  openDraftPr: (opts: { title: string; head: string; base: string; body: string }) => Promise<{ ok: true; number: number; url: string } | { ok: false; detail: string }>;
+  openDraftPr: (opts: { title: string; head: string; base: string; body: string }) => Promise<{ ok: true; number: number; url: string } | { ok: false; detail: string; final?: boolean }>;
 };
 
 /** What `publish` takes from its environment. */
@@ -235,7 +237,7 @@ export type PublishInput = {
   leaseWeekSeconds: number;
   /** The branch to push, `agent/smd-<n>-<slug>`. */
   branch: string;
-  /** The PR's head, `<bot account>:<branch>`, and base branch on this repo. */
+  /** The PR's head, the pushed branch (`agent/smd-<n>-<slug>`, a branch of this repo), and its base branch. */
   head: string;
   baseBranch: string;
   /** The PR title. It must be runner-computed or gate-scanned text (e.g. the commit subject, which the gate's secret scan covers) — never raw model output. GitHub renders a title as plain text and fires no mentions, and `publish` masks tokens in it, but it does not scan it. */
@@ -305,8 +307,8 @@ export function renewVerdict(reply: ClaimReply): RenewVerdict {
 }
 
 /**
- * Publish a passed run as the bot (docs steps 8-9): confirm the claim with a day-lease renewal (clean), push the branch
- * to the bot's fork, open the draft PR, record its number, set the lease to a week now the PR is open, and comment the
+ * Publish a passed run as the runner's App (docs steps 8-9): confirm the claim with a day-lease renewal (clean), push
+ * the branch to this repo, open the draft PR, record its number, set the lease to a week now the PR is open, and comment the
  * PR link on the ticket. Never throws — a throwing precheck or renewal, a push or PR failure, and a failed comment each
  * come back as a result (owed to retry, or handed to a person), never a rejection, so a tick can't crash with the claim
  * orphaned. The pre-publish re-checks (the ticket read and "nobody's work") are the injected `precheck`; the real GitHub
@@ -339,26 +341,28 @@ export async function publish(input: PublishInput, deps: PublishDeps): Promise<P
     return mk({ handToPerson: verdict.handToPerson, owed: verdict.retryable ? [{ kind: "publish", why: `renew before publishing: ${verdict.reason}`, at: at() }] : [], reason: `renew before publishing: ${verdict.reason}` });
   }
 
-  // Step 9 — push the branch to the bot's fork. The GitHub client does a real git push and REST call in cut 3b, so guard
+  // Step 9 — push the branch to this repo. The GitHub client does a real git push and REST call in cut 3b, so guard
   // a throw (a dropped connection) as well as a returned failure: either leaves the publish owed to retry, the claim
   // still held at the day lease the step-8 renewal confirmed (`leaseRenewed` true) — never a thrown rejection.
-  let push: { ok: true } | { ok: false; detail: string };
+  let push: { ok: true } | { ok: false; detail: string; final?: boolean };
   try {
     push = await deps.github.pushBranch({ branch: input.branch });
   } catch (e) {
-    return mk({ leaseRenewed: true, owed: [{ kind: "publish", why: `the push to the bot's fork threw: ${scrubDetail(errText(e))}`, at: at() }], reason: "the push to the bot's fork threw" });
+    return mk({ leaseRenewed: true, owed: [{ kind: "publish", why: `the push threw: ${scrubDetail(errText(e))}`, at: at() }], reason: "the push threw" });
   }
-  if (!push.ok) return mk({ leaseRenewed: true, owed: [{ kind: "publish", why: `the push to the bot's fork failed: ${scrubDetail(push.detail)}`, at: at() }], reason: `the push to the bot's fork failed: ${scrubDetail(push.detail)}` });
+  if (!push.ok && push.final) return mk({ leaseRenewed: true, handToPerson: true, reason: `the push was refused: ${scrubDetail(push.detail)}` });
+  if (!push.ok) return mk({ leaseRenewed: true, owed: [{ kind: "publish", why: `the push failed: ${scrubDetail(push.detail)}`, at: at() }], reason: `the push failed: ${scrubDetail(push.detail)}` });
 
-  // Step 9 — open the draft PR on this repo from the fork, guarded the same way. `openDraftPr` is idempotent (see its
+  // Step 9 — open the draft PR on this repo from the pushed branch, guarded the same way. `openDraftPr` is idempotent (see its
   // type), so the owed retry re-runs the step without duplicating the PR. The title is masked of tokens (it must already
   // be runner-computed or gate-scanned, per PublishInput.title); the body was masked, scanned and fenced by buildPrBody.
-  let pr: { ok: true; number: number; url: string } | { ok: false; detail: string };
+  let pr: { ok: true; number: number; url: string } | { ok: false; detail: string; final?: boolean };
   try {
     pr = await deps.github.openDraftPr({ title: maskTokens(input.title), head: input.head, base: input.baseBranch, body: input.body });
   } catch (e) {
     return mk({ leaseRenewed: true, pushed: true, owed: [{ kind: "publish", why: `opening the draft PR threw: ${scrubDetail(errText(e))}`, at: at() }], reason: "opening the draft PR threw" });
   }
+  if (!pr.ok && pr.final) return mk({ leaseRenewed: true, pushed: true, handToPerson: true, reason: `the branch was pushed but GitHub refused the draft PR: ${scrubDetail(pr.detail)}` });
   if (!pr.ok) return mk({ leaseRenewed: true, pushed: true, owed: [{ kind: "publish", why: `the branch was pushed but the draft PR couldn't be opened: ${scrubDetail(pr.detail)}`, at: at() }], reason: `the branch was pushed but the draft PR couldn't be opened: ${scrubDetail(pr.detail)}` });
 
   // Record the PR number as soon as it exists. A record-write throw is swallowed (the PR is open regardless), so step 0's

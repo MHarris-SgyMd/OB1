@@ -106,7 +106,7 @@ function stubGql(commentSuccess = true, seq: string[] = []): { gql: Gql; calls: 
 /** A GitHub client stub that records its arguments, so the test asserts publish passes the right head/base/body/branch. */
 type PushArg = { branch: string };
 type PrArg = { title: string; head: string; base: string; body: string };
-function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string } = {}, seq: string[] = []): { client: GitHubClient; pushes: PushArg[]; prs: PrArg[] } {
+function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string; final?: boolean } = {}, seq: string[] = []): { client: GitHubClient; pushes: PushArg[]; prs: PrArg[] } {
   const pushes: PushArg[] = [];
   const prs: PrArg[] = [];
   const client: GitHubClient = {
@@ -114,13 +114,13 @@ function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; 
       seq.push("push");
       pushes.push(o);
       if (opts.pushThrows) throw new Error("git push: connection reset");
-      return opts.push === false ? { ok: false, detail: opts.pushDetail ?? "remote rejected" } : { ok: true };
+      return opts.push === false ? { ok: false, detail: opts.pushDetail ?? "remote rejected", ...(opts.final ? { final: true } : {}) } : { ok: true };
     },
     openDraftPr: async (o) => {
       seq.push("pr");
       prs.push(o);
       if (opts.prThrows) throw new Error("fetch failed: the network is down");
-      return opts.pr === false ? { ok: false, detail: "GitHub 422" } : { ok: true, number: 777, url: "https://github.com/owner/repo/pull/777" };
+      return opts.pr === false ? { ok: false, detail: "GitHub 422", ...(opts.final ? { final: true } : {}) } : { ok: true, number: 777, url: "https://github.com/owner/repo/pull/777" };
     },
   };
   return { client, pushes, prs };
@@ -129,7 +129,7 @@ function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; 
 /** Make a PublishInput over a fresh record, and the deps, for a scenario. */
 function makePublish(
   state: string,
-  opts: { renew?: RenewScenario; push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string; comment?: boolean; precheck?: boolean | "throw" } = {},
+  opts: { renew?: RenewScenario; push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string; final?: boolean; comment?: boolean; precheck?: boolean | "throw" } = {},
 ): { input: PublishInput; deps: PublishDeps; dir: string; seq: string[]; pushes: PushArg[]; prs: PrArg[]; fetchCalls: string[]; gqlCalls: string[]; leases: number[] } {
   const n = runSeq++;
   const run = `2026-01-02T03-04-05-${String(n).padStart(3, "0")}Z`;
@@ -138,7 +138,7 @@ function makePublish(
   const seq: string[] = [];
   const f = stubFetch(opts.renew ?? "clean", seq);
   const g = stubGql(opts.comment ?? true, seq);
-  const gh = stubGithub({ push: opts.push, pr: opts.pr, pushThrows: opts.pushThrows, prThrows: opts.prThrows, pushDetail: opts.pushDetail }, seq);
+  const gh = stubGithub({ push: opts.push, pr: opts.pr, pushThrows: opts.pushThrows, prThrows: opts.prThrows, pushDetail: opts.pushDetail, final: opts.final }, seq);
   const deps: PublishDeps = { github: gh.client, fetch: f.fetch, base: "http://127.0.0.1:8010/api", brainKey: `bk${"0".repeat(60)}`, runnerDir: state, gql: g.gql, now: () => new Date("2026-01-02T03:04:05Z") };
   const precheck: PublishInput["precheck"] =
     opts.precheck === "throw"
@@ -153,7 +153,7 @@ function makePublish(
     leaseDaySeconds: DAY,
     leaseWeekSeconds: WEEK,
     branch: "agent/smd-1234-fix-the-thing",
-    head: "ob1-agent-runner:agent/smd-1234-fix-the-thing",
+    head: "agent/smd-1234-fix-the-thing",
     baseBranch: "main",
     title: "[core] Fix the thing (SMD-1234)",
     body: "the pre-built body",
@@ -395,6 +395,20 @@ export async function selfCheck(): Promise<number> {
       ok(!r.published && !r.pushed && r.leaseRenewed, "not published, not pushed, but the claim was confirmed");
       ok(r.owed.some((o) => o.kind === "publish") && !r.handToPerson, "the push failure is owed to retry, not a person's");
       ok(!m.seq.includes("pr"), "it did not open a PR");
+    });
+
+    await section("publish: a push GitHub refused for good (final) — a person's, nothing owed, no PR", async () => {
+      const m = makePublish(root, { push: false, final: true, pushDetail: "GitHub refused the push of agent/smd-1234-fix-the-thing: [rejected] (fetch first)" });
+      const r = await publish(m.input, m.deps);
+      ok(!r.published && !r.pushed && r.leaseRenewed && r.handToPerson && r.owed.length === 0, "not pushed, handed to a person, nothing owed to retry");
+      ok(r.reason.startsWith("the push was refused") && !m.seq.includes("pr"), "the reason says the push was refused, and no PR was asked for");
+    });
+
+    await section("publish: a draft PR GitHub refused for good (final) — pushed, a person's, nothing owed", async () => {
+      const m = makePublish(root, { pr: false, final: true });
+      const r = await publish(m.input, m.deps);
+      ok(!r.published && r.pushed && r.handToPerson && r.owed.length === 0 && r.prNumber === null, "pushed, no PR, handed to a person, nothing owed");
+      ok(r.reason.startsWith("the branch was pushed but GitHub refused the draft PR") && readRecord(m.dir).pr === null, "the reason says so, and the record has no PR");
     });
 
     await section("publish: a GitHub token in a push error is scrubbed from the record strings", async () => {
