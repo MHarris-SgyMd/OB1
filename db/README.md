@@ -5445,23 +5445,24 @@ test-schema [136], test-upgrade [20cn].
 
 **Migration 153 is for a part that is no longer a judgement of its texts**
 (SMD-4446 PR 2b-1). A part keeps the fingerprint of each text it was judged
-at. Judged again at the texts as they stand, a statement the writer names
-again takes its earlier row's place (`replaced`, above). One it names no more
-stayed: stale, or pending at fingerprints that are no longer its texts'.
+at. Judged again at the texts as they stand, a statement the pass records
+again takes its earlier row's place (`replaced`, above). One it does not
+record again stayed: stale, or pending at fingerprints that are no longer
+its texts'.
 
 - **`settle_stale_part(id, older fingerprint, newer fingerprint)`** is the
   pass's removal of such a part. Its caller gives the fingerprint of each
   text as it read it: where it judged the pair again and that judgement did
-  not name the part, or where nothing will judge the pair again. Under the
-  supersession advisory lock and the row's own it answers, as values:
+  not record the part again, or where nothing will judge the pair again.
+  Under the supersession advisory lock and the row's own it answers, as values:
   `NOT_FOUND` (no such part: replaced, removed already, or gone with a
   thought); `DECIDED` with the status (a reviewer's decision stands whatever
   its texts have done since); `EDITED_SINCE` with `older_edited` and
   `newer_edited` (a fingerprint given is not its text's as it stands, so the
-  caller judged other texts and its judgement says nothing of this part);
+  caller read other texts and what it found says nothing of this part);
   `NOT_STALE` (pending at the fingerprints given: a judgement of these very
-  texts, which another judgement of them that names it no more does not
-  remove); else `{ok, action: removed, id, was}`, the row deleted and its
+  texts, which another judgement of them that does not record it again does
+  not remove); else `{ok, action: removed, id, was}`, the row deleted and its
   lineage row with it. It removes and does not reject: nobody decided the
   part, and a rejection would keep its statement from being proposed on the
   pair again. It runs under READ COMMITTED alone, echoes no argument, and
