@@ -11983,19 +11983,19 @@ checkProductName();
 // a path of the checkout reads it through a read-only bind mount, where no
 // access time moves and the watch is told of the open. And the workflow
 // names READS_WATCH_WAIT nowhere, a comment included: it is how long a marker
-// waits to hear from its watch, shortened by reads.sh's own cases, and set
-// short in a job it would leave that job's lists saying watch=none.
+// waits to hear from its watch, shortened by reads.sh's own cases; set short
+// in a job, it would leave that job's lists saying watch=none.
 const READS_SCRIPT = ".github/ci/reads.sh";
 const READS_MARK = `bash ${READS_SCRIPT} mark`;
 const READS_WATCH = `${READS_MARK} --watch`;
 const READS_WAIT = "READS_WATCH_WAIT";
 /**
  * The jobs whose marker also watches (PR 3c-1): each runs containers, and a read through a read-only bind mount of
- * the checkout moves no access time (deploy-stack-auth binds three tracked paths so today; the other two none, and
- * would be whole without the watch until one did). Named here and not read off the workflow, so a `--watch` taken off a
- * marker is a failure, not a job that quietly watches no longer. The other two jobs that run the compose stack do
- * not watch: each reads most of the tree, so its list would skip it for almost no pull request (SMD-2435's replay,
- * 2026-11-23: 3 and 2 of 100).
+ * the checkout moves no access time (deploy-stack-auth binds three tracked paths so today; the other two bind none,
+ * and their lists would be whole without the watch until one did). Named here and not read off the workflow, so a
+ * `--watch` taken off a marker is a failure, not a job that quietly watches no longer. The other two jobs that run
+ * the compose stack do not watch: each reads most of the tree, so its list would skip it for almost no pull request
+ * (SMD-2435's replay, 2026-11-23: 3 and 2 of 100).
  */
 const READS_WATCHED: readonly string[] = ["deploy-stack-auth", "deploy-stack-observability", "auth-poc"];
 const READS_LIST = `bash ${READS_SCRIPT} list`;
@@ -12008,14 +12008,15 @@ const READS_KEEP_IF = `\${{ !cancelled() && steps.${READS_MARK_ID}.outcome == 's
 /** A command line that runs reads.sh's `mark` or `list`, however the script is reached: `bash .github/ci/reads.sh mark`, `cd .github/ci && bash reads.sh mark`. */
 const readsRuns = (run: string | null, verb: "mark" | "list") => new RegExp(`(^|[\\s/])reads\\.sh["']?\\s+${verb}\\b`).test(run ?? "");
 const READS_STATUS = "${{ job.status }}";
-/** What check 55 reports of a workflow's text: each gated job's checkout, marker, list and upload, and the self-check's step. */
-function readsProblems(text: string, gated: readonly string[], selfCheckJob: string, watched: readonly string[] = []): string[] {
+/**
+ * What check 55 reports of a workflow's text: each gated job's checkout, marker (watching, for the jobs `watched`
+ * names and no other), list and upload, the self-check's step, and the watch's wait named anywhere.
+ */function readsProblems(text: string, gated: readonly string[], selfCheckJob: string, watched: readonly string[] = []): string[] {
   let doc: unknown;
   try { doc = Bun.YAML.parse(text); } catch (e) { return [`does not parse: ${(e as Error).message} — check 55 cannot read where the jobs mark and list their reads (SMD-2435)`]; }
   const jobs = mapping(mapping(doc)?.jobs);
   if (!jobs) return ["has no `jobs:` map check 55 can read (SMD-2435)"];
   const problems: string[] = [];
-  // reads.sh's own cases shorten the marker's wait for its watch by this name; set in a job, no watch would be heard from in time.
   if (text.includes(READS_WAIT)) problems.push(`names ${READS_WAIT} — how long a marker waits for its watch is ${READS_SCRIPT}'s own cases' to set; set short in a job it would leave that job's lists saying watch=none, so the workflow does not name it, in a comment either (check 55, SMD-2435)`);
   const stepsOf = (job: Record<string, unknown> | null) => (Array.isArray(job?.steps) ? job.steps : []).map((s) => mapping(s) ?? {});
   const runOf = (step: Record<string, unknown>) => (typeof step.run === "string" ? step.run.trim() : null);
