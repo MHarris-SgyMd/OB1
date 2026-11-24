@@ -110,10 +110,13 @@ export function normalizePem(value: string): string {
   return value.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n").map((l) => l.trimEnd()).join("\n").trim();
 }
 
-/** Whether a PEM is a private key that can sign a JWT (RS256), so a key that fits the shape but not the maths is caught at install. */
+/** Whether a PEM is an RSA private key that can sign a JWT (RS256), so a key that fits the shape but not the maths, or not RSA, is caught at install. */
 export function canSign(pem: string): boolean {
   try {
-    createSign("RSA-SHA256").update("probe").sign(createPrivateKey(pem));
+    const key = createPrivateKey(pem);
+    // GitHub's App keys are RSA, and the JWT is RS256: an EC key would sign, and GitHub would refuse what it signed.
+    if (key.asymmetricKeyType !== "rsa") return false;
+    createSign("RSA-SHA256").update("probe").sign(key);
     return true;
   } catch {
     return false;
@@ -168,45 +171,34 @@ export type AppFacts = {
 /** The permissions decision 13's App holds: these two writes, and the metadata read GitHub gives every App. */
 const APP_PERMISSIONS: Record<string, string> = { contents: "write", pull_requests: "write", metadata: "read" };
 
-/** A ruleset's include patterns, and whether one of them reaches `ref`'s kind ("~ALL", or a pattern naming it). */
-function includes(rs: AppFacts["rulesets"] extends (infer R)[] | null ? R : never): string[] {
-  const c = rs.conditions as { ref_name?: { include?: unknown } } | undefined;
-  return Array.isArray(c?.ref_name?.include) ? (c.ref_name.include as unknown[]).filter((x): x is string => typeof x === "string") : [];
-}
-
-/** Tags `release.yml` starts on (`v[0-9]*`), as samples: a ruleset fences the tags only if it covers each of them. */
-export const RELEASE_TAGS = ["refs/tags/v0.0.1", "refs/tags/v2.3.0", "refs/tags/v10.20.30-rc.1", "refs/tags/v1"];
+/**
+ * The refs a fence must cover, by the ruleset patterns that cover the whole of them. Read as a fixed list, not by
+ * translating GitHub's fnmatch (its `**`, its leading-dot rule and its unsupported `[^...]` differ from any regex this
+ * code would write, review pass 3): a ruleset counts as covering only if it includes one of these.
+ */
+export const COVERS = {
+  /** Every tag `release.yml` starts on (`v[0-9]*`). */
+  releaseTags: ["~ALL", "refs/tags/*", "refs/tags/**", "refs/tags/v*", "refs/tags/v[0-9]*"],
+  /** main, this repo's default branch. */
+  main: ["~ALL", "~DEFAULT_BRANCH", "refs/heads/main", "refs/heads/*", "refs/heads/**"],
+} as const;
 
 /**
- * Whether a ruleset's ref pattern matches `ref`, as GitHub reads one: `~ALL`, `~DEFAULT_BRANCH` (this repo's is main),
- * or an fnmatch pattern on the full ref, where `*` stops at `/`, `**` doesn't, `?` is one character and `[...]` a set.
+ * Whether an exclude pattern might take out some of the refs a fence covers, read with suspicion: `~ALL`, a pattern of
+ * GitHub's own form for them, one not under `refs/`, or one whose literal start (to its first `*`, `?`, `[` or `\\`)
+ * could begin one of those refs. Only an exclude that plainly can't reach them (`refs/tags/nightly-*` for the release
+ * tags) is let pass, so a misread exclude fails the check rather than passing it.
  */
-export function refMatches(pattern: string, ref: string): boolean {
+export function excludeMayReach(pattern: string, fence: keyof typeof COVERS): boolean {
   if (pattern === "~ALL") return true;
-  if (pattern === "~DEFAULT_BRANCH") return ref === "refs/heads/main";
-  let re = "";
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i];
-    if (c === "*" && pattern[i + 1] === "*") {
-      re += ".*";
-      i++;
-    } else if (c === "*") re += "[^/]*";
-    else if (c === "?") re += "[^/]";
-    else if (c === "[") {
-      const close = pattern.indexOf("]", i + 1);
-      if (close < 0) re += "\\[";
-      else {
-        const body = pattern.slice(i + 1, close).replace(/\\/g, "\\\\");
-        re += `[${body.startsWith("!") ? `^${body.slice(1)}` : body}]`;
-        i = close;
-      }
-    } else re += c.replace(/[.+^${}()|\\\]]/g, "\\$&");
-  }
-  try {
-    return new RegExp(`^${re}$`).test(ref);
-  } catch {
-    return false;
-  }
+  if (pattern.startsWith("~")) return fence === "main" ? pattern === "~DEFAULT_BRANCH" : false;
+  if (!pattern.startsWith("refs/")) return true;
+  const literal = pattern.slice(0, pattern.search(/[*?[\\]/) < 0 ? pattern.length : pattern.search(/[*?[\\]/));
+  const wild = literal.length < pattern.length;
+  if (fence === "main") return wild ? "refs/heads/main".startsWith(literal) : literal === "refs/heads/main";
+  // A release tag is refs/tags/v<digit>…: the literal reaches one if it starts one, or one could start with it.
+  if ("refs/tags/v".startsWith(literal)) return true;
+  return /^refs\/tags\/v[0-9]/.test(literal);
 }
 
 /**
@@ -219,9 +211,10 @@ export function refMatches(pattern: string, ref: string): boolean {
  *   - main's update is restricted by an active ruleset the App can't bypass, so it can't merge whatever
  *     approvals it holds (its `pull_requests: write` could approve a PR, and an approval counts):
  *     `.github/rulesets/main-merge.json`, beside `main.json`, which it leaves as it is.
- * Rules stack across rulesets, as GitHub applies them, and patterns are read as GitHub reads them, excludes included.
- * A ruleset whose bypass list the reader couldn't see (GitHub shows it to a repo admin alone) is not taken as one the
- * App can't bypass: the line says the list couldn't be read.
+ * Rules stack across rulesets, as GitHub applies them. A ruleset covers a fence's refs only by an include from `COVERS`
+ * and no exclude `excludeMayReach` suspects. A ruleset whose bypass list the reader couldn't see (GitHub shows it only
+ * to a caller with write access to the ruleset) is not taken as one the App can't bypass; nor is one that a repository
+ * role short of admin may bypass, since whether that reaches an App's installation isn't documented.
  */
 export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: string; githubAppSlug: string }): { ok: boolean; lines: string[] } {
   const lines: string[] = [];
@@ -252,44 +245,47 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
   const active = facts.rulesets.filter((r) => r.enforcement === "active");
   type Rs = (typeof active)[number];
   const bypassSeen = (r: Rs): boolean => Array.isArray(r.bypass_actors);
+  // The App itself, or a repository role short of admin (5), which might take in its installation: either counts as the App's bypass.
   const appBypasses = (r: Rs): boolean =>
-    bypassSeen(r) && (r.bypass_actors as { actor_type?: unknown; actor_id?: unknown }[]).some((a) => a?.actor_type === "Integration" && String(a?.actor_id) === cfg.githubAppId);
+    bypassSeen(r) &&
+    (r.bypass_actors as { actor_type?: unknown; actor_id?: unknown }[]).some(
+      (a) => (a?.actor_type === "Integration" && String(a?.actor_id) === cfg.githubAppId) || (a?.actor_type === "RepositoryRole" && String(a?.actor_id) !== "5"),
+    );
   const ruleTypes = (r: Rs): string[] => (Array.isArray(r.rules) ? (r.rules as { type?: unknown }[]).map((x) => String(x?.type)) : []);
   const patterns = (r: Rs, key: "include" | "exclude"): string[] => {
     const c = r.conditions as { ref_name?: Record<string, unknown> } | undefined;
     const v = c?.ref_name?.[key];
     return Array.isArray(v) ? v.map(String) : [];
   };
-  const covers = (r: Rs, ref: string): boolean => patterns(r, "include").some((p) => refMatches(p, ref)) && !patterns(r, "exclude").some((p) => refMatches(p, ref));
+  const covers = (r: Rs, fence: keyof typeof COVERS): boolean =>
+    patterns(r, "include").some((p) => (COVERS[fence] as readonly string[]).includes(p)) && !patterns(r, "exclude").some((p) => excludeMayReach(p, fence));
   /**
-   * Whether every ref in `refs` has each rule in `types` from some active ruleset of `target` that covers it and that
-   * the App can't bypass — rules stack across rulesets, as GitHub applies them. "unseen" when the only rulesets that
-   * would hold a rule hide their bypass lists from the reader.
+   * Whether each rule in `types` holds over the whole fence from some active ruleset of `target` that covers it and
+   * that the App can't bypass — rules stack across rulesets, as GitHub applies them. "unseen" when the only rulesets
+   * that would hold a rule hide their bypass lists from the reader.
    */
-  const fenced = (target: string, refs: string[], types: string[]): "yes" | "no" | "unseen" => {
+  const fenced = (target: string, fence: keyof typeof COVERS, types: string[]): "yes" | "no" | "unseen" => {
     let unseen = false;
-    for (const ref of refs) {
-      for (const t of types) {
-        const holding = active.filter((r) => r.target === target && covers(r, ref) && ruleTypes(r).includes(t));
-        if (holding.some((r) => bypassSeen(r) && !appBypasses(r))) continue;
-        if (holding.some((r) => !bypassSeen(r))) unseen = true;
-        else return "no";
-      }
+    for (const t of types) {
+      const holding = active.filter((r) => r.target === target && covers(r, fence) && ruleTypes(r).includes(t));
+      if (holding.some((r) => bypassSeen(r) && !appBypasses(r))) continue;
+      if (holding.some((r) => !bypassSeen(r))) unseen = true;
+      else return "no";
     }
     return unseen ? "unseen" : "yes";
   };
 
   // The tag fence: every v* tag release.yml starts on, its creation, update and deletion restricted, past the App's reach.
-  const tags = fenced("tag", RELEASE_TAGS, ["creation", "update", "deletion"]);
+  const tags = fenced("tag", "releaseTags", ["creation", "update", "deletion"]);
   if (tags === "yes") say(true, "every v* tag's creation, update and deletion is restricted by a tag ruleset the App can't bypass");
-  else if (tags === "unseen") say(false, "a tag ruleset restricts v* tags, but its bypass list couldn't be read (gh must be a repo admin's): the App may be on it");
+  else if (tags === "unseen") say(false, "a tag ruleset restricts v* tags, but its bypass list couldn't be read (gh must have write access to it): the App may be on it");
   else say(false, "no active tag ruleset the App can't bypass restricts creating, moving and deleting every v* tag: the App could push or move one and start a release (.github/rulesets/tags.json)");
 
   // The merge fence: main's update restricted by a ruleset the App can't bypass, so no approval it holds lets it merge.
   // (Deleting main is main.json's to refuse: its deletion rule binds everyone, with no bypass actor, check 20.)
-  const main = fenced("branch", ["refs/heads/main"], ["update"]);
+  const main = fenced("branch", "main", ["update"]);
   if (main === "yes") say(true, "main's update is restricted by a ruleset the App can't bypass: it can't merge, whatever approvals it holds");
-  else if (main === "unseen") say(false, "a ruleset restricts updating main, but its bypass list couldn't be read (gh must be a repo admin's): the App may be on it");
+  else if (main === "unseen") say(false, "a ruleset restricts updating main, but its bypass list couldn't be read (gh must have write access to it): the App may be on it");
   else say(false, "no active ruleset the App can't bypass restricts updating main: the App could merge its own green PR (.github/rulesets/main-merge.json)");
   return { ok, lines };
 }
@@ -337,7 +333,7 @@ export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch)
     if (r.status !== 0) return { ok: false, why: `gh api exited ${r.status}: ${oneLine(r.stderr || r.stdout || "", 160) || "no words"} (is gh logged in?)` };
     return { ok: true, out: r.stdout ?? "" };
   };
-  const list = gh([`repos/${cfg.repo}/rulesets?includes_parents=true`, "--jq", ".[].id"]);
+  const list = gh(["--paginate", `repos/${cfg.repo}/rulesets?includes_parents=true&per_page=100`, "--jq", ".[].id"]);
   if (!list.ok) lines.push(`✗ the rulesets couldn't be listed: ${list.why}`);
   else {
     const ids = list.out.split("\n").map((x) => x.trim()).filter((x) => /^\d+$/.test(x));
@@ -630,6 +626,8 @@ export function selfCheck(): number {
       const lines = APP_PEM.trim().split("\n");
       const garbled = [lines[0], ...lines.slice(1, -1).map((l) => l.replace(/[A-Za-z]/g, "A")), lines.at(-1)].join("\n");
       ok(PEM_SHAPE.test(garbled) && refuses(() => installValue(join(root, "app-key-bad"), "github-app", garbled)).includes("can sign"), "a PEM-shaped key that can't sign is refused at install");
+      const ec = generateKeyPairSync("ec", { namedCurve: "P-256", privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+      ok(PEM_SHAPE.test(ec.trim()) && refuses(() => installValue(join(root, "app-key-ec"), "github-app", ec)).includes("can sign"), "an EC key, PEM-shaped and able to sign, is refused: the JWT is RS256");
       const mismatched = APP_PEM.trim().replace("-----END RSA PRIVATE KEY-----", "-----END PRIVATE KEY-----");
       ok(refuses(() => installValue(join(root, "app-key-bad2"), "github-app", mismatched)) !== "", "a key whose BEGIN and END lines disagree is refused");
     });
@@ -672,9 +670,12 @@ export function selfCheck(): number {
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, { enforcement: "evaluate" })] }, "start a release"), "a tag ruleset only evaluating is ✗");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, rules("creation"))] }, "start a release"), "a tag ruleset restricting creation alone is ✗: a moved tag starts a release too");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, rules("creation", "update"))] }, "start a release"), "a tag ruleset that lets a v* tag be deleted is ✗: deleted and pushed again, it starts a release");
+      ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, rules("creation", "deletion"))] }, "start a release"), "a tag ruleset that lets a v* tag be moved is ✗: a forced move is a push, and starts a release");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, refs(["refs/tags/v*"], ["refs/tags/v[0-9]*"]))] }, "start a release"), "a tag ruleset excluding the v[0-9]* tags is ✗");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, refs(["refs/tags/v2*"]))] }, "start a release"), "a tag ruleset on some v* tags alone is ✗");
       ok(judged({ rulesets: [mainJson, lockRs, with_(tagRs, refs(["~ALL"], ["refs/tags/nightly-*"]))] }).ok, "every tag but nightly-* is ✓: the excluded tags start no release");
+      ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, refs(["refs/tags/v*"], ["refs/tags/v3*"]))] }, "start a release"), "a tag ruleset excluding v3* is ✗: every v3 tag would be open");
+      ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, refs(["refs/tags/v[0-24-9]*"]))] }, "start a release"), "a tag ruleset on an include this code doesn't know is ✗, not guessed at");
       ok(judged({ rulesets: [mainJson, lockRs, with_(tagRs, rules("creation")), with_(tagRs, { name: "b", ...rules("update", "deletion") })] }).ok, "creation in one tag ruleset and update and deletion in another is ✓: rules stack");
       const unseenTag = { ...tagRs };
       delete unseenTag.bypass_actors;
@@ -688,6 +689,9 @@ export function selfCheck(): number {
       ok(says({ rulesets: [mainJson, with_(lockRs, refs(["~ALL"], ["~DEFAULT_BRANCH"])), tagRs] }, "could merge"), "a lock on every branch but main is ✗");
       ok(says({ rulesets: [mainJson, with_(lockRs, refs(["refs/heads/main"], ["refs/heads/main"])), tagRs] }, "could merge"), "a lock that includes and excludes main is ✗");
       ok(judged({ rulesets: [mainJson, with_(lockRs, refs(["refs/heads/**"], ["refs/heads/agent/**"])), tagRs] }).ok, "a lock on every branch but agent/** is ✓");
+      ok(says({ rulesets: [mainJson, with_(lockRs, refs(["~ALL"], ["refs/heads/**/main"])), tagRs] }, "could merge"), "a lock excluding refs/heads/**/main is ✗: GitHub's ** matches no directory there, taking main out");
+      ok(says({ rulesets: [mainJson, with_(lockRs, { bypass_actors: [{ actor_type: "RepositoryRole", actor_id: 4, bypass_mode: "always" }] }), tagRs] }, "could merge"), "a lock the write role may bypass is ✗: it may take in the App");
+      ok(judged({ rulesets: [mainJson, with_(lockRs, { bypass_actors: [{ actor_type: "RepositoryRole", actor_id: 5, bypass_mode: "exempt" }] }), tagRs] }).ok, "a lock the admin role is exempt from is ✓");
       ok(says({ rulesets: [mainJson, with_(lockRs, { enforcement: "disabled" }), tagRs] }, "could merge"), "a disabled lock is ✗");
       const unseenLock = { ...lockRs };
       delete unseenLock.bypass_actors;
@@ -696,11 +700,11 @@ export function selfCheck(): number {
       ok(says({ rulesets: null }, "rulesets couldn't be read"), "rulesets that can't be read are ✗");
     });
 
-    section("refMatches: ruleset patterns, as GitHub reads them", () => {
-      ok(refMatches("~ALL", "refs/tags/x") && refMatches("~DEFAULT_BRANCH", "refs/heads/main") && !refMatches("~DEFAULT_BRANCH", "refs/heads/mainline"), "~ALL, and ~DEFAULT_BRANCH as main alone");
-      ok(refMatches("refs/tags/v*", "refs/tags/v2.3.0") && !refMatches("refs/tags/*", "refs/tags/x/v1") && !refMatches("refs/heads/*", "refs/heads/agent/smd-1-x") && refMatches("refs/tags/**", "refs/tags/x/v1"), "* stops at /, ** doesn't");
-      ok(refMatches("refs/tags/v[0-9]*", "refs/tags/v10.1") && !refMatches("refs/tags/v[0-9]*", "refs/tags/vx") && refMatches("refs/tags/v[!a-z]*", "refs/tags/v1") && !refMatches("refs/tags/v[!a-z]*", "refs/tags/vb"), "a set and a negated set");
-      ok(refMatches("refs/heads/ma?n", "refs/heads/main") && !refMatches("refs/heads/main", "refs/heads/mainx") && !refMatches("refs/heads/m.in", "refs/heads/main") && !refMatches("refs/heads/(main)", "refs/heads/main"), "? is one character; . and ( are themselves");
+    section("excludeMayReach: an exclude passes only when it plainly can't reach the fence's refs", () => {
+      ok(["~ALL", "refs/tags/*", "refs/tags/v*", "refs/tags/v3*", "refs/tags/v1.0.0", "refs/tags/**/*", "refs/tags/[v]*", "refs/tags/?*", "v*", "refs/tags/v\\*"].every((p) => excludeMayReach(p, "releaseTags")), "every exclude that could take out a v<digit> tag, or that this code can't read for sure, is suspected");
+      ok(["refs/tags/nightly-*", "refs/tags/vx*", "refs/tags/latest", "refs/heads/main", "~DEFAULT_BRANCH"].every((p) => !excludeMayReach(p, "releaseTags")), "an exclude that can't reach one (another prefix, a branch) passes");
+      ok(["~ALL", "~DEFAULT_BRANCH", "refs/heads/main", "refs/heads/**/main", "refs/heads/m*", "refs/heads/*", "main", "refs/heads/[m]ain"].every((p) => excludeMayReach(p, "main")), "every exclude that could take out main is suspected");
+      ok(["refs/heads/agent/**", "refs/heads/mainline", "refs/heads/release-*", "refs/tags/*"].every((p) => !excludeMayReach(p, "main")), "an exclude that can't reach main passes");
     });
 
     section("what the probe stamp says of its binary and its install (SMD-4491)", () => {

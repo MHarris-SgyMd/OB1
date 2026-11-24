@@ -15,8 +15,8 @@
  * touches `.github/workflows/` is refused; a tag ruleset (`.github/rulesets/tags.json`) keeps `v*` tags, and so
  * `release.yml`, the maintainer's; and a ruleset locking `main` to repository admins (`main-merge.json`) keeps a merge
  * the maintainer's whatever approvals the App holds. Those three are the design's prerequisites for the first live
- * publish, checked by `setup.ts check-github-app`. The bare repository's own config is checked before each push, so a
- * proxy, TLS or URL-rewrite setting there can't redirect the token.
+ * publish, checked by `setup.ts check-github-app`. The bare repository's config, every scope git reads, is checked
+ * against an allowlist before each push, so a proxy, TLS or URL-rewrite setting there can't redirect the token.
  *
  * What this code adds:
  *   - only a branch under the runner's prefix (`agent/smd-<n>-<slug>`) is pushed, by an explicit refspec, with no tags,
@@ -211,11 +211,27 @@ export async function installationToken(fetchImpl: Fetch, app: App, pem: string,
 }
 
 /**
- * The bare repository's own config keys a push would read that could send the token elsewhere or run code: a proxy or
- * TLS setting (`http.*`), a URL rewrite (`url.*`), an include, a credential helper, a transport rule, a command git
- * would run. The runner writes none of these; finding one means the repository was tampered with.
+ * The config keys the runner's bare repository may carry: what `git clone --bare` writes, and the two run.ts sets. A
+ * push reads the repository's config, and a key outside this list (a proxy or TLS setting, a URL rewrite, a remote named
+ * by the URL pushed to, an include, a credential helper, a command, an extension such as `worktreeConfig` that brings in
+ * another file) could send the token elsewhere or run code. The runner writes none, so one there means tampering. An
+ * allowlist, since a denylist missed `config.worktree` and `remote.<url>.url` (review pass 3).
  */
-export const RISKY_REPO_CONFIG = /^(http\.|url\.|include\.|includeif\.|credential\.|protocol\.|core\.(sshcommand|askpass|gitproxy|hookspath|fsmonitor)$|remote\.[^.]+\.(proxy|pushurl|receivepack|uploadpack)$)/i;
+export const REPO_CONFIG_ALLOWED = /^(core\.(repositoryformatversion|filemode|bare|ignorecase|precomposeunicode|logallrefupdates|symlinks)|remote\.origin\.(url|fetch)|gc\.auto|maintenance\.auto|extensions\.objectformat)$/i;
+
+/** The keys of `git config --show-scope --name-only --list` the push may not run with: any outside the allowlist, in any scope but the command line's (this call passes none of its own beyond the self-check's). */
+export function repoConfigProblems(listing: string): string[] {
+  return listing
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const tab = l.indexOf("\t");
+      return tab < 0 ? { scope: "?", key: l } : { scope: l.slice(0, tab), key: l.slice(tab + 1) };
+    })
+    .filter(({ scope, key }) => scope !== "command" && !(scope === "local" && REPO_CONFIG_ALLOWED.test(key)))
+    .map(({ scope, key }) => `${key} (${scope})`);
+}
 
 /** One git invocation's result. */
 export type GitOut = { code: number; stdout: string; stderr: string };
@@ -323,13 +339,14 @@ export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => P
       // The bare repository's own config is read by the push: refuse one that could redirect the token, before minting it.
       let keys: GitOut;
       try {
-        keys = await d.git(["-C", d.bareRepo, "config", "--local", "--no-includes", "--name-only", "--list"], gitEnv(d.home));
+        // Every scope git would read for the push (local, worktree, and any other), not the local file alone.
+        keys = await d.git(["-C", d.bareRepo, "config", "--show-scope", "--name-only", "--list"], gitEnv(d.home));
       } catch (e) {
         return { ok: false, detail: `reading the bare repository's config threw: ${oneLine(String((e as Error)?.message ?? e), 160)}` };
       }
       if (keys.code !== 0) return { ok: false, detail: `reading the bare repository's config exited ${keys.code}: ${oneLine(keys.stderr, 160)}` };
-      const risky = keys.stdout.split("\n").map((k) => k.trim()).filter((k) => k && RISKY_REPO_CONFIG.test(k));
-      if (risky.length) return { ok: false, final: true, detail: `refusing to push from a bare repository whose config sets ${risky.slice(0, 5).join(", ")}: the runner writes none of these, so it was tampered with` };
+      const risky = repoConfigProblems(keys.stdout);
+      if (risky.length) return { ok: false, final: true, detail: `refusing to push from a bare repository whose config sets ${risky.slice(0, 5).join(", ")}: the runner writes no such key, so it was tampered with` };
       const t = await mintToken();
       if (!t.ok) return { ok: false, detail: t.detail };
       try {

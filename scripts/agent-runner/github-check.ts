@@ -22,7 +22,7 @@ import { join } from "node:path";
 import type { Fetch } from "./facts.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import { branchFor } from "./record.ts";
-import { INSTALLATION_TOKEN, PEM_SHAPE, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationRepos, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
+import { INSTALLATION_TOKEN, PEM_SHAPE, repoConfigProblems, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationRepos, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
 
 const NOW = Date.parse("2026-11-24T12:00:00Z");
 /** A token in GitHub's stateless form (`ghs_<app id>_<JWT>`, about 520 characters, with `_`, `.` and `-`), which GitHub has minted since 2026. */
@@ -282,7 +282,7 @@ export async function selfCheck(): Promise<number> {
     });
 
     await section("pushBranch: a bare repository whose config could redirect the token is refused before a token is minted", async () => {
-      for (const [key, value] of [["http.proxy", "http://127.0.0.1:9"], ["http.https://github.com/.sslVerify", "false"], ["url.https://evil.example/.insteadOf", "https://github.com/"], ["include.path", "/tmp/x"], ["core.sshCommand", "touch /tmp/pwn"]] as const) {
+      for (const [key, value] of [["http.proxy", "http://127.0.0.1:9"], ["http.https://github.com/.sslVerify", "false"], ["url.https://evil.example/.insteadOf", "https://github.com/"], ["include.path", "/tmp/x"], ["core.sshCommand", "touch /tmp/pwn"], [`remote.${target}.url`, "https://evil.example/x.git"], ["extensions.worktreeConfig", "true"]] as const) {
         const tampered = join(root, `tampered-${key.replace(/[^a-z]/gi, "")}.git`);
         sh(["clone", "-q", "--bare", source, tampered]);
         sh(["-C", tampered, "config", key, value]);
@@ -291,6 +291,34 @@ export async function selfCheck(): Promise<number> {
         const r = await c.pushBranch({ branch: BRANCH });
         ok(!r.ok && r.final === true && r.detail.toLowerCase().includes(key.toLowerCase().split(".")[0]) && mints(mintRoute.sent) === before, `${key}: refused as final, no token minted`);
       }
+    });
+
+    await section("pushBranch: a proxy in config.worktree, which --local alone doesn't list, is refused", async () => {
+      const tampered = join(root, "tampered-worktree.git");
+      sh(["clone", "-q", "--bare", source, tampered]);
+      writeFileSync(join(tampered, "config.worktree"), "[http]\n\tproxy = http://127.0.0.1:9\n\tsslVerify = false\n");
+      const before = mints(mintRoute.sent);
+      // Without the extension git doesn't read config.worktree at all: the allowlist passes, and so does the push.
+      const fresh = join(root, "fresh-target.git");
+      sh(["init", "-q", "--bare", fresh]);
+      const plain = await appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: tampered, home, remote: fresh, now: () => NOW }).pushBranch({ branch: BRANCH });
+      ok(plain.ok, "a stray config.worktree that git doesn't read leaves the push as it was");
+      sh(["-C", tampered, "config", "extensions.worktreeConfig", "true"]);
+      const r = await appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: tampered, home, remote: target, now: () => NOW }).pushBranch({ branch: BRANCH });
+      ok(!r.ok && r.final === true && r.detail.includes("http.proxy (worktree)") && r.detail.includes("extensions.worktreeconfig (local)") && mints(mintRoute.sent) === before + 1, "with the extension on, the worktree file's proxy is named by its scope, and the push refused unminted");
+    });
+
+    await section("pushBranch: a config that can't be read is a retry, with no token minted and no push", async () => {
+      const before = mints(mintRoute.sent);
+      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => (argv.includes("config") ? { code: 1, stdout: "", stderr: "fatal: bad config line 3" } : { code: 0, stdout: "", stderr: "" }), bareRepo: source, home, remote: target, now: () => NOW });
+      const r = await c.pushBranch({ branch: BRANCH });
+      ok(!r.ok && !r.final && r.detail.includes("bad config line 3") && mints(mintRoute.sent) === before, "not pushed, not final, no token");
+    });
+
+    await section("repoConfigProblems: the allowlist, in every scope but the command line's", () => {
+      const listing = "local\tcore.repositoryformatversion\nlocal\tcore.bare\nlocal\tremote.origin.url\nlocal\tgc.auto\nlocal\tmaintenance.auto\ncommand\tprotocol.file.allow\n";
+      ok(repoConfigProblems(listing).length === 0, "what a bare clone and run.ts write, plus the command line, pass");
+      ok(JSON.stringify(repoConfigProblems(`${listing}worktree\tcore.bare\nlocal\tremote.origin.pushurl\nglobal\tuser.name\n`)) === JSON.stringify(["core.bare (worktree)", "remote.origin.pushurl (local)", "user.name (global)"]), "an allowed key in another scope, a key past the list, and any other scope are named");
     });
 
     await section("pushCommand's header reaches github.com alone (git's own URL matching)", () => {
@@ -312,14 +340,14 @@ export async function selfCheck(): Promise<number> {
 
     await section("pushBranch: git's own words are scrubbed of the token, in either form", async () => {
       const basic = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
-      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => (argv.includes("push") ? { code: 128, stdout: "", stderr: `fatal: header AUTHORIZATION: basic ${basic} refused for ${TOKEN}` } : { code: 0, stdout: "core.bare\n", stderr: "" }), bareRepo: source, home, remote: target, now: () => NOW });
+      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => (argv.includes("push") ? { code: 128, stdout: "", stderr: `fatal: header AUTHORIZATION: basic ${basic} refused for ${TOKEN}` } : { code: 0, stdout: "local\tcore.bare\n", stderr: "" }), bareRepo: source, home, remote: target, now: () => NOW });
       const r = await c.pushBranch({ branch: BRANCH });
       const fragments = [TOKEN.slice(0, 40), TOKEN.slice(200, 240), basic.slice(0, 40), basic.slice(100, 140)];
       ok(!r.ok && !r.final && r.detail.includes("exited 128") && fragments.every((x) => !r.detail.includes(x)), "a failed push's detail carries no piece of the token or its basic-auth form, however git's words are cut");
     });
 
     await section("pushBranch: a throwing git is a result with the token scrubbed", async () => {
-      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => { if (argv.includes("push")) throw new Error(`spawn failed near ${TOKEN}`); return { code: 0, stdout: "core.bare\n", stderr: "" }; }, bareRepo: source, home, remote: target, now: () => NOW });
+      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => { if (argv.includes("push")) throw new Error(`spawn failed near ${TOKEN}`); return { code: 0, stdout: "local\tcore.bare\n", stderr: "" }; }, bareRepo: source, home, remote: target, now: () => NOW });
       const r = await c.pushBranch({ branch: BRANCH });
       ok(!r.ok && !r.final && r.detail.includes("git push threw") && !r.detail.includes(TOKEN), "a result, not thrown, the token gone");
     });
