@@ -5461,7 +5461,8 @@ stayed: stale, or pending at fingerprints that are no longer its texts'.
 
 - **`settle_stale_part(id, older fingerprint, newer fingerprint)`** is the
   pass's removal of such a part. Its caller gives the fingerprint of each
-  text as it judged it, when that judgement did not name the part. Under the
+  text as it read it: where it judged the pair again and that judgement did
+  not name the part, or where nothing will judge the pair again. Under the
   supersession advisory lock and the row's own it answers, as values:
   `NOT_FOUND` (no such part: replaced, removed already, or gone with a
   thought); `DECIDED` with the status (a reviewer's decision stands whatever

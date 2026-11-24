@@ -24030,8 +24030,8 @@ console.log("\n[138] Migration 153: a settled part that is no longer a judgement
                                        col_description('settled_parts'::regclass, (SELECT attnum::int FROM pg_attribute WHERE attrelid = 'settled_parts'::regclass AND attname = 'status')) AS s,
                                        obj_description('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)'::regprocedure, 'pg_proc') AS r`)) as { t: string | null; s: string | null; r: string | null }[];
     assert(namesSettle(cm.t) === 1 && namesSettle(cm.s) === 1 && namesSettle(cm.r) === 1 && JSON.stringify(cmAgain) === JSON.stringify(cm)
-        && (cm.t ?? "").startsWith("One row per settled part:") && (cm.t ?? "").endsWith(`is removed with its lineage row (settle_stale_part, migration ${NUM}).`)
-        && (cm.s ?? "").startsWith("pending: the part awaits a reviewer.") && (cm.s ?? "").endsWith(`is removed (settle_stale_part, migration ${NUM}).`)
+        && (cm.t ?? "").startsWith("One row per settled part:") && (cm.t ?? "").endsWith(`that the pass names no more when it judges the pair again or whose pair nothing will judge again, is removed with its lineage row (settle_stale_part, migration ${NUM}).`)
+        && (cm.s ?? "").startsWith("pending: the part awaits a reviewer.") && (cm.s ?? "").endsWith(`An undecided row the pass names no more when it judges the pair again, or whose pair nothing will judge again, is removed (settle_stale_part, migration ${NUM}).`)
         && !(cm.r ?? "").includes("nothing settles a part yet") && (cm.r ?? "").includes(`a rejection included: the pass removes a part it settles and rejects none (settle_stale_part, migration ${NUM}), so a rejection is a person's)`),
       `151's comments on the parts' table, its status column and rebuild_derived name the pass's removal since ${NUM}, each once, the rest of each as 151 wrote it, and a further apply changes none (${namesSettle(cm.t)}, ${namesSettle(cm.s)} and ${namesSettle(cm.r)} time(s); the same after: ${JSON.stringify(cmAgain) === JSON.stringify(cm)})`);
   } catch (e) {
