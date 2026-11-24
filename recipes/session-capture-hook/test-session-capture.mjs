@@ -1469,16 +1469,17 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
 
   // SMD-4546: the 64-hex rule's sha256sum exemption reads sha256sum's own spaces, not a blank line, as its gap — so a
   // bare key on its own line before a blank line is found, in a prompt, in the outcome and in the model's excerpt; and
-  // a sha256sum line followed by a blank line is a digest still.
+  // a sha256sum line followed by a blank line is a digest still. (Review pass 1: a prompt is flattened onto one line, so
+  // the prompt half passed on main too; the outcome and the excerpt are where the gap was read.)
   const bareHex = "9c".repeat(16) + "e4d2b1a0".repeat(4);
-  const bare = [`Your key is:\n${bareHex}\n\nUse it well.`, `${bareHex}\n\nat the start`, `the key:\n${bareHex}\n\n\nthree breaks`].map((text) => {
+  const bare = [`Your key is:\n${bareHex}\n\nUse it well.`, `${bareHex}\n\nat the start`, `Your key is:\r\n${bareHex}\r\nUse it well.`].map((text) => {
     const inPrompt = cleanEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0], "redact");
     const inOutcome = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text }]).episodes[0], "redact");
     return { prompt: !inPrompt.text.includes(bareHex), outcome: !inOutcome.text.includes(bareHex) && /\[redacted:64-hex token/.test(inOutcome.text), gate: gateFindings(inOutcome, inOutcome.text).length, withheld: /64-hex token/.test(assistantExcerpt({ assistant: [text] }).withheld ?? "") };
   });
   const sumThenBlank = scanForSecrets(`${bareHex}  release.tar.gz\n\nverified above`).length + scanForSecrets(`${bareHex}\t\trelease.tar.gz`).length;
   assert(bare.every((b) => b.prompt && b.outcome && b.gate === 0 && b.withheld) && sumThenBlank === 0,
-    `a bare 64-hex key on its own line before a blank line is found in a prompt, the outcome and the excerpt; a sha256sum line before a blank line, or with two tabs for its gap, is still a digest (SMD-4546) (${JSON.stringify([bare, sumThenBlank])})`);
+    `a bare 64-hex key on its own line before a blank line or a CRLF line end is found in a prompt, the outcome and the excerpt; a sha256sum line before a blank line, or with two tabs for its gap, is still a digest (SMD-4546) (${JSON.stringify([bare, sumThenBlank])})`);
 }
 
 // ── [6] Posting ──────────────────────────────────────────────────────────────
