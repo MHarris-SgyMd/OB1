@@ -3430,6 +3430,7 @@ export function supersededStatements(files) {
         statements.push({
           action: hit[0] === "COMMENT ON INDEX" ? "COMMENT" : hit[0],
           comment: hit[0].startsWith("COMMENT"),
+          rule: ofIndex ? "index" : "constraint",
           key: ofIndex ? `index ${name}` : `${table}.${name}`,
           table,
           name,
@@ -3473,7 +3474,7 @@ export function supersededStatements(files) {
     let text = file.sql;
     const left = [];
     for (const { s, by } of struck[i].sort((x, y) => x.s.start - y.s.start)) {
-      left.push({ action: s.action, table: s.table, name: s.name, by: read[by].name });
+      left.push({ action: s.action, rule: s.rule, table: s.table, name: s.name, by: read[by].name });
       text = text.slice(0, s.start) + text.slice(s.start, s.end).replace(/[^\n]/g, " ") + text.slice(s.end);
     }
     out.set(file.name, { sql: text, left });

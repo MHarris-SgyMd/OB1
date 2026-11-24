@@ -8106,8 +8106,9 @@ console.log("\n[24] --reapply on a brain holding rows a later migration's rule a
       const short = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_TEST_MIGRATIONS_DIR: copy }, "--reapply");
       const ledger999 = (await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '999%'`)[0].c as number;
       assert(short.code === 1 && /--reapply {2}FAILED: the re-run would end without query_log_arm_check on query_log \(left to 999_guarded_arm\.sql\)/.test(short.out) && /it rolled back/.test(short.out)
+               && /Nothing here is yours to fix/.test(short.out) && !/Fix the cause and run --reapply again/.test(short.out)
                && (await checks()) === checksBefore && ledger999 === 0,
-             `a re-run that would end without a constraint it left out fails, naming it and the file it was left to, and rolls back: both CHECKs as they were, the file not recorded (exit ${short.code}, ${ledger999} recorded)`);
+             `a re-run that would end without a constraint it left out fails, naming it and the file it was left to, says it is not the operator's to fix, and rolls back: both CHECKs as they were, the file not recorded (exit ${short.code}, ${ledger999} recorded)`);
     } finally {
       rmSync(copy, { recursive: true, force: true });
     }

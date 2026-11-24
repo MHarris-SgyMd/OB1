@@ -1309,21 +1309,27 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
   // by --dry-run too. A plain run applies each file whole: no row the later
   // rule admits can stand before the file that admits it.
   const superseded = reapply ? supersededStatements(migrations) : new Map<string, { sql: string; left: SupersededStatement[] }>();
-  /** The lines beside a file the re-run leaves a statement out of. One a rule: a CHECK's ADD and its VALIDATE read as one thing left. */
+  /**
+   * The lines beside a file the re-run leaves a statement out of. One a rule: a
+   * CHECK's ADD and its VALIDATE read as one thing left. A rule is its table,
+   * its name and whether it is a constraint or an index, so two of one name
+   * are two lines.
+   */
   const leftLines = (name: string, would: boolean): string[] => {
-    const byName = new Map<string, { by: string; actions: string[] }>();
+    const byRule = new Map<string, { name: string; by: string; actions: string[] }>();
     for (const l of superseded.get(name)?.left ?? []) {
-      const seen = byName.get(l.name) ?? { by: l.by, actions: [] };
+      const key = `${l.rule} ${l.table} ${l.name}`;
+      const seen = byRule.get(key) ?? { name: l.name, by: l.by, actions: [] };
       seen.actions.push(l.action);
-      byName.set(l.name, seen);
+      byRule.set(key, seen);
     }
-    return [...byName].map(([n, x]) => `  ·  ${n} is left to ${x.by}, which decides it last: this file's ${x.actions.join(" and ")} ${would ? "would not run" : "did not run"}`);
+    return [...byRule.values()].map((x) => `  ·  ${x.name} is left to ${x.by}, which decides it last: this file's ${x.actions.join(" and ")} ${would ? "would not run" : "did not run"}`);
   };
 
   if (reapply && !dryRun) {
     // An object, not a `let`: an assignment inside the callback is invisible to
     // the type checker's flow analysis, which would narrow a `let` to null.
-    const progress: { current: Migration | null } = { current: null };
+    const progress: { current: Migration | null; short: boolean } = { current: null, short: false };
     /** What a file said beside its line, by name — 021's, with the acceptances out of its sight. */
     const notes = new Map<string, string>();
     try {
@@ -1351,6 +1357,7 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
           }
         }
         if (lost.size > 0) {
+          progress.short = true;
           throw new Error(
             `the re-run would end without ${[...lost].join(", ")}: an earlier file's ADD was left out for the file that defines the constraint last, and that file did not add it. ` +
               "This is the migrator's reading of the files (config.mjs's supersededStatements), not the database's fault"
@@ -1362,7 +1369,8 @@ async function migrateWith(sql: SQL, opts: MigrateOptions, out: Writer["out"], e
       for (const line of explainFailure(caught, progress.current, "reapply")) err(line);
       err(
         "  The re-run is one transaction: it rolled back, nothing was re-applied or applied, and the schema is as it was.\n" +
-          "  Fix the cause and run --reapply again."
+          // Not the operator's to fix: no file failed, the migrator read one wrongly.
+          (progress.short ? "  Nothing here is yours to fix, and running it again ends the same: report it, with the line above." : "  Fix the cause and run --reapply again.")
       );
       return 1;
     }

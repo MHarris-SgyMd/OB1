@@ -495,7 +495,7 @@ export function grantVerifySql(role: string, merged: readonly { kind: string; na
 /** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */
 export function stripSqlComments(text: string): string;
 /** A statement `--reapply` leaves to the migration that decides its rule last: a CHECK's ADD or VALIDATE, a unique index's CREATE, or a COMMENT on either (SMD-3149). */
-export type SupersededStatement = { action: "ADD" | "VALIDATE" | "CREATE UNIQUE INDEX" | "COMMENT"; table: string; name: string; by: string };
+export type SupersededStatement = { action: "ADD" | "VALIDATE" | "CREATE UNIQUE INDEX" | "COMMENT"; rule: "constraint" | "index"; table: string; name: string; by: string };
 /** By file name, each migration with a statement of its own that makes a rule a later file loosens — an `ADD CONSTRAINT … CHECK` or `VALIDATE CONSTRAINT` of a constraint a later file adds again to the same table, a `CREATE UNIQUE INDEX` a later file drops, and a COMMENT on either before the file that decides it last: its text with those statements blanked (newlines kept), and what was left to which file. Whether the last file added the constraint is the migrator's to check (SMD-3149). */
 export function supersededStatements(files: readonly { name: string; sql: string }[]): Map<string, { sql: string; left: SupersededStatement[] }>;
 /** What a .sql file may not run in Daemonic Brain: each rule's name, regex (matched over the whole comment-stripped text) and reason (SMD-1796). */
