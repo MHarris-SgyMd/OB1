@@ -201,10 +201,14 @@ export function scanForSecrets(text, { every = false, skip = [], softWrap = fals
         // class stopped at the first space and the tail was sent (second
         // review pass). No close on the line: the class's stop stands.
         const close = m.input.indexOf(QUOTE_CLOSE[m.groups.q] ?? m.groups.q, end), line = m.input.indexOf("\n", end);
-        // On the soft-wrapped view (SMD-4543 review pass 1) the close must be the value's own: at most one wrap away, no
-        // other quote before it, and no word character after it — or an unclosed quote ran on to an apostrophe or a
-        // later quote and blanked the prose between.
-        if (close !== -1 && (line === -1 || close < line) && (!view || ownClose(text, end, close))) end = close;
+        const closes = close !== -1 && (line === -1 || close < line);
+        // On the soft-wrapped view (SMD-4543 review pass 1) the close must be the value's own: at most one wrap from the
+        // value's start, no other quote before it, and no letter, digit or underscore after it — or an unclosed quote
+        // ran on to an apostrophe or a later quote and blanked the prose between. Judged from the value's start, so the
+        // quoted branch, whose value ends at its own close, is held to it too (review pass 2: `'<it>⏎I'll` blanked the
+        // `I`). A view's finding that fails is dropped; the text's own reading of that value stands.
+        if (view && !(closes && ownClose(text, at, close))) continue;
+        if (closes) end = close;
       } else if (m.indices?.groups?.v) {
         // A value class of `[^\s"']` runs to the next space: a closing bracket,
         // backtick or full stop after the value is the sentence's, not the
@@ -238,18 +242,19 @@ export function scanForSecrets(text, { every = false, skip = [], softWrap = fals
   const seen = new Set();
   return findings.filter((f) => { const k = every || f.reason === "high-entropy token" ? `${f.reason}\u0000${f.at}\u0000${f.end}` : f.reason; if (seen.has(k)) return false; seen.add(k); return true; });
 }
+/** Whether the quote at `close` closes the value that starts at `at` in a soft-wrapped view: at most one line break between,
+ * no other quote between, and no letter, digit or underscore after it, in the text as written (SMD-4543 review passes 1
+ * and 2). */
+const ownClose = (text, at, close) => {
+  const between = text.slice(at, close);
+  return (between.match(/\r\n|\r|\n/g) ?? []).length <= 1 && !/["'`‘’“”«»]/.test(between) && !/[\p{L}\p{N}_]/u.test(text[close + 1] ?? "");
+};
 /**
  * A text's SOFT-WRAPPED view (SMD-4543): a lone line break read as spaces, one for each of its characters, so every
  * offset is the text's own. A quoted value carried to its closing quote only on its line was cut at a soft wrap —
  * `password = "correct horse⏎battery staple 42"` blanked `correct` and sent the rest — where the summary keeps the
  * outcome's lines. A blank line still ends a value: a paragraph break is not a wrap.
  */
-/** Whether the quote at `close` closes the value read from `end` in a soft-wrapped view: one wrap away at most, no other
- * quote between, and no word character after it, in the text as written (SMD-4543 review pass 1). */
-const ownClose = (text, end, close) => {
-  const between = text.slice(end, close);
-  return (between.match(/\r\n|\r|\n/g) ?? []).length <= 1 && !/["'`‘’“”«»]/.test(between) && !/[\p{L}\p{N}_]/u.test(text[close + 1] ?? "");
-};
 export const softWrapped = (t) => t.replace(/(?<![\r\n])(?:\r\n|\r|\n)(?![\r\n])/g, (m) => " ".repeat(m.length));
 
 // ── Redaction (SMD-2127) ─────────────────────────────────────────────────────

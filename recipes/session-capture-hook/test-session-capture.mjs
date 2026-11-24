@@ -1426,12 +1426,16 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     ['The .env line `PGPASSWORD="Kp7mWq2z9` was missing its closing quote,\nso compose read the rest as the value.\nI added the quote and the "db" service starts.', "so compose read the rest as the value."],
     ['- password: “Kp7mWq2z9" (mixed quotes)\n- the “db” service restarted', "- the “db” service restarted"],
     ['password: "Kp7mWq2z9 for now\nthen the next step\nand a third line" ok', "then the next step"],
+    // Review pass 2: the quoted branch, whose value ends at its own close, is held to the same close.
+    ["PGPASSWORD='Kp7mWq2z9\nI'll rotate it tomorrow.", "\nI'll rotate it tomorrow."],
+    ["password: `Kp7mWq2z9\n- 1\n- 2\nOK, I'm done", "\n- 1\n- 2\nOK, I'm done"],
+    ['password: "Kp7m Wq2z 9x\nA1 B2\nC3 D4\nok" done', "A1 B2\nC3 D4"],
   ].map(([text, kept]) => cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text }]).episodes[0], "redact").text.includes(kept));
   const merged = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: 'secret_key = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ1\nQyNTUxOQAAACBkZ2VtYWlsLWtleS1mb3ItdGVzdGluZy1v2"' }]).episodes[0], "redact");
   const twoTokens = `one ${SEEDED} and two ${SEEDED.split("").reverse().join("")}\nhere`;
   const tokens = [scanForSecrets(twoTokens), scanForSecrets(twoTokens, { softWrap: true })].map((fs) => fs.filter((f) => f.reason === "high-entropy token").length);
   assert(ownQuote.every(Boolean) && merged.redactions.some((r) => r.in === "the outcome") && /\[redacted:/.test(merged.text) && tokens.every((n) => n === 2),
-    `an unclosed or mismatched quote keeps the prose after it; a wrapped value merged with a key token is counted; each entropy token answers (SMD-4543 review pass 1) (${JSON.stringify([ownQuote, merged.redactions, tokens])})`);
+    `an unclosed or mismatched quote keeps the prose after it; a wrapped value merged with a key token is counted; each entropy token answers (SMD-4543 review passes 1 and 2) (${JSON.stringify([ownQuote, merged.redactions, tokens])})`);
   // …and the model's excerpt reads soft-wrapped too: a short-first-word password a wrap cut withholds it.
   const wrapExc = assistantExcerpt({ assistant: ["an earlier note.", 'Use password: "Kp7m Wq2z\nR9x 4tUv" there.'] });
   const plainExc = assistantExcerpt({ assistant: ["an earlier note.", "Wrapped prose: the deploy\nfinished in 4 minutes."] });
