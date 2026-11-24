@@ -4,10 +4,12 @@
  * this module fills: push the one branch, open the draft PR.
  *
  * How it authenticates. The App's private key (`github-app.pem`, 0600, beside the runner's other secrets) signs a
- * ten-minute JWT, and the JWT buys an installation token that lasts an hour. Each token is asked for with the least the
- * publish needs: this repo alone, `contents: write` (the push) and `pull_requests: write` (the PR), and nothing else.
- * A token GitHub hands back with more than that, or for another repository, is refused unused: the App was given more
- * than the design allows, and the maintainer must take it back (README, "The GitHub App").
+ * nine-minute JWT, and the JWT buys an installation token that lasts an hour. Each token is asked for with the least
+ * the publish needs: this repo alone, `contents: write` (the push) and `pull_requests: write` (the PR), and nothing
+ * else. GitHub grants a narrowed token only what was asked, so what the App itself holds is `setup.ts
+ * check-github-app`'s to check; the client checks the answer all the same, and a token that comes back with more,
+ * with less, or for another repository is revoked and refused unused. Every token is revoked once its step is done,
+ * so none outlives the step by its hour.
  *
  * What the App can't do, by GitHub's own rules and not this code's: it holds no `workflows` permission, so a push that
  * touches `.github/workflows/` is refused; a tag ruleset keeps `v*` tags (and so `release.yml`) the maintainer's; and
@@ -39,8 +41,12 @@ export const PUSH_BRANCH = /^agent\/smd-[1-9][0-9]{0,6}-[a-z0-9]+(?:-[a-z0-9]+)*
 /** The permissions an installation token is asked for, and all it may come back with (`metadata: read` GitHub adds to every token). */
 export const TOKEN_PERMISSIONS = { contents: "write", pull_requests: "write" } as const;
 const ALLOWED_BACK: Record<string, string> = { ...TOKEN_PERMISSIONS, metadata: "read" };
-/** An installation token's shape. */
-const INSTALLATION_TOKEN = /^ghs_[A-Za-z0-9]{36,}$/;
+/**
+ * An installation token's shape, read as an opaque string: `ghs_` and what follows. Since 2026 GitHub mints the
+ * stateless `ghs_<app id>_<JWT>` form, about 520 characters with `_`, `.` and `-` in it, and says to treat it as
+ * opaque; the legacy form was 40. Bounded, and with nothing that could end a header line.
+ */
+export const INSTALLATION_TOKEN = /^ghs_[A-Za-z0-9._-]{36,4096}$/;
 const API = "https://api.github.com";
 
 /** The App, as the runner's config names it: its id, its installation on this repo, and the repo (owner/name). */
@@ -69,7 +75,7 @@ export function scrubToken(text: string, token: string | null): string {
     t = t.split(token).join("ghs_…");
     t = t.split(Buffer.from(`x-access-token:${token}`).toString("base64")).join("…");
   }
-  return t.replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, "gh…");
+  return t.replace(/\b(gh[pousr]_[A-Za-z0-9._-]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, "gh…");
 }
 
 const init = (method: string, bearer: string, body?: unknown): RequestInit => ({
@@ -86,11 +92,75 @@ const init = (method: string, bearer: string, body?: unknown): RequestInit => ({
   signal: AbortSignal.timeout(TIME_LIMITS.request),
 });
 
-/** GitHub's own words for a refusal, at most a line: its `message`, never the body whole. */
-async function refusal(res: Response, what: string): Promise<string> {
+/** A refusal's parts: GitHub's `message`, and its `errors[]` messages (where a 422 says what failed validation). */
+type Refusal = { text: string; errors: { message: string; field: string | null }[] };
+
+/** GitHub's own words for a refusal, at most a line or two: its `message` and its `errors[]` messages, never the body whole. */
+async function refusalOf(res: Response, what: string): Promise<Refusal> {
   const body = await jsonOf(res);
-  const msg = body !== NOT_JSON && body && typeof body === "object" && typeof (body as { message?: unknown }).message === "string" ? `: ${oneLine((body as { message: string }).message, 160)}` : "";
-  return `GitHub answered ${res.status} (${what})${msg}`;
+  const o = body !== NOT_JSON && body && typeof body === "object" ? (body as { message?: unknown; errors?: unknown }) : {};
+  const errors = Array.isArray(o.errors)
+    ? (o.errors as { message?: unknown; field?: unknown; code?: unknown }[])
+        .filter((e) => e && typeof e === "object" && (typeof e.message === "string" || typeof e.field === "string"))
+        .slice(0, 3)
+        .map((e) => ({ message: oneLine(typeof e.message === "string" ? e.message : `${String(e.field)} ${typeof e.code === "string" ? e.code : "invalid"}`, 160), field: typeof e.field === "string" ? e.field : null }))
+    : [];
+  const parts = [typeof o.message === "string" ? oneLine(o.message, 160) : "", ...errors.map((e) => e.message)].filter(Boolean);
+  return { text: `GitHub answered ${res.status} (${what})${parts.length ? `: ${parts.join("; ")}` : ""}`, errors };
+}
+const refusal = async (res: Response, what: string): Promise<string> => (await refusalOf(res, what)).text;
+
+/**
+ * Whether GitHub's 422 to opening a PR is one no retry mends: no commits between the branch and its base, or a head or
+ * base it won't take. Any other 422 (an abuse limit among them) is retried.
+ */
+export function prRefusalFinal(r: Refusal): boolean {
+  return r.errors.some((e) => /no commits between/i.test(e.message) || e.field === "head" || e.field === "base") || /no commits between/i.test(r.text);
+}
+
+/** Revoke an installation token (DELETE /installation/token, with the token itself). Best-effort: a failure leaves it to expire within its hour. Never throws. */
+export async function revokeToken(fetchImpl: Fetch, token: string): Promise<boolean> {
+  try {
+    const res = await fetchImpl(`${API}/installation/token`, init("DELETE", token));
+    return res.status === 204;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The repositories the installation reaches, for `setup.ts check-github-app`: read with a token minted for the whole
+ * installation and `metadata: read` alone (a token narrowed to one repository lists only that one), then revoked.
+ */
+export async function installationRepos(fetchImpl: Fetch, app: App, pem: string, nowMs: number): Promise<{ ok: true; repos: string[] } | { ok: false; detail: string }> {
+  let jwt: string;
+  try {
+    jwt = appJwt(app.appId, pem, nowMs);
+  } catch {
+    return { ok: false, detail: "the App's private key couldn't sign a JWT" };
+  }
+  let token: string | null = null;
+  try {
+    const res = await fetchImpl(`${API}/app/installations/${app.installationId}/access_tokens`, init("POST", jwt, { permissions: { metadata: "read" } }));
+    if (res.status !== 201) return { ok: false, detail: await refusal(res, "minting a metadata token") };
+    const body = (await jsonOf(res)) as { token?: unknown } | typeof NOT_JSON;
+    if (body === NOT_JSON || !body || typeof body.token !== "string" || !INSTALLATION_TOKEN.test(body.token)) return { ok: false, detail: "GitHub's answer carried no installation token of the expected shape" };
+    token = body.token;
+    const repos: string[] = [];
+    for (let page = 1; page <= 10; page++) {
+      const list = await fetchImpl(`${API}/installation/repositories?per_page=100&page=${page}`, init("GET", token));
+      if (!list.ok) return { ok: false, detail: scrubToken(await refusal(list, "listing the installation's repositories"), token) };
+      const got = (await jsonOf(list)) as { repositories?: { full_name?: unknown }[] } | typeof NOT_JSON;
+      if (got === NOT_JSON || !got || !Array.isArray(got.repositories)) return { ok: false, detail: "GitHub answered the repository list with something that isn't one" };
+      repos.push(...got.repositories.map((r) => String(r?.full_name)));
+      if (got.repositories.length < 100) return { ok: true, repos };
+    }
+    return { ok: false, detail: "the installation reaches over 1,000 repositories" };
+  } catch (e) {
+    return { ok: false, detail: scrubToken(`the repository list failed: ${oneLine(String((e as Error)?.message ?? e), 160)}`, token) };
+  } finally {
+    if (token) await revokeToken(fetchImpl, token);
+  }
 }
 
 export type TokenResult = { ok: true; token: string; expiresAt: number } | { ok: false; detail: string };
@@ -122,10 +192,12 @@ export async function installationToken(fetchImpl: Fetch, app: App, pem: string,
   const extra = perms === null ? ["(none listed)"] : Object.entries(perms).filter(([k, v]) => ALLOWED_BACK[k] !== v).map(([k, v]) => `${k}: ${String(v)}`);
   const missing = perms === null ? [] : Object.entries(TOKEN_PERMISSIONS).filter(([k, v]) => perms[k] !== v).map(([k]) => k);
   if (extra.length || missing.length) {
+    await revokeToken(fetchImpl, b.token);
     return { ok: false, detail: `the installation token's permissions aren't the publish's (${[...extra.map((e) => `more: ${e}`), ...missing.map((m) => `missing: ${m}`)].join(", ")}); refused unused` };
   }
   const repos = Array.isArray(b.repositories) ? (b.repositories as { full_name?: unknown }[]).map((r) => r?.full_name) : null;
   if (!repos || repos.length !== 1 || typeof repos[0] !== "string" || repos[0].toLowerCase() !== app.repo.toLowerCase()) {
+    await revokeToken(fetchImpl, b.token);
     return { ok: false, detail: `the installation token isn't for ${app.repo} alone; refused unused` };
   }
   const exp = typeof b.expires_at === "string" ? Date.parse(b.expires_at) : NaN;
@@ -164,15 +236,19 @@ export function pushCommand(opts: { bareRepo: string; remote: string; branch: st
 
 /**
  * Read `git push --porcelain`'s line for the ref: pushed (`*` a new branch, ` ` a fast-forward) or already there (`=`).
- * A rejection (`!`) is final: the branch is on GitHub at a commit this push doesn't descend from, which only a person
- * can sort out.
+ * A refusal (`!`) is final when git says `rejected` (the branch is on GitHub at a commit this push doesn't descend
+ * from) or `remote rejected` (GitHub refused it: a ruleset, a workflow file the App may not write, a hook), which only a
+ * person can sort out; `remote failure` is retried, as is git failing before any ref.
  */
 export function pushOutcome(out: GitOut, branch: string): { ok: true } | { ok: false; final: boolean; detail: string } {
   const ref = `refs/heads/${branch}`;
   const line = out.stdout.split("\n").find((l) => l.split("\t")[1] === `${ref}:${ref}`);
   const flag = line?.[0];
   if (out.code === 0 && (flag === "*" || flag === " " || flag === "=")) return { ok: true };
-  if (flag === "!") return { ok: false, final: true, detail: `GitHub refused the push of ${branch}: ${oneLine(line?.split("\t")[2] ?? "rejected", 120)}` };
+  if (flag === "!") {
+    const why = oneLine(line?.split("\t")[2] ?? "rejected", 160);
+    return { ok: false, final: !/^\[remote failure\]/.test(why), detail: `GitHub refused the push of ${branch}: ${why}` };
+  }
   return { ok: false, final: false, detail: `git push of ${branch} exited ${out.code}: ${oneLine(out.stderr || out.stdout, 200)}` };
 }
 
@@ -181,7 +257,7 @@ type PrRow = { number?: unknown; html_url?: unknown; user?: { login?: unknown } 
 /** A PR row as `{number, url}`, when it is a PR of this repo from `branch` in this repo, opened by the App. */
 function ourPr(row: PrRow, app: App & { botLogin: string }, branch: string): { number: number; url: string } | null {
   if (typeof row?.number !== "number" || !Number.isInteger(row.number) || row.number <= 0) return null;
-  if (typeof row.html_url !== "string" || !row.html_url.startsWith(`https://github.com/${app.repo}/pull/`)) return null;
+  if (typeof row.html_url !== "string" || !row.html_url.toLowerCase().startsWith(`https://github.com/${app.repo.toLowerCase()}/pull/`) || !/\/pull\/[1-9][0-9]*$/.test(row.html_url)) return null;
   if (row.head?.ref !== branch || typeof row.head?.repo?.full_name !== "string" || row.head.repo.full_name.toLowerCase() !== app.repo.toLowerCase()) return null;
   if (typeof row.user?.login !== "string" || row.user.login.toLowerCase() !== app.botLogin.toLowerCase()) return null;
   return { number: row.number, url: row.html_url };
@@ -217,8 +293,8 @@ export type AppClientDeps = {
 };
 
 /**
- * publish.ts's GitHubClient over the App. Each call mints its own token (an hour's, of which a publish uses seconds), so
- * no token outlives its step in memory. Neither call throws, and nothing either returns carries the token.
+ * publish.ts's GitHubClient over the App. Each call mints its own token and revokes it when the step is done, so no
+ * token outlives its step. Neither call throws, and nothing either returns carries the token.
  */
 export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => Promise<TokenResult> } {
   const now = d.now ?? Date.now;
@@ -232,11 +308,15 @@ export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => P
       if (!t.ok) return { ok: false, detail: t.detail };
       try {
         const cmd = pushCommand({ bareRepo: d.bareRepo, remote, branch, token: t.token, home: d.home });
-        const out = await d.git(cmd.argv, cmd.env);
+        const raw = await d.git(cmd.argv, cmd.env);
+        // Scrubbed before anything cuts it short: a stateless token runs to about 520 characters, and a cut one no longer matches itself.
+        const out = { code: raw.code, stdout: scrubToken(raw.stdout, t.token), stderr: scrubToken(raw.stderr, t.token) };
         const r = pushOutcome(out, branch);
         return r.ok ? r : { ...r, detail: scrubToken(r.detail, t.token) };
       } catch (e) {
         return { ok: false, detail: scrubToken(`git push threw: ${oneLine(String((e as Error)?.message ?? e), 160)}`, t.token) };
+      } finally {
+        await revokeToken(d.fetch, t.token);
       }
     },
     async openDraftPr({ title, head, base, body }) {
@@ -252,16 +332,21 @@ export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => P
           const pr = ourPr((await jsonOf(res)) as PrRow, d.app, head);
           return pr ? { ok: true, ...pr } : { ok: false, detail: "GitHub opened a PR but answered with one that isn't the App's from this branch" };
         }
-        const why = scrubToken(await refusal(res, "opening the draft PR"), t.token);
+        const refused = await refusalOf(res, "opening the draft PR");
+        const why = scrubToken(refused.text, t.token);
         if (res.status === 422) {
-          // A lost answer to an earlier try: the PR exists. Anything else at 422 (no commits between, a bad base) is final.
+          // A lost answer to an earlier try: the PR exists. No commits between, or a head or base GitHub won't take, is
+          // final; any other 422 (an abuse limit among them) is retried, and so is a lookup that failed.
           const after = await findOpenPr(d.fetch, d.app, t.token, head);
-          if (!("error" in after) && after.found) return { ok: true, ...after.found };
-          return { ok: false, final: true, detail: why };
+          if ("error" in after) return { ok: false, detail: `${why}; then the lookup for an open PR failed: ${scrubToken(after.error, t.token)}` };
+          if (after.found) return { ok: true, ...after.found };
+          return prRefusalFinal(refused) ? { ok: false, final: true, detail: why } : { ok: false, detail: why };
         }
         return { ok: false, detail: why };
       } catch (e) {
         return { ok: false, detail: scrubToken(`the PR request failed: ${oneLine(String((e as Error)?.message ?? e), 160)}`, t.token) };
+      } finally {
+        await revokeToken(d.fetch, t.token);
       }
     },
   };

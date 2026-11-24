@@ -43,7 +43,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { KEY_FILES, KEY_SHAPES, noRedirect, parseConfig, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
 import type { Config, Fetch } from "./facts.ts";
-import { APP_KEY_FILE, PEM_SHAPE, appJwt, installationToken, type App } from "./github.ts";
+import { APP_KEY_FILE, PEM_SHAPE, appJwt, installationRepos, installationToken, revokeToken, type App } from "./github.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import type { GitRun } from "./gate.ts";
 import { CLAUDE_DIR, INSTALL_DIR, claudeVersion, copyClaude, hostNow, makeInstall, stampReport } from "./install.ts";
@@ -161,10 +161,13 @@ function includes(rs: AppFacts["rulesets"] extends (infer R)[] | null ? R : neve
  * ✓ or ✗, and whether all the required ones hold. Pure, so the self-check covers every verdict offline.
  *   - the App is the configured one, holds contents and pull_requests write and nothing more (no `workflows`, no
  *     `administration`), and is installed on this repo alone;
- *   - an active tag ruleset restricts creating `v*` tags, and the App is not among those who may bypass it, so the
- *     App can't start a release;
- *   - main's active ruleset requires an approving review (SMD-4090), and the App can't bypass it, so the App can't
- *     merge its own PR.
+ *   - an active tag ruleset restricts creating, moving and deleting `v*` tags, excludes none of them, and the App is
+ *     not among those who may bypass it, so the App can't start a release (a moved tag is a push, as a new one is);
+ *   - main's active ruleset requires an approving review that a later push voids (stale reviews dismissed, or the
+ *     last push approved by someone else), and the App can't bypass it, so the App can't merge its own PR, nor push
+ *     after an approval and merge then (SMD-4090).
+ * A ruleset whose bypass list the reader couldn't see (GitHub shows it to a repo admin alone) is not taken as one the
+ * App can't bypass: the line says the list couldn't be read.
  */
 export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: string; githubAppSlug: string }): { ok: boolean; lines: string[] } {
   const lines: string[] = [];
@@ -191,22 +194,43 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
     return { ok, lines };
   }
   const active = facts.rulesets.filter((r) => r.enforcement === "active");
-  const appBypasses = (r: (typeof active)[number]): boolean =>
-    Array.isArray(r.bypass_actors) && (r.bypass_actors as { actor_type?: unknown; actor_id?: unknown }[]).some((a) => a?.actor_type === "Integration" && String(a?.actor_id) === cfg.githubAppId);
-  const ruleTypes = (r: (typeof active)[number]): string[] => (Array.isArray(r.rules) ? (r.rules as { type?: unknown }[]).map((x) => String(x?.type)) : []);
-  const tagGuard = active.find((r) => r.target === "tag" && includes(r).some((p) => p === "~ALL" || /^refs\/tags\/v?\*$/.test(p) || p === "refs/tags/v[0-9]*") && ruleTypes(r).includes("creation") && !appBypasses(r));
-  say(tagGuard !== undefined, tagGuard ? `the tag ruleset ${JSON.stringify(tagGuard.name)} restricts creating v* tags, and the App can't bypass it` : "no active tag ruleset restricts creating v* tags without the App among its bypass actors: the App could push a v* tag and start a release");
+  type Rs = (typeof active)[number];
+  const bypassSeen = (r: Rs): boolean => Array.isArray(r.bypass_actors);
+  const appBypasses = (r: Rs): boolean =>
+    (r.bypass_actors as { actor_type?: unknown; actor_id?: unknown }[]).some((a) => a?.actor_type === "Integration" && String(a?.actor_id) === cfg.githubAppId);
+  const ruleTypes = (r: Rs): string[] => (Array.isArray(r.rules) ? (r.rules as { type?: unknown }[]).map((x) => String(x?.type)) : []);
+  const excludes = (r: Rs): string[] => {
+    const c = r.conditions as { ref_name?: { exclude?: unknown } } | undefined;
+    return Array.isArray(c?.ref_name?.exclude) ? (c.ref_name.exclude as unknown[]).map(String) : [];
+  };
+
+  // The tag fence: every v* tag (no exclusion), its creation, update and deletion restricted, the App no bypass actor.
+  const tagRules = active.filter((r) => r.target === "tag" && includes(r).some((p) => p === "~ALL" || /^refs\/tags\/v?\*$/.test(p) || p === "refs/tags/v[0-9]*") && excludes(r).length === 0 && ["creation", "update", "deletion"].every((t) => ruleTypes(r).includes(t)));
+  const tagGuard = tagRules.find((r) => bypassSeen(r) && !appBypasses(r));
+  if (tagGuard) say(true, `the tag ruleset ${JSON.stringify(tagGuard.name)} restricts creating, moving and deleting v* tags, and the App can't bypass it`);
+  else if (tagRules.some((r) => !bypassSeen(r))) say(false, "a tag ruleset restricts v* tags, but its bypass list couldn't be read (gh must be a repo admin's): the App may be on it");
+  else say(false, "no active tag ruleset restricts creating, moving and deleting every v* tag without the App among its bypass actors: the App could push or move a v* tag and start a release");
+
+  // The merge fence: an approving review a later push voids, the App no bypass actor on any of main's rulesets.
   const mainRules = active.filter((r) => r.target === "branch" && includes(r).some((p) => p === "~DEFAULT_BRANCH" || p === "~ALL" || p === "refs/heads/main"));
-  const approving = mainRules.find((r) => !appBypasses(r) && Array.isArray(r.rules) && (r.rules as { type?: unknown; parameters?: { required_approving_review_count?: unknown } }[]).some((x) => x?.type === "pull_request" && Number(x.parameters?.required_approving_review_count) >= 1));
-  say(approving !== undefined, approving ? `main's ruleset ${JSON.stringify(approving.name)} requires an approving review, and the App can't bypass it (SMD-4090)` : "main's rulesets require no approving review the App can't bypass: the App could merge its own green PR (SMD-4090)");
-  if (mainRules.some(appBypasses)) say(false, "the App is a bypass actor on a ruleset of main");
+  type Pr = { type?: unknown; parameters?: { required_approving_review_count?: unknown; dismiss_stale_reviews_on_push?: unknown; require_last_push_approval?: unknown } };
+  const approves = (r: Rs): boolean =>
+    Array.isArray(r.rules) && (r.rules as Pr[]).some((x) => x?.type === "pull_request" && Number(x.parameters?.required_approving_review_count) >= 1 && (x.parameters?.dismiss_stale_reviews_on_push === true || x.parameters?.require_last_push_approval === true));
+  const approving = mainRules.find((r) => approves(r) && bypassSeen(r) && !appBypasses(r));
+  if (approving) say(true, `main's ruleset ${JSON.stringify(approving.name)} requires an approving review that a later push voids, and the App can't bypass it (SMD-4090)`);
+  else if (mainRules.some((r) => approves(r) && !bypassSeen(r))) say(false, "main's ruleset requires an approving review, but its bypass list couldn't be read (gh must be a repo admin's): the App may be on it (SMD-4090)");
+  else say(false, "main's rulesets require no approving review, voided by a later push, that the App can't bypass: the App could merge its own green PR (SMD-4090)");
+  const unseen = mainRules.filter((r) => !bypassSeen(r));
+  if (mainRules.some((r) => bypassSeen(r) && appBypasses(r))) say(false, "the App is a bypass actor on a ruleset of main");
+  else if (approving && unseen.length) say(false, `the bypass lists of ${unseen.length} other ruleset(s) of main couldn't be read: the App may be on one`);
   return { ok, lines };
 }
 
 /**
  * `check-github-app`: read what `appFindings` judges — the App and its installation with the App's own key, the
- * installation's repositories with a token it mints, and the rulesets with the maintainer's gh — then judge it. Needs
- * the network; not in the offline self-check. Mints one installation token, used for one read; nothing is written.
+ * installation's repositories with a metadata-only token minted for the whole installation, and the rulesets with the
+ * maintainer's gh — then judge it, and mint the publish's own token once to see it minted. Needs the network; not in
+ * the offline self-check. Both tokens are revoked once read; nothing else is written.
  */
 export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch): Promise<{ ok: boolean; lines: string[] }> {
   if (!cfg.githubAppId || !cfg.githubAppInstallationId || !cfg.githubAppSlug) return { ok: false, lines: ["✗ the config names no GitHub App (githubAppId, githubAppInstallationId, githubAppSlug)"] };
@@ -230,12 +254,14 @@ export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch)
     facts.app = (await get("/app", jwt)) as AppFacts["app"];
     facts.installation = (await get(`/app/installations/${app.installationId}`, jwt)) as AppFacts["installation"];
   }
+  // What the installation reaches, read with a token NOT narrowed to this repo (a narrowed one lists only its own).
+  const reach = await installationRepos(fetchImpl, app, pem, Date.now());
+  if (reach.ok) facts.repos = reach.repos;
+  // And the publish's own token, minted as a run mints it, then revoked.
   const minted = await installationToken(fetchImpl, app, pem, Date.now());
   const lines: string[] = [];
-  if (minted.ok) {
-    const listed = (await get("/installation/repositories?per_page=100", minted.token)) as { repositories?: { full_name?: unknown }[] } | null;
-    facts.repos = Array.isArray(listed?.repositories) ? listed.repositories.map((r) => String(r?.full_name)) : null;
-  } else lines.push(`✗ an installation token couldn't be minted: ${minted.detail}`);
+  if (minted.ok) await revokeToken(fetchImpl, minted.token);
+  else lines.push(`✗ the publish's installation token couldn't be minted: ${minted.detail}`);
   const list = spawnSync("gh", ["api", `repos/${cfg.repo}/rulesets?includes_parents=true`, "--jq", ".[].id"], { encoding: "utf8", timeout: 20_000 });
   if (!list.error && list.status === 0) {
     const ids = (list.stdout ?? "").split("\n").map((x) => x.trim()).filter((x) => /^\d+$/.test(x));
@@ -501,9 +527,9 @@ export function selfCheck(): number {
 
     section("check-github-app's verdicts: the App as decision 13 needs it, and its fence (appFindings)", () => {
       const cfgA = { repo: "MHarris-SgyMd/OB1", githubAppId: "123456", githubAppSlug: "ob1-agent-runner" };
-      const tagRs = { name: "tags", target: "tag", enforcement: "active", conditions: { ref_name: { include: ["refs/tags/v*"], exclude: [] } }, rules: [{ type: "creation" }, { type: "update" }, { type: "deletion" }], bypass_actors: [{ actor_type: "RepositoryRole", actor_id: 5 }] };
+      const tagRs: Record<string, unknown> = { name: "tags", target: "tag", enforcement: "active", conditions: { ref_name: { include: ["refs/tags/v*"], exclude: [] } }, rules: [{ type: "creation" }, { type: "update" }, { type: "deletion" }], bypass_actors: [{ actor_type: "RepositoryRole", actor_id: 5 }] };
       // main's ruleset as it reads today (0 approvals), and as SMD-4090 makes it.
-      const mainRs = (count: number, bypass: unknown[] = []) => ({ name: "main", target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } }, rules: [{ type: "deletion" }, { type: "pull_request", parameters: { required_approving_review_count: count } }], bypass_actors: bypass });
+      const mainRs = (count: number, bypass: unknown[] | null = [], voids: Record<string, boolean> = { dismiss_stale_reviews_on_push: true, require_last_push_approval: false }): Record<string, unknown> => ({ name: "main", target: "branch", enforcement: "active", conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } }, rules: [{ type: "deletion" }, { type: "pull_request", parameters: { required_approving_review_count: count, ...voids } }], ...(bypass === null ? {} : { bypass_actors: bypass }) });
       const good: AppFacts = {
         app: { slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read" } },
         installation: { repository_selection: "selected" },
@@ -529,7 +555,18 @@ export function selfCheck(): number {
       ok(says({ rulesets: [{ ...tagRs, enforcement: "evaluate" }, mainRs(1)] }, "start a release"), "a tag ruleset only evaluating is ✗");
       ok(says({ rulesets: [{ ...tagRs, rules: [{ type: "deletion" }] }, mainRs(1)] }, "start a release"), "a tag ruleset that doesn't restrict creation is ✗");
       ok(judged({ rulesets: [{ ...tagRs, conditions: { ref_name: { include: ["~ALL"] } } }, mainRs(1)] }).ok, "a tag ruleset on every tag is ✓");
-      ok(says({ rulesets: [tagRs, mainRs(0)] }, "SMD-4090"), "main's ruleset as it reads today, 0 approvals, is ✗ naming SMD-4090");
+      ok(says({ rulesets: [tagRs, mainRs(0, [], { dismiss_stale_reviews_on_push: false, require_last_push_approval: false })] }, "SMD-4090"), "main's ruleset as it reads today, 0 approvals, is ✗ naming SMD-4090");
+      ok(says({ rulesets: [tagRs, mainRs(1, [], { dismiss_stale_reviews_on_push: false, require_last_push_approval: false })] }, "voided by a later push"), "an approval a later push doesn't void is ✗: the App could push after it and merge");
+      ok(judged({ rulesets: [tagRs, mainRs(1, [], { dismiss_stale_reviews_on_push: false, require_last_push_approval: true })] }).ok, "an approval of the last push by someone else is ✓");
+      ok(says({ rulesets: [tagRs, mainRs(0)] }, "SMD-4090"), "0 approvals is ✗ even with stale approvals dismissed");
+      ok(says({ rulesets: [{ ...tagRs, rules: [{ type: "creation" }] }, mainRs(1)] }, "moving and deleting"), "a tag ruleset restricting creation alone is ✗: a moved tag starts a release too");
+      ok(says({ rulesets: [{ ...tagRs, conditions: { ref_name: { include: ["refs/tags/v*"], exclude: ["refs/tags/v[0-9]*"] } } }, mainRs(1)] }, "start a release"), "a tag ruleset excluding some v* tags is ✗");
+      const unseenTag = { ...tagRs };
+      delete unseenTag.bypass_actors;
+      ok(says({ rulesets: [unseenTag, mainRs(1)] }, "bypass list couldn't be read"), "a tag ruleset whose bypass list wasn't shown is ✗, not taken as safe");
+      ok(says({ rulesets: [tagRs, mainRs(1, null)] }, "bypass list couldn't be read"), "main's ruleset whose bypass list wasn't shown is ✗");
+      ok(says({ rulesets: [tagRs, mainRs(1), { ...mainRs(0, [{ actor_type: "Integration", actor_id: 123456 }]), name: "other" }] }, "the App is a bypass actor on a ruleset of main"), "another ruleset of main the App can bypass is ✗, beside one that approves");
+      ok(says({ rulesets: [tagRs, mainRs(1), { ...mainRs(0, null), name: "other" }] }, "other ruleset(s) of main couldn't be read"), "another ruleset of main whose bypass list wasn't shown is ✗");
       ok(says({ rulesets: [tagRs, mainRs(1, [{ actor_type: "Integration", actor_id: 123456 }])] }, "SMD-4090"), "an approving review the App can bypass is ✗");
       ok(says({ rulesets: null }, "rulesets couldn't be read"), "rulesets that can't be read are ✗");
     });

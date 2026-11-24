@@ -22,10 +22,13 @@ import { join } from "node:path";
 import type { Fetch } from "./facts.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import { branchFor } from "./record.ts";
-import { PEM_SHAPE, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
+import { INSTALLATION_TOKEN, PEM_SHAPE, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationRepos, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
 
 const NOW = Date.parse("2026-11-24T12:00:00Z");
-const TOKEN = `ghs_${"T0k3n".repeat(8)}`;
+/** A token in GitHub's stateless form (`ghs_<app id>_<JWT>`, about 520 characters, with `_`, `.` and `-`), which GitHub has minted since 2026. */
+const TOKEN = `ghs_123456_eyJhbGciOiJSUzI1NiJ9.${"eyJpc3MiOiIxMjM0NTYifQ-_".repeat(18)}.${"c2lnbmF0dXJl".repeat(8)}`;
+/** The legacy form, 40 characters. */
+const LEGACY = `ghs_${"T0k3nL3gacy".repeat(3)}abc`;
 const APP: App & { botLogin: string } = { appId: "123456", installationId: "7890", repo: "MHarris-SgyMd/OB1", botLogin: "ob1-agent-runner[bot]" };
 const BRANCH = "agent/smd-1234-fix-the-thing";
 
@@ -68,7 +71,11 @@ export async function selfCheck(): Promise<number> {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048, publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs1", format: "pem" } });
   const pkcs8 = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
   const PEM = privateKey.trim();
-  const tokenRoute = (method: string, url: string): Response | null => (method === "POST" && url === "https://api.github.com/app/installations/7890/access_tokens" ? tokenAnswer() : null);
+  const tokenRoute = (method: string, url: string): Response | null =>
+    method === "POST" && url === "https://api.github.com/app/installations/7890/access_tokens" ? tokenAnswer() : method === "DELETE" && url === "https://api.github.com/installation/token" ? new Response(null, { status: 204 }) : null;
+  /** The requests that revoked a token, by the token they carried. */
+  const revoked = (sent: Sent[]): string[] => sent.filter((x) => x.init.method === "DELETE" && x.url === "https://api.github.com/installation/token").map((x) => String((x.init.headers as Record<string, string>).Authorization).replace(/^Bearer /, ""));
+  const mints = (sent: Sent[]): number => sent.filter((x) => x.init.method === "POST" && x.url.endsWith("/access_tokens")).length;
 
   await section("the key's shape, and the branches the runner pushes", () => {
     ok(PEM_SHAPE.test(PEM) && PEM_SHAPE.test(pkcs8.trim()), "a PKCS#1 key, as GitHub hands it out, and a PKCS#8 key are taken");
@@ -95,6 +102,8 @@ export async function selfCheck(): Promise<number> {
     const f = stubFetch((m, u) => tokenRoute(m, u) ?? json({ message: "unrouted" }, 404));
     const t = await installationToken(f.fetch, APP, PEM, NOW);
     ok(t.ok && t.token === TOKEN && t.expiresAt === Date.parse("2026-11-24T13:00:00Z"), "a clean answer is the token, with its expiry");
+    ok(TOKEN.length > 500 && INSTALLATION_TOKEN.test(TOKEN) && INSTALLATION_TOKEN.test(LEGACY), "the stateless form (over 500 characters, with _ . -) and the legacy 40 are both tokens");
+    ok(!INSTALLATION_TOKEN.test("ghp_" + "a".repeat(40)) && !INSTALLATION_TOKEN.test(`${LEGACY}\r\nX-Evil: 1`) && !INSTALLATION_TOKEN.test(`${LEGACY} x`) && !INSTALLATION_TOKEN.test("ghs_" + "a".repeat(5000)), "another kind of token, one with a header line after it, a space, or 5,000 characters is not");
     const req = f.sent[0];
     const body = JSON.parse(String(req.init.body));
     ok(f.sent.length === 1 && req.init.method === "POST" && req.url === "https://api.github.com/app/installations/7890/access_tokens", "one POST to the installation's access_tokens");
@@ -118,6 +127,12 @@ export async function selfCheck(): Promise<number> {
       const t = await answer(res);
       ok(!t.ok && t.detail.includes(says) && t.detail.includes("refused unused") && !t.detail.includes(TOKEN), `${what}: refused, saying ${JSON.stringify(says)}, the token unshown`);
     }
+    const f = stubFetch((m, u) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, workflows: "write" } })));
+    await installationToken(f.fetch, APP, PEM, NOW);
+    ok(revoked(f.sent).join() === TOKEN, "a token refused for its permissions is revoked, not left for its hour");
+    const g = stubFetch((m, u) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ repositories: [{ full_name: "someone/OB1" }] })));
+    await installationToken(g.fetch, APP, PEM, NOW);
+    ok(revoked(g.sent).join() === TOKEN, "a token refused for its repository is revoked too");
     const two = await answer(tokenAnswer({ repositories: [{ full_name: "MHarris-SgyMd/OB1" }, { full_name: "MHarris-SgyMd/other" }] }));
     const other = await answer(tokenAnswer({ repositories: [{ full_name: "someone/OB1" }] }));
     const none = await answer(tokenAnswer({ repositories: undefined }));
@@ -141,8 +156,9 @@ export async function selfCheck(): Promise<number> {
 
   await section("scrubToken: the token, its basic-auth form and any other GitHub token", () => {
     const basic = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
-    const s = scrubToken(`a ${TOKEN} b AUTHORIZATION: basic ${basic} c ghp_${"x".repeat(36)} d github_pat_${"y_".repeat(15)}`, TOKEN);
-    ok(!s.includes(TOKEN) && !s.includes(basic) && !s.includes("ghp_x") && !s.includes("github_pat_y"), "none of them is left");
+    const other = TOKEN.replace("123456", "654321");
+    const s = scrubToken(`a ${TOKEN} b AUTHORIZATION: basic ${basic} c ghp_${"x".repeat(36)} d github_pat_${"y_".repeat(15)} e ${other} f`, TOKEN);
+    ok(!s.includes(TOKEN) && !s.includes(basic) && !s.includes("ghp_x") && !s.includes("github_pat_y") && !s.includes("eyJ"), "none of them is left, another stateless token's JWT part included");
   });
 
   await section("pushCommand: the token in git's environment, in no argument; one refspec, no tags, no hooks, no force", () => {
@@ -153,6 +169,14 @@ export async function selfCheck(): Promise<number> {
     ok(["--no-verify", "--no-follow-tags", "core.hooksPath=/dev/null", "protocol.allow=never", "credential.helper=", "http.followRedirects=false"].every((a) => c.argv.includes(a)), "hooks off, no tags, https only, no credential helper, no redirect");
     ok(!c.argv.some((a) => a === "--force" || a === "-f" || a === "--tags" || a === "--mirror" || a === "--all" || a.startsWith("+")), "no force, no tags, no mirror");
     ok(c.env.GIT_CONFIG_GLOBAL === "/dev/null" && c.env.GIT_CONFIG_NOSYSTEM === "1" && c.env.HOME === "/h", "no config of the maintainer's");
+  });
+
+  await section("pushOutcome: GitHub's own refusal is final; a remote failure is retried", () => {
+    const ref = `refs/heads/${BRANCH}:refs/heads/${BRANCH}`;
+    const remote = pushOutcome({ code: 1, stdout: `!\t${ref}\t[remote rejected] (refusing to allow a GitHub App to create or update workflow without workflows permission)\n`, stderr: "" }, BRANCH);
+    ok(!remote.ok && remote.final && remote.detail.includes("workflows permission"), "a remote rejection (a workflow file, a ruleset) is final, in GitHub's words");
+    const failure = pushOutcome({ code: 1, stdout: `!\t${ref}\t[remote failure] (remote failed to report status)\n`, stderr: "" }, BRANCH);
+    ok(!failure.ok && !failure.final, "a remote failure is retried");
   });
 
   await section("pushOutcome: pushed, already there, refused (final), or failed (retry)", () => {
@@ -221,7 +245,7 @@ export async function selfCheck(): Promise<number> {
       ok(sh(["tag", "-l"], target) === "" && sh(["for-each-ref", "--format=%(refname)"], target) === `refs/heads/${BRANCH}`, "no tag and no other branch went with it");
       ok(!existsSync(marker), "the source's pre-push hook did not run");
       ok(seen.length === 1 && !seen[0].argv.join(" ").includes(TOKEN) && seen[0].env.GIT_CONFIG_VALUE_0.includes(Buffer.from(`x-access-token:${TOKEN}`).toString("base64")), "the token went in git's environment alone");
-      ok(mintRoute.sent.length === 1, "one token was minted for the push");
+      ok(mints(mintRoute.sent) === 1 && revoked(mintRoute.sent).join() === TOKEN, "one token was minted for the push, and revoked once it was done");
       const again = await client.pushBranch({ branch: BRANCH });
       ok(again.ok, "a second push of the same commit is already there, not an error");
     });
@@ -259,7 +283,8 @@ export async function selfCheck(): Promise<number> {
       const basic = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
       const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async () => ({ code: 128, stdout: "", stderr: `fatal: header AUTHORIZATION: basic ${basic} refused for ${TOKEN}` }), bareRepo: source, home, remote: target, now: () => NOW });
       const r = await c.pushBranch({ branch: BRANCH });
-      ok(!r.ok && !r.final && r.detail.includes("exited 128") && !r.detail.includes(TOKEN) && !r.detail.includes(basic), "a failed push's detail carries neither the token nor its basic-auth form");
+      const fragments = [TOKEN.slice(0, 40), TOKEN.slice(200, 240), basic.slice(0, 40), basic.slice(100, 140)];
+      ok(!r.ok && !r.final && r.detail.includes("exited 128") && fragments.every((x) => !r.detail.includes(x)), "a failed push's detail carries no piece of the token or its basic-auth form, however git's words are cut");
     });
 
     await section("pushBranch: a throwing git is a result with the token scrubbed", async () => {
@@ -288,6 +313,7 @@ export async function selfCheck(): Promise<number> {
     ok(r.ok && r.number === 901 && r.url === "https://github.com/MHarris-SgyMd/OB1/pull/901", "the PR's number and URL");
     ok(JSON.stringify(posted) === JSON.stringify({ title: OPEN.title, head: BRANCH, base: "main", body: "the body", draft: true }), "posted as a draft, head the branch of this repo, base main");
     ok(sent.filter((s) => s.url.startsWith("https://api.github.com/repos/")).every((s) => (s.init.headers as Record<string, string>).Authorization === `Bearer ${TOKEN}`), "the installation token, not the JWT, goes to the repo's API");
+    ok(mints(sent) === 1 && revoked(sent).join() === TOKEN && sent.at(-1)?.init.method === "DELETE", "one token, revoked last");
   });
 
   await section("openDraftPr: the App's PR already open from the branch is the answer — no second PR", async () => {
@@ -302,6 +328,7 @@ export async function selfCheck(): Promise<number> {
       ["from another repo's branch", prRow({ head: { ref: BRANCH, repo: { full_name: "someone/OB1" } } })],
       ["of another branch", prRow({ head: { ref: "agent/smd-1-other", repo: { full_name: "MHarris-SgyMd/OB1" } } })],
       ["with a URL elsewhere", prRow({ html_url: "https://evil.example/pull/900" })],
+      ["with a URL past its number", prRow({ html_url: "https://github.com/MHarris-SgyMd/OB1/pull/900/files" })],
     ] as const) {
       let postedN = 0;
       const { c } = prClient((m, u) => (m === "GET" && u === LIST ? json([row]) : m === "POST" && u === PULLS ? (postedN++, json(prRow(), 201)) : null));
@@ -315,9 +342,16 @@ export async function selfCheck(): Promise<number> {
     const lost = prClient((m, u) => (m === "GET" && u === LIST ? (lists++ === 0 ? json([]) : json([prRow()])) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ message: "A pull request already exists" }] }, 422) : null));
     const r1 = await lost.c.openDraftPr(OPEN);
     ok(r1.ok && r1.number === 901, "a lost answer: the PR is found after the 422");
-    const none = prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed: No commits between main and the branch" }, 422) : null));
+    const none = prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ resource: "PullRequest", code: "custom", message: "No commits between main and agent/smd-1234-fix-the-thing" }] }, 422) : null));
     const r2 = await none.c.openDraftPr(OPEN);
-    ok(!r2.ok && r2.final === true && r2.detail.includes("422") && r2.detail.includes("No commits between"), "no commits between: final, in GitHub's words");
+    ok(!r2.ok && r2.final === true && r2.detail.includes("422") && r2.detail.includes("Validation Failed; No commits between"), "no commits between: final, in GitHub's words from errors[]");
+    const badHead = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ resource: "PullRequest", field: "head", code: "invalid" }] }, 422) : null)).c.openDraftPr(OPEN);
+    ok(!badHead.ok && badHead.final === true, "a head GitHub won't take: final");
+    const spam = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ message: "was submitted too quickly" }] }, 422) : null)).c.openDraftPr(OPEN);
+    ok(!spam.ok && !spam.final && spam.detail.includes("too quickly"), "any other 422 (an abuse limit) is retried");
+    let calls = 0;
+    const flaky = await prClient((m, u) => (m === "GET" && u === LIST ? (calls++ === 0 ? json([]) : json({ message: "Server Error" }, 502)) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ message: "A pull request already exists for MHarris-SgyMd:agent/smd-1234-fix-the-thing." }] }, 422) : null)).c.openDraftPr(OPEN);
+    ok(!flaky.ok && !flaky.final && flaky.detail.includes("already exists") && flaky.detail.includes("502"), "a 422 whose follow-up lookup fails is retried, not final");
   });
 
   await section("openDraftPr: other failures are retried, scrubbed, never thrown", async () => {
@@ -330,6 +364,30 @@ export async function selfCheck(): Promise<number> {
     ok(!thrown.ok && !thrown.final && thrown.detail.includes("socket hang up") && !thrown.detail.includes(TOKEN), "a transport failure: a result, the token gone");
     const weird = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json(prRow({ user: { login: "someone" } }), 201) : null)).c.openDraftPr(OPEN);
     ok(!weird.ok && weird.detail.includes("isn't the App's"), "a 201 answering someone else's PR is not taken");
+  });
+
+  await section("openDraftPr: the repo's case in the config doesn't turn the App's own PR into a stranger's", async () => {
+    const f = stubFetch((m, u) => tokenRoute(m, u) ?? (m === "GET" && u.includes("/pulls?state=open") ? json([]) : m === "POST" && u.endsWith("/pulls") ? json(prRow(), 201) : null) ?? json({}, 404));
+    const c = appClient({ app: { ...APP, repo: "mharris-sgymd/ob1" }, pem: PEM, fetch: f.fetch, git: realGitSpawn, bareRepo: "/x", home: "/x", now: () => NOW });
+    const r = await c.openDraftPr(OPEN);
+    ok(r.ok && r.number === 901, "a 201 answering https://github.com/MHarris-SgyMd/OB1/pull/901 is the PR, for a config saying mharris-sgymd/ob1");
+  });
+
+  await section("installationRepos: what the installation reaches, read with a token for the whole of it, then revoked", async () => {
+    let asked: unknown = null;
+    const page = (n: number, from: number) => Array.from({ length: n }, (_, i) => ({ full_name: `o/r${from + i}` }));
+    const f = stubFetch((m, u, b) =>
+      m === "POST" && u.endsWith("/access_tokens") ? ((asked = b), json({ token: TOKEN, permissions: { metadata: "read" } }, 201))
+      : m === "GET" && u.endsWith("/installation/repositories?per_page=100&page=1") ? json({ total_count: 101, repositories: page(100, 0) })
+      : m === "GET" && u.endsWith("/installation/repositories?per_page=100&page=2") ? json({ total_count: 101, repositories: [{ full_name: "MHarris-SgyMd/OB1" }] })
+      : m === "DELETE" ? new Response(null, { status: 204 }) : json({}, 404));
+    const r = await installationRepos(f.fetch, APP, PEM, NOW);
+    ok(r.ok && r.repos.length === 101 && r.repos.at(-1) === "MHarris-SgyMd/OB1", "every page is read: 101 repositories");
+    ok(JSON.stringify(asked) === JSON.stringify({ permissions: { metadata: "read" } }), "the token is asked for metadata alone, and for no repository in particular (a narrowed one lists only its own)");
+    ok(revoked(f.sent).join() === TOKEN, "the token is revoked after");
+    const refused = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : m === "POST" ? json({ token: TOKEN }, 201) : json({ message: `no ${TOKEN}` }, 403)));
+    const r2 = await installationRepos(refused.fetch, APP, PEM, NOW);
+    ok(!r2.ok && r2.detail.includes("403") && !r2.detail.includes(TOKEN) && revoked(refused.sent).join() === TOKEN, "a refused list is said, scrubbed, and the token still revoked");
   });
 
   await section("openDraftPr: a head outside the runner's prefix is refused, nothing sent", async () => {
