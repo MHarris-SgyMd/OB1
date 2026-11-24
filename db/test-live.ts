@@ -27204,6 +27204,24 @@ if (want("37b")) {
  * sleep.ts's newestLive reads as a write — so no pass gains work. A search
  * is none (SMD-3315).
  */
+/**
+ * The line consolidation joins extraction on, either of two (SMD-4515, SMD-4545). A thought's entities are written a
+ * moment before its claim is marked finished, and a thought with entities is extracted whatever its claim says
+ * (SMD-4468, backlogCut). A poll in that moment on the last thought in hand reads no backlog left and a pool not
+ * drained, and the scheduler joins on SMD-4468's line; a poll a moment later joins on "extraction drained". A row that
+ * means "consolidation joined" takes either. Not the stalled join's line, which ends "consolidating first".
+ */
+const CONSOLIDATION_JOINED = /^ {2}extraction (?:drained|has done the thoughts captured before the period began) — consolidating beside it/;
+/**
+ * Either join line as six of [38]'s waits read it, more loosely: "extraction drained" anywhere in a line, which takes
+ * in the drained line said with consolidation held, and now SMD-4468's line too (SMD-4545). On the drained line alone
+ * a wait ran out its whole bound when the other was printed. SMD-4468's line does not say extraction is over: it is
+ * also printed while a note of today's is still being extracted. So a wait whose next step acts on extraction asks
+ * that no extraction claim is pending or in hand as well (review pass 1): on the drained line that was so when it
+ * was printed, and running out its bound it was so by then.
+ */
+const JOIN_SAID = /extraction (?:drained|has done the thoughts captured before the period began)/;
+
 const liveWrite = (sql: SQL, note: string) =>
   sql`INSERT INTO thought_audit (thought_id, action, actor_name, diff) VALUES (gen_random_uuid(), 'update', 'op-sleep', ${{ note }}::jsonb)`;
 
@@ -27525,6 +27543,8 @@ if (want("38")) {
   // The suite's client closed at [24]; each section since opens its own.
   const sql = new SQL({ url: URL_, max: 4 });
   const { EX, CO, modelCalls, sw, env, capture, claims, auditRows, beat, lines, ONE_SHOT, sleepRun, bounded, intercept, around, nextPeriod, done } = await sleepScaffold(sql);
+  /** No extraction claim pending or in hand, in one read: what a wait on JOIN_SAID asks besides when its next step acts on extraction (SMD-4545). */
+  const extractionSettled = async () => { const c = await claims(EX); return !c.pending && !c.claimed; };
   // The outage schedule starts at 1 s in this section (SMD-3048), but for
   // the refusal retried and its reset, which read 2.5 s and 5 s: long enough
   // to see the row re-stamped through a wait, and the schedule still doubling
@@ -27861,7 +27881,7 @@ if (want("38")) {
     // one drained, the next, begun for that note at once — a sync write gates
     // none (SMD-3379 PR 1c-4b).
     sw.slow = 0;
-    await pollUntil(async () => (await claims(EX)).succeeded === 6 && lines.some((l) => /extraction drained/.test(l)), 30_000);
+    await pollUntil(async () => (await claims(EX)).succeeded === 6 && lines.some((l) => JOIN_SAID.test(l)), 30_000);
     const wakesBefore = lines.filter((l) => /paused: a live/.test(l)).length;
     sw.slow = 6000;
     const synced = await capture("A ticket the sync copied in.", "sync-sleep", 0, 3);
@@ -28551,7 +28571,7 @@ if (want("38")) {
     let besideNote = "";
     try {
       // This note's own judgement done, consolidation's first pass over: an earlier case's succeeded rows say nothing of it (review pass 1).
-      if (await pollUntil(async () => lines.some((l) => /extraction drained — consolidating beside it/.test(l)) && !(await claims(CO)).pending && !(await claims(CO)).claimed
+      if (await pollUntil(async () => lines.some((l) => CONSOLIDATION_JOINED.test(l)) && !(await claims(CO)).pending && !(await claims(CO)).claimed
           && (await sql`SELECT 1 FROM thought_work_claims WHERE work_type = ${CO} AND thought_id = ${endFirst}::uuid AND status = 'succeeded'`).length === 1, 20_000)) {
         besideNote = await capture("A note extracted beside consolidation, its claim not yet queued.", "sync-sleep", 0, 21);
         await sql`UPDATE thought_work_claims SET status = 'succeeded', finished_at = now() WHERE work_type = ${EX} AND thought_id = ${besideNote}::uuid`;
@@ -28786,7 +28806,7 @@ if (want("38")) {
     // the next pause's runs on (SMD-3379 PR 1c-3b). The pause that reaches the cap says so within about 2 s of the
     // write, a second inside the capture.
     const retrying = sleepRun({ follow: true, captureMs: 3000, pollMs: 500, stallFloorMs: 1000, abortAfterMs: 1000, consolidateAborts: 1, signal: ac3.signal, minStampEveryS: 1 }).finally(() => { retryDone = true; });
-    await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
+    await pollUntil(async () => lines.some((l) => JOIN_SAID.test(l)), 20_000);
     // The claim read once its judge call is held, not at the first claim seen:
     // under load that was a thought with no pair (finished at once), or one
     // whose call had not begun when the model went, so the wake had nothing in
@@ -28858,7 +28878,7 @@ if (want("38")) {
     const stillRunning = !retryDone;
     sw.missing = false;
     const at = lines.length;
-    const recovered = await pollUntil(async () => lines.slice(at).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 40_000);
+    const recovered = await pollUntil(async () => lines.slice(at).some((l) => JOIN_SAID.test(l)) && (await beat())?.outcome === "ok", 40_000);
     const holdsRecovered = (await beat())?.holds;
     assert(retryHold?.why === "model" && typeof retryHold.until === "string" && retryHold.until > nowIso && Date.parse(retryHold.until) - Date.parse(nowIso) <= 2600
         && secondHold?.why === "model" && secondLeft > 2600 && secondLeft <= 5100 && carriedHold?.until === secondHold.until && holdsRecovered === undefined,
@@ -28877,7 +28897,7 @@ if (want("38")) {
     const firstWaitAgain = lines.slice(at2).find((l) => /tries it again in [\d.]+ s/.test(l))?.match(/in ([\d.]+) s/)?.[1];
     sw.missing = false;
     const at3 = lines.length;
-    const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => /extraction drained/.test(l)) && (await beat())?.outcome === "ok", 30_000);
+    const recoveredAgain = await pollUntil(async () => lines.slice(at3).some((l) => JOIN_SAID.test(l)) && (await beat())?.outcome === "ok", 30_000);
     // Failed once in a full run under PR 3 (no retry line in 20 s) and passed in the harness since: the scheduler's lines say why next time.
     // The 2.5 s schedule restored first, so the section's own restore puts back the shipped one, not 2.5 s.
     restoreOutage();
@@ -28928,7 +28948,8 @@ if (want("38")) {
     const retryHeldRun = sleepRun({ follow: true, minStampEveryS: 1, signal: acRetryHeld.signal });
     let heldWaited = false;
     try {
-      await pollUntil(async () => lines.some((l) => /extraction drained/.test(l)), 20_000);
+      // The model goes missing next: with extraction's claims settled, so it is consolidation's start that is refused.
+      await pollUntil(async () => lines.some((l) => JOIN_SAID.test(l)) && (await extractionSettled()), 20_000);
       sw.missing = true;
       if (await nextPeriod("a live write that ends the sleep before the refusal")) {
         heldWaited = await pollUntil(async () => lines.some((l) => /tries it again in 2\.5 s/.test(l)), 20_000);
@@ -29299,7 +29320,7 @@ if (want("38")) {
       // (SMD-3379 PR 1c-4b), so the rescan is 2 s here.
       await capture("A note the switch follows.", "sync-sleep", 0, 11);
       const switchRun = followRun({ rescanMs: 2000 });
-      await pollUntil(async () => count(/extraction drained/) >= 1, 20_000);
+      await pollUntil(async () => count(JOIN_SAID) >= 1 && (await extractionSettled()), 20_000);
       await setKey("extract:another-model@p2");
       await nextPeriod("A note captured under the switched key");
       const switchCode = await switchRun.settle();
@@ -31671,7 +31692,7 @@ if (want("38b")) {
       `paused ${scaled(3500) / 1000} s into every working period, the six-window thought is extracted, the six behind it too, and consolidation joins — within ${a.sleeps} period(s) (reached ${a.reached}, ${statuses.filter((s) => s === "succeeded").length} of ${all.length} extracted, ${judged.length} judgement(s), exit ${a.code})`);
     assert(a.sleeps >= 2 && longCalls.length <= 6 + wakes && new Set(longCalls.map((c) => c.part)).size === 6,
       `…across more than one period, no window sent again but one an abort took from hand: ${longCalls.length} window calls for 6 windows over ${wakes} period(s) (${longCalls.map((c) => c.part).join(",")})`);
-    assert(lines.some((l) => /extraction drained — consolidating beside it/.test(l)) && !lines.some((l) => /extraction holds only/.test(l)),
+    assert(lines.some((l) => CONSOLIDATION_JOINED.test(l)) && !lines.some((l) => /extraction holds only/.test(l)),
       "…consolidation joined because extraction drained, not past a stalled thought — the document gained windows in every period");
     // Paused, the scheduler's polls read the live writes and nothing else: no
     // pool, a scan of every thought for extraction, between a pause and its resume.
@@ -31964,7 +31985,7 @@ if (want("38b")) {
       await pollUntil(async () => stuckStarts.length > 0, 25_000);
       return new Response("the key is refused", { status: 401 });
     };
-    const byItselfSay = (l: string) => { byItself.push(l); if (/extraction drained — consolidating beside it/.test(l)) consolidatingBeside = true; };
+    const byItselfSay = (l: string) => { byItself.push(l); if (CONSOLIDATION_JOINED.test(l)) consolidatingBeside = true; };
     const byItselfAc = new AbortController();
     // The passes poll for new work every second, not every 15 s: the note comes after extraction's pass has drained,
     // and waited out its poll, 15 s of this case's 16 (SMD-3196).
@@ -31998,7 +32019,7 @@ if (want("38b")) {
       return new Response("the key is refused", { status: 401 });
     };
     const retryLines: string[] = [];
-    const retrySay = (l: string) => { retryLines.push(l); if (/extraction drained — consolidating beside it/.test(l)) retryBeside = true; };
+    const retrySay = (l: string) => { retryLines.push(l); if (CONSOLIDATION_JOINED.test(l)) retryBeside = true; };
     const retryAc = new AbortController();
     const restoreRetryOutage = shortenOutage(1000, 2000);
     const retryRun = runSleep({ url: URL_!, subjects: false, env: { ...env, OB1_JUDGE_MODEL: JUDGE }, capture: 1, poll: 1, passFollowS: 1, follow: true, minStampEveryS: 60, signal: retryAc.signal, writer: { out: retrySay, err: retrySay } });
@@ -32420,7 +32441,7 @@ if (want("38s")) {
     const firstCode = await oneShot();
     const filled = ((await sql`SELECT value FROM ob1_config WHERE key = 'subject_pool_filled'`)[0] as { value: string } | undefined)?.value;
     const firstClaims = await claims(POOL);
-    const drainedAt = lines.findIndex((l) => /^ {2}extraction drained — consolidating beside it/.test(l));
+    const drainedAt = lines.findIndex((l) => CONSOLIDATION_JOINED.test(l));
     const startedAt = lines.indexOf(`  the subject sweep starts beside consolidation, under ${POOL}`);
     assert(firstCode === 0 && (await named()) === POOL && filled === POOL && firstClaims.succeeded === 2 && !firstClaims.pending && !firstClaims.claimed && asked() === 2 && (await recorded()) === 2
         && drainedAt >= 0 && startedAt > drainedAt && ended() && lines.some((l) => /^ {2}working: .*extracting, then consolidating and the subject sweep beside it, until the pools drain/.test(l))
