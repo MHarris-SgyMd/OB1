@@ -788,7 +788,7 @@ async function selfCheck(): Promise<number> {
   });
 
   await section("git's environment, arguments and process", async () => {
-    await ok(() => JSON.stringify(gitEnv("/empty")) === JSON.stringify({ PATH: "/usr/bin:/bin", HOME: "/empty", LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }), "git's environment is built from nothing: no credential, agent socket, prompt or config of the maintainer's");
+    await ok(() => JSON.stringify(gitEnv("/empty")) === JSON.stringify({ PATH: "/usr/bin:/bin", HOME: "/empty", LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null" }), "git's environment is built from nothing: no credential, agent socket, prompt or config of the maintainer's");
     await ok(() => GIT_SAFE.join(" ") === "-c credential.helper= -c protocol.allow=never -c protocol.https.allow=always -c http.followRedirects=false -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20", "every git call drops the credential helpers, allows https alone, follows no redirect and gives up a stalled transfer");
     const spawned: { cmd: string[]; opts: Parameters<SpawnImpl>[1] }[] = [];
     const recorder: SpawnImpl = (cmd, opts) => {

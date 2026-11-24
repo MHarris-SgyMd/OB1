@@ -104,7 +104,7 @@ function stubGql(commentSuccess = true, seq: string[] = []): { gql: Gql; calls: 
 }
 
 /** A GitHub client stub that records its arguments, so the test asserts publish passes the right head/base/body/branch. */
-type PushArg = { branch: string };
+type PushArg = { branch: string; commit: string };
 type PrArg = { title: string; head: string; base: string; body: string };
 function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string; final?: boolean } = {}, seq: string[] = []): { client: GitHubClient; pushes: PushArg[]; prs: PrArg[] } {
   const pushes: PushArg[] = [];
@@ -153,6 +153,7 @@ function makePublish(
     leaseDaySeconds: DAY,
     leaseWeekSeconds: WEEK,
     branch: "agent/smd-1234-fix-the-thing",
+    commit: "d".repeat(40),
     head: "agent/smd-1234-fix-the-thing",
     baseBranch: "main",
     title: "[core] Fix the thing (SMD-1234)",
@@ -319,7 +320,7 @@ export async function selfCheck(): Promise<number> {
       const r = await publish(m.input, m.deps);
       ok(r.published && r.prNumber === 777 && r.prUrl?.includes("/777"), "published, with the PR number and URL");
       ok(r.pushed && r.leaseRenewed && r.commented && r.owed.length === 0 && !r.handToPerson, "pushed, lease renewed, commented, nothing owed, not a person's");
-      ok(m.pushes[0]?.branch === "agent/smd-1234-fix-the-thing", "pushBranch got the run's branch");
+      ok(m.pushes[0]?.branch === "agent/smd-1234-fix-the-thing" && m.pushes[0]?.commit === "d".repeat(40), "pushBranch got the run's branch and the gated commit");
       ok(m.prs[0]?.head === m.input.head && m.prs[0]?.base === "main" && m.prs[0]?.body === m.input.body, "openDraftPr got the right head, base and body");
       ok(readRecord(m.dir).pr === 777, "the record holds the PR number");
       ok(readToken(claimsDir(root), m.input.claimId).lease_seconds === WEEK, "the token file's lease is bumped to a week after the PR opens");

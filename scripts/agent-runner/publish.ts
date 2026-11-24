@@ -191,12 +191,12 @@ export function prLinkComment(ticket: string, pr: { number: number; url: string 
  * `appClient`. Neither operation's `detail`, nor any message it throws (which `publish` records in an owed step), may
  * carry the App's token: github.ts authenticates without a token in a URL that git could echo on a failed push, and
  * scrubs the token from its errors. The runner never writes a token to a record. A failure marked `final` is one no
- * retry mends (GitHub refused the push as not a fast-forward, or refused the PR for a reason other than its already
- * being open): the ticket goes to a person instead of the publish being left owed.
+ * retry mends (a push that isn't a fast-forward, or that GitHub itself refuses; a PR with no commits, a bad base, or
+ * someone else's PR from the branch): the ticket goes to a person instead of the publish being left owed.
  */
 export type GitHubClient = {
-  /** Push the one branch from the runner's bare repository to this repo (explicit refspec, no tags, hooks off, no force). */
-  pushBranch: (opts: { branch: string }) => Promise<{ ok: true } | { ok: false; detail: string; final?: boolean }>;
+  /** Push the gated commit from the runner's bare repository to this repo as the one branch (`<commit>:refs/heads/<branch>`, no tags, hooks off, no force), whatever the branch's ref holds by then. */
+  pushBranch: (opts: { branch: string; commit: string }) => Promise<{ ok: true } | { ok: false; detail: string; final?: boolean }>;
   /**
    * Open a draft PR on this repo from the pushed branch, returning its number and URL. Must be idempotent: if a PR already
    * exists for this head, return it as `{ ok: true, number, url }` rather than failing — a publish that fails here is
@@ -237,6 +237,8 @@ export type PublishInput = {
   leaseWeekSeconds: number;
   /** The branch to push, `agent/smd-<n>-<slug>`. */
   branch: string;
+  /** The commit the gate passed (the imported bundle's head, from the run's record): what is pushed, so a ref moved after the gate pushes nothing it didn't check. */
+  commit: string;
   /** The PR's head, the pushed branch (`agent/smd-<n>-<slug>`, a branch of this repo), and its base branch. */
   head: string;
   baseBranch: string;
@@ -346,7 +348,7 @@ export async function publish(input: PublishInput, deps: PublishDeps): Promise<P
   // still held at the day lease the step-8 renewal confirmed (`leaseRenewed` true) — never a thrown rejection.
   let push: { ok: true } | { ok: false; detail: string; final?: boolean };
   try {
-    push = await deps.github.pushBranch({ branch: input.branch });
+    push = await deps.github.pushBranch({ branch: input.branch, commit: input.commit });
   } catch (e) {
     return mk({ leaseRenewed: true, owed: [{ kind: "publish", why: `the push threw: ${scrubDetail(errText(e))}`, at: at() }], reason: "the push threw" });
   }

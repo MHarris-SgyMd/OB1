@@ -58,9 +58,14 @@ export const TIME_LIMITS = { request: 20_000, linear: 30_000 };
 /** The request options every credentialed call carries: no redirect followed, no headers logged, TLS checked. Bun reads `verbose` and `tls`. */
 export const SAFE_REQUEST = { redirect: "manual", verbose: false, tls: { rejectUnauthorized: true } } as const;
 
-/** The environment git runs with: nothing of the maintainer's, no config but the repo's own, and no prompt. `home` is an empty directory. */
+/**
+ * The environment git runs with: nothing of the maintainer's, no config but the repo's own, and no prompt. `home` is an
+ * empty directory. Replace refs and grafts are off, so every read sees the objects themselves: a `refs/replace/` ref in
+ * the runner's bare repository would otherwise show the gate and the review one blob while the push sends another
+ * (SMD-4087 cut 3b-1 review pass 4).
+ */
 export function gitEnv(home: string): Record<string, string> {
-  return { PATH: "/usr/bin:/bin", HOME: home, LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  return { PATH: "/usr/bin:/bin", HOME: home, LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null" };
 }
 /**
  * Arguments every git call starts with: no credential helper, https as the only transport, no redirect followed,

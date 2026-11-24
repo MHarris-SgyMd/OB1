@@ -668,6 +668,8 @@ export function selfCheck(): number {
       ok(says({ rulesets: [mainJson, lockRs] }, "tags.json"), "no tag ruleset (today's repo) is ✗");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, { bypass_actors: [...APP_BYPASS] })] }, "start a release"), "a tag ruleset the App can bypass is ✗");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, { enforcement: "evaluate" })] }, "start a release"), "a tag ruleset only evaluating is ✗");
+      ok(says({ rulesets: [mainJson, lockRs, { ...tagRs, target: "branch", ...refs(["~ALL"]) }] }, "start a release"), "a branch ruleset on ~ALL with the tag rules is ✗: it fences no tag");
+      ok(says({ rulesets: [mainJson, tagRs, { ...lockRs, target: "tag", ...refs(["~ALL"]) }] }, "could merge"), "a tag ruleset restricting updates is ✗ as main's lock");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, rules("creation"))] }, "start a release"), "a tag ruleset restricting creation alone is ✗: a moved tag starts a release too");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, rules("creation", "update"))] }, "start a release"), "a tag ruleset that lets a v* tag be deleted is ✗: deleted and pushed again, it starts a release");
       ok(says({ rulesets: [mainJson, lockRs, with_(tagRs, rules("creation", "deletion"))] }, "start a release"), "a tag ruleset that lets a v* tag be moved is ✗: a forced move is a push, and starts a release");

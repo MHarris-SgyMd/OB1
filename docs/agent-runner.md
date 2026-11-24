@@ -375,7 +375,7 @@ Each its own PR, in order:
    * the bot pushes to its own fork, with no write access here (amended 2026-11-24: a GitHub App, below);
    * the claim token sits beside the runner's secrets, which cut 2 writes into CLAUDE.md's "Claim your work";
    * the profile closes the sandbox's open defaults and denies reading the home directory.
-9. SMD-4090 is related to SMD-4087, not a blocker: with the bot on its fork, its review rule on `main` is a backstop (amended 2026-11-24: with the App, it blocks the first live publish, below).
+9. SMD-4090 is related to SMD-4087, not a blocker: with the bot on its fork, its review rule on `main` is a backstop (amended 2026-11-24: with the App it stays related; a second ruleset locking `main`, not an approval, keeps merges the maintainer's, below).
 
 ## Changed by the reviews, 2026-11-06
 
@@ -383,7 +383,7 @@ A security review and a correctness review read the draft after the maintainer's
 
 1. **The runner runs none of the agent's code.** The draft's gate ran `db/ci-parity.sh` and scratch stacks on the agent's branch, outside the sandbox, as the maintainer. The gate is now data alone, GitHub CI on the draft PR is the code gate, and tickets needing containers are out of the pilot (decision 9, "The gate").
 2. **A standalone clone, and a bundle back,** in place of a linked worktree that wrote into the main checkout's `.git` (decision 8).
-3. **A bot fork,** in place of a bot pushing here, where no ruleset stops a tag push from starting `release.yml` (decision 13). SMD-4089's GitHub line changes with it. (Amended 2026-11-24: a GitHub App pushing here, with a tag ruleset and SMD-4090's review rule as its fence.)
+3. **A bot fork,** in place of a bot pushing here, where no ruleset stops a tag push from starting `release.yml` (decision 13). SMD-4089's GitHub line changes with it. (Amended 2026-11-24: a GitHub App pushing here, fenced by a tag ruleset and a second ruleset locking `main`, `.github/rulesets/tags.json` and `main-merge.json`.)
 4. **The claim token beside the runner's secrets,** not where the agent writes. This takes an amendment to CLAUDE.md's "Claim your work", in cut 2 (decision 6).
 5. **The sandbox's open defaults closed and checked at start;** reads of the whole home directory denied; the guard fails closed and runs from the runner's install ("How the profile is enforced").
 6. **Selection skips any unreleased claim, lapsed ones included,** so the runner never takes over paused work ("Choosing a ticket").

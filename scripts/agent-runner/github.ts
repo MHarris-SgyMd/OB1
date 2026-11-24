@@ -247,13 +247,15 @@ export const realGitSpawn: GitSpawn = async (argv, env) => {
 
 /**
  * The push's argv and environment. The token rides in the environment as an `http.extraheader` scoped to
- * `https://github.com/` (git ≥ 2.31's GIT_CONFIG_COUNT), so it is in no URL git could echo and no argument `ps` shows.
+ * `https://github.com/` (git ≥ 2.31's GIT_CONFIG_COUNT), so it is in no URL git could echo and in no argument. The
+ * environment is readable to this user's own processes (`ps eww`), which can read the key file anyway. The source is
+ * the gated commit, not the branch's ref, so a ref moved after the gate pushes nothing the gate didn't check.
  * GIT_SAFE: https only, no credential helper, no redirect. Hooks off; no tags; no force; one explicit refspec.
  */
-export function pushCommand(opts: { bareRepo: string; remote: string; branch: string; token: string; home: string }): { argv: string[]; env: Record<string, string> } {
+export function pushCommand(opts: { bareRepo: string; remote: string; branch: string; commit: string; token: string; home: string }): { argv: string[]; env: Record<string, string> } {
   const ref = `refs/heads/${opts.branch}`;
   return {
-    argv: [...GIT_SAFE, "-c", "core.hooksPath=/dev/null", "-c", "push.followTags=false", "-c", "push.gpgSign=false", "-C", opts.bareRepo, "push", "--porcelain", "--no-verify", "--no-follow-tags", opts.remote, `${ref}:${ref}`],
+    argv: [...GIT_SAFE, "-c", "core.hooksPath=/dev/null", "-c", "push.followTags=false", "-c", "push.gpgSign=false", "-C", opts.bareRepo, "push", "--porcelain", "--no-verify", "--no-follow-tags", opts.remote, `${opts.commit}:${ref}`],
     env: {
       ...gitEnv(opts.home),
       GIT_CONFIG_COUNT: "1",
@@ -271,7 +273,8 @@ export function pushCommand(opts: { bareRepo: string; remote: string; branch: st
  */
 export function pushOutcome(out: GitOut, branch: string): { ok: true } | { ok: false; final: boolean; detail: string } {
   const ref = `refs/heads/${branch}`;
-  const line = out.stdout.split("\n").find((l) => l.split("\t")[1] === `${ref}:${ref}`);
+  // The line's middle field is `<source>:<destination>`; the source is the commit pushed, so match on the destination.
+  const line = out.stdout.split("\n").find((l) => (l.split("\t")[1] ?? "").endsWith(`:${ref}`));
   const flag = line?.[0];
   if (out.code === 0 && (flag === "*" || flag === " " || flag === "=")) return { ok: true };
   if (flag === "!") {
@@ -328,13 +331,13 @@ export type AppClientDeps = {
  * publish.ts's GitHubClient over the App. Each call mints its own token and revokes it when the step is done, so no
  * token outlives its step. Neither call throws, and nothing either returns carries the token.
  */
-export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => Promise<TokenResult> } {
+export function appClient(d: AppClientDeps): GitHubClient {
   const now = d.now ?? Date.now;
   const remote = d.remote ?? `https://github.com/${d.app.repo}.git`;
   const mintToken = () => installationToken(d.fetch, d.app, d.pem, now());
   return {
-    mintToken,
-    async pushBranch({ branch }) {
+    async pushBranch({ branch, commit }) {
+      if (!/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(commit)) return { ok: false, final: true, detail: "refusing to push: the commit to push isn't a full commit id" };
       if (!PUSH_BRANCH.test(branch)) return { ok: false, final: true, detail: `refusing to push ${JSON.stringify(oneLine(branch, 80))}: the runner pushes only agent/smd-<n>-<slug>` };
       // The bare repository's own config is read by the push: refuse one that could redirect the token, before minting it.
       let keys: GitOut;
@@ -350,7 +353,7 @@ export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => P
       const t = await mintToken();
       if (!t.ok) return { ok: false, detail: t.detail };
       try {
-        const cmd = pushCommand({ bareRepo: d.bareRepo, remote, branch, token: t.token, home: d.home });
+        const cmd = pushCommand({ bareRepo: d.bareRepo, remote, branch, commit, token: t.token, home: d.home });
         const raw = await d.git(cmd.argv, cmd.env);
         // Scrubbed before anything cuts it short: a stateless token runs to about 520 characters, and a cut one no longer matches itself.
         const out = { code: raw.code, stdout: scrubToken(raw.stdout, t.token), stderr: scrubToken(raw.stderr, t.token) };
@@ -378,8 +381,9 @@ export function appClient(d: AppClientDeps): GitHubClient & { mintToken: () => P
         const refused = await refusalOf(res, "opening the draft PR");
         const why = scrubToken(refused.text, t.token);
         if (res.status === 422) {
-          // A lost answer to an earlier try: the PR exists. No commits between, or a head or base GitHub won't take, is
-          // final; any other 422 (an abuse limit among them) is retried, and so is a lookup that failed.
+          // A lost answer to an earlier try: the PR exists. No commits between, a base GitHub won't take, or an open PR
+          // from the branch that isn't the App's, is final; any other 422 (an abuse limit, a head GitHub doesn't see yet)
+          // is retried, and so is a lookup that failed.
           const after = await findOpenPr(d.fetch, d.app, t.token, head);
           if ("error" in after) return { ok: false, detail: `${why}; then the lookup for an open PR failed: ${scrubToken(after.error, t.token)}` };
           if (after.found) return { ok: true, ...after.found };
