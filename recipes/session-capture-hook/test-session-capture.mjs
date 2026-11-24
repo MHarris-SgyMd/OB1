@@ -1465,7 +1465,7 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
     return { prompt: !inPrompt.text.toLowerCase().includes(claimHex) && /\[redacted:work-claim token/.test(inPrompt.text), outcome: !inOutcome.text.toLowerCase().includes(claimHex) && /\[redacted:work-claim token/.test(inOutcome.text), gate: gateFindings(inPrompt, inPrompt.text).length + gateFindings(inOutcome, inOutcome.text).length, withheld: /work-claim token/.test(exc.withheld ?? "") };
   });
   assert(glued.every((g) => g.prompt && g.outcome && g.gate === 0 && g.withheld),
-    `a work-claim token glued to a letter or digit, before it or after it, is blanked in a prompt and the outcome, and withholds the model's excerpt (SMD-4544) (${JSON.stringify(glued)})`);
+    `a work-claim token glued to a letter or digit before it, or a hex character after it, is blanked in a prompt and the outcome, and withholds the model's excerpt (SMD-4544) (${JSON.stringify(glued)})`);
 }
 
 // ── [6] Posting ──────────────────────────────────────────────────────────────
