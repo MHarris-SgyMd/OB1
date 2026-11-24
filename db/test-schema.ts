@@ -97,7 +97,7 @@ import {
 import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, NOT_SEARCH_KINDS, queryLabels, renderReport, SEARCH_KINDS, SEARCH_KINDS_LITERAL, summarise, toActionRow, toSearchRow, type ActionRow, type SearchRow } from "../evals/utilization.ts";
 import { refsOf, transitiveDemotion } from "../evals/transitive-freshness.ts";
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
-import { subjectKeyValid } from "../server-portable/subject.ts";
+import { subjectKeyValid, unscopedKey } from "../server-portable/subject.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName, TRIM_RE } from "../server-portable/entity-gate.ts";
 import { linearAdapter, SAMPLE_ISSUE } from "./ingest-linear.ts";
@@ -23793,22 +23793,22 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
         FROM pg_attribute WHERE attrelid = 'subject_repo_settings'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
     const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('subject_repo_settings_one_standing')) AS d`)).d ?? "";
     const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'subject_repo_settings'::regclass AND NOT tgisinternal`)).t;
-    const FNS = ["subject_key_valid(text)", "ob1_subject_repo_refusal(text)", "ob1_subject_scoped_key(text, text)", "ob1_subject_repo_settings_guard()", "ob1_subject_repo()", "set_subject_repo(text, jsonb)", "subject_repo_setting()", "ob1_subject_repo_map_max()", "ob1_subject_repo_settings_by_setter()"];
+    const FNS = ["subject_key_valid(text)", "ob1_subject_repo_refusal(text)", "ob1_subject_scoped_key(text, text)", "ob1_subject_repo_settings_guard()", "ob1_subject_repo()", "set_subject_repo(text, jsonb, boolean)", "subject_repo_setting()", "ob1_subject_repo_map_max()", "ob1_subject_repo_settings_by_setter()", "ob1_subject_unscoped_key(text)"];
     const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
       `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
     const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
     assert(cols === "id bigint not null, repo text not null, set_by text not null, set_by_agent_id uuid not null, set_at timestamp with time zone not null, ended_at timestamp with time zone, ended_by text, ended_by_agent_id uuid"
            && /UNIQUE INDEX subject_repo_settings_one_standing ON public\.subject_repo_settings USING btree \(\(true\)\) WHERE \(ended_at IS NULL\)/.test(idx)
            && trig === "subject_repo_settings_history:31 subject_repo_settings_no_truncate:34"
-           && fns.length === 9 && fns.every((f) => !f.d && /[Mm]igration(s 111,)? 153 \/ (SMD-3306, )?SMD-3887/.test(f.c ?? ""))
-           && vol["subject_key_valid(text)"] === "i" && vol["ob1_subject_repo_refusal(text)"] === "i" && vol["ob1_subject_scoped_key(text,text)"] === "i" && vol["ob1_subject_repo_map_max()"] === "i" && vol["ob1_subject_repo_settings_by_setter()"] === "s"
+           && fns.length === 10 && fns.every((f) => !f.d && /[Mm]igration(s 111,)? 153 \/ (SMD-3306, )?SMD-3887/.test(f.c ?? ""))
+           && vol["subject_key_valid(text)"] === "i" && vol["ob1_subject_repo_refusal(text)"] === "i" && vol["ob1_subject_scoped_key(text,text)"] === "i" && vol["ob1_subject_repo_map_max()"] === "i" && vol["ob1_subject_repo_settings_by_setter()"] === "s" && vol["ob1_subject_unscoped_key(text)"] === "i"
            && vol["ob1_subject_repo()"] === "s" && vol["subject_repo_setting()"] === "s"
-           && vol["set_subject_repo(text,jsonb)"] === "v" && vol["ob1_subject_repo_settings_guard()"] === "v"
-           && ["subject_key_valid", "ob1_subject_repo_refusal", "ob1_subject_scoped_key", "ob1_subject_repo_settings_guard", "ob1_subject_repo", "set_subject_repo", "subject_repo_setting", "ob1_subject_repo_map_max", "ob1_subject_repo_settings_by_setter", "close_thought_subjects"].every((f) => lastDefinerOf(f) === file),
-      `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; nine functions commented by 153 with the right volatilities, none SECURITY DEFINER, 153 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+           && vol["set_subject_repo(text,jsonb,boolean)"] === "v" && vol["ob1_subject_repo_settings_guard()"] === "v"
+           && ["subject_key_valid", "ob1_subject_repo_refusal", "ob1_subject_scoped_key", "ob1_subject_repo_settings_guard", "ob1_subject_repo", "set_subject_repo", "subject_repo_setting", "ob1_subject_repo_map_max", "ob1_subject_repo_settings_by_setter", "close_thought_subjects", "ob1_subject_unscoped_key"].every((f) => lastDefinerOf(f) === file),
+      `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; ten functions commented by 153 with the right volatilities, none SECURITY DEFINER, 153 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
     // The key shapes' sentinel stands above the function in the file (a SQL body keeps no comment); the mapping's is in the setter's body.
     assert(/ob1:subject-key-shapes[\s\S]*CREATE OR REPLACE FUNCTION subject_key_valid/.test(readFileSync(join(MIGRATIONS, file), "utf8"))
-           && /ob1:subject-repo-mapping/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'set_subject_repo(text, jsonb)'::regprocedure`)).s)),
+           && /ob1:subject-repo-mapping/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'set_subject_repo(text, jsonb, boolean)'::regprocedure`)).s)),
       "the sentinels: the key shapes above subject_key_valid, the mapping in the setter's body");
 
     // The key's shapes: 111's still admitted, a scoped pr: and version: beside them, lowercase and as GitHub names an owner and a repository.
@@ -23832,6 +23832,10 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
            && refs[5] !== null && /not \. or \.\./.test(refs[6] ?? "") && /not \. or \.\./.test(refs[7] ?? "") && refs[8] === null && refs[9] !== null,
       `ob1_subject_repo_refusal refuses NULL, capitals, no repository, a third part, an edge hyphen, . and .., an owner of 40; takes o/r and an owner of 39 (${refs.map((r) => r === null ? "ok" : r.slice(0, 18)).join(" | ")})`);
     const scoped = await q<{ k: string | null }>(`SELECT ob1_subject_scoped_key(k, r) AS k FROM (VALUES (1, 'pr:12', 'o/r'), (2, 'version:v1.2.3', 'o/r'), (3, 'ticket:SMD-1', 'o/r'), (4, 'phrase:x y', 'o/r'), (5, 'pr:a/b#12', 'o/r'), (6, 'pr:12', NULL)) AS v(n, k, r) ORDER BY n`);
+    const unscoped = await q<{ k: string | null }>(`SELECT ob1_subject_unscoped_key(k) AS k FROM (VALUES (1, 'pr:o/r#12'), (2, 'version:o-1/r.x@v1.2.3'), (3, 'pr:12'), (4, 'ticket:SMD-1'), (5, 'phrase:pr:a/b#1'), (6, NULL)) AS v(n, k) ORDER BY n`);
+    assert(unscoped.map((s) => String(s.k)).join(",") === "pr:12,version:v1.2.3,pr:12,ticket:SMD-1,phrase:pr:a/b#1,null"
+           && ["pr:o/r#12", "version:o-1/r.x@v1.2.3", "pr:12", "ticket:SMD-1", "phrase:pr:a/b#1"].map(unscopedKey).join(",") === unscoped.slice(0, 5).map((s) => s.k).join(","),
+      `ob1_subject_unscoped_key gives a scoped key's bare form, and any other key, and NULL, as given, as subject.ts's unscopedKey does (${unscoped.map((s) => String(s.k)).join(",")})`);
     assert(scoped.map((s) => s.k).join(",") === "pr:o/r#12,version:o/r@v1.2.3,ticket:SMD-1,phrase:x y,pr:a/b#12,pr:12",
       `ob1_subject_scoped_key scopes a bare pr: and version: key, and leaves a ticket, a phrase, a key scoped already and a NULL repository as given (${scoped.map((s) => s.k).join(",")})`);
 
@@ -24011,6 +24015,27 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
            && again2.changed === false && again2.mapped === 0 && again2.thoughts === 0,
       `the repository standing, set again, maps a bare key a raw write left, writing no setting; once none stands it maps nothing (${JSON.stringify(repair).slice(0, 160)}; ${JSON.stringify(again2).slice(0, 60)})`);
 
+    // A mistaken repository corrected (review pass 5, the maintainer's choice of 2026-11-24): set by default, a change
+    // leaves the keys scoped to the one it replaces; with remap_previous it moves them, each thread kept whole. A
+    // remap with no repository to move to is refused, and keys scoped to any other repository stay.
+    const setRepoRemap = async (repo: string | null) =>
+      (await one<{ r: Record<string, unknown> }>(`SELECT set_subject_repo($1, $2::jsonb, true) AS r`, [repo, JSON.stringify(OP)])).r;
+    await setRepo("o/typo", OP);
+    const t14 = await thought("t14"), t15 = await thought("t15"), t16 = await thought("t16");
+    await subjects(t14, ["pr:77"]);
+    await subjects(t15, ["pr:77"]);
+    await subjects(t16, ["version:v9.9"]);
+    const typoKeys = `${await keysOf(t14)};${await keysOf(t16)}`;
+    const needsRepo = await setRepoRemap(null);
+    const fixed = await setRepoRemap("o/r");
+    const l14 = await lineageOf(t14, "pr:o/r#77");
+    assert(typoKeys === "pr:o/typo#77;version:o/typo@v9.9" && needsRepo.ok === false && needsRepo.error === "REMAP_NEEDS_REPO"
+           && fixed.ok === true && fixed.changed === true && fixed.previous === "o/typo" && fixed.remapped === 3 && fixed.mapped === 3 && fixed.thoughts === 3
+           && (await keysOf(t14)) === "pr:o/r#77" && (await keysOf(t15)) === "pr:o/r#77" && (await keysOf(t16)) === "version:o/r@v9.9"
+           && (await edges("pr:o/r#77")) === "t15→t14" && (await edges("pr:o/typo#77")) === ""
+           && (await keysOf(t1)) === "pr:o/r#12" && (await keysOf(t7)) === "pr:o3/x#99" && l14?.recipe.scoped_from === "pr:o/typo#77" && l14?.recipe.repo === "o/r",
+      `with remap_previous a change moves the keys scoped to the repository it replaces, each thread whole, its lineage noting what it was scoped from; with no repository it is refused; other repositories' keys stay (${typoKeys}; ${String(needsRepo.error)}; ${JSON.stringify(fixed).slice(0, 180)})`);
+
     // The guard's schema-qualified frame is test-upgrade [20cp]'s: this suite's one connection compiled the setter long
     // before, under its unqualified name (review pass 4).
 
@@ -24066,6 +24091,10 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const t12 = await thought("t12");
     const ticketWrite = await subjects(t12, ["ticket:SMD-91372"]);
     const bareWrite = await failure(`SELECT record_thought_subjects($1::uuid, '{pr:5}'::text[], 'model', $2, NULL::uuid, $3, NULL::jsonb)`, [t12, K, await fp(t12)]);
+    // …and the setting is read past the door's own answers: a bare key's write at a text read before it moved answers
+    // stale, as it would with no setting (review pass 5).
+    const staleWrite = (await one<{ r: { action: string; stale?: boolean } }>(`SELECT record_thought_subjects($1::uuid, '{pr:5}'::text[], 'model', $2, NULL::uuid, 'a fingerprint since moved', NULL::jsonb) AS r`, [t12, K])).r;
+    assert(staleWrite.action === "none" && staleWrite.stale === true, `a bare key's write at a moved text answers stale, not the setting's 22000 (${JSON.stringify(staleWrite)})`);
     assert(ticketWrite.ok === true && ticketWrite.action === "added" && /^22000 the operator's subject-key repository/.test(bareWrite) && (await keysOf(t12)) === "ticket:SMD-91372",
       `with a stored repository the refusal names, a ticket's write goes on and a bare key's raises 22000 (${ticketWrite.action}; ${bareWrite.slice(0, 60)})`);
     const said = await settingNow();

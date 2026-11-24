@@ -2534,10 +2534,13 @@ The setting is the operator's, in `subject_repo_settings`, 140's shape: one
 standing row at most, history after, written and ended by an operator key by
 its agent id, through `set_subject_repo` alone: its guard refuses a raw write,
 which would stand a repository with no key mapped.
-- **`set_subject_repo(repo, actor)`** sets it, an operator's alone. Any other
+- **`set_subject_repo(repo, actor, remap_previous)`** sets it, an operator's alone. Any other
   key answers `NOT_OPERATOR`, and a value `ob1_subject_repo_refusal` names
   answers `BAD_REPO`. The value is trimmed and lowercased, and `NULL` clears
-  it, leaving scoped keys as they are. Setting the repository that stands
+  it, leaving scoped keys as they are. With `remap_previous`, a change of
+  repository also moves the keys scoped to the one it replaces, so a mistaken
+  setting can be corrected; without it they stay, since after a real move they
+  name the old repository truly. Setting the repository that stands
   writes no setting, but maps any bare key a raw write left under it.
 - **Setting a repository maps the standing keys** in the same transaction:
   every standing unscoped `pr:` or `version:` subject is closed and its scoped

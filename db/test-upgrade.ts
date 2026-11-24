@@ -33,7 +33,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
 import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, ROLE_GRANT_GROUPS, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey, supersededStatements } from "./config.mjs";
-import { sweepSubjects } from "./subject-sweep.ts";
+import { sameKeys, sweepSubjects } from "./subject-sweep.ts";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -7735,10 +7735,16 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
     assert(set.ok === true && set.mapped === 3 && set.keys === 2 && (await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await edges("pr:12")) === 0 && (await edges("pr:o/r#12")) === 1,
       `an operator's setting maps the three standing keys to two scoped ones, and the thread's edge closes under the bare key and stands under the scoped one (${JSON.stringify(set)}; ${await keys()})`);
 
+    // The sweep reads a found bare key as the scoped key standing from it, as the door writes it (review pass 5): the
+    // set found again is the set kept, not a new key.
+    assert(sameKeys(["pr:12"], ["pr:o/r#12"]) && sameKeys(["version:v1.4", "ticket:SMD-1"], ["ticket:SMD-1", "version:o/r@v1.4"]) && !sameKeys(["pr:13"], ["pr:o/r#12"])
+           && !sameKeys(["pr:12", "pr:13"], ["pr:o/r#12"]) && sameKeys(null, []) && !sameKeys(["pr:o2/y#12"], ["pr:o/r#12"]),
+      "sameKeys reads a found bare key as the scoped one standing from it, and no other key so");
+
     // The settings guard reads the setter's frame schema-qualified too (review pass 4): in a fresh session whose path
     // shows another function of its name first, PL/pgSQL compiles public.set_subject_repo, called by its schema, under
     // a qualified name. A session that compiled it before keeps the name it compiled, so the call needs its own.
-    await sql.unsafe(`CREATE SCHEMA ob1_shadow_153; CREATE FUNCTION ob1_shadow_153.set_subject_repo(p_repo text, p_actor jsonb) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$`);
+    await sql.unsafe(`CREATE SCHEMA ob1_shadow_153; CREATE FUNCTION ob1_shadow_153.set_subject_repo(p_repo text, p_actor jsonb, p_remap_previous boolean) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$`);
     const fresh = new SQL({ url: URL_, max: 1 });
     let shadowed: string[] = [];
     try {
@@ -7751,7 +7757,7 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
       shadowed = [`threw: ${(e as Error).message.slice(0, 120)}`];
     } finally {
       await fresh.close();
-      await sql.unsafe(`DROP FUNCTION ob1_shadow_153.set_subject_repo(text, jsonb); DROP SCHEMA ob1_shadow_153`);
+      await sql.unsafe(`DROP FUNCTION ob1_shadow_153.set_subject_repo(text, jsonb, boolean); DROP SCHEMA ob1_shadow_153`);
     }
     assert(shadowed.join(",") === "true:true,true:true" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r",
       `the setter, called by its schema in a fresh session where its name is another's on the path, writes its setting past the guard (${shadowed.join(", ")})`);

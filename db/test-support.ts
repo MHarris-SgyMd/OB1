@@ -448,10 +448,11 @@ const FUNCTIONS = [
   "ob1_subject_scoped_key(text, text)",
   "ob1_subject_repo_settings_guard()",
   "ob1_subject_repo()",
-  "set_subject_repo(text, jsonb)",
+  "set_subject_repo(text, jsonb, boolean)",
   "subject_repo_setting()",
   "ob1_subject_repo_map_max()",
   "ob1_subject_repo_settings_by_setter()",
+  "ob1_subject_unscoped_key(text)",
   // 148 (SMD-3887): a thought's state on three axes, read from the records that exist.
   "thought_validity(uuid[])",
   // 116 (SMD-3663): priority assertions — the five calls, the drift check, the

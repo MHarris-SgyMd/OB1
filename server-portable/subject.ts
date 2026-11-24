@@ -34,8 +34,9 @@
  *
  * The extraction worker records the rules' subject with each thought's entities, and its `--subjects` sweep asks the
  * model for the rest and finds again a subject found under an older rule or question (db/subject-sweep.ts). A key is
- * `ticket:<ID>`, `pr:<number>`, `version:v<n>.<n>[…]` or `phrase:<lower-case words>` (111's subject_key_valid,
- * mirrored here by subjectKeyValid).
+ * `ticket:<ID>`, `pr:<number>`, `version:v<n>.<n>[…]` or `phrase:<lower-case words>`, and since migration 153 a pull
+ * request's or a version's key scoped to its repository, `pr:<owner>/<repo>#<number>` or
+ * `version:<owner>/<repo>@v<n>.<n>[…]` (153's subject_key_valid, mirrored here by subjectKeyValid; SMD-3887).
  */
 
 import { pairContext, jsonObject } from "./consolidate-decide.ts";
@@ -81,6 +82,25 @@ const PHRASE_MAX = 200;
 const KEY_REPO = "[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9._-]{1,100}";
 const SCOPED_PR = new RegExp(`^pr:${KEY_REPO}#[0-9]{1,9}$`);
 const SCOPED_VERSION = new RegExp(`^version:${KEY_REPO}@v[0-9]+(\\.[0-9]+){1,3}$`);
+
+/** 153's ob1_subject_unscoped_key: a scoped pr: or version: key's bare form (`pr:o/r#12` is `pr:12`); any other key as given. */
+export function unscopedKey(key: string): string {
+  return key.replace(/^pr:[^#/]+\/[^#]+#/, "pr:").replace(/^version:[^@/]+\/[^@]+@/, "version:");
+}
+
+/**
+ * The standing key a found key is written as, as 153's door writes it: the key itself when it stands, or for a bare
+ * pr: or version: key the standing key scoped from it (the setting's repository's, when one is given, else the first
+ * by key); undefined when none stands. The sweep counts a set kept or a key new by it (review pass 5: it compared a
+ * bare key with the scoped one standing, and counted every pass over a mapped brain a new key).
+ */
+export function heldAs(found: string, standing: readonly string[], repo: string | null = null): string | undefined {
+  if (standing.includes(found)) return found;
+  if (!/^pr:[0-9]{1,9}$/.test(found) && !/^version:v[0-9]+(\.[0-9]+){1,3}$/.test(found)) return undefined;
+  const scoped = standing.filter((s) => s !== found && unscopedKey(s) === found).sort();
+  const own = repo === null ? undefined : scoped.find((s) => s === found.replace(/^pr:/, `pr:${repo}#`).replace(/^version:/, `version:${repo}@`));
+  return own ?? scoped[0];
+}
 
 /**
  * 153's subject_key_valid (111's, with a pull request's and a version's key scoped to its repository beside the bare

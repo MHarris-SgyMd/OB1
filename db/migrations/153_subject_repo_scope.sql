@@ -37,6 +37,8 @@
 --   * ob1_subject_scoped_key(key, repo) — a bare `pr:` or `version:` key scoped
 --     to the repository; any other key, or a NULL repository, as given.
 --     IMMUTABLE. The setter's mapping and PR 3b's thread read take it.
+--   * ob1_subject_unscoped_key(key) — its inverse: a scoped key's bare form.
+--     IMMUTABLE. The door and the setter's remap read keys through it.
 --   * subject_repo_settings — the operator's settings, 140's shape: one row a
 --     setting, at most one standing (ended_at NULL), a row history once written
 --     (it changes only to end, once; DELETE and TRUNCATE refused), set and ended
@@ -48,7 +50,7 @@
 --   * ob1_subject_repo() — the standing repository, or NULL. STABLE. A stored
 --     value the refusal names raises (140's principle), so a sweep fails loudly
 --     rather than scope keys to a repository the operator did not set.
---   * set_subject_repo(repo, actor) — the operator's write. Only a key the
+--   * set_subject_repo(repo, actor, remap_previous) — the operator's write. Only a key the
 --     registry classifies operator, named by its agent id: any other answers
 --     {ok: false, error: NOT_OPERATOR}. A value the refusal names answers
 --     {ok: false, error: BAD_REPO}. The value is trimmed and lowercased. NULL
@@ -56,7 +58,10 @@
 --     unscoped again. Setting what stands writes no setting ({changed: false}), and maps any unscoped key a raw write left standing under it.
 --     Setting a repository, a first one or another, maps every STANDING
 --     unscoped `pr:` and `version:` subject to it (below); keys scoped to
---     another repository stay, since they name it truly. A setting that would
+--     another repository stay, since they name it truly — unless
+--     remap_previous, which moves the keys scoped to the setting it replaces to
+--     the new one, to correct a mistaken setting (the maintainer, 2026-11-24;
+--     with no new repository it answers REMAP_NEEDS_REPO). A setting that would
 --     map more distinct keys than ob1_subject_repo_map_max() answers {ok:
 --     false, error: TOO_MANY_KEYS} and writes nothing (review pass 2).
 --   * ob1_subject_repo_map_max() — 2,000, the most distinct keys one mapping
@@ -118,7 +123,7 @@
 --   caller.
 --
 -- SAFETY
---   One new table, its key and a partial unique index, two triggers and eight
+--   One new table, its key and a partial unique index, two triggers and nine
 --   functions; subject_key_valid replaced with a wider rule under its
 --   signature, every key it admitted admitted still; record_thought_subjects
 --   and close_thought_subjects replaced on 130's bodies, writing as before
@@ -234,6 +239,21 @@ $$;
 COMMENT ON FUNCTION ob1_subject_scoped_key(text, text) IS
   'A bare subject key scoped to a repository: pr:<n> becomes pr:<repo>#<n> and version:v<n>... becomes version:<repo>@v<n>...; any other key (ticket:, phrase:, a key scoped already), or a NULL repository, comes back as given. IMMUTABLE. set_subject_repo maps a brain''s standing keys by it; the thread read resolves a bare key by it (SMD-3887 PR 3b). Migration 153 / SMD-3887.';
 
+-- A scoped pr: or version: key's bare form: pr:<repo>#<n> is pr:<n>, and
+-- version:<repo>@v<n>... version:v<n>...; any other key as given. The door
+-- reads a bare key against the scoped ones a thought holds by it, and the
+-- setter's remap moves a key from one repository to another through it
+-- (review pass 5).
+CREATE OR REPLACE FUNCTION ob1_subject_unscoped_key(p_key text)
+RETURNS text
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT regexp_replace(regexp_replace(p_key, '^pr:[^#/]+/[^#]+#', 'pr:'), '^version:[^@/]+/[^@]+@', 'version:')
+$$;
+COMMENT ON FUNCTION ob1_subject_unscoped_key(text) IS
+  'A scoped pr: or version: subject key''s bare form (pr:<owner>/<repo>#<n> is pr:<n>, version:<owner>/<repo>@v<n>.<n> is version:v<n>.<n>); any other key, and NULL, as given. IMMUTABLE. ob1_subject_scoped_key''s inverse on the keys it scopes. Migration 153 / SMD-3887.';
+
 -- ---------------------------------------------------------------------------
 -- 4. subject_repo_settings — the operator's settings
 -- ---------------------------------------------------------------------------
@@ -271,8 +291,8 @@ DECLARE
 BEGIN
   GET DIAGNOSTICS v_stack = PG_CONTEXT;
   -- The setter's frame as PL/pgSQL names it: schema-qualified when the function is not visible on the session's
-  -- search_path (format_procedure), so an optional schema (review pass 4).
-  IF v_stack !~ 'function ([a-z_][a-z0-9_$]*\.)?set_subject_repo\(text,jsonb\) line' THEN
+  -- search_path (format_procedure), so an optional schema (review pass 4), quoted when its name needs it (pass 5).
+  IF v_stack !~ 'function (("([^"]|"")+"|[a-z_][a-z0-9_$]*)\.)?set_subject_repo\(text,jsonb,boolean\) line' THEN
     RAISE EXCEPTION USING
       MESSAGE = 'subject_repo_settings is written by set_subject_repo alone, which maps the standing keys with the setting',
       HINT = 'SELECT set_subject_repo(<repo or NULL>, <an operator key''s actor envelope>)',
@@ -281,7 +301,7 @@ BEGIN
 END;
 $$;
 COMMENT ON FUNCTION ob1_subject_repo_settings_by_setter() IS
-  'Raises 42501 unless set_subject_repo(text, jsonb) is on the call stack (PG_CONTEXT): subject_repo_settings''s guard calls it last on an INSERT or an ending UPDATE, so a raw write cannot stand a repository without the mapping. A guard against a slip, not a privilege: a role holding the table''s writes could define a function of that name in its own schema. Migration 153 / SMD-3887.';
+  'Raises 42501 unless set_subject_repo(text, jsonb, boolean) is on the call stack (PG_CONTEXT): subject_repo_settings''s guard calls it last on an INSERT or an ending UPDATE, so a raw write cannot stand a repository without the mapping. A guard against a slip, not a privilege: a role holding the table''s writes could define a function of that name in its own schema. Migration 153 / SMD-3887.';
 
 -- A row is checked when written, and is history after: it changes only to end,
 -- once (140's guard, for the repository).
@@ -428,7 +448,10 @@ COMMENT ON FUNCTION ob1_subject_repo_map_max() IS
 -- One writer at a time, by a transaction advisory lock taken before the
 -- standing row is read (140's set_work_claim_cap).
 -- p_repo has no default: a clear is a NULL passed on purpose, never a call that named the actor alone (review pass 1).
-CREATE OR REPLACE FUNCTION set_subject_repo(p_repo text, p_actor jsonb DEFAULT NULL)
+-- p_remap_previous (review pass 5, the maintainer's choice of 2026-11-24): a change of repository also moves the keys
+-- scoped to the setting it replaces, to correct a mistaken one; by default they stay, as they name it truly after a
+-- real move.
+CREATE OR REPLACE FUNCTION set_subject_repo(p_repo text, p_actor jsonb DEFAULT NULL, p_remap_previous boolean DEFAULT false)
 RETURNS jsonb
 LANGUAGE plpgsql
 AS $$
@@ -454,6 +477,8 @@ DECLARE
   v_bare    text[] := '{}';
   v_same    boolean;
   v_moved   boolean;
+  v_from    text;
+  v_remapped integer := 0;
 BEGIN
   SELECT * INTO v_who FROM ob1_work_claim_actor(p_actor, 'set_subject_repo');
   -- The operator's kind by its agent id alone: a name lends no kind (SMD-2608).
@@ -470,6 +495,10 @@ BEGIN
       RETURN jsonb_build_object('ok', false, 'error', 'BAD_REPO', 'message', v_bad);
     END IF;
   END IF;
+  IF p_remap_previous AND v_repo IS NULL THEN
+    RETURN jsonb_build_object('ok', false, 'error', 'REMAP_NEEDS_REPO',
+      'message', 'a remap moves the keys scoped to the previous repository to the new one: name the new one (a clear leaves scoped keys as they are)');
+  END IF;
 
   -- ob1:subject-repo-lock — a CONTRACT SENTINEL, not prose: exclusive here, and shared in record_thought_subjects,
   -- which reads the setting under it. A subject write in flight finishes before the mapping reads the keys, and one
@@ -483,14 +512,19 @@ BEGIN
   -- thought_facets left, which the door would have scoped — is mapped all the same, so setting it again repairs the
   -- thread (review pass 4). With none, nothing is written.
   v_same := v_old.repo IS NOT DISTINCT FROM v_repo;
+  -- The repository a remap moves keys from: the one this setting replaces, when asked (review pass 5).
+  v_from := CASE WHEN p_remap_previous AND NOT v_same THEN v_old.repo END;
   IF v_repo IS NOT NULL THEN
-    -- The keys the mapping moves: each standing unscoped key whose scoped form is a key (one too long once scoped
-    -- stays). Past ob1_subject_repo_map_max() the setting is refused before anything is written (review pass 2).
+    -- The keys the mapping moves: each standing unscoped key, and on a remap each key scoped to the previous
+    -- repository, whose form in the new one is a key (one too long once scoped stays). Past ob1_subject_repo_map_max()
+    -- the setting is refused before anything is written (review pass 2).
     SELECT COALESCE(array_agg(DISTINCT f2.payload->>'key' ORDER BY f2.payload->>'key'), '{}') INTO v_bare
       FROM thought_facets f2
      WHERE f2.kind = 'subject' AND f2.valid_until IS NULL
-       AND (f2.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR f2.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
-       AND subject_key_valid(ob1_subject_scoped_key(f2.payload->>'key', v_repo));
+       AND ((f2.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR f2.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
+              OR (v_from IS NOT NULL AND ob1_subject_unscoped_key(f2.payload->>'key') <> f2.payload->>'key'
+                  AND ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_from) = f2.payload->>'key'))
+       AND subject_key_valid(ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_repo));
     IF cardinality(v_bare) > ob1_subject_repo_map_max() THEN
       RETURN jsonb_build_object('ok', false, 'error', 'TOO_MANY_KEYS', 'keys', cardinality(v_bare), 'max', ob1_subject_repo_map_max(),
         'message', format('setting %s would map %s distinct unscoped pr: and version: keys in one transaction, past the %s one mapping takes (its thread locks are held to the commit); nothing is set',
@@ -501,7 +535,7 @@ BEGIN
     -- The changed reply's shape, set_at as subject_repo_setting() gives it (review pass 1).
     RETURN jsonb_build_object('ok', true, 'changed', false, 'repo', v_repo, 'previous', v_repo,
       'set_at', CASE WHEN v_old.id IS NULL THEN NULL ELSE to_char(v_old.set_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') END,
-      'set_by', v_old.set_by, 'mapped', 0, 'closed_alone', 0, 'unscopable', 0, 'keys', 0, 'thoughts', 0);
+      'set_by', v_old.set_by, 'mapped', 0, 'closed_alone', 0, 'unscopable', 0, 'remapped', 0, 'keys', 0, 'thoughts', 0);
   END IF;
   IF NOT v_same AND v_old.id IS NOT NULL THEN
     UPDATE subject_repo_settings SET ended_at = v_now, ended_by = v_who.name, ended_by_agent_id = v_who.agent_id
@@ -516,16 +550,19 @@ BEGIN
     -- Every key the mapping moves, unscoped and scoped, locked now in key order (130's ob1_thread_lock_keys): the
     -- commit's re-links take them again at once, so the setter queues behind a db/threads.ts batch, which locks its
     -- keys in the same order, rather than deadlocking with one as thought-id order could (review pass 2).
-    PERFORM ob1_thread_lock_keys(v_bare || ARRAY(SELECT ob1_subject_scoped_key(k, v_repo) FROM unnest(v_bare) AS k));
+    PERFORM ob1_thread_lock_keys(v_bare || ARRAY(SELECT ob1_subject_scoped_key(ob1_subject_unscoped_key(k), v_repo) FROM unnest(v_bare) AS k));
 
     -- ob1:subject-repo-mapping — a CONTRACT SENTINEL, not prose: every standing
-    -- unscoped pr:/version: subject closed and its scoped twin written with its
+    -- unscoped pr:/version: subject (and on a remap every one scoped to the
+    -- previous repository) closed and its scoped twin written with its
     -- lineage, thought by thought in id order, under the lock above.
     FOR v_thought IN
       SELECT DISTINCT f2.thought_id
         FROM thought_facets f2
        WHERE f2.kind = 'subject' AND f2.valid_until IS NULL
-         AND (f2.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR f2.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
+         AND ((f2.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR f2.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
+              OR (v_from IS NOT NULL AND ob1_subject_unscoped_key(f2.payload->>'key') <> f2.payload->>'key'
+                  AND ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_from) = f2.payload->>'key'))
        ORDER BY f2.thought_id
     LOOP
       SELECT COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) INTO v_fp
@@ -538,11 +575,13 @@ BEGIN
         SELECT s.id, s.payload->>'key' AS key, s.payload->>'by' AS way, s.payload->>'judge_key' AS judge
           FROM thought_facets s
          WHERE s.thought_id = v_thought AND s.kind = 'subject' AND s.valid_until IS NULL
-           AND (s.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR s.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
+           AND ((s.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR s.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
+              OR (v_from IS NOT NULL AND ob1_subject_unscoped_key(s.payload->>'key') <> s.payload->>'key'
+                  AND ob1_subject_scoped_key(ob1_subject_unscoped_key(s.payload->>'key'), v_from) = s.payload->>'key'))
          ORDER BY s.payload->>'key', s.id
            FOR UPDATE
       LOOP
-        v_key := ob1_subject_scoped_key(f.key, v_repo);
+        v_key := ob1_subject_scoped_key(ob1_subject_unscoped_key(f.key), v_repo);
         IF NOT subject_key_valid(v_key) THEN
           -- Too long once the repository is in it (111 bounds a version's digits by the key's 207 characters alone):
           -- the bare key stands, counted, rather than refuse every setting (review pass 1).
@@ -552,6 +591,9 @@ BEGIN
         UPDATE thought_facets SET valid_until = now() WHERE id = f.id;
         v_keys := v_keys || v_key;
         v_moved := true;
+        IF f.key <> ob1_subject_unscoped_key(f.key) THEN
+          v_remapped := v_remapped + 1;
+        END IF;
         IF EXISTS (SELECT 1 FROM thought_facets d
                     WHERE d.thought_id = v_thought AND d.kind = 'subject' AND d.valid_until IS NULL AND d.payload->>'key' = v_key) THEN
           -- The scoped key stands on the thought already: the unscoped one is
@@ -598,12 +640,12 @@ BEGIN
   RETURN jsonb_build_object('ok', true, 'changed', NOT v_same, 'repo', v_repo, 'previous', v_old.repo,
     'set_at', CASE WHEN v_repo IS NULL THEN NULL ELSE to_char(COALESCE(v_new.set_at, v_old.set_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') END,
     'set_by', CASE WHEN v_repo IS NULL THEN NULL ELSE COALESCE(v_new.set_by, v_old.set_by) END,
-    'mapped', v_mapped, 'closed_alone', v_dupes, 'unscopable', v_unscopable,
+    'mapped', v_mapped, 'closed_alone', v_dupes, 'unscopable', v_unscopable, 'remapped', v_remapped,
     'keys', (SELECT count(DISTINCT k) FROM unnest(v_keys) AS k), 'thoughts', v_thts);
 END
 $$;
-COMMENT ON FUNCTION set_subject_repo(text, jsonb) IS
-  'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes no setting ({changed: false}), and maps any unscoped key a raw write left standing under it. Setting a repository maps every standing unscoped pr:/version: subject to it (ob1:subject-repo-mapping): the facet closed and its scoped twin (ob1_subject_scoped_key) written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo and a rebuild asked of it (stale_since, stale_reason) kept; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. More than ob1_subject_repo_map_max() distinct keys to map answers {ok: false, error: TOO_MANY_KEYS, keys, max, message}, nothing written. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked, and every key moved has its thread lock (ob1_thread_lock_keys) taken first, in key order. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, keys (the distinct scoped keys), thoughts (those a facet moved on)}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Migration 153 / SMD-3887.';
+COMMENT ON FUNCTION set_subject_repo(text, jsonb, boolean) IS
+  'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes no setting ({changed: false}), and maps any unscoped key a raw write left standing under it. Setting a repository maps every standing unscoped pr:/version: subject to it (ob1:subject-repo-mapping): the facet closed and its scoped twin (ob1_subject_scoped_key) written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo and a rebuild asked of it (stale_since, stale_reason) kept; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. More than ob1_subject_repo_map_max() distinct keys to map answers {ok: false, error: TOO_MANY_KEYS, keys, max, message}, nothing written. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked, and every key moved has its thread lock (ob1_thread_lock_keys) taken first, in key order. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay, unless p_remap_previous: a change of repository then moves the keys scoped to the one it replaces to the new one as it maps a bare key (lineage noting scoped_from), to correct a mistaken setting; with no new repository it answers {ok: false, error: REMAP_NEEDS_REPO}. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, remapped (facets moved from the previous repository), keys (the distinct scoped keys), thoughts (those a facet moved on)}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Migration 153 / SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 7. subject_repo_setting — the standing setting, for brain_info
@@ -692,9 +734,6 @@ BEGIN
   -- before the thought's lock; the setter takes no thought's advisory lock, so the order cannot cross.
   PERFORM pg_advisory_xact_lock_shared(hashtextextended('ob1:subject-repo', 0));
   v_bare := EXISTS (SELECT 1 FROM unnest(v_keys) AS k WHERE k ~ '^pr:[0-9]{1,9}$' OR k ~ '^version:v[0-9]+(\.[0-9]+){1,3}$');
-  IF v_bare THEN
-    v_repo := ob1_subject_repo();
-  END IF;
   SELECT k INTO v_key FROM unnest(v_keys) AS k WHERE NOT subject_key_valid(k) LIMIT 1;
   IF FOUND THEN
     RAISE EXCEPTION USING
@@ -745,13 +784,16 @@ BEGIN
   -- a pass that found `pr:12` keeps the thread the setter mapped; else bare, as is one too long once scoped. One key
   -- for one, so the set's bound holds.
   IF v_bare THEN
+    -- Read here, past the key checks and the gone and stale answers, so a stored setting the refusal names raises only
+    -- where a key is scoped (review pass 5).
+    v_repo := ob1_subject_repo();
     SELECT COALESCE(array_agg(DISTINCT s ORDER BY s), '{}') INTO v_keys
       FROM (SELECT CASE WHEN NOT (k ~ '^pr:[0-9]{1,9}$' OR k ~ '^version:v[0-9]+(\.[0-9]+){1,3}$') THEN k
                         ELSE COALESCE(
                           (SELECT h.payload->>'key' FROM thought_facets h
                             WHERE h.thought_id = p_thought AND h.kind = 'subject' AND h.valid_until IS NULL
                               AND h.payload->>'key' <> k
-                              AND regexp_replace(regexp_replace(h.payload->>'key', '^pr:[^#]+#', 'pr:'), '^version:[^@]+@', 'version:') = k
+                              AND ob1_subject_unscoped_key(h.payload->>'key') = k
                             ORDER BY h.payload->>'key' = ob1_subject_scoped_key(k, v_repo) DESC, h.payload->>'key'
                             LIMIT 1),
                           CASE WHEN subject_key_valid(ob1_subject_scoped_key(k, v_repo)) THEN ob1_subject_scoped_key(k, v_repo) ELSE k END)
