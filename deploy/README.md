@@ -2914,12 +2914,13 @@ capture-time tagging reads the same `OB1_METADATA_MODEL`:
 podman compose -f deploy/compose.yaml up -d api coordinator
 ```
 
-The switch re-extracts every thought that has no row under the new key — all
-of them, for a key the brain has never used. **Going back to a model or
-prompt version used before re-extracts nothing**: every thought still has
-its finished row under that key, so the graph stays the other model's while
-`--status` reads done (SMD-2607 fixes this). Until then, judge a new model on
-a working copy (`db/tier.ts`) rather than switching the brain to it and back.
+The switch re-extracts every thought, whether the brain has used the new key
+before or not. Going back to a model or prompt version used before returns
+that key's finished, failed and lapsed rows to the pool as it records the
+key, and the run says how many (SMD-2607); `--status` and `--dry-run` under
+that key count them first. A whole backlog either way, so judge a new model
+on a working copy (`db/tier.ts`) rather than switching the brain to it and
+back.
 
 Consolidation's key follows its judge model (`OB1_JUDGE_MODEL`, else the
 metadata model) and prompt version, with no switch to refuse: a new one is a

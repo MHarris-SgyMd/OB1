@@ -5904,6 +5904,11 @@ if (want("10")) {
       if ((hemlockIsProse && /hemlock/.test(prompt)) || [...proseKeys].some((k) => prompt.includes(k))) {
         return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
       }
+      // One entity a model, so a graph says whose reading it holds (SMD-2607).
+      if (prompt.includes("switchback")) {
+        const reading = { entities: [{ name: body.model === "stub-other" ? "Borealis" : "Aurora", type: "project", confidence: 0.9 }], relationships: [] };
+        return Response.json({ choices: [{ message: { content: JSON.stringify(reading) } }], model: body.model });
+      }
       const key = Object.keys(answers).find((k) => prompt.includes(k));
       if (key === "ledger") ledgerCalls++;
       const answer = key ? answers[key] : { entities: [], relationships: [] };
@@ -8189,6 +8194,46 @@ if (want("10")) {
   const goneAbortSummary = goneAbortLines.find((l) => /edited mid-extraction/.test(l)) ?? "";
   assert(goneInFlight && goneAborted === 1 && goneAbortCode <= 1 && /, 1 deleted mid-pass/.test(goneAbortSummary) && !/set back/.test(goneAbortSummary) && goneAbortLines.some((l) => l.includes(`${vanishing}: deleted while it was leased`)),
          `…a note deleted while its call is in hand, then aborted, is counted deleted, not set back (${goneAborted} aborted; exit ${goneAbortCode}: ${goneAbortSummary.trim().slice(0, 200)})`);
+
+  // --switch-key back to a key the brain used before (SMD-2607): key A, then
+  // B, then A again. Each key's model names its own entity, so the graph says
+  // whose reading it holds; one thought fails under A, so A's rows are two
+  // finished and one failed when the brain comes back to it.
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const KEY_B = "extract:stub-other@p2";
+  const envB = { ...env, OB1_METADATA_MODEL: "stub-other" };
+  const backIds = [await seed("The first switchback note."), await seed("The second switchback note."), await seed("The switchfail entry of the switchback set.")];
+  const readings = async () => (await sql`
+    SELECT e.name, te.extraction_key AS key, count(*)::int AS c FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id
+     WHERE te.thought_id = ANY(${sql.array(backIds, "TEXT")}::uuid[]) GROUP BY 1, 2 ORDER BY 1, 2`).map((r: { name: string; key: string; c: number }) => `${r.c} ${r.name} under ${r.key}`).join(", ");
+  const rowsUnder = async (k: string) => (await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${k} GROUP BY 1 ORDER BY 1`).map((r: { status: string; c: number }) => `${r.c} ${r.status}`).join(", ");
+  const line = (text: string, re: RegExp) => text.split("\n").find((l) => re.test(l))?.trim().slice(0, 220);
+  proseKeys.add("switchfail");
+  const underA = await extractInProcess();
+  proseKeys.delete("switchfail");
+  assert(underA.code === 1 && (await readings()) === `2 Aurora under ${KEY}` && (await rowsUnder(KEY)) === "1 failed, 2 succeeded",
+         `key A's first run extracts two notes as its model reads them and fails the third (exit ${underA.code}; ${await readings()}; ${await rowsUnder(KEY)})`);
+  const toB = await extractInProcess({ switchKey: true, env: envB });
+  assert(toB.code === 0 && (await readings()) === `3 Borealis under ${KEY_B}` && (await rowsUnder(KEY)) === "1 failed, 2 succeeded" && toB.stdout.includes(`--switch-key: no row under ${KEY_B} to return to the pool`) && /pool: 3 thought\(s\) added/.test(toB.stdout),
+         `a switch to a key never used is the switch as it was: every thought pooled and read by B's model, nothing returned, A's rows left as they ended (exit ${toB.code}; ${await readings()}; ${line(toB.stdout, /--switch-key:/)})`);
+  // Back to A, asked first: --status and --dry-run count what the switch returns, and write nothing.
+  const callsBeforeBack = calls;
+  const statusBack = await extractInProcess({ status: true });
+  const dryBack = await extractInProcess({ dryRun: true, switchKey: true });
+  assert(statusBack.code === 0 && statusBack.stdout.includes(`the brain used ${KEY} before: a --switch-key run returns its 3 finished, failed or lapsed row(s) to the pool`)
+      && dryBack.code === 0 && dryBack.stdout.includes(`record ${KEY} in ob1_config so new captures enqueue; return the 3 finished, failed or lapsed row(s) this key holds from an earlier use to the pool; add 0 thoughts to the pool; send 3 thought(s) to stub-meta`)
+      && (await rowsUnder(KEY)) === "1 failed, 2 succeeded" && (await readings()) === `3 Borealis under ${KEY_B}` && calls === callsBeforeBack
+      && (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].value === KEY_B,
+         `--status and --dry-run under the earlier key count the three rows a switch returns, and write and send nothing (${line(dryBack.stdout, /would:/)})`);
+  const backToA = await extractInProcess({ switchKey: true });
+  assert(backToA.code === 0 && backToA.stdout.includes(`--switch-key: the brain used ${KEY} before — its 3 finished, failed or lapsed row(s) returned to the pool, each extracted again in place of ${KEY_B}'s reading`)
+      && calls === callsBeforeBack + 3 && (await readings()) === `3 Aurora under ${KEY}` && (await rowsUnder(KEY)) === "3 succeeded"
+      && (await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0].value === KEY,
+         `--switch-key back to the earlier key returns its rows to the pool and extracts every thought again: three calls, the graph A's reading, the failed row among them (exit ${backToA.code}; ${calls - callsBeforeBack} call(s); ${await readings()}; ${await rowsUnder(KEY)}; ${line(backToA.stdout, /--switch-key:/)})`);
+  const settledA = await extractInProcess();
+  assert(settledA.code === 0 && calls === callsBeforeBack + 3 && !/--switch-key:/.test(settledA.stdout) && (await rowsUnder(KEY)) === "3 succeeded",
+         `…and a run under the key now recorded returns nothing: no call, the rows left finished (exit ${settledA.code}; ${calls - callsBeforeBack - 3} call(s))`);
 
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
