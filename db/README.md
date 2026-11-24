@@ -3184,7 +3184,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
-| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; decide version 6 writes them): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. Since 153 it is the settle's too: `settle_stale_part` removes an undecided part the pass no longer names. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
+| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; decide version 6 writes them): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. Since 153 it is the settle's too: `settle_stale_part` removes an undecided part that is no longer a judgement of its texts and that the pass does not record again. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
 | | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks, and `sleep.ts` at its start and each poll for a migration (SMD-3379 PR 1c-1); without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -5468,23 +5468,24 @@ test-schema [136], test-upgrade [20cn].
 
 **Migration 153 is for a part that is no longer a judgement of its texts**
 (SMD-4446 PR 2b-1). A part keeps the fingerprint of each text it was judged
-at. Judged again at the texts as they stand, a statement the writer names
-again takes its earlier row's place (`replaced`, above). One it names no more
-stayed: stale, or pending at fingerprints that are no longer its texts'.
+at. Judged again at the texts as they stand, a statement the pass records
+again takes its earlier row's place (`replaced`, above). One it does not
+record again stayed: stale, or pending at fingerprints that are no longer
+its texts'.
 
 - **`settle_stale_part(id, older fingerprint, newer fingerprint)`** is the
   pass's removal of such a part. Its caller gives the fingerprint of each
   text as it read it: where it judged the pair again and that judgement did
-  not name the part, or where nothing will judge the pair again. Under the
-  supersession advisory lock and the row's own it answers, as values:
+  not record the part again, or where nothing will judge the pair again.
+  Under the supersession advisory lock and the row's own it answers, as values:
   `NOT_FOUND` (no such part: replaced, removed already, or gone with a
   thought); `DECIDED` with the status (a reviewer's decision stands whatever
   its texts have done since); `EDITED_SINCE` with `older_edited` and
   `newer_edited` (a fingerprint given is not its text's as it stands, so the
-  caller judged other texts and its judgement says nothing of this part);
+  caller read other texts and what it found says nothing of this part);
   `NOT_STALE` (pending at the fingerprints given: a judgement of these very
-  texts, which another judgement of them that names it no more does not
-  remove); else `{ok, action: removed, id, was}`, the row deleted and its
+  texts, which another judgement of them that does not record it again does
+  not remove); else `{ok, action: removed, id, was}`, the row deleted and its
   lineage row with it. It removes and does not reject: nobody decided the
   part, and a rejection would keep its statement from being proposed on the
   pair again. It runs under READ COMMITTED alone, echoes no argument, and
