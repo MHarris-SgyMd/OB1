@@ -26,7 +26,8 @@ for n, raw in enumerate(open(path), 1):
             said.append(" ".join(bits))
         print(at, d["path"], d["http"], d["era"], mcp, "|", "; ".join(said), "| ua:", d["headers"].get("user-agent"))
     elif d["event"] == "response":
-        refused = " ".join(f"{k}={d[k]}" for k in ("away", "refused") if d.get(k))
-        print(at, "    ->", d["status"], d.get("type"), ("sid " + d["sid"][:8]) if d.get("sid") else "", refused)
+        # What base's printed, and after it how the answer was a refusal, where it was one.
+        refused = [f"{k}={d[k]}" for k in ("away", "refused") if d.get(k)]
+        print(at, "    ->", d["status"], d.get("type"), ("sid " + d["sid"][:8]) if d.get("sid") else "", *refused)
     else:
         print(at, "  *", d["event"], {k: v for k, v in d.items() if k not in ("at", "event")})

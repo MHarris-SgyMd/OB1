@@ -43,8 +43,10 @@
 //                              bound (HTTP 200, JSON-RPC -32603), every other request served
 //   What these three copy of the brain is the status and the body of a single request, of a listen and of a
 //   notification. Nothing else: not its headers, not what it answers a batch, a GET or a body that is no JSON, and
-//   not the 401 with a challenge that it gives a caller with no key or a refused token. A second refusal begun
-//   while one runs replaces it. `reset` makes Bun print an error for each stream it ends, and the probe serves on.
+//   not the 401 with a challenge that it gives a caller with no key or a refused token. Of two refusals of a caller
+//   (`revoked`, `unknown`, and the outages above) the second replaces the first, its time with it; `nolisten` runs
+//   beside any of them. The `serving-again` line is each control's own timer, so with two at once it can be wrong.
+//   `reset` makes Bun print an error for each stream it ends, and the probe serves on.
 //
 //   LISTEN=off bun probe.ts   declare tools.listChanged false, as the brain's server does today: a client told so
 //                             is offered no stream
@@ -163,7 +165,7 @@ function endHeld(way: "clean" | "reset" | "frame"): number {
       log({ event: "end-error", way, message: (err as Error).message });
     }
     // For `clean` this is the whole of it: the SDK closes its stream with no frame of its own, and the client reads
-    // the body's end. After the other two the stream's end has already cancelled the SDK's side, and this does nothing.
+    // the body's end. For the other two it ends the SDK's side too, which the stream's own end would do without it.
     h.abort.abort();
   }
   return all.length;
