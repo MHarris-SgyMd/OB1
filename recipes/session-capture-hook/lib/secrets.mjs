@@ -127,10 +127,13 @@ export const SECRET_PATTERNS = [
   //   of letters (`os.`, `process.`), so a password glued onto the getter (`<it>getenv(`) is not taken for one.
   // - Review pass 4: a getter's call whose default is already a whole marker, the argument's last, is no value, or the
   //   second scan would find the call once the first had blanked its default.
-  // - Review pass 5: the step-over applies only when the default ends the argument, a literal or a name then `,` or
-  //   `)`. A nested call or an expression there (`getenv("A", getenv("B"))`, `"<it>" + SUFFIX`) is read as before, the
-  //   outer call blanked, not half-blanked into a line the second scan would refuse.
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*(?=["'`‘“«][^"'`‘’“”«»\n]*["'`’”»]\s*[,)]|[^\s"'`‘’“”«»,()\[\]]+\s*[,)]))?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*["'`‘“«]?\[redacted:[^\]\n]*\]["'`’”»]?\s*[,)])(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»{<$][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
+  // - Review pass 5: the step-over applies only when the default ends the argument. A nested call or an expression
+  //   there (`getenv("A", getenv("B"))`, `"<it>" + SUFFIX`) is read as before, the outer call blanked, not half-blanked
+  //   into a line the second scan would refuse.
+  // - Review pass 6: the default is a quoted literal closed by its own quote's partner, then `,` or `)`. A bare name
+  //   (`getenv("X", DEFAULT_PW).encode()`) let the value run past the call's `)`, and a mismatched quote past the
+  //   default's end, each into a line the second scan refused; both are read as before, the call blanked.
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*(?=(?:"[^"'`‘’“”«»\n]*"|'[^"'`‘’“”«»\n]*'|`[^"'`‘’“”«»\n]*`|‘[^"'`‘’“”«»\n]*’|“[^"'`‘’“”«»\n]*”|«[^"'`‘’“”«»\n]*»)\s*[,)]))?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*["'`‘“«]\[redacted:[^\]\n]*\]["'`’”»]\s*[,)])(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»{<$][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
   // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
   // their digests — told apart only by where they sit: a digest follows
   // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key

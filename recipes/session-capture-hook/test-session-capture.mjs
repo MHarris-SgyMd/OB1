@@ -1363,15 +1363,18 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const pwGlued = redactEpisode(segment([{ t: "prompt", text: 'password=hunter22os.getenv("PW", "Kp7mWq2zR9")' }, { t: "outcome", text: "ok" }]).episodes[0]).text;
   assert(pwRefs.every(Boolean) && !/hunter22/.test(pwGlued),
     `a bare reference with a fallback after it is found and refused under refuse, as before, and a password glued onto a getter is blanked (SMD-4542 review pass 3) (${JSON.stringify([pwRefs, pwGlued])})`);
-  // Review pass 4: the second scan passes a getter's blanked default, quoted or not, and only a whole marker ending the
-  // argument: one with more after it, or unclosed, is found, as main found the call (a text that already carried one).
-  // Review pass 5: a nested or expression default is read as main read it, so a secret-free line is not refused.
-  const pwSecond = ['PASSWORD = getenv("PW", Kp7mWq2zR9x)', "password = os.environ.get('PW', 'Kp7mWq2zR9')", 'password = os.getenv("DB_PASSWORD", os.getenv("PGPASSWORD", ""))', 'password = os.getenv("DB_PASSWORD", "changeme" if DEBUG else None)', 'password = os.getenv("DB_PASSWORD", DEFAULTS["password"])']
+  // Review pass 4: the second scan passes a getter's blanked default, and only a whole marker ending the
+  // argument: one with more after it, unclosed or unquoted, is found, as main found the call (a text that already carried one).
+  // Review passes 5 and 6: a nested or expression default, a bare name and unpaired quotes are read as main read them,
+  // so a secret-free line is not refused.
+  const pwSecond = ['PASSWORD = getenv("PW", Kp7mWq2zR9x)', "password = os.environ.get('PW', 'Kp7mWq2zR9')", 'password = os.getenv("DB_PASSWORD", os.getenv("PGPASSWORD", ""))', 'password = os.getenv("DB_PASSWORD", "changeme" if DEBUG else None)', 'password = os.getenv("DB_PASSWORD", DEFAULTS["password"])',
+    // Review pass 6: a bare-name default with more after the call, and a default whose quotes do not pair.
+    'password = os.environ.get("DB_PASSWORD", DEFAULT_PASSWORD).encode("utf-8")', 'conn = connect(password=os.getenv("PW", DEFAULT_PW),host="db")', 'password = os.getenv("X", \u201cKp7mWq2z hunter")']
     .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; const c = cleanEpisode(ep, "redact"); return gateFindings(c, c.text).length; });
-  const pwMarked = ['PGPASSWORD=os.getenv("X", "[redacted:x]Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", "[redacted:pw Kp7mWq2zR9")']
+  const pwMarked = ['PGPASSWORD=os.getenv("X", "[redacted:x]Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", "[redacted:pw Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", [redacted:x])']
     .map((text) => scanForSecrets(text, { every: true }).length);
   assert(pwSecond.every((n) => n === 0) && pwMarked.every((n) => n > 0),
-    `the second scan passes a getter's blanked default, quoted or not, and a nested or expression default; a marker with more after it, or unclosed, does not hide the call (SMD-4542 review passes 4 and 5) (${JSON.stringify([pwSecond, pwMarked])})`);
+    `the second scan passes a getter's blanked default, and a bare-name, unpaired, nested or expression default read as before; a marker with more after it, unclosed or unquoted does not hide the call (SMD-4542 review passes 4 to 6) (${JSON.stringify([pwSecond, pwMarked])})`);
   // Review pass 1 (secrets adversary): a password given as a `${VAR:-<it>}` default is blanked, as main blanked it (an
   // exclusion of `${` sent it); and quoted prose or a placeholder is read as main read it, blanked nowhere and refusing
   // nothing under refuse (the quoted branch had widened to them).
