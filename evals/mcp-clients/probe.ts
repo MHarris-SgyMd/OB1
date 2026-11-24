@@ -1,6 +1,6 @@
 // A scratch MCP server (SMD-4344): it records which revision a client offers and what makes it list tools again.
 // docs/mcp-client-refresh.md holds what was measured with it. Not the brain's server, and it has no auth: it binds
-// to loopback, serves two dummy tools and holds nothing.
+// to loopback, serves two dummy tools and stores nothing but its log.
 //
 //   bun install && bun probe.ts        serve on 127.0.0.1:$PORT (default 8765), log to $LOG (default ./probe.jsonl)
 //   bun selfcheck.ts                   prove it with the SDK's own client
@@ -53,7 +53,9 @@
 //                             is offered no stream
 //   /control/expire        forget every 2025-era session, so its next request is answered 404
 //   /control/ttl?ms=N      the ttlMs answered on tools/list (2026-07-28 only)
-//   /control/state         what the probe holds
+//   /control/state         what the probe holds, and where its log is
+//
+//   One probe to a port: a second started on a port that answers stops at once.
 import { appendFileSync } from "node:fs";
 import { createMcpHandler, isLegacyRequest, McpServer, SERVER_INFO_META_KEY, SUBSCRIPTION_ID_META_KEY, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 
@@ -85,7 +87,7 @@ const REFUSALS = {
 const LISTEN = process.env.LISTEN !== "off";
 /** What a client is answered while the probe is away, by the control that sent it away. */
 const away = (id: unknown): Response =>
-  // A refused caller, as the brain's edge answers one: a request 200 with the error, a notification 202 with no body.
+  // A refused caller, as the brain's edge answers one that presents a key: a request 200 with the error, a notification 202 with no body.
   downAs === "revoked" || downAs === "unknown" ? (id === undefined ? new Response(null, { status: 202 }) : Response.json({ jsonrpc: "2.0", error: { code: -32001, message: REFUSALS[downAs] }, id }, { status: 200 }))
     : downAs === "busy" ? Response.json({ jsonrpc: "2.0", error: { code: -32003, message: "Busy: the key could not be checked just now. Retry shortly." }, id: id ?? null }, { status: 200, headers: { "retry-after": "2" } })
     : downAs === "fault" ? new Response("Internal Server Error", { status: 500, headers: { "content-type": "text/plain; charset=UTF-8" } })
@@ -225,12 +227,12 @@ async function record(req: Request, path: string): Promise<void> {
 async function sessionful(req: Request): Promise<Response> {
   const sid = req.headers.get("mcp-session-id");
   if (sid) {
-    const held = sessions.get(sid);
-    if (!held) {
+    const open = sessions.get(sid);
+    if (!open) {
       log({ event: "session-unknown", sid });
       return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
     }
-    return held.transport.handleRequest(req);
+    return open.transport.handleRequest(req);
   }
   if (req.method !== "POST") return new Response("Method not allowed.", { status: 405, headers: { Allow: "POST" } });
   const server = build();
@@ -302,10 +304,13 @@ async function control(url: URL): Promise<Response> {
       downAs = "down";
       downUntil = Date.now() + seconds * 1000;
       setTimeout(() => log({ event: "serving-again" }), seconds * 1000);
-      // After this answer has left: every connection dropped, and the port open again at once to answer 502.
+      // After this answer has left: every connection dropped, the port answering 502 throughout. The new listener
+      // is opened beside the old before the old is stopped, so that a client that connects the instant its stream
+      // drops is never refused: stopped first, the port refused 11 of 3,000 such connections (macOS, Bun 1.4.3).
       setTimeout(() => {
-        void listener.stop(true).then(() => old.close()).catch(() => undefined);
+        const dying = listener;
         listener = listen();
+        void dying.stop(true).then(() => old.close()).catch(() => undefined);
       }, 100);
     } else if (how !== "refuse") {
       downAs = how as typeof downAs;
@@ -342,12 +347,14 @@ async function control(url: URL): Promise<Response> {
   } else if (what !== "state") {
     return new Response("unknown control", { status: 404 });
   }
-  return Response.json({ toolSet: extra ? "B" : "A", ttlMs, sessions: sessions.size, requests, down: Date.now() < downUntil, noListen: Date.now() < noListenUntil, listen: LISTEN, held: held.size });
+  return Response.json({ toolSet: extra ? "B" : "A", ttlMs, sessions: sessions.size, requests, down: Date.now() < downUntil, noListen: Date.now() < noListenUntil, listen: LISTEN, held: held.size, log: LOG });
 }
 
 const listen = () => Bun.serve({
   port: PORT,
   hostname: HOST,
+  // Two listeners of this probe hold the port for an instant at a `cut`, the new one taking what connects.
+  reusePort: true,
   idleTimeout: 255,
   async fetch(req) {
     const url = new URL(req.url);
@@ -383,5 +390,10 @@ const listen = () => Bun.serve({
     return res;
   },
 });
+// A port shared between listeners would let a second probe in beside the first, to take its requests: refused here.
+if (await fetch(`http://${HOST}:${PORT}/control/state`).then((r) => (void r.body?.cancel(), true), () => false)) {
+  console.error(`port ${PORT} already answers: stop what holds it, or set PORT`);
+  process.exit(1);
+}
 let listener = listen();
 log({ event: "listening", host: HOST, port: PORT, ttlMs });
