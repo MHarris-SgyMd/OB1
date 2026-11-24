@@ -249,8 +249,14 @@ export function parseRetagKey(key: string): { model: string; promptVersion: numb
 export const RETAG_TAGS_ROW_SQL: string;
 /** Whether thought `t`, beside its tags row `d`, is in the re-tag backlog: db/retag.ts's pool and preflight's count. */
 export const RETAG_DUE_SQL: string;
-/** The backlog by kind (missing, marked, stale, fallback) and against key $1's claim rows (unpooled, due): one row. */
+/** The backlog by kind (missing, marked, stale, recipe, fallback) and against key $1's claim rows (unpooled, due): one row. */
 export const RETAG_BACKLOG_SQL: string;
+/** ob1_config.retag_key, NULL where unset or blank: the tags' target recipe. */
+export const RETAG_RECORDED_KEY_SQL: string;
+/** The retag: key tags row `d`'s recipe makes; NULL where it names no model or prompt version. */
+export const RETAG_RECIPE_KEY_SQL: string;
+/** As RETAG_BACKLOG_SQL with key $1 the target too: what a run recording $1 finds behind it, counted before it records. */
+export const RETAG_BACKLOG_AS_KEY_SQL: string;
 /** `SELECT embedding_model AS model, count(*) AS c` over the rows with a vector, grouped (021). */
 export const CORPUS_BY_MODEL_SQL: string;
 /** Those rows read against one model: at it, unlabelled, and the other models with counts. */
@@ -488,6 +494,10 @@ export function grantRows(groups?: readonly RoleGrantGroup[]): { group: RoleGran
 export function grantVerifySql(role: string, merged: readonly { kind: string; name: string; privileges: readonly string[] }[]): string;
 /** `text` with its comments blanked in place — literal-aware, dollar-quoted bodies scanned within, newlines kept so line numbers hold (SMD-1796, SMD-1316). */
 export function stripSqlComments(text: string): string;
+/** A statement `--reapply` leaves to the migration that decides its rule last: a CHECK's ADD or VALIDATE, a unique index's CREATE, or a COMMENT on either (SMD-3149). */
+export type SupersededStatement = { action: "ADD" | "VALIDATE" | "CREATE UNIQUE INDEX" | "COMMENT"; rule: "constraint" | "index"; table: string; name: string; by: string };
+/** By file name, each migration with a statement of its own that makes a rule a later file loosens — an `ADD CONSTRAINT … CHECK` or `VALIDATE CONSTRAINT` of a constraint a later file adds again to the same table, a `CREATE UNIQUE INDEX` a later file drops, and a COMMENT on either before the file that decides it last: its text with those statements blanked (newlines kept), and what was left to which file. Whether the last file added the constraint is the migrator's to check (SMD-3149). */
+export function supersededStatements(files: readonly { name: string; sql: string }[]): Map<string, { sql: string; left: SupersededStatement[] }>;
 /** What a .sql file may not run in Daemonic Brain: each rule's name, regex (matched over the whole comment-stripped text) and reason (SMD-1796). */
 export const SUPABASE_SQL_RULES: readonly { name: string; re: RegExp; msg: string }[];
 /** Every SUPABASE_SQL_RULES hit in `text`, comments excepted, with the source line number. */

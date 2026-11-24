@@ -74,11 +74,13 @@ export async function modelSummary(cfg, payload, fetchImpl = fetch) {
   if (!cfg.modelUrl || !cfg.model) { log(`model summary skipped for ${chain}: summary=model but no model_url/model configured — derived summary sent`); return null; }
   // The assistant messages are scanned before they leave the box, as the
   // derived text was at prepare and the model's own output is below: a key in a
-  // message that is not the last outcome is absent from the derived summary, so
-  // prepare's scan never saw it, and this is the only gate before it would
-  // reach the model — a remote one under egress allow/off (first review pass:
-  // both reviewers found the excerpt left the box unscanned). A hit keeps the
-  // derived summary; nothing is sent to the model.
+  // message that is not the last outcome is absent from the derived summary,
+  // so the summary's scan never saw it (first review pass: both reviewers found
+  // the excerpt left the box unscanned). Since 1.11.4 prepare scans whole each
+  // message the excerpt reaches and withholds the excerpt on a hit (SMD-3656);
+  // this scan is the net under that one, and the only gate for a payload a
+  // hook before 1.11.4 queued. A hit keeps the derived summary; nothing is
+  // sent to the model.
   const leak = scanForSecrets(payload.assistant);
   if (leak.length) { log(`model summary refused for ${chain}: ${leak[0].reason} at char ${leak[0].at} in the assistant messages — nothing sent to the model, derived summary sent`); return null; }
   const refusal = egressRefusalForModel(cfg);

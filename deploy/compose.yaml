@@ -845,6 +845,8 @@ services:
       # Consolidation's decide mode (SMD-3115): the tier's model gives each
       # verdict and OB1_JUDGE_MODEL writes only the proposals it calls. The
       # workers inherit this block; preflight here names the pass key by it.
+      # Since decide version 6 (SMD-4446) what it writes of such a pair is its
+      # settled parts, and a proposal only where a thought falls whole.
       OB1_CONSOLIDATE_DECIDER: ${OB1_CONSOLIDATE_DECIDER:-}
       # Decide mode's own tier (a tier per caller, SMD-3326): H2O-Lightning-4B
       # on the host (jev/h2o/README.md), reached as
