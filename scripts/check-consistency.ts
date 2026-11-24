@@ -650,8 +650,9 @@
  *      that records no access times fails (SMD-2435 PR 3b-1); and a job
  *      READS_WATCHED names, which runs containers, where a read through a
  *      read-only mount of the checkout moves no access time, marks with
- *      --watch, and no other does (PR 3c-1). Its probe pins what it refuses
- *      and passes
+ *      --watch, and no other does, and the workflow nowhere names
+ *      READS_WATCH_WAIT, the wait reads.sh's own cases shorten (PR 3c-1).
+ *      Its probe pins what it refuses and passes
  *  56. .github/ci/changes.sh's MAP_LISTS — the lists of what main's jobs
  *      read that a pull request's jobs may skip by — names gated jobs alone,
  *      a matrix job by every one of its cells and no other; every gated job
@@ -11980,7 +11981,10 @@ checkProductName();
 // records no access times fails. A job READS_WATCHED names marks with
 // --watch, and no other does (PR 3c-1): it runs containers, and one handed
 // a path of the checkout reads it through a read-only bind mount, where no
-// access time moves and the watch is told of the open.
+// access time moves and the watch is told of the open. And the workflow
+// names READS_WATCH_WAIT nowhere, a comment included: it is how long a marker
+// waits to hear from its watch, shortened by reads.sh's own cases, and set
+// short in a job it would leave that job's lists saying watch=none.
 const READS_SCRIPT = ".github/ci/reads.sh";
 const READS_MARK = `bash ${READS_SCRIPT} mark`;
 const READS_WATCH = `${READS_MARK} --watch`;
@@ -12012,7 +12016,7 @@ function readsProblems(text: string, gated: readonly string[], selfCheckJob: str
   if (!jobs) return ["has no `jobs:` map check 55 can read (SMD-2435)"];
   const problems: string[] = [];
   // reads.sh's own cases shorten the marker's wait for its watch by this name; set in a job, no watch would be heard from in time.
-  if (text.includes(READS_WAIT)) problems.push(`names ${READS_WAIT} — how long a marker waits for its watch is ${READS_SCRIPT}'s own cases' to set; in the workflow it would leave every watching job's list saying watch=none (check 55, SMD-2435)`);
+  if (text.includes(READS_WAIT)) problems.push(`names ${READS_WAIT} — how long a marker waits for its watch is ${READS_SCRIPT}'s own cases' to set; set short in a job it would leave that job's lists saying watch=none, so the workflow does not name it, in a comment either (check 55, SMD-2435)`);
   const stepsOf = (job: Record<string, unknown> | null) => (Array.isArray(job?.steps) ? job.steps : []).map((s) => mapping(s) ?? {});
   const runOf = (step: Record<string, unknown>) => (typeof step.run === "string" ? step.run.trim() : null);
   const extraKeys = (step: Record<string, unknown>, allowed: string[]) => Object.keys(step).filter((k) => !allowed.includes(k));
