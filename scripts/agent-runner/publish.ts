@@ -237,7 +237,7 @@ export type PublishInput = {
   leaseWeekSeconds: number;
   /** The branch to push, `agent/smd-<n>-<slug>`. */
   branch: string;
-  /** The commit the gate passed (the imported bundle's head, from the run's record): what is pushed, so a ref moved after the gate pushes nothing it didn't check. */
+  /** The commit the gate passed: what is pushed, so a ref moved after the gate pushes nothing it didn't check. Nothing records it yet: cut 3b-2 resolves the imported branch to a commit once, runs the gate on that commit, and records it for this. */
   commit: string;
   /** The PR's head, the pushed branch (`agent/smd-<n>-<slug>`, a branch of this repo), and its base branch. */
   head: string;

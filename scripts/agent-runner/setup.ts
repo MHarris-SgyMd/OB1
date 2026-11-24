@@ -44,13 +44,12 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { KEY_FILES, KEY_SHAPES, noRedirect, parseConfig, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
 import type { Config, Fetch } from "./facts.ts";
-import { APP_KEY_FILE, PEM_SHAPE, appJwt, installationRepos, installationToken, revokeToken, type App } from "./github.ts";
+import { APP_KEY_FILE, PEM_SHAPE, appJwt, installationRepos, installationToken, revokeToken, said, type App } from "./github.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import type { GitRun } from "./gate.ts";
 import { CLAUDE_DIR, INSTALL_DIR, claudeVersion, copyClaude, hostNow, makeInstall, stampReport } from "./install.ts";
 import { STATE_DIR, ensureBareRepo, gitRunner, installDir } from "./live-run.ts";
 import { STAMP_FILE, type Host } from "./probes.ts";
-import { oneLine } from "./text.ts";
 import { PROFILE_FILES, sha256Hex } from "./profile.ts";
 
 /** The Anthropic key isn't one the runner reads (Claude Code reads it through apiKeyHelper), so it isn't in KEY_FILES; it lives beside the others. */
@@ -225,18 +224,18 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
   };
   if (facts.app === null) say(false, "the App couldn't be read with its JWT (GET /app): check githubAppId and github-app.pem");
   else {
-    say(facts.app.slug === cfg.githubAppSlug, `the App's slug is ${JSON.stringify(facts.app.slug)} (the config says ${cfg.githubAppSlug})`);
+    say(facts.app.slug === cfg.githubAppSlug, `the App's slug is ${said(JSON.stringify(facts.app.slug ?? null), 80)} (the config says ${cfg.githubAppSlug})`);
     const perms = facts.app.permissions && typeof facts.app.permissions === "object" ? (facts.app.permissions as Record<string, unknown>) : {};
     // Each permission that differs from decision 13's, said once: one the App shouldn't hold, or one at the wrong level.
     const off = [...new Set([...Object.keys(perms), ...Object.keys(APP_PERMISSIONS)])]
       .filter((k) => perms[k] !== APP_PERMISSIONS[k] && !(k === "metadata" && perms[k] === undefined))
-      .map((k) => (Object.hasOwn(APP_PERMISSIONS, k) ? `${k}: ${perms[k] === undefined ? "none" : String(perms[k])} (needs ${APP_PERMISSIONS[k]})` : `${k}: ${String(perms[k])} (allowed: none)`));
+      .map((k) => (Object.hasOwn(APP_PERMISSIONS, k) ? `${k}: ${perms[k] === undefined ? "none" : said(perms[k], 40)} (needs ${APP_PERMISSIONS[k]})` : `${said(k, 40)}: ${said(perms[k], 40)} (allowed: none)`));
     say(off.length === 0, off.length ? `the App's permissions are not decision 13's: ${off.join(", ")}` : "the App holds contents and pull_requests write, metadata read, and nothing else (no workflows, no administration)");
   }
   if (facts.installation === null) say(false, "the installation couldn't be read (GET /app/installations/<id>): check githubAppInstallationId");
   else say(facts.installation.repository_selection === "selected", `the App is installed on selected repositories (it says ${JSON.stringify(facts.installation.repository_selection)})`);
   if (facts.repos === null) say(false, "the installation's repositories couldn't be read with an installation token");
-  else say(facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase(), `the installation reaches ${facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase() ? `${cfg.repo} alone` : `${facts.repos.join(", ") || "nothing"}, not ${cfg.repo} alone`}`);
+  else say(facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase(), `the installation reaches ${facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase() ? `${cfg.repo} alone` : `${facts.repos.slice(0, 10).map((r) => said(r, 100)).join(", ") || "nothing"}${facts.repos.length > 10 ? ` and ${facts.repos.length - 10} more` : ""}, not ${cfg.repo} alone`}`);
 
   if (facts.rulesets === null) {
     say(false, "the repo's rulesets couldn't be read (gh api repos/<repo>/rulesets)");
@@ -249,9 +248,9 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
   const appBypasses = (r: Rs): boolean =>
     bypassSeen(r) &&
     (r.bypass_actors as { actor_type?: unknown; actor_id?: unknown }[]).some(
-      (a) => (a?.actor_type === "Integration" && String(a?.actor_id) === cfg.githubAppId) || (a?.actor_type === "RepositoryRole" && String(a?.actor_id) !== "5"),
+      (a) => (a?.actor_type === "Integration" && said(a?.actor_id) === cfg.githubAppId) || (a?.actor_type === "RepositoryRole" && said(a?.actor_id) !== "5"),
     );
-  const ruleTypes = (r: Rs): string[] => (Array.isArray(r.rules) ? (r.rules as { type?: unknown }[]).map((x) => String(x?.type)) : []);
+  const ruleTypes = (r: Rs): string[] => (Array.isArray(r.rules) ? (r.rules as { type?: unknown }[]).map((x) => (typeof x?.type === "string" ? x.type : "")) : []);
   const patterns = (r: Rs, key: "include" | "exclude"): string[] => {
     const c = r.conditions as { ref_name?: Record<string, unknown> } | undefined;
     const v = c?.ref_name?.[key];
@@ -328,9 +327,10 @@ export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch)
   else lines.push(`✗ the publish's installation token couldn't be minted: ${minted.detail}`);
   // The rulesets, each read whole with the maintainer's gh (GitHub shows a bypass list only to a caller with write access).
   const gh = (args: string[]): { ok: true; out: string } | { ok: false; why: string } => {
-    const r = spawnSync("gh", ["api", ...args], { encoding: "utf8", timeout: 20_000 });
+    // SIGKILL at the limit: a gh that ignores SIGTERM would otherwise outlive it.
+    const r = spawnSync("gh", ["api", ...args], { encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL", maxBuffer: 8 << 20 });
     if (r.error) return { ok: false, why: (r.error as NodeJS.ErrnoException).code === "ENOENT" ? "gh isn't installed" : `gh couldn't run (${(r.error as NodeJS.ErrnoException).code ?? r.error.message})` };
-    if (r.status !== 0) return { ok: false, why: `gh api exited ${r.status}: ${oneLine(r.stderr || r.stdout || "", 160) || "no words"} (is gh logged in?)` };
+    if (r.status !== 0) return { ok: false, why: `gh api exited ${r.status}: ${said(r.stderr || r.stdout || "", 160) || "no words"} (is gh logged in?)` };
     return { ok: true, out: r.stdout ?? "" };
   };
   const list = gh(["--paginate", `repos/${cfg.repo}/rulesets?includes_parents=true&per_page=100`, "--jq", ".[].id"]);
@@ -662,6 +662,16 @@ export function selfCheck(): number {
       ok(says({ app: { slug: "ob1-agent-runner", permissions: { contents: "read", pull_requests: "write", metadata: "read" } } }, "contents: read (needs write)"), "contents read alone is ✗, said once");
       ok(says({ app: null }, "GET /app"), "an App that can't be read is ✗");
       ok(says({ installation: { repository_selection: "all" } }, "selected"), "an App installed on every repository is ✗");
+      const hostile = { toString: () => { throw new Error("No default value"); } };
+      let threw = false;
+      try {
+        judged({ app: { slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read", admin: hostile } }, rulesets: [mainJson, lockRs, { ...tagRs, rules: [{ type: hostile }] }] });
+      } catch {
+        threw = true;
+      }
+      ok(!threw && says({ app: { slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read", admin: hostile } } }, "admin: (a value that can't be shown)"), "values whose String() throws are said as such, never thrown");
+      const forged = judged({ repos: ["MHarris-SgyMd/OB1", "o/r\n✓ every check passed\x1b[2J"] });
+      ok(!forged.ok && forged.lines.every((l) => !l.includes("\n") && !l.includes("\x1b")) && forged.lines.some((l) => l.includes("<U+001B>")), "a repository name can't start a line of its own or carry an escape to the terminal");
       ok(says({ repos: ["MHarris-SgyMd/OB1", "MHarris-SgyMd/other"] }, "not MHarris-SgyMd/OB1 alone"), "an installation reaching two repositories is ✗");
 
       // The tag fence.

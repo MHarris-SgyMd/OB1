@@ -50,12 +50,13 @@ export const STATE_DIR = join(homedir(), ".local", "share", "open-brain", "agent
 export const BARE_REPO = join(STATE_DIR, "repo.git");
 
 /**
- * git args for the runner's own LOCAL operations: no credential helper, and no background gc (an auto-gc mid-run races
- * the review checkout's clone — run.ts). Every repo the runner's own git touches is local — the main checkout, its own
+ * git args for the runner's own LOCAL operations: no credential helper, no background gc (an auto-gc mid-run races
+ * the review checkout's clone — run.ts), and no hooks (a hook planted in the bare repository would run, as the
+ * runner's user, at its fetches and imports — SMD-4087 cut 3b-1 review pass 5). Every repo the runner's own git touches is local — the main checkout, its own
  * bare repo, the per-run clone — never a remote, so the file transport stays at git's default. facts.ts's GIT_SAFE
  * (https only, no redirect) is for the GitHub `ls-remote` alone, and would wrongly refuse a local clone.
  */
-export const LOCAL_GIT = ["-c", "credential.helper=", "-c", "gc.auto=0"] as const;
+export const LOCAL_GIT = ["-c", "credential.helper=", "-c", "gc.auto=0", "-c", "core.hooksPath=/dev/null"] as const;
 
 /** git for the runner's own steps (the bare repo, the clone), hermetic (gitEnv: no maintainer config, no prompt) and local-only (LOCAL_GIT). */
 export function gitRunner(home: string): GitRun {

