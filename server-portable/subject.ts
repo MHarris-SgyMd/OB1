@@ -82,6 +82,9 @@ const PHRASE_MAX = 200;
 const KEY_REPO = "[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9._-]{1,100}";
 const SCOPED_PR = new RegExp(`^pr:${KEY_REPO}#[0-9]{1,9}$`);
 const SCOPED_VERSION = new RegExp(`^version:${KEY_REPO}@v[0-9]+(\\.[0-9]+){1,3}$`);
+/** 111's bare shapes: a pull request's and a version's key with no repository. */
+const BARE_PR = /^pr:[0-9]{1,9}$/;
+const BARE_VERSION = /^version:v[0-9]+(\.[0-9]+){1,3}$/;
 
 /** 153's ob1_subject_unscoped_key: a scoped pr: or version: key's bare form (`pr:o/r#12` is `pr:12`); any other key as given. */
 export function unscopedKey(key: string): string {
@@ -96,8 +99,8 @@ export function unscopedKey(key: string): string {
  */
 export function heldAs(found: string, standing: readonly string[], repo: string | null = null): string | undefined {
   if (standing.includes(found)) return found;
-  if (!/^pr:[0-9]{1,9}$/.test(found) && !/^version:v[0-9]+(\.[0-9]+){1,3}$/.test(found)) return undefined;
-  const scoped = standing.filter((s) => s !== found && unscopedKey(s) === found).sort();
+  if (!BARE_PR.test(found) && !BARE_VERSION.test(found)) return undefined;
+  const scoped = standing.filter((s) => unscopedKey(s) === found).sort();
   const own = repo === null ? undefined : scoped.find((s) => s === found.replace(/^pr:/, `pr:${repo}#`).replace(/^version:/, `version:${repo}@`));
   return own ?? scoped[0];
 }
@@ -110,9 +113,9 @@ export function heldAs(found: string, standing: readonly string[], repo: string 
 export function subjectKeyValid(key: string): boolean {
   return [...key].length <= 207 && (
     /^ticket:[A-Z][A-Z0-9]*-[0-9]+$/.test(key) ||
-    /^pr:[0-9]{1,9}$/.test(key) ||
+    BARE_PR.test(key) ||
     SCOPED_PR.test(key) ||
-    /^version:v[0-9]+(\.[0-9]+){1,3}$/.test(key) ||
+    BARE_VERSION.test(key) ||
     SCOPED_VERSION.test(key) ||
     /^phrase:[^\s\p{Lu}\p{Lt}]+( [^\s\p{Lu}\p{Lt}]+)*$/u.test(key)) &&
     !/^(pr|version):[^/]*\/\.\.?[#@]/.test(key);

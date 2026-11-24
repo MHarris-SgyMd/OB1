@@ -2534,19 +2534,27 @@ The setting is the operator's, in `subject_repo_settings`, 140's shape: one
 standing row at most, history after, written and ended by an operator key by
 its agent id, through `set_subject_repo` alone: its guard refuses a raw write,
 which would stand a repository with no key mapped.
-- **`set_subject_repo(repo, actor, remap_previous)`** sets it, an operator's alone. Any other
-  key answers `NOT_OPERATOR`, and a value `ob1_subject_repo_refusal` names
-  answers `BAD_REPO`. The value is trimmed and lowercased, and `NULL` clears
-  it, leaving scoped keys as they are. With `remap_previous`, a change of
-  repository also moves the keys scoped to the one it replaces, so a mistaken
-  setting can be corrected; without it they stay, since after a real move they
-  name the old repository truly. Setting the repository that stands
-  writes no setting, but maps any bare key a raw write left under it.
+- **`set_subject_repo(repo, actor, remap_previous)`** sets it, an operator's
+  alone. Any other key answers `NOT_OPERATOR`, and a value
+  `ob1_subject_repo_refusal` names answers `BAD_REPO`. The value is trimmed and
+  lowercased, and `NULL` clears it, leaving scoped keys as they are. With
+  `remap_previous`, a change of repository also moves the keys scoped to the
+  one it replaces, so a mistaken setting can be corrected (with no repository
+  named, it answers `REMAP_NEEDS_REPO`); without it they stay, since after a
+  real move they name the old repository truly. Setting the repository that
+  stands writes no setting, but maps any bare key a raw write left under it.
 - **Setting a repository maps the standing keys** in the same transaction:
   every standing unscoped `pr:` or `version:` subject is closed and its scoped
   twin written with the same `by` and judge key. The closed facet's lineage row
   is copied to the twin, its recipe noting `scoped_from` and `repo`, with any
   rebuild asked of it (`stale_since`, `stale_reason`).
+- **A moved text is mapped too.** It is not refused, as
+  `record_thought_subjects` would refuse it. A thought already holding the
+  scoped key has the bare one closed alone.
+- **The thread triggers re-link both keys at the commit,** so each thread
+  keeps its members under the scoped key.
+- **A key too long once scoped stays bare,** counted `unscopable`; the reply
+  takes the same shape whether anything changed or not.
 - **One mapping moves at most 2,000 distinct keys**
   (`ob1_subject_repo_map_max()`). It holds two thread locks a key to its
   commit, and taking every one first, in key order, keeps it from deadlocking
@@ -2555,14 +2563,6 @@ which would stand a repository with no key mapped.
   key's members: 130's trigger re-links a thread once per member moved, so a
   key held by 1,000 thoughts took 4.7 s to map (2026-11-24); re-linking each
   key once is SMD-4564.
-- **A moved text is mapped too.** It is not refused, as
-  `record_thought_subjects` would refuse it. A thought already holding the
-  scoped key has the bare one closed alone.
-- **The thread triggers re-link both keys at the commit,** so each thread
-  keeps its members under the scoped key. Keys scoped to another repository
-  stay.
-- **A key too long once scoped stays bare,** counted `unscopable`; the reply
-  takes the same shape whether anything changed or not.
 - **The writer scopes too.** 153 carries 130's `record_thought_subjects` with
   one change: once a repository is set, a bare `pr:` or `version:` key it is
   handed is written scoped, so a write after the setting cannot undo the
@@ -2578,12 +2578,14 @@ which would stand a repository with no key mapped.
 refusal names. `subject_repo_setting()` gives brain_info the setting without
 raising. `ob1_subject_scoped_key(key, repo)` scopes a bare key.
 
-Nothing changes until an operator sets a repository. The sweep, a bare key's
-thread read and the operation that sets it over REST and MCP come in PR 3b. 153 carries
-`SELECT` on the setting to every role reading or writing `thought_facets`, and
-`INSERT, UPDATE` to one writing `thought_sources` too, the structure group's
-mark: a deliverables writer never sets it. It is refused by name without
-016, 046, 061, 111, 113, 115, 120 or 130's index, and a re-apply is a no-op.
+Nothing changes until an operator sets a repository. The sweep's own reading
+of the setting and of a pull request's URL, a bare key's thread read and the
+operation that sets it over REST and MCP come in PR 3b.
+153 carries `SELECT` on the setting to every role reading or writing
+`thought_facets`, and `INSERT, UPDATE` to one writing `thought_sources` too,
+the structure group's mark: a deliverables writer never sets it. It is refused
+by name without 016, 046, 061, 111, 113, 115, 120 or 130's index, and a
+re-apply is a no-op.
 `subjectKeyValid` in `server-portable/subject.ts` mirrors the key shapes, so
 the thread read takes a scoped key; resolving a bare one to the setting is 3b's.
 Covered by test-schema [138] and test-upgrade [20cp].
@@ -3241,7 +3243,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
 | | `thought_audit` (008) | `SELECT, INSERT` — since 055 `ob1_append_thought_event` reads the row it inserts (`INSERT … RETURNING`), and since 060 the audit trigger's check and the projector read the event; the row lacked `SELECT` from 055 to 058 (SMD-2116) |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
-| | `subject_repo_settings` (153) | `SELECT` — the operator's subject-key repository (SMD-3887): a reader of a thought's subjects resolves a bare `pr:` or `version:` key by it (the thread read, SMD-3887 PR 3b). 153 carries it to every role reading or writing `thought_facets` |
+| | `subject_repo_settings` (153) | `SELECT` — the operator's subject-key repository (SMD-3887): `record_thought_subjects`, run as the caller, reads it to scope a bare `pr:` or `version:` key it writes, and the thread read will resolve a bare key by it (SMD-3887 PR 3b). 153 carries it to every role reading or writing `thought_facets` |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
@@ -3273,7 +3275,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `extraction_progress` (093) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 093's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873), and since 111 `record_thought_subject` adds `subject` facets (SMD-3306). Postgres grants INSERT per table, so this group writes any facet kind — links, citations, relations and subjects alike; capture's `SELECT, UPDATE` cover the reads and the closing |
-| | `subject_repo_settings` (153) | `SELECT, INSERT, UPDATE` — the operator's subject-key repository (SMD-3887): a subject writer reads it to scope its keys (the sweep, SMD-3887 PR 3b), and `set_subject_repo`, which runs as the caller, writes it and maps the standing keys, a trigger holding the write to an operator key by its agent id. 153 carries these to every role writing both `thought_facets` and `thought_sources`, this group's mark |
+| | `subject_repo_settings` (153) | `SELECT, INSERT, UPDATE` — the operator's subject-key repository (SMD-3887): a subject writer reads it to scope its keys (`record_thought_subjects` since 153, the sweep itself in SMD-3887 PR 3b), and `set_subject_repo`, which runs as the caller, writes it and maps the standing keys, a trigger holding the write to an operator key by its agent id. 153 carries these to every role writing both `thought_facets` and `thought_sources`, this group's mark |
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
 | | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |

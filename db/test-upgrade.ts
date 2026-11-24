@@ -805,7 +805,8 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 152 counts a work claim's renewals in a column on work_claims (115's
   // renew_work_claim and ob1_work_claim_json and 140's claim_work carried with
   // the count), refusing by name without 115 or 140 ([20co]);
-  // 153 redefines 111's subject_key_valid on its own signature and adds the
+  // 153 redefines 111's subject_key_valid on its own signature and 130's
+  // record_thought_subjects and close_thought_subjects, and adds the
   // operator's subject-key repository setting and its setter, refusing by
   // name without 016, 046, 061, 111, 113, 115, 120 or 130's index ([20cp]) —
   // all recorded by the planted ledger with their prerequisites present, so

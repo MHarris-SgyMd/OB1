@@ -235,9 +235,10 @@ function definedIn(file: string): string[] {
  * (SMD-4540), and carries 115 and 140: a restore of any of the three
  * re-runs 115 and 140 first, putting back their other functions (115's
  * release_work_claim, 140's cap functions), then 152. 153 is 130's
- * record_thought_subjects with a bare pr: or version: key scoped once the
- * operator names a repository (SMD-3887), and carries 130: a restore re-runs
- * 130, putting back its other functions, then 153.
+ * record_thought_subjects and close_thought_subjects, each taking the
+ * repository's lock, the first with a bare pr: or version: key scoped once
+ * the operator names a repository (SMD-3887), and carries 130: a restore
+ * re-runs 130, putting back its other functions, then 153.
  */
 const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"], "153": ["130"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
@@ -18891,10 +18892,10 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   await restoreShipped("record_thought_subject", "close_thought_subject", "ob1_thread_relink_subject");
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
 
-  // The shape: 130 the last definer of its six functions; one index per thought and key, 111's gone; statistics on a
-  // facet's key; the sentinels; SECURITY INVOKER throughout; the comments.
-  // record_thought_subjects's and close_thought_subjects's last definer is the subject-repo file, which carries 130's
-  // bodies with a bare key scoped once a repository is set and the repository's lock taken ([138]); by name.
+  // The shape: 130 the last definer of four of its six functions; one index per thought and key, 111's gone; statistics
+  // on a facet's key; the sentinels; SECURITY INVOKER throughout; the comments. record_thought_subjects's and
+  // close_thought_subjects's last definer is the subject-repo file, which carries 130's bodies with a bare key scoped
+  // once a repository is set and the repository's lock taken ([138]); by name.
   for (const fn of ["ob1_thread_lock_keys", "record_thought_subjects", "record_thought_subject", "close_thought_subjects", "close_thought_subject", "ob1_thread_relink_subject"]) {
     const by = fn === "record_thought_subjects" || fn === "close_thought_subjects" ? (files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql") : file;
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === by, `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
@@ -23768,7 +23769,7 @@ console.log("\n[137] Migration 152: a work claim counts its renewals — work_cl
   }
 }
 
-console.log("\n[138] Migration 153: a pr: or version: subject key names its repository on a brain whose operator names one — subject_key_valid admits pr:<owner>/<repo>#<n> and version:<owner>/<repo>@v<n>.<n> beside 111's shapes, lowercase and as GitHub names them; ob1_subject_repo_refusal at the shape's edges; ob1_subject_scoped_key scoping a bare key alone; subject_repo_settings one standing row at most, history after; set_subject_repo an operator key's alone, by its agent id, lowercasing, refusing a bad repository, writing nothing for the one standing, NULL clearing; setting one maps every standing unscoped pr:/version: subject to it, closed and its twin written with the same by, judge and lineage (scoped_from noted), a moved text mapped too, a scoped key standing already closing the bare one alone, a key scoped to another repository and a ticket untouched, each thread keeping its members under the scoped key; another repository maps nothing scoped already; a clear leaves scoped keys; a stored value the refusal names raising 22000 while the setting says it; a re-apply a no-op (SMD-3887)");
+console.log("\n[138] Migration 153: a pr: or version: subject key names its repository on a brain whose operator names one — subject_key_valid admits pr:<owner>/<repo>#<n> and version:<owner>/<repo>@v<n>.<n> beside 111's shapes, lowercase and as GitHub names them; ob1_subject_repo_refusal at the shape's edges; ob1_subject_scoped_key scoping a bare key alone; subject_repo_settings one standing row at most, history after; set_subject_repo an operator key's alone, by its agent id, lowercasing, refusing a bad repository, writing no setting for the one standing, NULL clearing; setting one maps every standing unscoped pr:/version: subject to it, closed and its twin written with the same by, judge and lineage (scoped_from noted), a moved text mapped too, a scoped key standing already closing the bare one alone, a key scoped to another repository and a ticket untouched, each thread keeping its members under the scoped key; another repository maps nothing scoped already; a clear leaves scoped keys; a stored value the refusal names raising 22000 while the setting says it; a re-apply a no-op (SMD-3887)");
 {
   const file = files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql";
   const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
@@ -23786,9 +23787,9 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const OP = { name: "[138] op", agent_id: await idOf("[138] op") };
     const H = { name: "[138] h", agent_id: await idOf("[138] h") };
 
-    // The shape: the table, its one-standing index, two triggers; six functions commented by 153 and subject_key_valid
-    // replaced, the reads STABLE, the rules IMMUTABLE, the setter and the guard VOLATILE, none SECURITY DEFINER; 153 the
-    // last definer of each.
+    // The shape: the table, its one-standing index, two triggers; nine functions made by 153 and subject_key_valid
+    // replaced, all ten commented by 153, the reads and the setter-frame check STABLE, the rules IMMUTABLE, the setter
+    // and the guard VOLATILE, none SECURITY DEFINER; 153 the last definer of each, and of close_thought_subjects.
     const cols = (await one<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
         FROM pg_attribute WHERE attrelid = 'subject_repo_settings'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
     const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('subject_repo_settings_one_standing')) AS d`)).d ?? "";

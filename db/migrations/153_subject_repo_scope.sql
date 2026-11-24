@@ -36,7 +36,7 @@
 --     table's trigger, the setter and the reader.
 --   * ob1_subject_scoped_key(key, repo) — a bare `pr:` or `version:` key scoped
 --     to the repository; any other key, or a NULL repository, as given.
---     IMMUTABLE. The setter's mapping and PR 3b's thread read take it.
+--     IMMUTABLE. The setter's mapping, the door and PR 3b's thread read take it.
 --   * ob1_subject_unscoped_key(key) — its inverse: a scoped key's bare form.
 --     IMMUTABLE. The door and the setter's remap read keys through it.
 --   * subject_repo_settings — the operator's settings, 140's shape: one row a
@@ -44,18 +44,18 @@
 --     (it changes only to end, once; DELETE and TRUNCATE refused), set and ended
 --     by a key the registry classifies operator, named by its agent id, and
 --     through set_subject_repo alone (ob1_subject_repo_settings_by_setter,
---     review pass 3). Its own
---     table, not an ob1_config row (132's reason: the roles that read
---     ob1_config would need a write on every row of it).
+--     review pass 3). Its own table, not an ob1_config row (132's reason: the
+--     roles that read ob1_config would need a write on every row of it).
 --   * ob1_subject_repo() — the standing repository, or NULL. STABLE. A stored
 --     value the refusal names raises (140's principle), so a sweep fails loudly
 --     rather than scope keys to a repository the operator did not set.
---   * set_subject_repo(repo, actor, remap_previous) — the operator's write. Only a key the
---     registry classifies operator, named by its agent id: any other answers
---     {ok: false, error: NOT_OPERATOR}. A value the refusal names answers
---     {ok: false, error: BAD_REPO}. The value is trimmed and lowercased. NULL
---     clears: keys already scoped stay as they are, and the sweep's new keys are
---     unscoped again. Setting what stands writes no setting ({changed: false}), and maps any unscoped key a raw write left standing under it.
+--   * set_subject_repo(repo, actor, remap_previous) — the operator's write.
+--     Only a key the registry classifies operator, named by its agent id: any
+--     other answers {ok: false, error: NOT_OPERATOR}. A value the refusal names
+--     answers {ok: false, error: BAD_REPO}. The value is trimmed and lowercased.
+--     NULL clears: keys already scoped stay as they are, and the sweep's new
+--     keys are unscoped again. Setting what stands writes no setting ({changed:
+--     false}), and maps any unscoped key a raw write left standing under it.
 --     Setting a repository, a first one or another, maps every STANDING
 --     unscoped `pr:` and `version:` subject to it (below); keys scoped to
 --     another repository stay, since they name it truly — unless
@@ -103,24 +103,26 @@
 --   has its thread lock taken first, in key order, as db/threads.ts takes a
 --   batch's, so the two queue rather than deadlock; those locks are held to
 --   the commit, two a key, which is why ob1_subject_repo_map_max() bounds the
---   keys (review pass 2). A thought holding the scoped key standing already has the
---   unscoped one closed alone (one standing subject a thought and key, 130); a
---   key too long once scoped stands bare, counted. The thread triggers (120, 130)
---   re-link both keys of every facet moved at the commit: the unscoped key's
---   edges close and the scoped key's are written, so each thread keeps its
---   members and their order.
+--   keys (review pass 2). A thought holding the scoped key standing already
+--   has the unscoped one closed alone (one standing subject a thought and key,
+--   130); a key too long once scoped stands bare, counted. The thread triggers
+--   (120, 130) re-link both keys of every facet moved at the commit: the
+--   unscoped key's edges close and the scoped key's are written, so each thread
+--   keeps its members and their order. A remap (remap_previous, review pass 5)
+--   moves each key scoped to the setting it replaces the same way, its twin's
+--   recipe naming that key in `scoped_from`.
 --
 -- WHO READS AND WRITES
 --   The roles reading or writing thought_facets get SELECT on
 --   subject_repo_settings (the sweep reads the setting in PR 3b, the server's
 --   thread read too); those writing both thought_facets and thought_sources
 --   get INSERT and UPDATE as well (db/config.mjs: SELECT in the capture and
---   deliverables groups, the three in the structure group). Every subject writer reads the setting
---   now, through record_thought_subjects, so the SELECT is a writer's need
---   from here on. The trigger holds what a row
---   may be, and the setter who may call it (132's convention). The setter is
---   SECURITY INVOKER: its mapping writes thought_facets and derivations as the
---   caller.
+--   deliverables groups, the three in the structure group). A subject writer
+--   passing a bare pr: or version: key reads the setting now, through
+--   record_thought_subjects, so the SELECT is a writer's need from here on.
+--   The trigger holds what a row may be, and the setter who may call it (132's
+--   convention). The setter is SECURITY INVOKER: its mapping writes
+--   thought_facets and derivations as the caller.
 --
 -- SAFETY
 --   One new table, its key and a partial unique index, two triggers and nine
@@ -137,9 +139,10 @@
 --   (ob1_actor_agent_id), 111 (subject_key_valid, ob1_record_derivation's
 --   `subject` kind), 113 (ob1_filed_ticket, which the carried door reads), 115
 --   (ob1_work_claim_actor), 120 (the thread triggers), 130 (the
---   one-standing-subject-a-key index, and the door it carries). Applied
---   by `bun db/migrate.ts`. Re-applied: the table, its indexes and rows are
---   kept, and the functions and triggers replaced as they were.
+--   one-standing-subject-a-key index, ob1_thread_lock_keys, and the two
+--   functions it carries). Applied by `bun db/migrate.ts`. Re-applied: the
+--   table, its indexes and rows are kept, and the functions and triggers
+--   replaced as they were.
 -- =============================================================================
 
 -- Refused up front, by name, on a schema the ledger records but does not hold
@@ -201,9 +204,9 @@ COMMENT ON FUNCTION subject_key_valid(text) IS
 -- ---------------------------------------------------------------------------
 -- 2. ob1_subject_repo_refusal — what is wrong with a repository value
 -- ---------------------------------------------------------------------------
--- The one place the setting's shape is spelled: the trigger, set_subject_repo
--- and ob1_subject_repo() read it, so a migration that changes it replaces this
--- one function.
+-- The one place the setting's shape is spelled: the trigger, set_subject_repo,
+-- ob1_subject_repo() and subject_repo_setting() read it, so a migration that
+-- changes it replaces this one function.
 CREATE OR REPLACE FUNCTION ob1_subject_repo_refusal(p_repo text)
 RETURNS text
 LANGUAGE sql
@@ -425,12 +428,12 @@ COMMENT ON FUNCTION ob1_subject_repo() IS
 -- 6. set_subject_repo — the operator's write, which maps the standing keys
 -- ---------------------------------------------------------------------------
 -- ob1:subject-repo-map-max — a CONTRACT SENTINEL, not prose: the most distinct
--- unscoped keys one mapping moves (review pass 2). The mapping is one
--- transaction (the maintainer's choice), and the threads' locks it takes are
--- held to its commit, two a key (the unscoped one and its scoped twin): 2,000
--- keys hold 4,000 of the shared lock table's slots, which a default server
--- sizes at 6,400 (max_locks_per_transaction 64 × max_connections 100) for every
--- session at once. A brain past it is refused, nothing written; mapping it in
+-- keys one mapping moves (review pass 2). The mapping is one transaction (the
+-- maintainer's choice), and the threads' locks it takes are held to its
+-- commit, two a key (the key moved and its scoped twin): 2,000 keys hold 4,000
+-- of the shared lock table's slots, which a default server sizes at 6,400
+-- (max_locks_per_transaction 64 × max_connections 100) for every session at
+-- once. A brain past it is refused, nothing written; mapping it in
 -- batches is SMD-4559 (the maintainer, 2026-11-23). A function, so a test can
 -- lower it. The cap bounds the keys, not a key's members: 130's trigger
 -- re-links a key once per member moved, each over the whole thread, so a key
@@ -443,7 +446,7 @@ LANGUAGE sql
 IMMUTABLE
 AS $$ SELECT 2000 $$;
 COMMENT ON FUNCTION ob1_subject_repo_map_max() IS
-  'The most distinct unscoped pr:/version: subject keys one set_subject_repo maps (ob1:subject-repo-map-max): the mapping is one transaction and holds two thread locks a key to its commit, so past this it would run a default server''s shared lock table short. A setting that would map more answers {ok: false, error: TOO_MANY_KEYS} and writes nothing. Migration 153 / SMD-3887.';
+  'The most distinct pr:/version: subject keys one set_subject_repo maps, unscoped and, on a remap, scoped to the previous repository (ob1:subject-repo-map-max): the mapping is one transaction and holds two thread locks a key to its commit, so past this it would run a default server''s shared lock table short. A setting that would map more answers {ok: false, error: TOO_MANY_KEYS} and writes nothing. Migration 153 / SMD-3887.';
 
 -- One writer at a time, by a transaction advisory lock taken before the
 -- standing row is read (140's set_work_claim_cap).
@@ -501,10 +504,11 @@ BEGIN
   END IF;
 
   -- ob1:subject-repo-lock — a CONTRACT SENTINEL, not prose: exclusive here, and shared in record_thought_subjects,
-  -- which reads the setting under it. A subject write in flight finishes before the mapping reads the keys, and one
-  -- that starts after waits for the commit and reads the new setting, so no bare key is written beside a mapping
-  -- (review pass 1). It takes no thought's advisory lock: the facets and thoughts it moves are row-locked, which holds
-  -- no slot of the shared lock table however many there are; the threads' locks are bounded by the cap below.
+  -- which reads the setting under it, and in close_thought_subjects (review pass 3). A subject write in flight
+  -- finishes before the mapping reads the keys, and one that starts after waits for the commit and reads the new
+  -- setting, so no bare key is written beside a mapping (review pass 1). It takes no thought's advisory lock: the
+  -- facets and thoughts it moves are row-locked, which holds no slot of the shared lock table however many there
+  -- are; the threads' locks are bounded by the cap below.
   PERFORM pg_advisory_xact_lock(hashtextextended('ob1:subject-repo', 0));
   v_now := clock_timestamp();
   SELECT * INTO v_old FROM subject_repo_settings WHERE ended_at IS NULL FOR UPDATE;
@@ -673,10 +677,12 @@ COMMENT ON FUNCTION subject_repo_setting() IS
 -- ---------------------------------------------------------------------------
 -- 8. record_thought_subjects — 130's door for a set, its keys scoped
 -- ---------------------------------------------------------------------------
--- 130's body verbatim but where marked 153: a bare pr: or version: key written
--- scoped on a brain whose operator names a repository, the setting read under
--- the lock set_subject_repo takes exclusively (review pass 1: the writers would
--- otherwise undo the mapping, and one in flight could slip a bare key past it).
+-- 130's body verbatim but where marked 153, and the bad-key refusal's words,
+-- which name both shapes: a bare pr: or version: key written as the scoped key
+-- the thought holds already, else scoped on a brain whose operator names a
+-- repository, every write under the lock set_subject_repo takes exclusively
+-- (review pass 1: the writers would otherwise undo the mapping, and one in
+-- flight could slip a bare key past it; pass 3: a write of any set).
 CREATE OR REPLACE FUNCTION record_thought_subjects(
   p_thought   uuid,
   p_keys      text[],
@@ -729,9 +735,8 @@ BEGIN
   -- exclusive in set_subject_repo, so no write interleaves with a mapping. Whatever its set, a write closes the
   -- thought's standing subjects, a bare one the setter is mapping among them: one that ran beside the mapping would
   -- miss the twin it writes and leave it standing (review pass 3; pass 2 had taken the lock for a bare key alone).
-  -- Only a set holding a bare pr: or version: key reads the setting, so a stored setting the refusal names raises
-  -- only where a key would be scoped (review pass 2); the keys are scoped under the thought's lock below. Taken
-  -- before the thought's lock; the setter takes no thought's advisory lock, so the order cannot cross.
+  -- Taken before the thought's lock; the setter takes no thought's advisory lock, so the order cannot cross. Only a
+  -- set holding a bare pr: or version: key (v_bare) reads the setting, below, under the thought's lock (review pass 2).
   PERFORM pg_advisory_xact_lock_shared(hashtextextended('ob1:subject-repo', 0));
   v_bare := EXISTS (SELECT 1 FROM unnest(v_keys) AS k WHERE k ~ '^pr:[0-9]{1,9}$' OR k ~ '^version:v[0-9]+(\.[0-9]+){1,3}$');
   SELECT k INTO v_key FROM unnest(v_keys) AS k WHERE NOT subject_key_valid(k) LIMIT 1;

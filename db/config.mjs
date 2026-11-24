@@ -2513,9 +2513,10 @@ export const ROLE_GRANTS = Object.freeze({
     // citations that name the row and, detaching, writes them. A role without
     // these cannot delete any thought, cited or not.
     Object.freeze({ table: "thought_facets", privileges: Object.freeze(["SELECT", "UPDATE"]),                     since: "042" }),
-    // 153's subject-key repository (SMD-3887): a reader of a thought's subjects
-    // resolves a bare pr: or version: key by the operator's setting (the thread
-    // read, SMD-3887 PR 3b). Read only; the setter's writes are the structure
+    // 153's subject-key repository (SMD-3887): 153's record_thought_subjects,
+    // run as the caller, reads the operator's setting to scope a bare pr: or
+    // version: key it writes, and the thread read will resolve a bare key by it
+    // (SMD-3887 PR 3b). Read only; the setter's writes are the structure
     // group's.
     Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT"]),                        since: "153" }),
     // 046's audit trigger runs as the caller on EVERY write that carries an
@@ -2709,9 +2710,9 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_sources", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE", "DELETE"]), since: "053" }),
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),
     // 153's subject-key repository (SMD-3887): a subject writer reads the
-    // operator's setting to scope its keys (the sweep, SMD-3887 PR 3b), and the
-    // operator's setter writes it and maps the standing keys, as a writer of
-    // subjects.
+    // operator's setting to scope its keys (record_thought_subjects since 153,
+    // the sweep itself in SMD-3887 PR 3b), and the operator's setter writes it
+    // and maps the standing keys, as a writer of subjects.
     Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),  since: "153" }),
     // board-sync's findings step (SMD-2681, db/board-findings.ts) records what
     // it posted: read for the cap and "not posted again", inserted after Linear
