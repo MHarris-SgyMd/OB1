@@ -35,6 +35,7 @@ import { TICKET_ID, type Ticket } from "./select.ts";
 import { branchFor } from "./record.ts";
 import { run, type RunDeps, type RunInput, type RunLimits, type RunSession, type SessionRequest } from "./run.ts";
 import { liveRun, type LiveDeps, type LiveResult } from "./live.ts";
+import { repoConfigProblems } from "./github.ts";
 import { REAL_DEPS, runSession, type Pinned } from "./session.ts";
 import { profileHashes, settingsText, type SessionLimits, type SessionPaths } from "./profile.ts";
 import { hostNow, stampReport } from "./install.ts";
@@ -51,12 +52,14 @@ export const BARE_REPO = join(STATE_DIR, "repo.git");
 
 /**
  * git args for the runner's own LOCAL operations: no credential helper, no background gc (an auto-gc mid-run races
- * the review checkout's clone — run.ts), and no hooks (a hook planted in the bare repository would run, as the
- * runner's user, at its fetches and imports — SMD-4087 cut 3b-1 review pass 5). Every repo the runner's own git touches is local — the main checkout, its own
+ * the review checkout's clone — run.ts), no hook files and no fsmonitor command (a hook planted in the bare repository
+ * would run, as the runner's user, at its fetches and imports — SMD-4087 cut 3b-1 review pass 5). Config-based hooks
+ * (git 2.54's `hook.<name>.*`) aren't turned off by `core.hooksPath`: `ensureBareRepo` refuses a bare repository whose
+ * config holds any key outside github.ts's allowlist before it fetches, so none can be there (review pass 6). Every repo the runner's own git touches is local — the main checkout, its own
  * bare repo, the per-run clone — never a remote, so the file transport stays at git's default. facts.ts's GIT_SAFE
  * (https only, no redirect) is for the GitHub `ls-remote` alone, and would wrongly refuse a local clone.
  */
-export const LOCAL_GIT = ["-c", "credential.helper=", "-c", "gc.auto=0", "-c", "core.hooksPath=/dev/null"] as const;
+export const LOCAL_GIT = ["-c", "credential.helper=", "-c", "gc.auto=0", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] as const;
 
 /** git for the runner's own steps (the bare repo, the clone), hermetic (gitEnv: no maintainer config, no prompt) and local-only (LOCAL_GIT). */
 export function gitRunner(home: string): GitRun {
@@ -78,6 +81,12 @@ export function ensureBareRepo(git: GitRun, bareRepo: string, mainCheckout: stri
     const cloned = git(["clone", "--bare", "--quiet", mainCheckout, bareRepo]);
     if (cloned.code !== 0) return { ok: false, problem: `bare clone of ${mainCheckout} failed: ${cloned.stderr.trim()}` };
   }
+  // The bare repository's config, every scope, against the allowlist the push reads it by (github.ts): a config-based hook,
+  // an fsmonitor or a proxy planted there would otherwise run or apply at this fetch and the bundle import after it.
+  const keys = git(["-C", bareRepo, "config", "--show-scope", "--name-only", "--list"]);
+  if (keys.code !== 0) return { ok: false, problem: `reading the bare repo's config failed: ${keys.stderr.trim()}` };
+  const risky = repoConfigProblems(keys.stdout);
+  if (risky.length) return { ok: false, problem: `the bare repo's config sets ${risky.slice(0, 5).join(", ")}: the runner writes no such key, so it was tampered with` };
   // Fetch the checkout's main into the bare repo's own main, so the base is the maintainer's current origin/main.
   const fetched = git(["-C", bareRepo, "fetch", "--quiet", "--no-tags", mainCheckout, "refs/remotes/origin/main:refs/heads/main"]);
   // --quiet leaves a refused update without a word: the usual one is a main here that the checkout's origin/main is not ahead of.

@@ -233,7 +233,7 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
     say(off.length === 0, off.length ? `the App's permissions are not decision 13's: ${off.join(", ")}` : "the App holds contents and pull_requests write, metadata read, and nothing else (no workflows, no administration)");
   }
   if (facts.installation === null) say(false, "the installation couldn't be read (GET /app/installations/<id>): check githubAppInstallationId");
-  else say(facts.installation.repository_selection === "selected", `the App is installed on selected repositories (it says ${JSON.stringify(facts.installation.repository_selection)})`);
+  else say(facts.installation.repository_selection === "selected", `the App is installed on selected repositories (it says ${said(JSON.stringify(facts.installation.repository_selection ?? null), 40)})`);
   if (facts.repos === null) say(false, "the installation's repositories couldn't be read with an installation token");
   else say(facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase(), `the installation reaches ${facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase() ? `${cfg.repo} alone` : `${facts.repos.slice(0, 10).map((r) => said(r, 100)).join(", ") || "nothing"}${facts.repos.length > 10 ? ` and ${facts.repos.length - 10} more` : ""}, not ${cfg.repo} alone`}`);
 
@@ -254,7 +254,7 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
   const patterns = (r: Rs, key: "include" | "exclude"): string[] => {
     const c = r.conditions as { ref_name?: Record<string, unknown> } | undefined;
     const v = c?.ref_name?.[key];
-    return Array.isArray(v) ? v.map(String) : [];
+    return Array.isArray(v) ? v.map((x) => (typeof x === "string" ? x : said(x))) : [];
   };
   const covers = (r: Rs, fence: keyof typeof COVERS): boolean =>
     patterns(r, "include").some((p) => (COVERS[fence] as readonly string[]).includes(p)) && !patterns(r, "exclude").some((p) => excludeMayReach(p, fence));
@@ -666,6 +666,7 @@ export function selfCheck(): number {
       let threw = false;
       try {
         judged({ app: { slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read", admin: hostile } }, rulesets: [mainJson, lockRs, { ...tagRs, rules: [{ type: hostile }] }] });
+        judged({ rulesets: [mainJson, { ...lockRs, conditions: { ref_name: { include: [hostile], exclude: [hostile] } } }, tagRs] });
       } catch {
         threw = true;
       }

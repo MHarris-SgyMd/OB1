@@ -162,9 +162,10 @@ export async function selfCheck(): Promise<number> {
 
   await section("hostile answers: values whose String() throws, a token with a line end, GitHub's words with escapes", async () => {
     const hostile = { toString: () => { throw new Error("No default value"); } };
-    const f = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, metadata: "read" }, repositories: [hostile] })));
+    // Past the parser, so the hostile value reaches the code's own reads as itself (JSON would turn it into {}).
+    const f = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : ({ status: 201, json: async () => ({ token: TOKEN, permissions: { ...TOKEN_PERMISSIONS, metadata: "read" }, repositories: [hostile] }) } as unknown as Response)));
     const a = await installationToken(f.fetch, APP, PEM, NOW);
-    ok(!a.ok && revoked(f.sent).join() === TOKEN, "a repositories entry that isn't an object is refused and the token revoked, not thrown");
+    ok(!a.ok && revoked(f.sent).join() === TOKEN, "a repositories entry whose String() throws is refused and the token revoked, not thrown");
     // An object whose String() throws can't come from JSON; feed it past the parser to reach the code's own reads.
     const g = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : ({ status: 201, json: async () => ({ token: TOKEN, permissions: { ...TOKEN_PERMISSIONS, admin: hostile }, repositories: [{ full_name: "MHarris-SgyMd/OB1" }] }) } as unknown as Response)));
     let threw = false;
@@ -191,7 +192,10 @@ export async function selfCheck(): Promise<number> {
     const esc = await installationToken(stubFetch(() => json({ message: `bad \x1b[2J\x1b]0;title\x07 ${TOKEN.slice(0, 120)}\n✓ fake` }, 401)).fetch, APP, PEM, NOW);
     ok(!esc.ok && !/[\x1b\x07\n]/.test(esc.detail) && esc.detail.includes("<U+001B>"), "GitHub's words show escapes as <U+XXXX> and no line break");
     const perm = await installationToken(stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ permissions: { ...TOKEN_PERMISSIONS, [`x\x1b[31m${TOKEN}`]: "write" } }))).fetch, APP, PEM, NOW);
-    ok(!perm.ok && !perm.detail.includes("\x1b") && !perm.detail.includes(TOKEN.slice(12, 60)), "a permission key carrying escapes and the token shows neither");
+    ok(!perm.ok && !perm.detail.includes("\x1b") && !perm.detail.includes(TOKEN.slice(4, 24)), "a permission key carrying escapes and the token shows neither");
+    const legacyTail = `${"x".repeat(25)}${LEGACY.slice(4)}`;
+    const lv = await installationToken(stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : tokenAnswer({ token: LEGACY, permissions: { ...TOKEN_PERMISSIONS, admin: legacyTail } }))).fetch, APP, PEM, NOW);
+    ok(!lv.ok && !lv.detail.includes(LEGACY.slice(4, 24)), "a permission value carrying the token's tail past its cut is scrubbed before it is cut");
     ok(said(hostile) === "(a value that can't be shown)" && said("a\nb") === "a b", "said: a value whose String() throws, and a line break");
   });
 
@@ -203,7 +207,8 @@ export async function selfCheck(): Promise<number> {
       for (const raw of [`x-access-token:${tok}`, tok]) {
         const b64 = Buffer.from(raw).toString("base64");
         const forms = [b64, b64.replace(/=+$/, ""), Buffer.from(raw).toString("base64url")];
-        ok(forms.every((x) => !scrubToken(`< ${x}>`, tok).includes(x.slice(0, 40))), `base64 of ${raw.startsWith("x-") ? "the basic-auth form" : "the token alone"} (pad ${(3 - (raw.length % 3)) % 3}), padded, unpadded and url-safe, is scrubbed`);
+        ok(Buffer.from(raw).toString("base64url") === b64.replace(/=+$/, ""), "a token's characters never make + or / in base64, so its url-safe form is its unpadded one");
+        ok(forms.every((x) => !scrubToken(`< ${x}>`, tok).includes(x.slice(0, 40))), `base64 of ${raw.startsWith("x-") ? "the basic-auth form" : "the token alone"} (pad ${(3 - (raw.length % 3)) % 3}), padded and unpadded, is scrubbed`);
       }
     }
     ok(!scrubToken(`tail ${TOKEN.slice(4)} end`, TOKEN).includes(TOKEN.slice(4, 44)), "the token's tail past ghs_ is scrubbed");
@@ -327,7 +332,7 @@ export async function selfCheck(): Promise<number> {
         chmodSync(join(hooked, "hooks", h), 0o755);
       }
       const r = gitRunner(home)(["-C", hooked, "fetch", "--quiet", work, `+refs/heads/main:refs/heads/main`]);
-      ok(LOCAL_GIT.join(" ").includes("core.hooksPath=/dev/null") && r.code === 0 && !existsSync(ran), "the fetch ran, and no hook of the repository's did");
+      ok(LOCAL_GIT.join(" ").includes("core.hooksPath=/dev/null") && LOCAL_GIT.join(" ").includes("core.fsmonitor=false") && r.code === 0 && !existsSync(ran), "the fetch ran, and no hook of the repository's did");
       Bun.spawnSync([git, "-C", hooked, "update-ref", "refs/heads/x", sh(["rev-parse", "main"], hooked)], { env: { PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } });
       ok(existsSync(ran), "the same hooks run for git without it (the control)");
     });
@@ -367,7 +372,7 @@ export async function selfCheck(): Promise<number> {
       // The run's commit is now behind the remote's: pushing it would move the branch back, which git refuses unforced.
       ok(!r.ok && r.final === true, "refused as final");
       ok(sh(["rev-parse", BRANCH], target) === moved, "the remote's branch is untouched");
-      ok(!r.ok && !r.detail.includes(TOKEN), "the refusal carries no token");
+      ok(!r.ok && !r.detail.includes(TOKEN.slice(4, 24)), "the refusal carries no piece of the token");
     });
 
     await section("pushBranch: a branch outside the runner's prefix is refused before a token is minted", async () => {
@@ -446,7 +451,7 @@ export async function selfCheck(): Promise<number> {
     await section("pushBranch: a throwing git is a result with the token scrubbed", async () => {
       const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => { if (argv.includes("push")) throw new Error(`spawn failed near ${TOKEN}`); return { code: 0, stdout: "local\tcore.bare\n", stderr: "" }; }, bareRepo: source, home, remote: target, now: () => NOW });
       const r = await c.pushBranch({ branch: BRANCH, commit: tip });
-      ok(!r.ok && !r.final && r.detail.includes("git push threw") && !r.detail.includes(TOKEN), "a result, not thrown, the token gone");
+      ok(!r.ok && !r.final && r.detail.includes("git push threw") && !r.detail.includes(TOKEN.slice(4, 24)), "a result, not thrown, no piece of the token left");
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -526,7 +531,7 @@ export async function selfCheck(): Promise<number> {
     ok(!listFails.ok && !listFails.final && listFails.detail.includes("403") && listFails.detail.includes("not accessible"), "a refused lookup: a retry, nothing posted");
     const f = stubFetch((m, u) => tokenRoute(m, u) ?? Promise.reject(new Error(`socket hang up ${TOKEN}`)));
     const thrown = await appClient({ app: APP, pem: PEM, fetch: f.fetch, git: realGitSpawn, bareRepo: "/x", home: "/x", now: () => NOW }).openDraftPr(OPEN);
-    ok(!thrown.ok && !thrown.final && thrown.detail.includes("socket hang up") && !thrown.detail.includes(TOKEN), "a transport failure: a result, the token gone");
+    ok(!thrown.ok && !thrown.final && thrown.detail.includes("socket hang up") && !thrown.detail.includes(TOKEN.slice(4, 24)), "a transport failure: a result, no piece of the token left");
     const weird = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json(prRow({ user: { login: "someone" } }), 201) : null)).c.openDraftPr(OPEN);
     ok(!weird.ok && weird.detail.includes("isn't the App's"), "a 201 answering someone else's PR is not taken");
   });
@@ -552,7 +557,7 @@ export async function selfCheck(): Promise<number> {
     ok(revoked(f.sent).join() === TOKEN, "the token is revoked after");
     const refused = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : m === "POST" ? json({ token: TOKEN }, 201) : json({ message: `no ${TOKEN}` }, 403)));
     const r2 = await installationRepos(refused.fetch, APP, PEM, NOW);
-    ok(!r2.ok && r2.detail.includes("403") && !r2.detail.includes(TOKEN) && revoked(refused.sent).join() === TOKEN, "a refused list is said, scrubbed, and the token still revoked");
+    ok(!r2.ok && r2.detail.includes("403") && !r2.detail.includes(TOKEN.slice(4, 24)) && revoked(refused.sent).join() === TOKEN, "a refused list is said, scrubbed, and the token still revoked");
   });
 
   await section("openDraftPr: a head outside the runner's prefix is refused, nothing sent", async () => {

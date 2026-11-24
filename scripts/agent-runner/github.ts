@@ -76,13 +76,18 @@ export function appJwt(appId: string, pem: string, nowMs: number): string {
  * object) shows as such, never as a throw.
  */
 export function said(value: unknown, max = 160): string {
-  let s: string;
+  const s = rawText(value);
+  // Cut far past `max` first, so a huge value isn't expanded whole; shownText then cuts at `max` code points.
+  return shownText(s.length > max * 4 + 64 ? s.slice(0, max * 4 + 64) : s, max);
+}
+
+/** A value as a string, whole, never a throw: what to scrub before `said` cuts it. */
+export function rawText(value: unknown): string {
   try {
-    s = typeof value === "string" ? value : String(value);
+    return typeof value === "string" ? value : String(value);
   } catch {
-    s = "(a value that can't be shown)";
+    return "(a value that can't be shown)";
   }
-  return shownText(s, max);
 }
 
 /** A thrown value's message, scrubbed of the token whole and then shown on one line. */
@@ -93,7 +98,7 @@ function errSaid(e: unknown, token: string | null = null): string {
   } catch {
     m = e;
   }
-  return said(scrubToken(typeof m === "string" ? m : said(m, 400), token), 160);
+  return said(scrubToken(rawText(m), token), 160);
 }
 
 /**
@@ -107,7 +112,8 @@ export function scrubToken(text: string, token: string | null): string {
     const forms = [token, token.slice(4)];
     for (const raw of [`x-access-token:${token}`, token]) {
       const b64 = Buffer.from(raw).toString("base64");
-      forms.push(b64, b64.replace(/=+$/, ""), Buffer.from(raw).toString("base64url"));
+      // Padded and unpadded. (Url-safe base64 is the unpadded form here: a token's characters, [A-Za-z0-9._-], never make + or /.)
+      forms.push(b64, b64.replace(/=+$/, ""));
     }
     for (const f of forms.filter((x) => x.length >= 16).sort((a, b) => b.length - a.length)) t = t.split(f).join("…");
   }
@@ -235,7 +241,7 @@ export async function installationToken(fetchImpl: Fetch, app: App, pem: string,
   // Every check from here runs on GitHub's own values: one that throws (a hostile toString) must not leave the token live.
   try {
     const perms = b.permissions && typeof b.permissions === "object" && !Array.isArray(b.permissions) ? (b.permissions as Record<string, unknown>) : null;
-    const extra = perms === null ? ["(none listed)"] : Object.entries(perms).filter(([k, v]) => ALLOWED_BACK[k] !== v).map(([k, v]) => `${said(scrubToken(k, token), 60)}: ${said(scrubToken(said(v, 60), token), 60)}`);
+    const extra = perms === null ? ["(none listed)"] : Object.entries(perms).filter(([k, v]) => ALLOWED_BACK[k] !== v).map(([k, v]) => `${said(scrubToken(k, token), 60)}: ${said(scrubToken(rawText(v), token), 60)}`);
     const missing = perms === null ? [] : Object.entries(TOKEN_PERMISSIONS).filter(([k, v]) => perms[k] !== v).map(([k]) => k);
     if (extra.length || missing.length) {
       await revokeToken(fetchImpl, token);
