@@ -1328,6 +1328,128 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const bsAgain = scanSummary(bsDry.ep, bsDry.text);
   assert(bsDry.redactions.map((r) => r.in).join() === "prompt 1,the text,the text" && /https:\/\/u:\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(bsDry.text) && !/3f9a3f9a/.test(bsDry.text) && bsAgain.length === 1 && /^64-hex token .* in prompt 1$/.test(bsAgain[0].reason),
     `…the source round took the password, the text round the digest the un-URL'd path then showed (title and ask); the prompt, read whole and unclipped, still carries it, and that is the hit (${bsDry.redactions.map((r) => r.in).join()})`);
+
+  // SMD-4542: three shapes of password the rule let by, each blanked in a prompt and in the outcome, and found nowhere
+  // in the payload or the dry run: a second keyword taken as the value, a getter's default, a quoted value whose first
+  // word is short. A bare reference and unquoted prose stay as they were.
+  const pwShapes = [
+    ["the db line reads password: password = Tr0ub4dor3x now", "Tr0ub4dor3x"],
+    ['I changed it to password = os.environ.get("DB_PASSWORD", "Kp7mWq2zR9") so it falls back locally', "Kp7mWq2zR9"],
+    ["PASSWORD = os.getenv('DB_PASS', 'Zx8vBn3mQw') for the local run", "Zx8vBn3mQw"],
+    ['set password="Kp7m Wq2z R9x" in the vault', "Wq2z R9x"],
+    // Review pass 4: a value that only begins with a keyword is a value (the lookahead needs the keyword's `:` or `=`),
+    // and `env.get` and `ENV.fetch` are stepped over as `os.environ.get` is.
+    ["the db line reads password: Password-2024! now", "Password-2024!"],
+    ['const password = Deno.env.get("DB_PW", "Qw3rTy9Uio") ?? "";', "Qw3rTy9Uio"],
+    ['password = ENV.fetch("DB_PW", "Mn4bVc8Xzl")', "Mn4bVc8Xzl"],
+  ];
+  const pwBlanked = pwShapes.map(([text, secret]) => {
+    const inPrompt = redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]);
+    const inOutcome = redactEpisode(segment([{ t: "prompt", text: "tidy the vault notes" }, { t: "outcome", text }]).episodes[0]);
+    return { secret, prompt: !inPrompt.text.includes(secret) && /\[redacted:password assignment/.test(inPrompt.text), outcome: !inOutcome.text.includes(secret) && /\[redacted:password assignment/.test(inOutcome.text) };
+  });
+  // Unquoted words with digits and a quote later on the line: the quoted branch applies only after an opening quote.
+  const pwKept = ['the password: ab12 cd34 "x" later', 'password: Kp7m Wq2z "x"'].map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text.includes(text));
+  // A quoted value stops at its line's end: run on, it would be a block the episode is refused for (SMD-4543's).
+  pwKept.push(scanForSecrets('password="Kp7m Wq2z\nlater "x"', { every: true }).length === 0);
+  assert(pwBlanked.every((b) => b.prompt && b.outcome) && pwKept.every(Boolean),
+    `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; unquoted short words before a later quote, and a quoted value cut by its line's end, are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
+  // Review pass 3: a bare reference stays a value, as main read it, so a line naming one with a fallback after it is
+  // found and refused under refuse (an exclusion of references sent these whole, and the model's excerpt with them).
+  const pwRefs = ['const password = process.env.DB_PASSWORD || "Kp7mWq2zR9";', 'password = os.environ.get("DB_PASSWORD") or "Kp7mWq2zR9"', 'PGPASSWORD = os.environ.get("PGPASS") or "Kp7mWq2zR9"', 'const POSTGRESPASSWORD = process.env.PG_PW ?? "Kp7mWq2zR9";']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0; });
+  // …and a getter whose default is blanked is not found again by the second scan (the end-to-end case below), while a
+  // password glued onto a getter's name is not read as its receiver: blanked, as before, with the default.
+  const pwGlued = redactEpisode(segment([{ t: "prompt", text: 'password=hunter22os.getenv("PW", "Kp7mWq2zR9")' }, { t: "outcome", text: "ok" }]).episodes[0]).text;
+  assert(pwRefs.every(Boolean) && !/hunter22/.test(pwGlued),
+    `a bare reference with a fallback after it is found and refused under refuse, as before, and a password glued onto a getter is blanked (SMD-4542 review pass 3) (${JSON.stringify([pwRefs, pwGlued])})`);
+  // Review pass 4: the second scan passes a getter's blanked default, and only a whole marker ending the
+  // argument: one with more after it, unclosed or unquoted, is found, as main found the call (a text that already carried one).
+  // Review passes 5 and 6: a nested or expression default, a bare name and unpaired quotes are read as main read them,
+  // so a secret-free line is not refused.
+  const pwSecond = ['PASSWORD = getenv("PW", Kp7mWq2zR9x)', "password = os.environ.get('PW', 'Kp7mWq2zR9')", 'password = os.getenv("DB_PASSWORD", os.getenv("PGPASSWORD", ""))', 'password = os.getenv("DB_PASSWORD", "changeme" if DEBUG else None)', 'password = os.getenv("DB_PASSWORD", DEFAULTS["password"])',
+    // Review pass 6: a bare-name default with more after the call, and a default whose quotes do not pair.
+    'password = os.environ.get("DB_PASSWORD", DEFAULT_PASSWORD).encode("utf-8")', 'conn = connect(password=os.getenv("PW", DEFAULT_PW),host="db")', 'password = os.getenv("X", \u201cKp7mWq2z hunter")']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; const c = cleanEpisode(ep, "redact"); return gateFindings(c, c.text).length; });
+  const pwMarked = ['PGPASSWORD=os.getenv("X", "[redacted:x]Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", "[redacted:pw Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", [redacted:x])']
+    .map((text) => scanForSecrets(text, { every: true }).length);
+  assert(pwSecond.every((n) => n === 0) && pwMarked.every((n) => n > 0),
+    `the second scan passes a getter's blanked default, and a bare-name, unpaired, nested or expression default read as before; a marker with more after it, unclosed or unquoted does not hide the call (SMD-4542 review passes 4 to 6) (${JSON.stringify([pwSecond, pwMarked])})`);
+  // Review pass 1 (secrets adversary): a password given as a `${VAR:-<it>}` default is blanked, as main blanked it (an
+  // exclusion of `${` sent it); and quoted prose or a placeholder is read as main read it, blanked nowhere and refusing
+  // nothing under refuse (the quoted branch had widened to them).
+  const pwDefaults = ["POSTGRES_PASSWORD: ${POSTGRES_PW:-Kp7mWq2zR9}", "export PGPASSWORD=${PGPASS:-Kp7mWq2zR9}", 'password: "${DB_PASS:-Kp7mWq2zR9}"', "password=${PW:-hunter22} now"]
+    .map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text);
+  const pwProse = ['errors = { password: "is too short (minimum is 8 characters)" }', 'password: "Enter your password"', 'password: "<your password>"', 'POSTGRES_PASSWORD: "set me"', 'the error said password: "too weak" so I changed it', 'password: "*** ***"', 'password = "xx yy zz"', 'password: "{{ db_pass_2 }}"', 'password: "<pw 1>"', 'password: "${ PW1 }"']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return { kept: redactEpisode(ep).text.includes(text), refused: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0 }; });
+  assert(pwDefaults.every((t) => !/Kp7mWq2zR9|hunter22/.test(t) && /\[redacted:password assignment/.test(t)) && pwProse.every((p) => p.kept && !p.refused),
+    `a password as a \${VAR:-…} default is blanked as before; quoted prose and a placeholder are not blanked, and refuse nothing (SMD-4542 review pass 1) (${JSON.stringify(pwProse)})`);
+  writeFileSync(join(TMP, "pw-shapes.jsonl"), [user(pwShapes[0][0], { origin: { kind: "human" } }), user(pwShapes[1][0], { origin: { kind: "human" } }), user(pwShapes[3][0], { origin: { kind: "human" } }), assistant([{ type: "text", text: pwShapes[2][0] }])].join("\n"));
+  const shapePrep = prepare({ ...base, session_id: "s-pw-shapes", transcript_path: join(TMP, "pw-shapes.jsonl") });
+  const shapePayload = shapePrep.payloadPath ? readFileSync(shapePrep.payloadPath, "utf8") : "";
+  const shapeDry = await spawnScript(["--dry-run", join(TMP, "pw-shapes.jsonl")]);
+  const shapeLeft = pwShapes.map(([, secret]) => secret).filter((x) => shapePayload.includes(x) || shapeDry.out.includes(x) || shapeDry.err.includes(x));
+  assert(shapePrep.code === 0 && shapePayload && shapeDry.code === 0 && shapeLeft.length === 0,
+    `…and none of the four passwords is in the payload written or the dry run's output (SMD-4542) (${shapePrep.code} ${shapeDry.code} ${JSON.stringify(shapeLeft)})`);
+  if (shapePrep.payloadPath) unlinkSync(shapePrep.payloadPath);
+
+  // SMD-4543: the outcome keeps its lines in the summary, so a quoted password a soft wrap cut is blanked whole, read
+  // on the outcome's soft-wrapped view, where it was blanked as written and its second line sent. A blank line still
+  // ends a value, a sha256sum line is read at its line's start as before, and a key block is still a block.
+  const wrapped = [
+    ['Set it with password = "correct horse\nbattery staple 42" and restart.', ["horse", "battery staple 42"]],
+    ['Use password: "Kp7m Wq2z\nR9x 4tUv" there.', ["Kp7m Wq2z", "R9x 4tUv"]],
+    ['the db_password: "Tr0ub4dor 3x\r\nZq8 lmn" for now', ["Tr0ub4dor", "Zq8 lmn"]],
+  ].map(([text, parts]) => {
+    const ep = segment([{ t: "prompt", text: "set the db password" }, { t: "outcome", text }]).episodes[0];
+    const c = cleanEpisode(ep, "redact");
+    return { sent: parts.every((p) => !c.text.includes(p)) && /\[redacted:password assignment\]" (?:and|there|for)/.test(c.text), gate: gateFindings(c, c.text).length, refused: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0 };
+  });
+  const paragraph = "Set password = 'Kp7mWq2zR9 here\n\nThe next paragraph's own 'quote' stays.";
+  const paraSent = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: paragraph }]).episodes[0], "redact").text;
+  // …and a blank line ends even a token-like quoted value the quoted branch would read across it, as main read it.
+  const paraToken = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: 'password: "ab12 cd34\n\nef56 gh78" ok' }]).episodes[0], "redact").text;
+  const digestLine = `Checksums:\n${"a1b2c3d4".repeat(8)}  release.tar.gz`;
+  const digestSent = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: digestLine }]).episodes[0], "redact").text;
+  const wrapBlock = redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDLESS}\n${SEEDED}\n${SEEDLESS} and prose`, { softWrap: true }).blocks.length;
+  // A finding both passes see is one finding, and without `every` each rule still answers once (the refusal message).
+  const both = scanForSecrets('password = "Kp7mWq2zR9"\nthe next line', { softWrap: true }).length, firstEach = scanForSecrets("password = Kp7mWq2zR9 and passwd=Zx8vBn3mQw\nmore", { softWrap: true }).length;
+  assert(wrapped.every((w) => w.sent && w.gate === 0 && w.refused) && paraSent.includes("The next paragraph's own 'quote' stays.") && !paraSent.includes("Kp7mWq2zR9") && paraToken.includes("ef56 gh78")
+    && digestSent.includes("a1b2c3d4".repeat(8)) && wrapBlock === 1 && both === 1 && firstEach === 1,
+    `a quoted password a soft wrap cut in the outcome is blanked whole and the gate passes it under redact, refused under refuse; a blank line still ends a value, a sha256sum line keeps its digest, a key block is still a block, and a finding both readings see is one (SMD-4543) (${JSON.stringify([wrapped, wrapBlock, both, firstEach])})`);
+  // Review pass 1 (secrets adversary): on the soft-wrapped view a value's closing quote is its own — one wrap away, no
+  // other quote first, no word character after it — so an unclosed or mismatched quote keeps the prose after it, as
+  // main kept it; a wrapped value merged with a one-line key token is counted, not dropped as a block; and without
+  // `every` each entropy token still answers, as before.
+  const ownQuote = [
+    ["Set password: 'Kp7mWq2z9 for the test user\nand don't commit it.\nNext steps follow.", "and don't commit it."],
+    ['The .env line `PGPASSWORD="Kp7mWq2z9` was missing its closing quote,\nso compose read the rest as the value.\nI added the quote and the "db" service starts.', "so compose read the rest as the value."],
+    ['- password: “Kp7mWq2z9" (mixed quotes)\n- the “db” service restarted', "- the “db” service restarted"],
+    ['password: "Kp7mWq2z9 for now\nthen the next step\nand a third line" ok', "then the next step"],
+    // Review pass 2: the quoted branch, whose value ends at its own close, is held to the same close.
+    ["PGPASSWORD='Kp7mWq2z9\nI'll rotate it tomorrow.", "\nI'll rotate it tomorrow."],
+    ["password: `Kp7mWq2z9\n- 1\n- 2\nOK, I'm done", "\n- 1\n- 2\nOK, I'm done"],
+    ['password: "Kp7m Wq2z 9x\nA1 B2\nC3 D4\nok" done', "A1 B2\nC3 D4"],
+  ].map(([text, kept]) => cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text }]).episodes[0], "redact").text.includes(kept));
+  const merged = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: 'secret_key = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ1\nQyNTUxOQAAACBkZ2VtYWlsLWtleS1mb3ItdGVzdGluZy1v2"' }]).episodes[0], "redact");
+  const twoTokens = `one ${SEEDED} and two ${SEEDED.split("").reverse().join("")}\nhere`;
+  const tokens = [scanForSecrets(twoTokens), scanForSecrets(twoTokens, { softWrap: true })].map((fs) => fs.filter((f) => f.reason === "high-entropy token").length);
+  assert(ownQuote.every(Boolean) && merged.redactions.some((r) => r.in === "the outcome") && /\[redacted:/.test(merged.text) && tokens.every((n) => n === 2),
+    `an unclosed or mismatched quote keeps the prose after it; a wrapped value merged with a key token is counted; each entropy token answers (SMD-4543 review passes 1 and 2) (${JSON.stringify([ownQuote, merged.redactions, tokens])})`);
+  // …and the model's excerpt reads soft-wrapped too: a short-first-word password a wrap cut withholds it.
+  const wrapExc = assistantExcerpt({ assistant: ["an earlier note.", 'Use password: "Kp7m Wq2z\nR9x 4tUv" there.'] });
+  const plainExc = assistantExcerpt({ assistant: ["an earlier note.", "Wrapped prose: the deploy\nfinished in 4 minutes."] });
+  assert(wrapExc.withheld && /password assignment/.test(wrapExc.withheld) && !wrapExc.text && plainExc.text?.includes("finished in 4 minutes"),
+    `the model's excerpt withholds a quoted password a soft wrap cut, and sends wrapped prose (SMD-4543) (${JSON.stringify([wrapExc, plainExc])})`);
+  // …and end to end: prepare and --dry-run on such an outcome leave none of it in the payload or the output.
+  writeFileSync(join(TMP, "pw-wrap.jsonl"), [user("set the db password", { origin: { kind: "human" } }), assistant([{ type: "text", text: 'Set it with password = "correct horse\nbattery staple 42" and restart.' }])].join("\n"));
+  const wrapPrep = prepare({ ...base, session_id: "s-pw-wrap", transcript_path: join(TMP, "pw-wrap.jsonl") });
+  const wrapPayload = wrapPrep.payloadPath ? readFileSync(wrapPrep.payloadPath, "utf8") : "";
+  const wrapDry = await spawnScript(["--dry-run", join(TMP, "pw-wrap.jsonl")]);
+  const wrapLeft = ["horse", "battery staple"].filter((x) => wrapPayload.includes(x) || wrapDry.out.includes(x) || wrapDry.err.includes(x));
+  assert(wrapPrep.code === 0 && wrapPayload && wrapDry.code === 0 && wrapLeft.length === 0,
+    `…and neither the payload written nor the dry run's output holds the wrapped password (SMD-4543) (${wrapPrep.code} ${wrapDry.code} ${JSON.stringify(wrapLeft)})`);
+  if (wrapPrep.payloadPath) unlinkSync(wrapPrep.payloadPath);
 }
 
 // ── [6] Posting ──────────────────────────────────────────────────────────────

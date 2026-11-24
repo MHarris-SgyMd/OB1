@@ -138,6 +138,18 @@ Pending files in the same ordered transaction, because a ledger hole (a row
 deleted or misspelt by hand) would otherwise have an earlier-numbered file apply
 *after* the re-run, over the later definitions it had just restored. Every file
 is idempotent, so the run restores the latest definition of everything. One
+kind of statement is left out of the re-run, because run again it would refuse
+the brain's own rows: a rule a later file loosened (SMD-3149). That is a file's
+`ADD CONSTRAINT … CHECK`, with its `VALIDATE`, where a later file defines the
+constraint again (064's, 084's and 111's lists of lineage kinds; 059's search
+arms), and a file's `CREATE UNIQUE INDEX` where a later file drops the index
+(111's one standing subject a thought). A `COMMENT` on such a constraint or
+index is left out with it. The file that decides the rule last makes it, in
+the same transaction, and the run says so beside each file it left a statement
+out of, as `--dry-run` does. Only a statement of the file's own in exactly one
+of those shapes is left out; one inside a `DO` block guards itself. Before it
+commits the run looks for every constraint it left an `ADD` out for, and
+fails, rolled back, if one is not there. One
 transaction, so a failure part-way — a lock not granted within 10 s included —
 rolls back and the schema is as it was. `--dry-run` says what would re-run and
 judges the pgvector floor as the run does.
@@ -874,7 +886,8 @@ from upstream's `schemas/wiki-pages` (`pages`, not `wiki_pages`), whose
 directory retires with this file: a brain that applied it by hand keeps its
 tables untouched. The new `pages` grant group is what a role needs beside
 `capture` (the grants table). Additive; no arity moves; no seed row; a
-re-apply is idempotent (it re-validates the kind CHECK and moves no row).
+re-apply is idempotent (it re-validates the kind CHECK and moves no row; under
+`--reapply` the CHECK is left to the file that defines it last, §5).
 test-schema [59], test-live [32], test-upgrade [20p];
 `server-portable/test-preflight.ts` drives the census, the remedy and the
 repair arms.
@@ -1950,8 +1963,7 @@ restart board-sync), a demoted Duplicate says `↓ Ranked ×0.25 — duplicate`,
 the stated-status label prints its word, Duplicate. A Duplicate whose original
 is still open reads finished, as a cancel does. Refuses by name without 058 or
 071; a re-apply is a no-op. An older tree's `--reapply` over a 105 brain puts
-058's six back: run this tree's `--reapply` after it (which fails at 064 on a
-brain holding a judged relation until SMD-3149). test-schema [94] (the sets, a
+058's six back: run this tree's `--reapply` after it. test-schema [94] (the sets, a
 Duplicate settled and its blocker cleared, both under 058's sets as before, the
 mirror rebuilt), test-upgrade [20aw] (a session's cached plan reaching the new
 sets among it), test-live [41] (the poster's refusals without 058's set and
@@ -2882,9 +2894,9 @@ thread by its rows, not as 0.5% of the table. A thought in several threads
 counts in each of `threads.ts --status`'s and `brain_info`'s thought counts, a
 place in each thread. Nothing finds a set yet: the rules and the judge's
 question that do are PR 7a-3b. Needs 111, 113 and 120; a re-apply is a no-op. A
-re-apply of 111 makes its index again until 130 runs, and fails once a thought
-holds a set (so does `--reapply`, which already fails at 064 on any brain
-holding a subject, SMD-3149). test-schema [116], test-upgrade [20bt], test-live
+re-apply of 111 by hand makes its index again until 130 runs, and fails once a
+thought holds a set; `--reapply` leaves 111's index out (§5, SMD-3149).
+test-schema [116], test-upgrade [20bt], test-live
 [47] and [48], test-rest-sql [16].
 
 Migration 129 gives the agenda an order (SMD-4192). `priority`, the default, is
@@ -7377,6 +7389,66 @@ with no row under the key, and one that kept no pools, are each passed over and
 counted. Samples taken before SMD-4382 kept the pending and claimed rows alone,
 under every `extract:` key, and are read as before:
 `extraction rows pending or claimed`.
+
+### claim-report.ts
+
+How long work claims run, from claim to release (SMD-4540 PR 2): each claim's
+ending read from its release, its hours, and since migration 152 how many of its
+renewals landed, so SMD-4541 can decide whether a claim should state when its
+work will be done. It reads `list_claims`' answers with `include_ended` (any
+client holding a read key, no database credentials) or `work_claims` itself.
+
+- **`--from`:** walk `list_claims` to its end, `include_ended: true`, each page's
+  `cursor` as the next call's `after`, and save the pages as one JSON array.
+  A page is REST's `GET /v1/claims` body, or an MCP tool result as a client
+  saves it (its `structuredContent`, else its text; a JSON-RPC answer's
+  `result`), or a list of claims. A last page that says `truncated` is refused,
+  the rest of the brain missing; pages holding fewer entries than the first
+  page counted are warned of; a read of live claims alone says `include_ended`
+  was likely left off; entries with no `renewals` at all (`list_work_claims`'
+  own rows) are warned of as uncounted.
+- **`--sizes`:** `gh pr list --state merged --limit 500 --json
+  number,additions,deletions > sizes.json`, as it prints it, or an object of
+  `{ additions, deletions }` by PR number. Raise `--limit` once the oldest PR a
+  claim names falls outside it: the "size unknown" count shows it.
+- **`--now`:** give a saved dump the time it was read, an ISO time with its
+  zone (`2026-11-23T19:00:00Z`; one without is refused): unset, the clock reads a
+  claim live then whose lease has since ended as lapsed. A claim made after it
+  is left out, a release after it unread. A row keeps only its last lease and
+  count, so a claim renewed after `--now` reads with them.
+- **`--url`:** needs SELECT on `work_claims`' columns (the `claims` group's, by
+  `bun migrate.ts --grant <role> --groups claims`); a role without it is told
+  so. Before migration 152 every claim reads uncounted.
+
+```bash
+bun claim-report.ts --from claims.json [--sizes sizes.json] [--now 2026-11-23T19:00:00Z] [--json]
+bun claim-report.ts --url "$DATABASE_URL" [--sizes sizes.json]
+bun claim-report.ts --self-check
+```
+
+- **Endings:** merged (its holder released it saying "merged", in a clause, to
+  the next `.`, `;`, `:` or `,`, that doesn't first deny it with "not", "never",
+  "without", "unless", "until", "yet", "be" or "n't"; a merge of something else,
+  "merged main into the branch", reads as one too), closed by board-sync (by the
+  server's own `closedBySync`), taken over, force-released (another key's
+  release, an operator's after a merge included), released (other: a split into
+  pieces, a drop, a test), and lapsed, never released (timed to its lease's
+  end). Live claims are left out.
+- **Merged claims** are grouped by client (the label's first word before `@`,
+  else the key's name), by shape (a whole ticket or one piece) and, with
+  `--sizes`, by the merged PRs' changed lines. A merged claim's PRs are its
+  reason's first sentence's `OB1 PR N`, with any list after one (`OB1 PR 705,
+  PR 710 and PR 719`), their sizes summed; else its last `PR N`. Other wordings
+  (`OB1 PR 705, 710 and 719`, `OB1 PR 832/847`) read the first PR alone.
+- **What it cannot see** it says under the table, and `--json` carries as
+  `notSeen`: a claim runs to its release, at its merge, so its hours hold the
+  waits for review and for the word to merge, not work alone; a claim made
+  late, just before its merge, reads short; a PR that closed two claims is
+  counted under each; a renewal count says how often, not when, and each client
+  renews at its own pace, so counts compare within one client; a claim made
+  before 152 is uncounted; a claim taken over hides the work before its lapse; a
+  claim board-sync closed is timed to that pass, not its merge, and left out of
+  the merged tables.
 
 ### bench-querylog.ts
 

@@ -113,7 +113,27 @@ export const SECRET_PATTERNS = [
   ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"'`‘’“”«»]*\d)[^\s"'`‘’“”«»]{16,})/di],
   ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"'`‘’“”«»]{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\[)[^\s"'`‘’“”«»]{6,})/di],
+  // SMD-4542: a second keyword is no value (`password: password = <it>` takes the second's); a getter's call is
+  // stepped over to its default (`os.environ.get("X", "<it>")`); and after an opening quote a value that reads as a
+  // token — a digit in it, no whole word of three letters or more — runs to its closing quote on the line, spaces and
+  // all, though its first word is short (`password="Kp7m Wq2z R9x"`).
+  // - Review pass 1: `${…}` stays a value, as before, since an exclusion sent `${PG_PW:-<it>}`'s default; and quoted
+  //   prose or a placeholder (`"Enter your password"`, `"<your password>"`) is read as before, not blanked.
+  // - Review pass 2: nor does the quoted branch start a value at a placeholder's `{`, `<` or `$` (`"{{ db_pass_2 }}"`,
+  //   `"<pw 1>"`), which db/sensitivity.ts's own password rule skips too.
+  // - Review pass 3: a bare reference (`process.env.X`, `os.environ[…]`, `getenv(…)`) stays a value, as before.
+  //   Excluding it left `password = process.env.X || "<it>"` with no finding, so refuse sent it whole, the model's
+  //   excerpt carried it, and the brain read `PGPASSWORD=process.env.X` standard. The getter's receiver is dotted names
+  //   of letters (`os.`, `process.`), so a password glued onto the getter (`<it>getenv(`) is not taken for one.
+  // - Review pass 4: a getter's call whose default is already a whole marker, the argument's last, is no value, or the
+  //   second scan would find the call once the first had blanked its default.
+  // - Review pass 5: the step-over applies only when the default ends the argument. A nested call or an expression
+  //   there (`getenv("A", getenv("B"))`, `"<it>" + SUFFIX`) is read as before, the outer call blanked, not half-blanked
+  //   into a line the second scan would refuse.
+  // - Review pass 6: the default is a quoted literal closed by its own quote's partner, then `,` or `)`. A bare name
+  //   (`getenv("X", DEFAULT_PW).encode()`) let the value run past the call's `)`, and a mismatched quote past the
+  //   default's end, each into a line the second scan refused; both are read as before, the call blanked.
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*(?=(?:"[^"'`‘’“”«»\n]*"|'[^"'`‘’“”«»\n]*'|`[^"'`‘’“”«»\n]*`|‘[^"'`‘’“”«»\n]*’|“[^"'`‘’“”«»\n]*”|«[^"'`‘’“”«»\n]*»)\s*[,)]))?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*["'`‘“«]\[redacted:[^\]\n]*\]["'`’”»]\s*[,)])(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»{<$][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
   // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
   // their digests — told apart only by where they sit: a digest follows
   // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key
@@ -133,6 +153,8 @@ export const SECRET_PATTERNS = [
 
 /** The patterns that read the URL-blanked text: shapes, not prefixes. */
 const URL_BLIND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
+/** The patterns that read where a line starts, left out of a soft-wrapped view's pass (SMD-4543). */
+const LINE_BOUND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
 /** Each pattern once more with the `g` flag, for matchAll — the table's own objects stay stateless for exec. */
 const GLOBAL = new Map();
 const globalOf = (re) => { let g = GLOBAL.get(re); if (!g) { g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`); GLOBAL.set(re, g); } return g; };
@@ -151,20 +173,26 @@ const globalOf = (re) => { let g = GLOBAL.get(re); if (!g) { g = new RegExp(re.s
  * measures 5 and up; an identifier 4.4 (first review pass: six realistic
  * false positives, each of which would have refused a whole session). `skip`
  * lists `[at, end)` spans another scan has judged whole: a hit wholly inside one
- * is passed over (SMD-4502).
+ * is passed over (SMD-4502). `{ softWrap: true }` reads the named patterns once
+ * more over the text's soft-wrapped view (softWrapped, below) and returns the
+ * union, at the text's own offsets (SMD-4543).
  */
-export function scanForSecrets(text, { every = false, skip = [] } = {}) {
+export function scanForSecrets(text, { every = false, skip = [], softWrap = false } = {}) {
   const findings = [];
   // URLs and base64 payloads blanked in place (offsets kept) for the shape
   // rules — the 64-hex rule and the token scan: a hex id in a URL's path (a
   // sha256 repository's commit, a blob) is an address, not a pasted key (third
   // review pass). The named patterns run over the full text — a key inside a
   // URL's query is caught by its prefix or by the `?key=` rule above.
-  const blanked = text
+  const urlBlanked = (t) => t
     .replace(/\bhttps?:\/\/[^\s)>\]"']+/gi, (u) => " ".repeat(u.length))
     .replace(/\bbase64,[A-Za-z0-9+/=]+/g, (b) => " ".repeat(b.length));
-  for (const [name, re] of SECRET_PATTERNS) {
-    for (const m of (URL_BLIND.has(name) ? blanked : text).matchAll(globalOf(re))) {
+  const blanked = urlBlanked(text);
+  // The view's pass (SMD-4543) leaves out the rules that read a line's start: the 64-hex rule's `sha256sum` exemption
+  // wants its digest at the start of a line, which a joined line no longer is.
+  const named = (input, inputBlanked, view) => { for (const [name, re] of SECRET_PATTERNS) {
+    if (view && LINE_BOUND.has(name)) continue;
+    for (const m of (URL_BLIND.has(name) ? inputBlanked : input).matchAll(globalOf(re))) {
       // The span: the `v` group's indices where the rule names a value, else the match.
       let [at, end] = m.indices?.groups?.v ?? [m.index, m.index + m[0].length];
       if (m.groups?.q) {
@@ -173,7 +201,14 @@ export function scanForSecrets(text, { every = false, skip = [] } = {}) {
         // class stopped at the first space and the tail was sent (second
         // review pass). No close on the line: the class's stop stands.
         const close = m.input.indexOf(QUOTE_CLOSE[m.groups.q] ?? m.groups.q, end), line = m.input.indexOf("\n", end);
-        if (close !== -1 && (line === -1 || close < line)) end = close;
+        const closes = close !== -1 && (line === -1 || close < line);
+        // On the soft-wrapped view (SMD-4543 review pass 1) the close must be the value's own: at most one wrap from the
+        // value's start, no other quote before it, and no letter, digit or underscore after it — or an unclosed quote
+        // ran on to an apostrophe or a later quote and blanked the prose between. Judged from the value's start, so the
+        // quoted branch, whose value ends at its own close, is held to it too (review pass 2: `'<it>⏎I'll` blanked the
+        // `I`). A view's finding that fails is dropped; the text's own reading of that value stands.
+        if (view && !(closes && ownClose(text, at, close))) continue;
+        if (closes) end = close;
       } else if (m.indices?.groups?.v) {
         // A value class of `[^\s"']` runs to the next space: a closing bracket,
         // backtick or full stop after the value is the sentence's, not the
@@ -187,7 +222,9 @@ export function scanForSecrets(text, { every = false, skip = [] } = {}) {
       findings.push({ reason: name, at, end });
       if (!every) break;
     }
-  }
+  } };
+  named(text, blanked, false);
+  if (softWrap) { const view = softWrapped(text); if (view !== text) named(view, urlBlanked(view), true); }
   for (const m of blanked.matchAll(/[A-Za-z0-9+_=-]{32,}/g)) {
     const t = m[0];
     if (!/[a-z]/.test(t) || !/[A-Z]/.test(t) || !/[0-9]/.test(t)) continue;
@@ -199,8 +236,26 @@ export function scanForSecrets(text, { every = false, skip = [] } = {}) {
     if (judgedElsewhere({ at, end }, skip)) continue;
     findings.push({ reason: "high-entropy token", at, end });
   }
-  return findings.sort((a, b) => a.at - b.at || a.end - b.end);
+  findings.sort((a, b) => a.at - b.at || a.end - b.end);
+  // The two passes can find one span twice, and without `every` a rule once in each: the first of each kept, in one
+  // pass over a key set (a text of thousands of findings stays linear).
+  const seen = new Set();
+  return findings.filter((f) => { const k = every || f.reason === "high-entropy token" ? `${f.reason}\u0000${f.at}\u0000${f.end}` : f.reason; if (seen.has(k)) return false; seen.add(k); return true; });
 }
+/** Whether the quote at `close` closes the value that starts at `at` in a soft-wrapped view: at most one line break between,
+ * no other quote between, and no letter, digit or underscore after it, in the text as written (SMD-4543 review passes 1
+ * and 2). */
+const ownClose = (text, at, close) => {
+  const between = text.slice(at, close);
+  return (between.match(/\r\n|\r|\n/g) ?? []).length <= 1 && !/["'`‘’“”«»]/.test(between) && !/[\p{L}\p{N}_]/u.test(text[close + 1] ?? "");
+};
+/**
+ * A text's SOFT-WRAPPED view (SMD-4543): a lone line break read as spaces, one for each of its characters, so every
+ * offset is the text's own. A quoted value carried to its closing quote only on its line was cut at a soft wrap —
+ * `password = "correct horse⏎battery staple 42"` blanked `correct` and sent the rest — where the summary keeps the
+ * outcome's lines. A blank line still ends a value: a paragraph break is not a wrap.
+ */
+export const softWrapped = (t) => t.replace(/(?<![\r\n])(?:\r\n|\r|\n)(?![\r\n])/g, (m) => " ".repeat(m.length));
 
 // ── Redaction (SMD-2127) ─────────────────────────────────────────────────────
 
@@ -302,8 +357,10 @@ export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
  * `skip` lists `[at, end)` spans of the text another scan has already judged
  * whole: a finding wholly inside one is left as it is (SMD-4502, the summary's
  * listed prompts and title, which the scan of each whole prompt judged).
+ * `softWrap` scans the text's soft-wrapped view too (SMD-4543, the outcome): a span
+ * crossing only a soft wrap is a value cut by a wrap, blanked, not a block.
  */
-export function redactSecrets(text, { skip = [] } = {}) {
+export function redactSecrets(text, { skip = [], softWrap = false } = {}) {
   const spans = [];
   // Key material grown over its block first (third review pass). Growth never
   // reorders: findings come sorted by start; a key-material span grows left
@@ -311,11 +368,13 @@ export function redactSecrets(text, { skip = [] } = {}) {
   // material too and grows to the same block start, while a named hit's
   // `name=value` run is not a block line and stops the growth — so the array
   // stays sorted for the coalescing below.
-  const found = scanForSecrets(text, { every: true, skip }).map((f) => { if (!KEY_MATERIAL.has(f.reason)) return f; const [at, end] = growBlock(text, f.at, f.end); return { ...f, at, end }; });
+  const found = scanForSecrets(text, { every: true, skip, softWrap }).map((f) => { if (!KEY_MATERIAL.has(f.reason)) return f; const [at, end] = growBlock(text, f.at, f.end); return { ...f, at, end }; });
   for (const f of found) {
     const last = spans[spans.length - 1];
-    if (last && f.at <= last.end) { last.end = Math.max(last.end, f.end); if (!last.reasons.includes(f.reason)) last.reasons.push(f.reason); continue; }
-    spans.push({ reasons: [f.reason], at: f.at, end: f.end });
+    // Whether this finding is key material grown over lines, judged on its own span (SMD-4543 review pass 1).
+    const kmLines = KEY_MATERIAL.has(f.reason) && text.slice(f.at, f.end).includes("\n");
+    if (last && f.at <= last.end) { last.end = Math.max(last.end, f.end); if (!last.reasons.includes(f.reason)) last.reasons.push(f.reason); last.kmLines ||= kmLines; continue; }
+    spans.push({ reasons: [f.reason], at: f.at, end: f.end, kmLines });
   }
   // A span crossing a newline is MULTI-LINE key material — a pasted key block.
   // The scope call (SMD-2127): a blob is REFUSED, not redacted, since a precise
@@ -324,7 +383,12 @@ export function redactSecrets(text, { skip = [] } = {}) {
   // sent. Marked before the offsets shift; the span is blanked here too (so the
   // text a bug might still send is best-effort clean), but a block makes the
   // caller refuse.
-  for (const span of spans) span.multiline = text.slice(span.at, span.end).includes("\n");
+  // Under softWrap (SMD-4543) a span crossing only a soft wrap is a value, not a block, unless key material in it grew
+  // over its block's lines — judged on that finding's own span, not on the merged span's reasons (review pass 1: a
+  // wrapped value merged with a one-line token was dropped as a block, blanked and never counted).
+  const view = softWrap ? softWrapped(text) : text;
+  for (const span of spans) span.multiline = text.slice(span.at, span.end).includes("\n") && (view.slice(span.at, span.end).includes("\n") || span.kmLines);
+  for (const span of spans) delete span.kmLines;
   let out = text;
   for (let i = spans.length - 1; i >= 0; i--) out = out.slice(0, spans[i].at) + redactionMarker(spans[i].reasons) + out.slice(spans[i].end);
   // The spans as they sit in the text RETURNED — each marker's place, where a
