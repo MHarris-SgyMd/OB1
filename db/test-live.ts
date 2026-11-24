@@ -9749,6 +9749,13 @@ if (want("10h")) {
         await sql.unsafe(`GRANT SELECT ON thought_work_claims TO ${SROLE}`);
         assert(noClaimSelect.code === 2 && /This role cannot claim from the subject pool: it needs SELECT, INSERT and UPDATE on thought_work_claims/.test(noClaimSelect.stderr) && ownCalls === asked,
           `…and without SELECT on the claims, refused too, before any question (exit ${noClaimSelect.code})`);
+        // …or without SELECT on 153's subject-key repository, which the door reads for a bare pr: or version: key
+        // (SMD-3887 review pass 2: the check passed the role, and its first write was refused).
+        await sql.unsafe(`REVOKE SELECT ON subject_repo_settings FROM ${SROLE}`);
+        const noRepoRead = await sweep({}, sEnv, sUrl);
+        await sql.unsafe(`GRANT SELECT ON subject_repo_settings TO ${SROLE}`);
+        assert(noRepoRead.code === 2 && noRepoRead.stderr.includes(`record_thought_subjects needs ${DOOR_GRANTS}`) && DOOR_GRANTS.includes("SELECT on subject_repo_settings") && ownCalls === asked,
+          `…and without SELECT on the subject-key repository, refused before any question, naming it (exit ${noRepoRead.code}: ${noRepoRead.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         await sql.unsafe(`REVOKE SELECT ON ob1_config FROM ${SROLE}`);
         const noConfigRead = await sweep({ dryRun: true }, sEnv, sUrl);
         // …and a run, not dry, heard as the tables' refusal (PR 6b-1's review pass 2, mutant: heard as usage, it lived).

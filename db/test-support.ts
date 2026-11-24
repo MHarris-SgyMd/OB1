@@ -442,14 +442,15 @@ const FUNCTIONS = [
   // 145 (SMD-3606): the operator's one-call release of every live claim a holder holds.
   "release_holder_claims(text, text, jsonb)",
   // 153 (SMD-3887): the subject-key repository — the value's refusal, a bare key scoped, the setting's guard, the
-  // reader, the operator setter (which maps the standing keys) and the brain_info getter. subject_key_valid is 111's,
-  // redefined, named above.
+  // reader, the operator setter (which maps the standing keys), the brain_info getter and the mapping's cap.
+  // subject_key_valid is 111's, redefined, named above.
   "ob1_subject_repo_refusal(text)",
   "ob1_subject_scoped_key(text, text)",
   "ob1_subject_repo_settings_guard()",
   "ob1_subject_repo()",
   "set_subject_repo(text, jsonb)",
   "subject_repo_setting()",
+  "ob1_subject_repo_map_max()",
   // 148 (SMD-3887): a thought's state on three axes, read from the records that exist.
   "thought_validity(uuid[])",
   // 116 (SMD-3663): priority assertions — the five calls, the drift check, the

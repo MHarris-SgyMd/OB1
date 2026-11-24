@@ -2528,7 +2528,13 @@ its agent id.
 - **Setting a repository maps the standing keys** in the same transaction:
   every standing unscoped `pr:` or `version:` subject is closed and its scoped
   twin written with the same `by` and judge key. The closed facet's lineage row
-  is copied to the twin, its recipe noting `scoped_from` and `repo`.
+  is copied to the twin, its recipe noting `scoped_from` and `repo`, with any
+  rebuild asked of it (`stale_since`, `stale_reason`).
+- **One mapping moves at most 2,000 distinct keys**
+  (`ob1_subject_repo_map_max()`). It holds two thread locks a key to its
+  commit, and taking every one first, in key order, keeps it from deadlocking
+  with `db/threads.ts`. A brain past the cap answers `TOO_MANY_KEYS` and
+  nothing is set; mapping in batches is SMD-4559.
 - **A moved text is mapped too.** It is not refused, as
   `record_thought_subjects` would refuse it. A thought already holding the
   scoped key has the bare one closed alone.
@@ -2540,8 +2546,12 @@ its agent id.
 - **The writer scopes too.** 153 carries 130's `record_thought_subjects` with
   one change: once a repository is set, a bare `pr:` or `version:` key it is
   handed is written scoped, so a write after the setting cannot undo the
-  mapping. The writer takes the advisory lock `ob1:subject-repo` shared and the
-  setter takes it exclusive, so a write and a mapping never interleave.
+  mapping. A bare key the thought already holds scoped, to any repository,
+  keeps that facet, so a thread doesn't split a member at a time after the
+  repository changes or is cleared. The writer takes the advisory lock
+  `ob1:subject-repo` shared and the setter takes it exclusive, so a write and a
+  mapping never interleave. A set with no bare key takes neither the lock nor
+  the setting.
 
 `ob1_subject_repo()` reads the setting and raises on a stored value the
 refusal names. `subject_repo_setting()` gives brain_info the setting without
@@ -3268,6 +3278,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **deliverables** — deliverables (134, SMD-1715): a role whose clients record and verify deliverables through `record_deliverable` and `verify_deliverable`, or read them through `deliverable_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence, its KEY SHARE locks and its author (`thought_audit`) are the **capture** group's `SELECT` and `UPDATE`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `deliverable_events` (134; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; its trigger draws `seq` by `nextval`, so the sequence row below) | `SELECT, INSERT` |
 | | sequence `deliverable_events_seq_seq` (134; the trigger draws each event's `seq` itself, under the deliverable's lock, by `nextval`, which the identity's own draw does not need) | `USAGE` |
 | | `thought_facets` (042; the `deliverable` facet, the events' projection, written and replaced — INSERT only the **structure** group grants otherwise; Postgres grants it per table, so the group writes any facet kind, as structure does) | `SELECT, INSERT, UPDATE` |
+| | `subject_repo_settings` (153; the operator's subject-key repository, SMD-3887 — 153 carries `SELECT` to every role reading or writing thought_facets, this group's among them, so a role provisioned from the list holds what one carried at the upgrade does; its writes are the **structure** group's alone) | `SELECT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |

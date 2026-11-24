@@ -166,7 +166,7 @@ const CLOSE = "close_thought_subjects(uuid, uuid[], text)";
  * What the door needs of the role that calls it (111's and 130's comments), and where each grant comes from: the
  * sweep's refusals and the pass's say this.
  */
-export const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), and INSERT, UPDATE and SELECT on derivations (the capture group's)";
+export const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), INSERT, UPDATE and SELECT on derivations, and since migration 153 SELECT on subject_repo_settings (the capture group's)";
 
 /** What the pool needs of the role (113): the claims' reads and writes, and the pool's name in ob1_config. */
 export const POOL_GRANTS = "SELECT, INSERT and UPDATE on thought_work_claims, and INSERT and UPDATE on ob1_config";
@@ -840,7 +840,9 @@ async function sweep(
   const grantRows = await atStart(() => sql`
     SELECT has_any_column_privilege('thought_facets', 'INSERT') AND has_any_column_privilege('thought_facets', 'UPDATE')
        AND has_any_column_privilege('thoughts', 'UPDATE')
-       AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE') AS can,
+       AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE')
+       -- 153's setting, which the door reads for a bare pr: or version: key (SMD-3887 review pass 2); none before 153.
+       AND COALESCE((SELECT has_table_privilege(c.oid, 'SELECT') FROM pg_class c WHERE c.oid = to_regclass('subject_repo_settings')), true) AS can,
            has_table_privilege('thought_work_claims', 'SELECT') AND has_table_privilege('thought_work_claims', 'INSERT')
        AND has_table_privilege('thought_work_claims', 'UPDATE')
        AND has_any_column_privilege('ob1_config', 'INSERT') AND has_any_column_privilege('ob1_config', 'UPDATE') AS pools`);

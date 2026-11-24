@@ -54,17 +54,25 @@
 --     unscoped again. Setting what stands writes nothing ({changed: false}).
 --     Setting a repository, a first one or another, maps every STANDING
 --     unscoped `pr:` and `version:` subject to it (below); keys scoped to
---     another repository stay, since they name it truly.
+--     another repository stay, since they name it truly. A setting that would
+--     map more distinct keys than ob1_subject_repo_map_max() answers {ok:
+--     false, error: TOO_MANY_KEYS} and writes nothing (review pass 2).
+--   * ob1_subject_repo_map_max() — 2,000, the most distinct keys one mapping
+--     moves: its thread locks are held to its commit (below).
 --   * subject_repo_setting() — the standing setting for brain_info, never
 --     raising.
 --   * record_thought_subjects — 130's door for a set, redefined on its own
 --     body: on a brain whose operator names a repository a bare pr: or
 --     version: key is written scoped to it (bare only when too long once
 --     scoped), so a pass that finds `pr:12` again keeps the thread the setter
---     mapped instead of undoing it. It reads the setting under the
+--     mapped instead of undoing it. A bare key the thought holds already
+--     scoped, to any repository, keeps that facet, so a thread does not split
+--     a member at a time after the repository changes or is cleared (the
+--     maintainer, 2026-11-23). It reads the setting under the
 --     ob1:subject-repo lock, shared, which the setter takes exclusively: a
 --     write in flight finishes before a mapping reads the keys, and one that
---     starts after waits and reads the new setting (review pass 1).
+--     starts after waits and reads the new setting (review pass 1). A set with
+--     no bare key takes neither the lock nor the setting (review pass 2).
 --
 -- THE MAPPING (inside set_subject_repo)
 --   A subject facet is written once and only closed (111's validator), so a key
@@ -74,12 +82,17 @@
 --   same fingerprints, the same pass), its recipe noting `scoped_from` and
 --   `repo`. Not through record_thought_subjects: that door refuses a thought
 --   whose text moved since its subject was found, or one filed under a ticket
---   since, and a facet left unscoped would split its thread. Thought by
---   thought in id order, under the ob1:subject-repo lock alone: no thought's
---   advisory lock, as one per thought held to the commit would fill the
---   shared lock table on a large brain (review pass 1); the facets and
---   thoughts it moves are row-locked, the thought FOR KEY SHARE first (130's
---   order). A thought holding the scoped key standing already has the
+--   since, and a facet left unscoped would split its thread. A rebuild asked
+--   of the closed facet's row (stale_since, stale_reason) is asked of the
+--   twin's (review pass 2). Thought by thought in id order, under the
+--   ob1:subject-repo lock: no thought's advisory lock, as one per thought held
+--   to the commit would fill the shared lock table on a large brain (review
+--   pass 1); the facets and thoughts it moves are row-locked, the thought FOR
+--   KEY SHARE first (130's order). Every key it moves, unscoped and scoped,
+--   has its thread lock taken first, in key order, as db/threads.ts takes a
+--   batch's, so the two queue rather than deadlock; those locks are held to
+--   the commit, two a key, which is why ob1_subject_repo_map_max() bounds the
+--   keys (review pass 2). A thought holding the scoped key standing already has the
 --   unscoped one closed alone (one standing subject a thought and key, 130); a
 --   key too long once scoped stands bare, counted. The thread triggers (120, 130)
 --   re-link both keys of every facet moved at the commit: the unscoped key's
@@ -90,8 +103,8 @@
 --   The roles reading or writing thought_facets get SELECT on
 --   subject_repo_settings (the sweep reads the setting in PR 3b, the server's
 --   thread read too); those writing both thought_facets and thought_sources
---   get INSERT and UPDATE as well (db/config.mjs: SELECT in the capture group,
---   the three in the structure group). Every subject writer reads the setting
+--   get INSERT and UPDATE as well (db/config.mjs: SELECT in the capture and
+--   deliverables groups, the three in the structure group). Every subject writer reads the setting
 --   now, through record_thought_subjects, so the SELECT is a writer's need
 --   from here on. The trigger holds what a row
 --   may be, and the setter who may call it (132's convention). The setter is
@@ -99,13 +112,13 @@
 --   caller.
 --
 -- SAFETY
---   One new table, its key and a partial unique index, two triggers and six
+--   One new table, its key and a partial unique index, two triggers and seven
 --   functions; subject_key_valid replaced with a wider rule under its
 --   signature, every key it admitted admitted still; record_thought_subjects
 --   replaced on 130's body, writing as before until a repository is set.
 --   Nothing stored changes until an operator sets a repository. MINOR under
 --   FORK.md's version rules.
---   test-schema [137], test-upgrade [20co].
+--   test-schema [138], test-upgrade [20cp].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 046 (ob1_registry_kind), 061
@@ -352,6 +365,23 @@ COMMENT ON FUNCTION ob1_subject_repo() IS
 -- ---------------------------------------------------------------------------
 -- 6. set_subject_repo — the operator's write, which maps the standing keys
 -- ---------------------------------------------------------------------------
+-- ob1:subject-repo-map-max — a CONTRACT SENTINEL, not prose: the most distinct
+-- unscoped keys one mapping moves (review pass 2). The mapping is one
+-- transaction (the maintainer's choice), and the threads' locks it takes are
+-- held to its commit, two a key (the unscoped one and its scoped twin): 2,000
+-- keys hold 4,000 of the shared lock table's slots, which a default server
+-- sizes at 6,400 (max_locks_per_transaction 64 × max_connections 100) for every
+-- session at once. A brain past it is refused, nothing written; mapping it in
+-- batches is SMD-4559 (the maintainer, 2026-11-23). A function, so a test can
+-- lower it.
+CREATE OR REPLACE FUNCTION ob1_subject_repo_map_max()
+RETURNS integer
+LANGUAGE sql
+IMMUTABLE
+AS $$ SELECT 2000 $$;
+COMMENT ON FUNCTION ob1_subject_repo_map_max() IS
+  'The most distinct unscoped pr:/version: subject keys one set_subject_repo maps (ob1:subject-repo-map-max): the mapping is one transaction and holds two thread locks a key to its commit, so past this it would run a default server''s shared lock table short. A setting that would map more answers {ok: false, error: TOO_MANY_KEYS} and writes nothing. Migration 153 / SMD-3887.';
+
 -- One writer at a time, by a transaction advisory lock taken before the
 -- standing row is read (140's set_work_claim_cap).
 -- p_repo has no default: a clear is a NULL passed on purpose, never a call that named the actor alone (review pass 1).
@@ -378,6 +408,7 @@ DECLARE
   v_unscopable integer := 0;
   v_keys    text[] := '{}';
   v_thts    integer := 0;
+  v_bare    text[] := '{}';
 BEGIN
   SELECT * INTO v_who FROM ob1_work_claim_actor(p_actor, 'set_subject_repo');
   -- The operator's kind by its agent id alone: a name lends no kind (SMD-2608).
@@ -398,8 +429,8 @@ BEGIN
   -- ob1:subject-repo-lock — a CONTRACT SENTINEL, not prose: exclusive here, and shared in record_thought_subjects,
   -- which reads the setting under it. A subject write in flight finishes before the mapping reads the keys, and one
   -- that starts after waits for the commit and reads the new setting, so no bare key is written beside a mapping
-  -- (review pass 1). It is the mapping's only advisory lock: the facets and thoughts it moves are row-locked, which
-  -- holds no slot of the shared lock table however many there are.
+  -- (review pass 1). It takes no thought's advisory lock: the facets and thoughts it moves are row-locked, which holds
+  -- no slot of the shared lock table however many there are; the threads' locks are bounded by the cap below.
   PERFORM pg_advisory_xact_lock(hashtextextended('ob1:subject-repo', 0));
   v_now := clock_timestamp();
   SELECT * INTO v_old FROM subject_repo_settings WHERE ended_at IS NULL FOR UPDATE;
@@ -409,6 +440,20 @@ BEGIN
       'set_at', CASE WHEN v_old.id IS NULL THEN NULL ELSE to_char(v_old.set_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') END,
       'set_by', v_old.set_by, 'mapped', 0, 'closed_alone', 0, 'unscopable', 0, 'keys', 0, 'thoughts', 0);
   END IF;
+  IF v_repo IS NOT NULL THEN
+    -- The keys the mapping moves: each standing unscoped key whose scoped form is a key (one too long once scoped
+    -- stays). Past ob1_subject_repo_map_max() the setting is refused before anything is written (review pass 2).
+    SELECT COALESCE(array_agg(DISTINCT f2.payload->>'key' ORDER BY f2.payload->>'key'), '{}') INTO v_bare
+      FROM thought_facets f2
+     WHERE f2.kind = 'subject' AND f2.valid_until IS NULL
+       AND (f2.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR f2.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
+       AND subject_key_valid(ob1_subject_scoped_key(f2.payload->>'key', v_repo));
+    IF cardinality(v_bare) > ob1_subject_repo_map_max() THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'TOO_MANY_KEYS', 'keys', cardinality(v_bare), 'max', ob1_subject_repo_map_max(),
+        'message', format('setting %s would map %s distinct unscoped pr: and version: keys in one transaction, past the %s one mapping takes (its thread locks are held to the commit); nothing is set',
+                          v_repo, cardinality(v_bare), ob1_subject_repo_map_max()));
+    END IF;
+  END IF;
   IF v_old.id IS NOT NULL THEN
     UPDATE subject_repo_settings SET ended_at = v_now, ended_by = v_who.name, ended_by_agent_id = v_who.agent_id
      WHERE id = v_old.id;
@@ -417,6 +462,11 @@ BEGIN
     INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at)
     VALUES (v_repo, v_who.name, v_who.agent_id, v_now)
     RETURNING * INTO v_new;
+
+    -- Every key the mapping moves, unscoped and scoped, locked now in key order (130's ob1_thread_lock_keys): the
+    -- commit's re-links take them again at once, so the setter queues behind a db/threads.ts batch, which locks its
+    -- keys in the same order, rather than deadlocking with one as thought-id order could (review pass 2).
+    PERFORM ob1_thread_lock_keys(v_bare || ARRAY(SELECT ob1_subject_scoped_key(k, v_repo) FROM unnest(v_bare) AS k));
 
     -- ob1:subject-repo-mapping — a CONTRACT SENTINEL, not prose: every standing
     -- unscoped pr:/version: subject closed and its scoped twin written with its
@@ -465,7 +515,7 @@ BEGIN
         -- the closed facet's — the same inputs, fingerprints and pass — its
         -- recipe saying the key was scoped from what. A facet with no lineage
         -- row (none should be: 111 writes them together) takes the text now.
-        SELECT d.input_ids, d.input_fingerprints, d.recipe, d.canonical_agent_id INTO v_lin
+        SELECT d.input_ids, d.input_fingerprints, d.recipe, d.canonical_agent_id, d.stale_since, d.stale_reason INTO v_lin
           FROM derivations d
          WHERE d.artifact_kind = 'subject' AND d.artifact_id = f.id AND d.produced_by = f.judge;
         IF FOUND THEN
@@ -473,6 +523,12 @@ BEGIN
                                         COALESCE(v_lin.recipe, jsonb_build_object('deterministic', f.way <> 'model'))
                                           || jsonb_build_object('scoped_from', f.key, 'repo', v_repo),
                                         v_lin.canonical_agent_id);
+          IF v_lin.stale_since IS NOT NULL THEN
+            -- A rebuild asked of the closed facet's row (063's mark) is asked of its twin's, which ob1_record_derivation
+            -- wrote unmarked (review pass 2).
+            UPDATE derivations SET stale_since = v_lin.stale_since, stale_reason = v_lin.stale_reason
+             WHERE artifact_kind = 'subject' AND artifact_id = v_id AND produced_by = f.judge;
+          END IF;
         ELSE
           PERFORM ob1_record_derivation('subject', v_id, ARRAY[v_thought], ARRAY[v_fp], f.judge,
                                         jsonb_build_object('deterministic', f.way <> 'model', 'declared', false,
@@ -491,7 +547,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION set_subject_repo(text, jsonb) IS
-  'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes nothing ({changed: false}). Setting a repository maps every standing unscoped pr:/version: subject to it (ob1:subject-repo-mapping): the facet closed and its scoped twin (ob1_subject_scoped_key) written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked alone. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, keys (the distinct scoped keys), thoughts}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Migration 153 / SMD-3887.';
+  'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes nothing ({changed: false}). Setting a repository maps every standing unscoped pr:/version: subject to it (ob1:subject-repo-mapping): the facet closed and its scoped twin (ob1_subject_scoped_key) written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo and a rebuild asked of it (stale_since, stale_reason) kept; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. More than ob1_subject_repo_map_max() distinct keys to map answers {ok: false, error: TOO_MANY_KEYS, keys, max, message}, nothing written. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked, and every key moved has its thread lock (ob1_thread_lock_keys) taken first, in key order. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, keys (the distinct scoped keys), thoughts}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Migration 153 / SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 7. subject_repo_setting — the standing setting, for brain_info
@@ -541,6 +597,7 @@ DECLARE
   -- tickets at most, and the judge's question asks for three at most).
   c_max    constant integer := 3;
   v_keys   text[];
+  v_bare   boolean;
   v_repo   text;
   v_fp     text;
   v_filed  text;
@@ -570,17 +627,15 @@ BEGIN
   END IF;
   -- The set: each key once, in key order.
   SELECT COALESCE(array_agg(DISTINCT k ORDER BY k), '{}') INTO v_keys FROM unnest(p_keys) AS k;
-  -- 153 (SMD-3887): on a brain whose operator names a repository, a bare pr: or version: key is written scoped to it,
-  -- so a pass that found `pr:12` keeps the thread the setter mapped (ob1_subject_scoped_key); a key too long once
-  -- scoped is written bare, as the setter leaves one. Read under the ob1:subject-repo lock, shared here and exclusive
-  -- in set_subject_repo, so a write never interleaves with a mapping. Taken before the thought's lock below; the
-  -- setter takes no thought's advisory lock, so the order cannot cross.
-  PERFORM pg_advisory_xact_lock_shared(hashtextextended('ob1:subject-repo', 0));
-  v_repo := ob1_subject_repo();
-  IF v_repo IS NOT NULL THEN
-    SELECT COALESCE(array_agg(DISTINCT s ORDER BY s), '{}') INTO v_keys
-      FROM (SELECT CASE WHEN subject_key_valid(ob1_subject_scoped_key(k, v_repo)) THEN ob1_subject_scoped_key(k, v_repo) ELSE k END AS s
-              FROM unnest(v_keys) AS k) AS scoped;
+  -- 153 (SMD-3887): a set holding a bare pr: or version: key reads the setting, under the ob1:subject-repo lock,
+  -- shared here and exclusive in set_subject_repo, so a write never interleaves with a mapping; the keys are scoped
+  -- under the thought's lock below. A set with none takes neither (review pass 2): a ticket's or a phrase's write
+  -- waits on no mapping, and a stored setting the refusal names raises only where a key would be scoped. Taken
+  -- before the thought's lock; the setter takes no thought's advisory lock, so the order cannot cross.
+  v_bare := EXISTS (SELECT 1 FROM unnest(v_keys) AS k WHERE k ~ '^pr:[0-9]{1,9}$' OR k ~ '^version:v[0-9]+(\.[0-9]+){1,3}$');
+  IF v_bare THEN
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended('ob1:subject-repo', 0));
+    v_repo := ob1_subject_repo();
   END IF;
   SELECT k INTO v_key FROM unnest(v_keys) AS k WHERE NOT subject_key_valid(k) LIMIT 1;
   IF FOUND THEN
@@ -623,6 +678,27 @@ BEGIN
   IF cardinality(v_keys) > 0 AND (p_fp IS DISTINCT FROM v_fp
        OR CASE WHEN p_by = 'metadata' THEN v_keys[1] IS DISTINCT FROM 'ticket:' || v_filed ELSE v_filed IS NOT NULL END) THEN
     RETURN jsonb_build_object('ok', true, 'action', 'none', 'stale', true);
+  END IF;
+
+  -- 153 (SMD-3887), under the thought's lock: each bare pr: or version: key becomes the key the thought holds already
+  -- for the same number scoped to a repository — the setting's first, else the first by key — so a re-pass keeps its
+  -- thread after the repository changed or was cleared, as the setter leaves keys scoped already (the maintainer,
+  -- 2026-11-23); else, on a brain whose operator names a repository, the key scoped to it (ob1_subject_scoped_key), so
+  -- a pass that found `pr:12` keeps the thread the setter mapped; else bare, as is one too long once scoped. One key
+  -- for one, so the set's bound holds.
+  IF v_bare THEN
+    SELECT COALESCE(array_agg(DISTINCT s ORDER BY s), '{}') INTO v_keys
+      FROM (SELECT CASE WHEN NOT (k ~ '^pr:[0-9]{1,9}$' OR k ~ '^version:v[0-9]+(\.[0-9]+){1,3}$') THEN k
+                        ELSE COALESCE(
+                          (SELECT h.payload->>'key' FROM thought_facets h
+                            WHERE h.thought_id = p_thought AND h.kind = 'subject' AND h.valid_until IS NULL
+                              AND h.payload->>'key' <> k
+                              AND regexp_replace(regexp_replace(h.payload->>'key', '^pr:[^#]+#', 'pr:'), '^version:[^@]+@', 'version:') = k
+                            ORDER BY h.payload->>'key' = ob1_subject_scoped_key(k, v_repo) DESC, h.payload->>'key'
+                            LIMIT 1),
+                          CASE WHEN subject_key_valid(ob1_subject_scoped_key(k, v_repo)) THEN ob1_subject_scoped_key(k, v_repo) ELSE k END)
+                   END AS s
+              FROM unnest(v_keys) AS k) AS scoped;
   END IF;
 
   -- The standing subjects, each kept (under a key of the set, found the same
@@ -687,4 +763,4 @@ END;
 $$;
 
 COMMENT ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) IS
-  'The subject pass''s write of one thought''s own subjects as a set (SMD-3306 PR 7a-3a): the standing `subject` facets made to be exactly these keys (each once; at most three, ob1:subject-set), found one way (`by`) by one pass (judge_key). A standing subject under a key of the set, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); every other standing subject is closed (valid_until); each key not kept is written, with its lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) in the same transaction. NULL or an empty set closes every standing subject. `metadata` names one key. Refused, writing nothing (action none, stale), when the thought''s fingerprint is not the one the pass read, or the ticket it is filed under (ob1_filed_ticket) disagrees: metadata''s key under another ticket than it is filed under now, or any other way''s set on a thought filed since. Under the advisory lock on the thought (111''s), the thought locked FOR KEY SHARE first; the threads of the keys it moves re-link at the commit (120''s triggers, which lock them all in key order). Returns {ok, action, ids (the standing facets after, by key), kept, added, closed, closedIds (on a write), stale?, gone?}: action added when it wrote and closed nothing, closed when it closed and wrote nothing, replaced when it did both, kept when it did neither, none when nothing stood and nothing was asked, or on a refusal. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group), and since 120 what a re-link writes, as record_thought_subject. Since 153 (SMD-3887), on a brain whose operator names a repository (ob1_subject_repo), each bare pr: or version: key is written scoped to it (ob1_subject_scoped_key), bare only when too long once scoped; the setting is read under the ob1:subject-repo lock, shared here and exclusive in set_subject_repo, so a write never interleaves with a mapping, and a caller needs SELECT on subject_repo_settings. Migrations 130, 153 / SMD-3306, SMD-3887.';
+  'The subject pass''s write of one thought''s own subjects as a set (SMD-3306 PR 7a-3a): the standing `subject` facets made to be exactly these keys (each once; at most three, ob1:subject-set), found one way (`by`) by one pass (judge_key). A standing subject under a key of the set, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); every other standing subject is closed (valid_until); each key not kept is written, with its lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) in the same transaction. NULL or an empty set closes every standing subject. `metadata` names one key. Refused, writing nothing (action none, stale), when the thought''s fingerprint is not the one the pass read, or the ticket it is filed under (ob1_filed_ticket) disagrees: metadata''s key under another ticket than it is filed under now, or any other way''s set on a thought filed since. Under the advisory lock on the thought (111''s), the thought locked FOR KEY SHARE first; the threads of the keys it moves re-link at the commit (120''s triggers, which lock them all in key order). Returns {ok, action, ids (the standing facets after, by key), kept, added, closed, closedIds (on a write), stale?, gone?}: action added when it wrote and closed nothing, closed when it closed and wrote nothing, replaced when it did both, kept when it did neither, none when nothing stood and nothing was asked, or on a refusal. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group), and since 120 what a re-link writes, as record_thought_subject. Since 153 (SMD-3887), each bare pr: or version: key is written as the key the thought holds already for the same number scoped to a repository (the setting''s first), so a thread keeps its members after the repository changes or is cleared; else, on a brain whose operator names a repository (ob1_subject_repo), scoped to it (ob1_subject_scoped_key), bare only when too long once scoped. A set holding a bare key reads the setting under the ob1:subject-repo lock, shared here and exclusive in set_subject_repo, so a write never interleaves with a mapping, and its caller needs SELECT on subject_repo_settings; a set with none takes neither. Migrations 130, 153 / SMD-3306, SMD-3887.';

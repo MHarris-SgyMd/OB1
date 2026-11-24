@@ -2852,6 +2852,10 @@ export const ROLE_GRANTS = Object.freeze({
     // does not need (review pass 2).
     Object.freeze({ sequence: "deliverable_events_seq_seq", privileges: Object.freeze(["USAGE"]), since: "134" }),
     Object.freeze({ table: "thought_facets",     privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]), since: "042" }),
+    // 153 (SMD-3887) carries SELECT on the subject-key repository to every role reading or writing thought_facets, this
+    // group's among them, so a role provisioned from this list holds what one carried at the upgrade does (review pass 2).
+    // Its INSERT and UPDATE are the structure group's alone: a deliverables writer never sets the repository.
+    Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT"]), since: "153" }),
   ]),
   // The community schemas under schemas/ (SMD-1796), applied by hand beside the
   // migrations. Upstream's files granted these to Supabase's `service_role`

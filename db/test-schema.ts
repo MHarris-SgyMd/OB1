@@ -23793,19 +23793,19 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
         FROM pg_attribute WHERE attrelid = 'subject_repo_settings'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
     const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('subject_repo_settings_one_standing')) AS d`)).d ?? "";
     const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'subject_repo_settings'::regclass AND NOT tgisinternal`)).t;
-    const FNS = ["subject_key_valid(text)", "ob1_subject_repo_refusal(text)", "ob1_subject_scoped_key(text, text)", "ob1_subject_repo_settings_guard()", "ob1_subject_repo()", "set_subject_repo(text, jsonb)", "subject_repo_setting()"];
+    const FNS = ["subject_key_valid(text)", "ob1_subject_repo_refusal(text)", "ob1_subject_scoped_key(text, text)", "ob1_subject_repo_settings_guard()", "ob1_subject_repo()", "set_subject_repo(text, jsonb)", "subject_repo_setting()", "ob1_subject_repo_map_max()"];
     const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
       `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
     const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
     assert(cols === "id bigint not null, repo text not null, set_by text not null, set_by_agent_id uuid not null, set_at timestamp with time zone not null, ended_at timestamp with time zone, ended_by text, ended_by_agent_id uuid"
            && /UNIQUE INDEX subject_repo_settings_one_standing ON public\.subject_repo_settings USING btree \(\(true\)\) WHERE \(ended_at IS NULL\)/.test(idx)
            && trig === "subject_repo_settings_history:31 subject_repo_settings_no_truncate:34"
-           && fns.length === 7 && fns.every((f) => !f.d && /[Mm]igration(s 111,)? 153 \/ (SMD-3306, )?SMD-3887/.test(f.c ?? ""))
-           && vol["subject_key_valid(text)"] === "i" && vol["ob1_subject_repo_refusal(text)"] === "i" && vol["ob1_subject_scoped_key(text,text)"] === "i"
+           && fns.length === 8 && fns.every((f) => !f.d && /[Mm]igration(s 111,)? 153 \/ (SMD-3306, )?SMD-3887/.test(f.c ?? ""))
+           && vol["subject_key_valid(text)"] === "i" && vol["ob1_subject_repo_refusal(text)"] === "i" && vol["ob1_subject_scoped_key(text,text)"] === "i" && vol["ob1_subject_repo_map_max()"] === "i"
            && vol["ob1_subject_repo()"] === "s" && vol["subject_repo_setting()"] === "s"
            && vol["set_subject_repo(text,jsonb)"] === "v" && vol["ob1_subject_repo_settings_guard()"] === "v"
-           && ["subject_key_valid", "ob1_subject_repo_refusal", "ob1_subject_scoped_key", "ob1_subject_repo_settings_guard", "ob1_subject_repo", "set_subject_repo", "subject_repo_setting"].every((f) => lastDefinerOf(f) === file),
-      `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; seven functions commented by 153 with the right volatilities, none SECURITY DEFINER, 153 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+           && ["subject_key_valid", "ob1_subject_repo_refusal", "ob1_subject_scoped_key", "ob1_subject_repo_settings_guard", "ob1_subject_repo", "set_subject_repo", "subject_repo_setting", "ob1_subject_repo_map_max"].every((f) => lastDefinerOf(f) === file),
+      `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; eight functions commented by 153 with the right volatilities, none SECURITY DEFINER, 153 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
     // The key shapes' sentinel stands above the function in the file (a SQL body keeps no comment); the mapping's is in the setter's body.
     assert(/ob1:subject-key-shapes[\s\S]*CREATE OR REPLACE FUNCTION subject_key_valid/.test(readFileSync(join(MIGRATIONS, file), "utf8"))
            && /ob1:subject-repo-mapping/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'set_subject_repo(text, jsonb)'::regprocedure`)).s)),
@@ -23849,7 +23849,7 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
       `only an operator key by its agent id sets the repository; a name alone, an agent's and an unclassified key answer NOT_OPERATOR, no envelope raises, a bad repository BAD_REPO, nothing set (${refusedBy.map((r) => `${r.error}:${r.kind}`).join(", ")}; ${badRepo.map((r) => r.error).join(",")})`);
 
     // The mapping. Thoughts at known times, so each thread's order is the test's; subjects found by a model pass.
-    const K = "subject:test-137@p1";
+    const K = "subject:test-138@p1";
     let n = 0;
     const name: Record<string, string> = {};
     const thought = async (label: string) => {
@@ -23866,8 +23866,8 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const edges = async (key: string) => (await q<{ newer: string; older: string }>(
       `SELECT thought_id::text AS newer, payload->>'target' AS older FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = $1`, [key]))
       .map((e) => `${name[e.newer] ?? "?"}→${name[e.older] ?? "?"}`).sort().join(" ");
-    const lineageOf = async (thoughtId: string, key: string) => (await one<{ inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown> }>(
-      `SELECT d.input_ids::text[] AS inputs, d.input_fingerprints AS fps, d.produced_by AS by, d.recipe FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
+    const lineageOf = async (thoughtId: string, key: string) => (await one<{ inputs: string[]; fps: string[]; by: string; recipe: Record<string, unknown>; stale: string | null; why: string | null }>(
+      `SELECT d.input_ids::text[] AS inputs, d.input_fingerprints AS fps, d.produced_by AS by, d.recipe, d.stale_since::text AS stale, d.stale_reason AS why FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
         WHERE f.thought_id = $1::uuid AND f.kind = 'subject' AND f.payload->>'key' = $2 ORDER BY f.created_at DESC LIMIT 1`, [thoughtId, key]));
 
     const t1 = await thought("t1"), t2 = await thought("t2"), t3 = await thought("t3"), t4 = await thought("t4"), t5 = await thought("t5"), t6 = await thought("t6");
@@ -23887,6 +23887,20 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const before = { pr12: await edges("pr:12"), other: await edges("pr:o2/other#12") };
     assert(before.pr12 === "t2→t1 t6→t2", `before: the bare pr:12 thread runs t1, t2, t6 (${before.pr12})`);
 
+    // The cap (review pass 2): one mapping holds two thread locks a key to its commit, so past ob1_subject_repo_map_max()
+    // distinct keys the setting is refused, nothing written. Lowered here to 2, under the 3 keys these thoughts hold.
+    await db.exec(`CREATE OR REPLACE FUNCTION ob1_subject_repo_map_max() RETURNS integer LANGUAGE sql IMMUTABLE AS $$ SELECT 2 $$`);
+    const capped = await setRepo("o/r", OP);
+    const keysCapped = `${await keysOf(t1)};${await keysOf(t3)};${await keysOf(t5)}`;
+    await restoreShipped("ob1_subject_repo_map_max");
+    assert(capped.ok === false && capped.error === "TOO_MANY_KEYS" && capped.keys === 3 && capped.max === 2 && /would map 3 distinct unscoped pr: and version: keys/.test(String(capped.message))
+           && (await repoNow()) === null && keysCapped === "pr:12;ticket:SMD-91370,version:v1.2;pr:7,pr:o/r#7"
+           && (await one<{ m: number }>(`SELECT ob1_subject_repo_map_max() AS m`)).m === 2000,
+      `past the cap the setting answers TOO_MANY_KEYS, naming the keys and the cap, and nothing is set or mapped; the shipped cap is 2,000 (${JSON.stringify(capped).slice(0, 160)})`);
+    // A rebuild asked of t6's subject (063's mark) is asked of its twin once mapped.
+    await db.query(`UPDATE derivations d SET stale_since = '2027-06-02T00:00:00Z', stale_reason = 'test: asked before the mapping' FROM thought_facets f
+        WHERE d.artifact_kind = 'subject' AND d.artifact_id = f.id AND f.thought_id = $1::uuid AND f.kind = 'subject' AND f.valid_until IS NULL`, [t6]);
+
     const set1 = await setRepo(" O/R ", OP);
     const unscopedLeft = (await one<{ c: number }>(`SELECT count(*)::int AS c FROM thought_facets f JOIN thoughts t ON t.id = f.thought_id
         WHERE t.content LIKE '[138]%' AND f.kind = 'subject' AND f.valid_until IS NULL AND (f.payload->>'key' ~ '^pr:[0-9]+$' OR f.payload->>'key' ~ '^version:v')`)).c;
@@ -23899,8 +23913,9 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
       `each thought's keys after: scoped with the same by and judge, a ticket beside a version untouched, a key scoped to another repository untouched, a bare key beside its scoped twin closed alone, a moved text mapped too (${JSON.stringify(after).slice(0, 220)})`);
     const l6 = await lineageOf(t6, "pr:o/r#12");
     assert(l6 !== undefined && l6.by === K && JSON.stringify(l6.inputs) === JSON.stringify(t6Before.inputs) && JSON.stringify(l6.fps) === JSON.stringify(t6Before.fps)
-           && l6.recipe.scoped_from === "pr:12" && l6.recipe.repo === "o/r" && l6.recipe.model === "test" && l6.recipe.deterministic === false,
-      `a twin's lineage is its closed facet's — the same inputs, fingerprints and pass, the recipe kept — noting scoped_from and repo; the moved text's twin keeps the fingerprint its subject was found at (${JSON.stringify(l6).slice(0, 200)})`);
+           && l6.recipe.scoped_from === "pr:12" && l6.recipe.repo === "o/r" && l6.recipe.model === "test" && l6.recipe.deterministic === false
+           && l6.stale !== null && l6.stale.startsWith("2027-06-02") && l6.why === "test: asked before the mapping",
+      `a twin's lineage is its closed facet's — the same inputs, fingerprints and pass, the recipe kept, the rebuild asked of it kept — noting scoped_from and repo; the moved text's twin keeps the fingerprint its subject was found at (${JSON.stringify(l6).slice(0, 240)})`);
     const threads = { bare: await edges("pr:12"), scoped: await edges("pr:o/r#12"), other: await edges("pr:o2/other#12") };
     assert(threads.bare === "" && threads.scoped === before.pr12 && threads.other === before.other,
       `the threads re-link at the commit: the bare key's edges close, the scoped key's thread holds the same members in the same order, another repository's unmoved (${JSON.stringify(threads)})`);
@@ -23919,18 +23934,24 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     // No pid filter: PGlite is one backend, and its pg_locks gives pid null against a pg_backend_pid() of 0.
     const repoLock = async (tx: Tx) => (await tx.query<{ m: string }>(`SELECT string_agg(l.mode, ',') AS m FROM pg_locks l
         WHERE l.locktype = 'advisory' AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended('ob1:subject-repo', 0)`)).rows[0].m;
-    let doorMode: string | null = null, setterMode: string | null = null;
-    const t2fp = await fp(t2);  // read before: PGlite's one connection waits on the transaction for a read through db inside it
+    let doorMode: string | null = null, setterMode: string | null = null, ticketMode: string | null = "unread";
+    const t2fp = await fp(t2), t3fp = await fp(t3);  // read before: PGlite's one connection waits on the transaction for a read through db inside it
     await db.transaction(async (tx) => {
       await tx.query(`SELECT record_thought_subjects($1::uuid, '{pr:12}'::text[], 'model', $2, NULL::uuid, $3, NULL::jsonb)`, [t2, K, t2fp]);
       doorMode = await repoLock(tx);
     });
+    // A set with no bare key takes no repository lock (review pass 2): it waits on no mapping.
+    await db.transaction(async (tx) => {
+      await tx.query(`SELECT record_thought_subjects($1::uuid, '{ticket:SMD-91370}'::text[], 'model', $2, NULL::uuid, $3, NULL::jsonb)`, [t3, K, t3fp]);
+      ticketMode = await repoLock(tx);
+    });
+    await subjects(t3, ["version:v1.2", "ticket:SMD-91370"]);
     await db.transaction(async (tx) => {
       await tx.query(`SELECT set_subject_repo('o/r', $1::jsonb)`, [JSON.stringify(OP)]);
       setterMode = await repoLock(tx);
     });
-    assert(doorMode === "ShareLock" && setterMode === "ExclusiveLock",
-      `record_thought_subjects holds the ob1:subject-repo lock shared, set_subject_repo exclusive (${doorMode}; ${setterMode})`);
+    assert(doorMode === "ShareLock" && setterMode === "ExclusiveLock" && ticketMode === null && (await keysOf(t3)) === "ticket:SMD-91370,version:o/r@v1.2",
+      `record_thought_subjects holds the ob1:subject-repo lock shared for a bare key and none for a ticket alone, set_subject_repo exclusive (${doorMode}; ${ticketMode}; ${setterMode})`);
 
     // The one standing: nothing written, in the changed reply's shape. Another repository: keys scoped to the first stay, nothing
     // to map, and a bare key written under it is scoped to it. Cleared, a bare key is written bare; the first set again maps
@@ -23939,12 +23960,29 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const other = await setRepo("o3/x", OP);
     const t7 = await thought("t7");
     await subjects(t7, ["pr:99"]);
+    // A re-pass of a thought mapped under o/r keeps its scoped key under o3/x, and again after a clear, so the thread
+    // does not split a member at a time (the maintainer, 2026-11-23, review pass 2).
+    const keptUnderOther = await subjects(t1, ["pr:12"]);
+    const keysUnderOther = await keysOf(t1);
     await setRepo(null, OP);
+    const keptCleared = await subjects(t1, ["pr:12"]);
+    assert(keptUnderOther.action === "kept" && keysUnderOther === "pr:o/r#12" && keptCleared.action === "kept" && (await keysOf(t1)) === "pr:o/r#12"
+           && (await edges("pr:o/r#12")) === "t2→t1 t6→t2 t8→t6" && (await edges("pr:o3/x#12")) === "" && (await edges("pr:12")) === "",
+      `a bare key the thought holds already scoped keeps that facet, under another repository and after a clear: the thread stays whole (${keptUnderOther.action}, ${keysUnderOther}; ${keptCleared.action}; ${await edges("pr:o/r#12")})`);
     const t9 = await thought("t9"), t10 = await thought("t10");
     const LONG = `version:v1.${"7".repeat(196)}`;  // 207 characters bare, 211 scoped to o/r
     await subjects(t9, ["pr:98"]);
     await subjects(t10, [LONG]);
-    const back = await setRepo("o/r", OP);
+    // The setter takes every key it moves' thread lock before its commit, in key order (review pass 2): held inside the
+    // transaction already, where the re-links' own locks would come only at the commit. None for a key it leaves.
+    const threadLocks = async (tx: Tx, keys: string[]) => (await tx.query<{ k: string }>(`SELECT k FROM unnest($1::text[]) AS k
+        WHERE EXISTS (SELECT 1 FROM pg_locks l WHERE l.locktype = 'advisory' AND ((l.classid::bigint << 32) | l.objid::bigint) = hashtextextended('ob1:thread:' || k, 0)) ORDER BY k`, [keys])).rows.map((r) => r.k).join(",");
+    let back: Record<string, unknown> = {}, heldBefore = "unread";
+    await db.transaction(async (tx) => {
+      back = (await tx.query<{ r: Record<string, unknown> }>(`SELECT set_subject_repo('o/r', $1::jsonb) AS r`, [JSON.stringify(OP)])).rows[0].r;
+      heldBefore = await threadLocks(tx, ["pr:98", "pr:o/r#98", LONG]);
+    });
+    assert(heldBefore === "pr:98,pr:o/r#98", `the setter holds each moved key's thread lock, bare and scoped, before its commit, and none for a key it leaves (${heldBefore})`);
     const t11 = await thought("t11");
     await subjects(t11, [LONG]);
     assert(same.ok === true && same.changed === false && same.mapped === 0 && same.closed_alone === 0 && same.unscopable === 0 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(String(same.set_at))
@@ -23983,6 +24021,12 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     // A stored value the refusal names (the trigger off): the reader raises 22000 naming the setting, the setting says it without raising; a clear mends it.
     await db.exec(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history; UPDATE subject_repo_settings SET repo = 'Bad' WHERE ended_at IS NULL; ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
     const raised = await failure(`SELECT ob1_subject_repo()`);
+    // A write with nothing to scope reads no setting (review pass 2); one with a bare key raises with the reader.
+    const t12 = await thought("t12");
+    const ticketWrite = await subjects(t12, ["ticket:SMD-91372"]);
+    const bareWrite = await failure(`SELECT record_thought_subjects($1::uuid, '{pr:5}'::text[], 'model', $2, NULL::uuid, $3, NULL::jsonb)`, [t12, K, await fp(t12)]);
+    assert(ticketWrite.ok === true && ticketWrite.action === "added" && /^22000 the operator's subject-key repository/.test(bareWrite) && (await keysOf(t12)) === "ticket:SMD-91372",
+      `with a stored repository the refusal names, a ticket's write goes on and a bare key's raises 22000 (${ticketWrite.action}; ${bareWrite.slice(0, 60)})`);
     const said = await settingNow();
     const mend = await setRepo(null, OP);
     assert(/^22000 the operator's subject-key repository .* is refused, so no key is scoped: a repository is lowercase/.test(raised) && said.source === "operator" && said.repo === "Bad" && /lowercase/.test(String(said.refused))
