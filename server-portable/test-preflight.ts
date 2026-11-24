@@ -3648,6 +3648,31 @@ else {
              && /✗  validity\s+migration 149's thought_validity\(uuid\[\]\) missing though the ledger records 149; the validity tool faults on every call/.test(noFn.out)
              && /!  validity\s+thought_validity\(uuid\[\]\) missing, and .*so whether migration 149 is recorded is unknown/.test(noFnUnread.out),
              `…and the validity row names a table its read cannot SELECT, a warning; with every table readable, ok; the function gone while the ledger records 149, a failure, and to a role that cannot read the ledger a warning (${validityLine(noAudit.out)} | ${validityLine(missingBoth.out)} | ${validityLine(noFn.out)} | ${validityLine(noFnUnread.out)})`);
+      // 153 and 154's subject-key repository (SMD-3887 PR 3b-1): ok with none set; the role unable to read it, a stored
+      // value the refusal names, and a repository set without 154's link rule, each a warning; a repository set, ok.
+      const repoLine = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+subject repository\s/.test(l))?.trim() ?? "(no subject repository row)";
+      let repoUnread: { out: string }, repoSet: { out: string }, repoNoLinks: { out: string }, repoRefused: { out: string };
+      await claims.unsafe("REVOKE SELECT ON subject_repo_settings FROM ob1_pf_capture");
+      try { repoUnread = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { await claims.unsafe("GRANT SELECT ON subject_repo_settings TO ob1_pf_capture"); }
+      await claims`SELECT set_agent_kind('pf-subject-op', 'operator')`;
+      const pfOp = JSON.stringify({ name: "pf-subject-op", agent_id: String((await claims`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'pf-subject-op'`)[0].id) });
+      await claims`SELECT set_subject_repo('o/pf', (${pfOp}::text)::jsonb)`;
+      try {
+        repoSet = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
+        await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key(text, text) RENAME TO ob1_subject_linked_key_away_pf");
+        try { repoNoLinks = await run({ ...SQL_ENV, DATABASE_URL: LIVE }); } finally { await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key_away_pf(text, text) RENAME TO ob1_subject_linked_key"); }
+        await claims.unsafe("ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history; UPDATE subject_repo_settings SET repo = 'Bad' WHERE ended_at IS NULL; ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history");
+        repoRefused = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
+      } finally {
+        await claims`SELECT set_subject_repo(NULL, (${pfOp}::text)::jsonb)`;
+      }
+      assert(/✓  subject repository\s+none set: pr: and version: keys stay unscoped; the server's role reads the setting/.test(missingBoth.out)
+             && /!  subject repository\s+the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key and a thread read by one fault/.test(repoUnread.out)
+             && /✓  subject repository\s+o\/pf: a bare pr: or version: key is scoped to it, or to the repository its GitHub link names/.test(repoSet.out)
+             && /!  subject repository\s+o\/pf is set but migration 154 is not applied: a key its GitHub link names for another repository is scoped to o\/pf/.test(repoNoLinks.out)
+             && /!  subject repository\s+the stored repository "Bad" is refused \(a repository is lowercase.*: no bare pr: or version: key can be written/.test(repoRefused.out)
+             && (await claims`SELECT ob1_subject_repo() AS r`)[0].r === null,
+             `…and the subject repository row: none set, ok; the role unable to read it, a warning; set, ok; set without 154, a warning; a stored value the refusal names, a warning; the test's setting cleared after (${[missingBoth, repoUnread, repoSet, repoNoLinks, repoRefused].map((r) => repoLine(r.out)).join(" | ").slice(0, 600)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });

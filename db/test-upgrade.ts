@@ -808,11 +808,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // 153 redefines 111's subject_key_valid on its own signature and 130's
   // record_thought_subjects and close_thought_subjects, and adds the
   // operator's subject-key repository setting and its setter, refusing by
-  // name without 016, 046, 061, 111, 113, 115, 120 or 130's index ([20cp]) —
+  // name without 016, 046, 061, 111, 113, 115, 120 or 130's index ([20cp]);
+  // 154 redefines 153's set_subject_repo and record_thought_subjects with a
+  // GitHub link's repository first, refusing by name without 016, 046, 111,
+  // 113, 115, 130 or 153 ([20cq]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 124, `030 is among the last one hundred and twenty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 125, `030 is among the last one hundred and twenty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7769,6 +7772,82 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
       `a re-apply with a setting standing is a no-op: the keys, the repository and the grants as they were (${await keys()}; ${await grants()})`);
 
     for (const role of [READER, WRITER, FACETS, NONE]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+  } catch (e) {
+    assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
+  } finally {
+    await sql.close();
+  }
+}
+
+console.log("\n[20cq] Migration 154: onto a populated brain at the file before it — refused without each function it needs and 153's setting, by name, nothing changed; then applied: the bare pr: subjects as they were, a link changing nothing with no repository set; an operator's setting then maps a key its GitHub link names to the link's repository, the rest to the setting's; a re-apply a no-op (SMD-3887)");
+{
+  const the154 = MIGRATIONS.find((f) => /^\d{3}_subject_key_links\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the154.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the154 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const K = "subject:upgrade-154@p1";
+    const thought = async (content: string, mins: number) =>
+      String((await sql`INSERT INTO thoughts (content, content_fingerprint, created_at) VALUES (${content}, content_fingerprint_of(${content}), '2027-09-01T00:00:00Z'::timestamptz + make_interval(mins => ${mins}::int)) RETURNING id`)[0].id);
+    const subjects = async (id: string, keys: string[]) =>
+      // An array literal: Bun's client sends a JS array as no Postgres array here (these keys hold no comma or quote).
+      sql`SELECT record_thought_subjects(${id}::uuid, ${`{${keys.join(",")}}`}::text[], 'model', ${K}, NULL::uuid, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${id}::uuid), '{"deterministic": false}'::jsonb)`;
+    const a = await thought("upgrade 154: PR 12 https://github.com/siggymd/client/pull/12", 1), b = await thought("upgrade 154: PR 12 here", 2);
+    await subjects(a, ["pr:12"]);
+    await subjects(b, ["pr:12"]);
+    const keyOf = async (id: string) => String((await sql`SELECT string_agg(payload->>'key', ',' ORDER BY 1) AS k FROM thought_facets WHERE thought_id = ${id}::uuid AND kind = 'subject' AND valid_until IS NULL`)[0].k);
+    const linked = async () => (await sql`SELECT to_regprocedure('ob1_subject_linked_key(text, text)') IS NOT NULL AS m`)[0].m as boolean;
+    const before = `${await keyOf(a)};${await keyOf(b)}`;
+
+    // Without any one thing it needs, the file is refused by name and changes nothing.
+    const apply154 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 }).then(() => "applied", (e: Error) => e.message);
+    const needs: [string, string, string][] = [
+      ["content_fingerprint_of", "text", "016 (content_fingerprint_of)"],
+      ["ob1_registry_kind", "uuid, text", "046 (ob1_registry_kind)"],
+      ["ob1_record_derivation", "text, uuid, uuid[], text[], text, jsonb, uuid", "111 (ob1_record_derivation)"],
+      ["ob1_filed_ticket", "jsonb", "113 (ob1_filed_ticket)"],
+      ["ob1_work_claim_actor", "jsonb, text", "115 (ob1_work_claim_actor)"],
+      ["ob1_thread_lock_keys", "text[]", "130 (ob1_thread_lock_keys)"],
+      ["ob1_subject_scoped_key", "text, text", "153 (ob1_subject_scoped_key)"],
+      ["ob1_subject_unscoped_key", "text", "153 (ob1_subject_unscoped_key)"],
+      ["ob1_subject_repo", "", "153 (ob1_subject_repo)"],
+      ["ob1_subject_repo_refusal", "text", "153 (ob1_subject_repo_refusal)"],
+      ["ob1_subject_repo_map_max", "", "153 (ob1_subject_repo_map_max)"],
+    ];
+    const unrefused: string[] = [];
+    for (const [name, args, says] of needs) {
+      await sql.unsafe(`ALTER FUNCTION ${name}(${args}) RENAME TO ${name}_away`);
+      const got = await apply154();
+      await sql.unsafe(`ALTER FUNCTION ${name}_away(${args}) RENAME TO ${name}`).catch((e: Error) => unrefused.push(`${name} could not be put back: ${e.message.slice(0, 60)}`));
+      if (!got.startsWith(`migration ${NUM} needs ${says}; this schema lacks it`) || (await linked())) unrefused.push(`${name}: ${got.slice(0, 80)}`);
+    }
+    await sql.unsafe(`ALTER TABLE subject_repo_settings RENAME TO subject_repo_settings_away`);
+    const noTable = await apply154();
+    await sql.unsafe(`ALTER TABLE subject_repo_settings_away RENAME TO subject_repo_settings`);
+    if (!noTable.startsWith(`migration ${NUM} needs 153 (subject_repo_settings`) || (await linked())) unrefused.push(`the setting: ${noTable.slice(0, 80)}`);
+    assert(unrefused.length === 0 && !(await linked()) && `${await keyOf(a)};${await keyOf(b)}` === before,
+      `without any one of the eleven functions or 153's setting it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the table tried`})`);
+
+    // Applied: nothing stored moves, and with no repository set a link changes nothing.
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 });
+    const c = await thought("upgrade 154: github.com/siggymd/client/pull/12 again", 3);
+    await subjects(c, ["pr:12"]);
+    assert((await linked()) && before === "pr:12;pr:12" && `${await keyOf(a)};${await keyOf(b)}` === before && (await keyOf(c)) === "pr:12",
+      `applied: the bare keys as they were, and a link changes nothing with no repository set (${await keyOf(c)})`);
+
+    // An operator names the repository: a key its link names goes to the link's repository, the rest to the setting's.
+    await sql`SELECT set_agent_kind('upgrade-154-op', 'operator')`;
+    const op = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'upgrade-154-op'`)[0].id);
+    // Through text: Bun's client sends a string cast straight to jsonb as a jsonb string, not the object.
+    const set = (await sql`SELECT set_subject_repo('o/r', (${JSON.stringify({ name: "upgrade-154-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; mapped: number };
+    assert(set.ok === true && set.mapped === 3 && (await keyOf(a)) === "pr:siggymd/client#12" && (await keyOf(c)) === "pr:siggymd/client#12" && (await keyOf(b)) === "pr:o/r#12",
+      `an operator's setting maps a key its link names to the link's repository and the rest to the setting's (${JSON.stringify(set)})`);
+
+    // A re-apply with a setting standing is a no-op.
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 });
+    assert((await keyOf(a)) === "pr:siggymd/client#12" && (await keyOf(b)) === "pr:o/r#12" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r",
+      "a re-apply with a setting standing is a no-op: the keys and the repository as they were");
   } catch (e) {
     assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
   } finally {

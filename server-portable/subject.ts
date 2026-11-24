@@ -91,6 +91,11 @@ export function unscopedKey(key: string): string {
   return key.replace(/^pr:[^#/]+\/[^#]+#/, "pr:").replace(/^version:[^@/]+\/[^@]+@/, "version:");
 }
 
+/** 153's ob1_subject_scoped_key: a bare pr: or version: key scoped to a repository (`pr:12` in `o/r` is `pr:o/r#12`); any other key as given. */
+export function scopedKey(key: string, repo: string): string {
+  return BARE_PR.test(key) ? key.replace(/^pr:/, `pr:${repo}#`) : BARE_VERSION.test(key) ? key.replace(/^version:/, `version:${repo}@`) : key;
+}
+
 /**
  * The standing key a found key is written as, as 153's door writes it: the key itself when it stands, or for a bare
  * pr: or version: key the standing key scoped from it (the setting's repository's, when one is given, else the first
@@ -101,7 +106,7 @@ export function heldAs(found: string, standing: readonly string[], repo: string 
   if (standing.includes(found)) return found;
   if (!BARE_PR.test(found) && !BARE_VERSION.test(found)) return undefined;
   const scoped = standing.filter((s) => unscopedKey(s) === found).sort();
-  const own = repo === null ? undefined : scoped.find((s) => s === found.replace(/^pr:/, `pr:${repo}#`).replace(/^version:/, `version:${repo}@`));
+  const own = repo === null ? undefined : scoped.find((s) => s === scopedKey(found, repo));
   return own ?? scoped[0];
 }
 

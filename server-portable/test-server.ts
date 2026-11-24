@@ -9322,6 +9322,31 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
     `search's and fetch's replies carry the key where an item is marked and the unread note where a read failed, once, as priorityNote; none where nothing is said (${String(compatBad.unreviewedNote).slice(0, 60)})`);
 }
 
+console.log("\n[36j] The operator's subject-key repository in brain_info (SMD-3887 PR 3b-1, migration 153): subject_repo_setting()'s jsonb read, a reply with no source a fault; the row before 153, unread, none, the operator's, the operator's refused, with the setter's name and the refusal cut");
+{
+  const { subjectRepoValue, subjectRepoLine } = await import("./brain-info.ts");
+  const none = subjectRepoValue({ repo: null, source: "none" });
+  const set = subjectRepoValue({ repo: "mharris-sgymd/ob1", source: "operator", set_at: "2026-11-24T10:00:00.5+00:00", set_by: "op-key", refused: null });
+  const refused = subjectRepoValue({ repo: "Bad", source: "operator", set_at: "2026-11-24T10:00:00+00:00", set_by: "op-key", refused: "a repository is lowercase" });
+  const unread = { reason: "refused", message: "permission denied for table subject_repo_settings" } as never;
+  const lines = [
+    subjectRepoLine({ subjectRepo: null, unread: {} }),
+    subjectRepoLine({ subjectRepo: null, unread: { subjectRepo: unread } }),
+    subjectRepoLine({ subjectRepo: none, unread: {} }),
+    subjectRepoLine({ subjectRepo: set, unread: {} }),
+    subjectRepoLine({ subjectRepo: refused, unread: {} }),
+  ];
+  const badRead = [{ repo: "o/r" }, { source: "builtin" }, [], 3].map((r) => { try { subjectRepoValue(r); return "read"; } catch { return "threw"; } });
+  const long = subjectRepoLine({ subjectRepo: subjectRepoValue({ repo: "o/r", source: "operator", set_at: "2026-11-24T10:00:00+00:00", set_by: "k".repeat(200), refused: "r".repeat(1000) }), unread: {} });
+  assert(lines[0] === "none — migration 153 is not applied, so pr: and version: keys stay unscoped" && /^\? \(subject_repo_settings /.test(lines[1])
+      && lines[2] === "none: pr: and version: keys stay unscoped"
+      && lines[3] === "mharris-sgymd/ob1 (set 2026-11-24T10:00:00.500Z by op-key): a bare pr: or version: key is scoped to it, or to the repository its GitHub link names"
+      && lines[4] === "Bad, REFUSED, so no bare pr: or version: key can be written (set 2026-11-24T10:00:00.000Z by op-key): a repository is lowercase. An operator key sets it again, or clears it, through set_subject_repo"
+      && badRead.every((r) => r === "threw") && subjectRepoValue(null) === null
+      && long.length < 700 && long.includes(` by ${"k".repeat(79)}…)`) && long.includes(`${"r".repeat(299)}…. An operator key`),
+    `brain_info's Subject repository row: before 153, unread, none, the operator's, the operator's refused, cut; a reply with no source throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+}
+
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
   const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT, LITTLE_BAR, LITTLE_MEASURED_ON } = await import("./core/plan.ts");

@@ -19605,8 +19605,9 @@ if (want("16")) {
     // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 134's validator, which
     // carries 120's with the deliverable kind (SMD-1715), and the settled parts' file, whose lineage writer carries
     // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row),
-    // and the subject-repo file, whose key rule replaces 111's with a key scoped to its repository (SMD-3887).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) || /^\d{3}_subject_repo_scope\.sql$/.test(f) });
+    // and the subject-repo file, whose key rule replaces 111's with a key scoped to its repository, and the subject-key
+    // links file, whose door carries the subject-repo file's with a link's repository first (SMD-3887).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) || /^\d{3}_subject_repo_scope\.sql$/.test(f) || /^\d{3}_subject_key_links\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an

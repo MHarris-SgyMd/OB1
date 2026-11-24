@@ -1827,6 +1827,19 @@ export class SqlStore implements ThoughtStore {
     return { key, total, members, links: read.slice(0, THREAD_LINKS_SHOWN), linksMore: read.length > THREAD_LINKS_SHOWN };
   }
 
+  async subjectRepo(): Promise<string | null> {
+    let r: Record<string, unknown> | undefined;
+    try {
+      [r] = await this.sql`SELECT subject_repo_setting() AS s`;
+    } catch (e) {
+      // A brain before 153 has no setting; any other failure, the role's grant included, is a fault.
+      if (String((e as { errno?: unknown }).errno ?? "") === "42883" && /subject_repo_setting\(/.test(String((e as Error).message))) return null;
+      throw e;
+    }
+    const s = r?.s as { repo?: unknown; refused?: unknown } | null | undefined;
+    return typeof s?.repo === "string" && s.repo !== "" && (s.refused ?? null) === null ? s.repo : null;
+  }
+
   async threadPlaces(id: string): Promise<ThreadPlace[]> {
     if (!UUID_RE.test(id)) return [];
     // Each standing subject's thread, numbered as threadPage numbers it, and the thought's neighbours there.

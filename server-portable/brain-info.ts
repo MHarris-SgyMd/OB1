@@ -51,7 +51,7 @@ export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "o
 export type CountedTable = (typeof COUNTED_TABLES)[number];
 
 /** The tables the read asks after: the counted ones, the config, the ledger, where consolidation's findings stand (SMD-2680) and what became of those posted to the board (SMD-2682). */
-const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings", "work_claim_cap_settings", "priority_findings"] as const;
+const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings", "work_claim_cap_settings", "subject_repo_settings", "priority_findings"] as const;
 type KnownTable = (typeof KNOWN_TABLES)[number];
 
 export interface HnswIndex {
@@ -191,6 +191,13 @@ export interface DatabaseFacts {
    * `unread` entry: before 140, the built-in 50) or not read (`unread` names it). Not a stats read.
    */
   workClaimCap: WorkClaimCapSetting | null;
+  /**
+   * The operator's repository for the brain's pr: and version: subject keys (SMD-3887, migration 153): `repo` the one
+   * standing, or null (keys stay unscoped), who set it and when, and `refused` what is wrong with a stored value (no
+   * bare key can be written while it stands), from subject_repo_setting(). Null when the table is absent (no `unread`
+   * entry: before 153) or not read (`unread` names it). Not a stats read.
+   */
+  subjectRepo: SubjectRepoSetting | null;
   /**
    * The priority review's findings (SMD-3671 PR 2, migration 142): how many are pending, the oldest pending one's age
    * in seconds since it was found (null when none is pending), the pending by kind, and how many an operator decided in
@@ -1831,12 +1838,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                'board_findings_posted', to_regclass('board_findings_posted') IS NOT NULL,
                'priority_weight_settings', to_regclass('priority_weight_settings') IS NOT NULL,
                'work_claim_cap_settings', to_regclass('work_claim_cap_settings') IS NOT NULL,
+               'subject_repo_settings', to_regclass('subject_repo_settings') IS NOT NULL,
                'priority_findings', to_regclass('priority_findings') IS NOT NULL) AS resolved,
              (SELECT COALESCE(jsonb_object_agg(relname, schemas), '{}'::jsonb) FROM (
                 SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
-                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'work_claim_cap_settings', 'priority_findings')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'subject_repo_settings', 'work_claim_cap_settings', 'priority_findings')
                    -- Another tool's schema_migrations (Supabase's auth and
                    -- supabase_migrations, Rails, dbmate) is not this ledger:
                    -- only one carrying migrate.ts's sha256 column counts
@@ -1870,6 +1878,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       threads: null,
       priorityWeights: null,
       workClaimCap: null,
+      subjectRepo: null,
       priorityFindings: null,
       findings: null,
       hnsw: (cat.hnsw as { index: string; table: string; opts: string | null }[]).map((h) => ({ index: h.index, table: h.table, ...parseHnswOptions(h.opts) })),
@@ -1948,6 +1957,14 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         table: "work_claim_cap_settings",
         read: async (sp) => { facts.workClaimCap = capSettingValue((await sp`SELECT work_claim_cap_setting() AS s`)[0]?.s); },
         clear: () => { facts.workClaimCap = null; },
+      },
+      // The operator's subject-key repository (SMD-3887, migration 153): read by 153's function, which says what is
+      // wrong with a stored value without raising.
+      {
+        field: "subjectRepo",
+        table: "subject_repo_settings",
+        read: async (sp) => { facts.subjectRepo = subjectRepoValue((await sp`SELECT subject_repo_setting() AS s`)[0]?.s); },
+        clear: () => { facts.subjectRepo = null; },
       },
       // The priority review's findings (SMD-3671 PR 2, migration 142): the pending and the decided in 30 days alone, as
       // decided ones stay as history. Not a stats read: preflight's priority findings row reads it.
@@ -2174,6 +2191,21 @@ export function capSettingValue(r: unknown): WorkClaimCapSetting | null {
   if (!o || typeof o.cap !== "number") throw new Error("the work-claim cap read answered no setting");
   const at = typeof o.set_at === "string" && !Number.isNaN(Date.parse(o.set_at)) ? new Date(o.set_at).toISOString() : null;
   return { cap: o.cap, source: o.source === "operator" ? "operator" : "builtin", setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null };
+}
+
+/**
+ * The operator's repository for the brain's pr: and version: subject keys (SMD-3887, migration 153): the one standing,
+ * or null when none is (keys stay unscoped), who set it and when, and `refused` what is wrong with a stored value.
+ */
+export type SubjectRepoSetting = { repo: string | null; setAt: string | null; setBy: string | null; refused: string | null };
+/** subject_repo_setting()'s jsonb → the record's setting. An answer with no `source` throws: a reply this server cannot read is a fault. */
+export function subjectRepoValue(r: unknown): SubjectRepoSetting | null {
+  if (r === null || r === undefined) return null;
+  const o = typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : null;
+  if (!o || (o.source !== "none" && o.source !== "operator")) throw new Error("the subject-key repository read answered no setting");
+  if (o.source === "none") return { repo: null, setAt: null, setBy: null, refused: null };
+  const at = typeof o.set_at === "string" && !Number.isNaN(Date.parse(o.set_at)) ? new Date(o.set_at).toISOString() : null;
+  return { repo: typeof o.repo === "string" ? o.repo : null, setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null };
 }
 
 /** The threads' census as the record carries it: its counts, and no key (see DatabaseFacts.threads). */
@@ -2658,6 +2690,22 @@ export function workClaimCapLine(db: Pick<DatabaseSummary, "workClaimCap" | "unr
     : `the operator's, REFUSED, so every new claim fails: ${c.cap} (${when}): ${cut(c.refused, 300)}. An operator key sets it again, or clears it, through set_work_claim_cap`;
 }
 
+/** The operator's subject-key repository (SMD-3887): none (keys unscoped), the operator's, or the operator's refused (no bare key can be written). */
+export function subjectRepoLine(db: Pick<DatabaseSummary, "subjectRepo" | "unread">): string {
+  const r = db.subjectRepo;
+  if (r === null) {
+    const u = db.unread.subjectRepo;
+    return u ? `? (${deniedObject(u.message)?.name ?? "subject_repo_settings"} ${unreadWords(u)})` : "none — migration 153 is not applied, so pr: and version: keys stay unscoped";
+  }
+  if (r.repo === null) return "none: pr: and version: keys stay unscoped";
+  const cut = (t: string, n: number) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+  const when = `set ${r.setAt ?? "?"}${r.setBy ? ` by ${cut(JSON.stringify(r.setBy).slice(1, -1), 80)}` : ""}`;
+  const repo = cut(JSON.stringify(r.repo).slice(1, -1), 160);
+  return r.refused === null
+    ? `${repo} (${when}): a bare pr: or version: key is scoped to it, or to the repository its GitHub link names`
+    : `${repo}, REFUSED, so no bare pr: or version: key can be written (${when}): ${cut(r.refused, 300)}. An operator key sets it again, or clears it, through set_subject_repo`;
+}
+
 /**
  * The Threads row (SMD-3306 PR 7a-2c): the threads and whether every key read is linked, how far a bounded census read,
  * or why it was not read.
@@ -2864,6 +2912,7 @@ export function brainInfoRows(info: BrainInfo): [label: string, value: string][]
   lines.push(row("Threads", threadsLine(db)));
   lines.push(row("Priority weights", priorityWeightsLine(db)));
   lines.push(row("Work-claim cap", workClaimCapLine(db)));
+  lines.push(row("Subject repository", subjectRepoLine(db)));
   lines.push(row("Priority findings", priorityFindingsLine(db)));
   if (counts) lines.push(row("Findings", findingsLine(db)));
   lines.push(row("Workers", workersLine(db)));

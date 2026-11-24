@@ -8,7 +8,7 @@
 // across one.
 
 import { thoughtTitle } from "../thoughts.ts";
-import { isTicket, subjectKeyValid } from "../subject.ts";
+import { isTicket, scopedKey, subjectKeyValid } from "../subject.ts";
 import { ListCursorRefused, UUID_RE, type ThoughtStore, type ThreadLink, type ThreadPage, type ThreadTicket } from "../store.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
@@ -90,8 +90,15 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
   if (after !== undefined && !byKey) return refuse({ code: "REFUSED_THREAD_INPUT", retryable: false, problem: "after_needs_key" });
   const store = await ctx.store();
   if (byKey) {
-    const k = threadKey(key);
+    let k = threadKey(key);
     if (k === null) return refuse({ code: "REFUSED_THREAD_INPUT", retryable: false, problem: "key_shape", value: key });
+    // A bare pr: or version: key reads as the operator's repository, where the setter and the writer put its subjects
+    // (153, SMD-3887 PR 3b-1; the maintainer, 2026-11-23); a key scoped already reads as given. One too long once
+    // scoped stays bare, as the writer leaves it.
+    if (/^(pr:[0-9]|version:v)/.test(k)) {
+      const repo = await store.subjectRepo();
+      if (repo !== null && subjectKeyValid(scopedKey(k, repo))) k = scopedKey(k, repo);
+    }
     const pos = after === undefined ? undefined : parseThreadCursor(after);
     if (pos === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after ?? "", reason: "shape" });
     let page: ThreadPage;

@@ -2301,6 +2301,25 @@ console.log("\n[16b] Work threads, review pass 1 (SMD-3306 PR 7a-2a): a thread w
       && threadsOf(sMcp.sc)[0]?.key === "pr:o3/x.y#12" && sMcp.text.includes("Thread pr:o3/x.y#12 — ")
       && sDots.status === 400 && sDots.body.problem === "key_shape",
     `a scoped key reads its thread in any case and without leading zeros, its key shown shaped; a repository of .. is no key (${sPr.status} ${sVer.status} ${JSON.stringify(threadsOf(sMcp.sc)[0]?.key)} ${sDots.status} ${sDots.body.problem})`);
+  // A bare key reads as the operator's repository once one is set (SMD-3887 PR 3b-1): pr:12 and version:v01.2 read the
+  // threads scoped to o3/x.y, through both doors. The setting is planted with the guard off and taken out after, so the
+  // setter's mapping moves no other section's keys.
+  await sql.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history`);
+  const [{ id: plantedRepo }] = await sql`INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at) VALUES ('o3/x.y', 'test', gen_random_uuid(), now()) RETURNING id`;
+  await sql.unsafe(`ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+  let bareRead: { body: Record<string, unknown> }, bareVer: { body: Record<string, unknown> }, bareMcp: { sc: Record<string, unknown> };
+  try {
+    [bareRead, bareVer, bareMcp] = await Promise.all([rest("GET", "/v1/thread?key=pr:12"), rest("GET", "/v1/thread?key=version:v01.2"), mcp("thread", { key: "PR:12" })]);
+  } finally {
+    await sql.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history`);
+    await sql`DELETE FROM subject_repo_settings WHERE id = ${plantedRepo}`;
+    await sql.unsafe(`ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+  }
+  const afterClear = threadsOf((await rest("GET", "/v1/thread?key=pr:12")).body)[0];
+  assert(threadsOf(bareRead.body)[0]?.key === "pr:o3/x.y#12" && threadsOf(bareRead.body)[0].total === 1 && threadsOf(bareRead.body)[0].members[0]?.id === scopedPr
+         && threadsOf(bareVer.body)[0]?.key === "version:o3/x.y@v1.2" && threadsOf(bareMcp.sc)[0]?.key === "pr:o3/x.y#12"
+         && afterClear?.key === "pr:12" && afterClear.total === 1 && afterClear.members[0]?.id === prThought,
+    `with a repository set a bare key reads its scoped thread through both doors, and with none the bare one again (${threadsOf(bareRead.body)[0]?.key}; ${threadsOf(bareVer.body)[0]?.key}; ${afterClear?.key})`);
   // The render's shape check is subject_key_valid's (review pass 3): a key of the scoped shape whose repository is `..`
   // is shown as a JSON string and given as null in the value, as a phrase key is, never as a shaped key.
   const dotsShown = say.renderThread(ok({ id: null, threads: [{ key: "pr:o/..#1", total: 0, place: null, members: [], earlier: false, cursor: null, linked: [], linkedMore: false }] }));

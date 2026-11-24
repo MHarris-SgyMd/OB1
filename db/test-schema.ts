@@ -238,9 +238,12 @@ function definedIn(file: string): string[] {
  * record_thought_subjects and close_thought_subjects, each taking the
  * repository's lock, the first with a bare pr: or version: key scoped once
  * the operator names a repository (SMD-3887), and carries 130: a restore
- * re-runs 130, putting back its other functions, then 153.
+ * re-runs 130, putting back its other functions, then 153. 154 is 153's
+ * set_subject_repo and record_thought_subjects with a GitHub link's
+ * repository first (SMD-3887 PR 3b-1), and carries 153: a restore re-runs
+ * 153, then 154.
  */
-const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"], "153": ["130"] };
+const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"], "153": ["130"], "154": ["153"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
   const latest = new Set(fns.map(lastDefinerOf));
   for (let grew = true; grew;) {
@@ -18897,7 +18900,8 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   // close_thought_subjects's last definer is the subject-repo file, which carries 130's bodies with a bare key scoped
   // once a repository is set and the repository's lock taken ([138]); by name.
   for (const fn of ["ob1_thread_lock_keys", "record_thought_subjects", "record_thought_subject", "close_thought_subjects", "close_thought_subject", "ob1_thread_relink_subject"]) {
-    const by = fn === "record_thought_subjects" || fn === "close_thought_subjects" ? (files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql") : file;
+    const by = fn === "record_thought_subjects" ? (files.find((f) => /^\d{3}_subject_key_links\.sql$/.test(f)) ?? "no NNN_subject_key_links.sql")
+      : fn === "close_thought_subjects" ? (files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql") : file;
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === by, `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const [idx] = await q<{ uniq: string | null; old: string | null }>(`SELECT
@@ -23801,12 +23805,12 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     assert(cols === "id bigint not null, repo text not null, set_by text not null, set_by_agent_id uuid not null, set_at timestamp with time zone not null, ended_at timestamp with time zone, ended_by text, ended_by_agent_id uuid"
            && /UNIQUE INDEX subject_repo_settings_one_standing ON public\.subject_repo_settings USING btree \(\(true\)\) WHERE \(ended_at IS NULL\)/.test(idx)
            && trig === "subject_repo_settings_history:31 subject_repo_settings_no_truncate:34"
-           && fns.length === 10 && fns.every((f) => !f.d && /[Mm]igration(s 111,)? 153 \/ (SMD-3306, )?SMD-3887/.test(f.c ?? ""))
+           && fns.length === 10 && fns.every((f) => !f.d && /[Mm]igrations? (111, )?153(, 154)? \/ (SMD-3306, )?SMD-3887/.test(f.c ?? ""))
            && vol["subject_key_valid(text)"] === "i" && vol["ob1_subject_repo_refusal(text)"] === "i" && vol["ob1_subject_scoped_key(text,text)"] === "i" && vol["ob1_subject_repo_map_max()"] === "i" && vol["ob1_subject_repo_settings_by_setter()"] === "s" && vol["ob1_subject_unscoped_key(text)"] === "i"
            && vol["ob1_subject_repo()"] === "s" && vol["subject_repo_setting()"] === "s"
            && vol["set_subject_repo(text,jsonb,boolean)"] === "v" && vol["ob1_subject_repo_settings_guard()"] === "v"
-           && ["subject_key_valid", "ob1_subject_repo_refusal", "ob1_subject_scoped_key", "ob1_subject_repo_settings_guard", "ob1_subject_repo", "set_subject_repo", "subject_repo_setting", "ob1_subject_repo_map_max", "ob1_subject_repo_settings_by_setter", "close_thought_subjects", "ob1_subject_unscoped_key"].every((f) => lastDefinerOf(f) === file),
-      `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; ten functions commented by 153 with the right volatilities, none SECURITY DEFINER, 153 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+           && ["subject_key_valid", "ob1_subject_repo_refusal", "ob1_subject_scoped_key", "ob1_subject_repo_settings_guard", "ob1_subject_repo", "subject_repo_setting", "ob1_subject_repo_map_max", "ob1_subject_repo_settings_by_setter", "close_thought_subjects", "ob1_subject_unscoped_key"].every((f) => lastDefinerOf(f) === file),
+      `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; ten functions commented by 153 with the right volatilities, none SECURITY DEFINER, 153 the last definer of each but the setter, 154's ([139]) (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
     // The key shapes' sentinel stands above the function in the file (a SQL body keeps no comment); the mapping's is in the setter's body.
     assert(/ob1:subject-key-shapes[\s\S]*CREATE OR REPLACE FUNCTION subject_key_valid/.test(readFileSync(join(MIGRATIONS, file), "utf8"))
            && /ob1:subject-repo-mapping/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'set_subject_repo(text, jsonb, boolean)'::regprocedure`)).s)),
@@ -24113,12 +24117,130 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const c2 = await census();
     assert(c1.s === c2.s && c1.e === c2.e && (await functionsNamed("subject_key_valid")) === 1 && (await functionsNamed("set_subject_repo")) === 1 && (await repoNow()) === null,
       `a re-apply is a no-op: the subjects and edges stand, one of each function, no repository (${JSON.stringify(c1)} → ${JSON.stringify(c2)})`);
+    // 153 re-applied put its setter and door back; the shipped ones are 154's, which scope a bare pr: key by its link ([139]).
+    await restoreShipped("set_subject_repo", "record_thought_subjects");
   } catch (e) {
     assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
   } finally {
     // No repository is left standing for a later suite on this database: a clear by the operator, as the table takes no DELETE.
     await db.query(`SELECT set_subject_repo(NULL, $1::jsonb)`, [JSON.stringify({ name: "[138] op", agent_id: (await q<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = '[138] op'`))[0]?.id ?? null })]).catch(() => undefined);
     await db.exec(`DELETE FROM thoughts WHERE content LIKE '[138]%'`);
+  }
+  assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM subject_repo_settings WHERE ended_at IS NULL`)).c === 0, "the section leaves no repository standing");
+}
+
+console.log("\n[139] Migration 154: a pr: subject key takes the repository its GitHub link names, once an operator names the brain's — ob1_subject_linked_key reads a github.com/<owner>/<repo>/pull/<n> link of the key's own number, any case, www. or not, leading zeros, and no other host, number or key, one repository alone; with no repository set a link changes nothing; the setter's cap counts the keys moved and their targets; setting a repository maps each bare pr: key to its link's repository, else the setting's, a number two repositories claim to the setting's, each thread split by repository; the door writes a bare key to its link's repository first, a re-pass keeping it; a remap leaves a key its link scopes; a re-apply a no-op (SMD-3887)");
+{
+  const file = files.find((f) => /^\d{3}_subject_key_links\.sql$/.test(f)) ?? "no NNN_subject_key_links.sql";
+  const file153 = files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql";
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  try {
+    await db.exec(`SELECT set_agent_kind('[139] op', 'operator')`);
+    const OP = { name: "[139] op", agent_id: (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = '[139] op'`)).id };
+    const setRepo = async (repo: string | null, remap = false) =>
+      (await one<{ r: Record<string, unknown> }>(`SELECT set_subject_repo($1, $2::jsonb, $3) AS r`, [repo, JSON.stringify(OP), remap])).r;
+
+    // The shape: one new function, IMMUTABLE and commented by 154, its sentinel above it in the file; 154 the last
+    // definer of the setter and the door, each comment naming it.
+    const fn = await one<{ v: string; d: boolean; c: string | null }>(`SELECT p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = 'ob1_subject_linked_key(text, text)'::regprocedure`);
+    const comments = await one<{ s: string | null; r: string | null }>(`SELECT obj_description('set_subject_repo(text, jsonb, boolean)'::regprocedure, 'pg_proc') AS s,
+        obj_description('record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb)'::regprocedure, 'pg_proc') AS r`);
+    assert(fn.v === "i" && !fn.d && /Migration 154 \/ SMD-3887/.test(fn.c ?? "") && /ob1:subject-key-links[\s\S]*CREATE OR REPLACE FUNCTION ob1_subject_linked_key/.test(readFileSync(join(MIGRATIONS, file), "utf8"))
+           && ["ob1_subject_linked_key", "set_subject_repo", "record_thought_subjects"].every((f) => lastDefinerOf(f) === file) && lastDefinerOf("close_thought_subjects") === file153
+           && /Migrations 153, 154 \/ SMD-3887/.test(comments.s ?? "") && /Migrations 130, 153, 154 \/ SMD-3306, SMD-3887/.test(comments.r ?? ""),
+      `ob1_subject_linked_key IMMUTABLE, no definer, commented by 154 under its sentinel; 154 the last definer of the setter and the door, 153 still of the close (${fn.v}; ${lastDefinerOf("set_subject_repo")}; ${lastDefinerOf("record_thought_subjects")})`);
+
+    // The link's rule, at its edges.
+    const cases: [string | null, string, string | null][] = [
+      ["see https://github.com/SiggyMD/Client/pull/12 for it", "pr:12", "pr:siggymd/client#12"],
+      ["(github.com/o/r/pull/0012)", "pr:12", "pr:o/r#12"],
+      ["www.github.com/o/r/pull/12/files", "pr:12", "pr:o/r#12"],
+      ["github.com/o/r/pull/12", "pr:13", null],
+      ["github.com/o/r/pull/123", "pr:12", null],
+      ["github.com/a/x/pull/12 and github.com/b/y/pull/12", "pr:12", null],
+      ["github.com/a/x/pull/12 and https://github.com/A/X/pull/12#issuecomment-1", "pr:12", "pr:a/x#12"],
+      ["gitlab.com/o/r/pull/12", "pr:12", null],
+      ["notgithub.com/o/r/pull/12", "pr:12", null],
+      ["github.com/o/../pull/12", "pr:12", null],
+      ["github.com/o/r/pull/12", "version:v1.2", null],
+      ["github.com/o/r/pull/12", "pr:o/r#12", null],
+      [null, "pr:12", null],
+    ];
+    const got = await Promise.all(cases.map(async ([t, k]) => (await one<{ k: string | null }>(`SELECT ob1_subject_linked_key($1, $2) AS k`, [t, k])).k));
+    const off = cases.flatMap(([t, k, want], i) => got[i] === want ? [] : [`${k} in ${JSON.stringify(t)?.slice(0, 40)} → ${got[i]}`]);
+    assert(off.length === 0, `ob1_subject_linked_key: a GitHub link of the key's own number, any case, www. or not, leading zeros, one repository alone; no other host, number, key or text (${off.join(" | ") || "all"})`);
+
+    // Thoughts at known times, subjects found by a model pass.
+    const K = "subject:test-139@p1";
+    let n = 0;
+    const name: Record<string, string> = {};
+    const thought = async (label: string, text: string) => {
+      const id = (await one<{ id: string }>(`INSERT INTO thoughts (content, metadata, created_at) VALUES ($1, '{}', '2027-08-01T00:00:00Z'::timestamptz + make_interval(mins => $2::int)) RETURNING id::text`, [`[139] ${label}: ${text}`, ++n])).id;
+      name[id] = label;
+      return id;
+    };
+    const subjects = async (id: string, keys: string[]) => (await one<{ r: { ok: boolean; action: string } }>(
+      `SELECT record_thought_subjects($1::uuid, $2::text[], 'model', $3, NULL::uuid, (SELECT COALESCE(content_fingerprint, content_fingerprint_of(content)) FROM thoughts WHERE id = $1::uuid), '{"deterministic": false}'::jsonb) AS r`, [id, keys, K])).r;
+    const keysOf = async (id: string) => (await q<{ key: string }>(`SELECT payload->>'key' AS key FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject' AND valid_until IS NULL ORDER BY 1`, [id])).map((r) => r.key).join(",");
+    const edges = async (key: string) => (await q<{ newer: string; older: string }>(
+      `SELECT thought_id::text AS newer, payload->>'target' AS older FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = $1`, [key]))
+      .map((e) => `${name[e.newer] ?? "?"}→${name[e.older] ?? "?"}`).sort().join(" ");
+
+    // With no repository set a link changes nothing: the door writes the bare key (row 13).
+    const a = await thought("a", "PR 12 https://github.com/siggymd/client/pull/12");
+    const b = await thought("b", "PR 12 in this repository");
+    const c = await thought("c", "github.com/o/r/pull/7 merged");
+    const d = await thought("d", "github.com/x/one/pull/5 and github.com/y/two/pull/5");
+    const p1 = await thought("p1", "github.com/x/a/pull/31"), p2 = await thought("p2", "github.com/x/b/pull/31");
+    for (const [id, k] of [[a, "pr:12"], [b, "pr:12"], [c, "pr:7"], [d, "pr:5"], [p1, "pr:31"], [p2, "pr:31"]] as const) await subjects(id, [k]);
+    assert((await keysOf(a)) === "pr:12" && (await keysOf(c)) === "pr:7" && (await edges("pr:12")) === "b→a",
+      `with no repository set a link changes nothing: the bare keys stand and pr:12's thread runs a, b (${await keysOf(a)}; ${await edges("pr:12")})`);
+
+    // The cap counts the keys moved and their targets, two thread locks apiece: four bare keys, pr:31's sent by its two
+    // links to two repositories, have six targets, ten locks, past a cap of four keys (eight), though the keys alone
+    // are not past it (review: the count 153 made).
+    await db.exec(`CREATE OR REPLACE FUNCTION ob1_subject_repo_map_max() RETURNS integer LANGUAGE sql IMMUTABLE AS $$ SELECT 4 $$`);
+    const capped = await setRepo("o/r");
+    await restoreShipped("ob1_subject_repo_map_max");
+    assert(capped.ok === false && capped.error === "TOO_MANY_KEYS" && (await keysOf(p1)) === "pr:31" && (await one<{ m: number }>(`SELECT ob1_subject_repo_map_max() AS m`)).m === 2000,
+      `the cap counts the targets too: four keys with six targets are past a cap of four (eight locks), nothing set (${JSON.stringify(capped).slice(0, 120)})`);
+
+    // Setting a repository maps each bare key by its link first, else to the setting's.
+    const set1 = await setRepo("o/r");
+    assert(set1.ok === true && set1.mapped === 6 && set1.keys === 6 && set1.thoughts === 6
+           && (await keysOf(a)) === "pr:siggymd/client#12" && (await keysOf(b)) === "pr:o/r#12" && (await keysOf(c)) === "pr:o/r#7" && (await keysOf(d)) === "pr:o/r#5"
+           && (await keysOf(p1)) === "pr:x/a#31" && (await keysOf(p2)) === "pr:x/b#31"
+           && (await edges("pr:12")) === "" && (await edges("pr:siggymd/client#12")) === "" && (await edges("pr:o/r#12")) === "",
+      `the mapping sends each bare key to its link's repository, else the setting's, a number two repositories claim to the setting's, PR 12's two thoughts now apart (${JSON.stringify(set1).slice(0, 140)})`);
+
+    // The door: a bare key goes to its link's repository first, else the setting's; a re-pass keeps its key.
+    const e = await thought("e", "again https://github.com/siggymd/client/pull/12");
+    const f = await thought("f", "PR 12 here once more");
+    await subjects(e, ["pr:12"]);
+    await subjects(f, ["pr:12"]);
+    const again = await subjects(a, ["pr:12"]);
+    assert((await keysOf(e)) === "pr:siggymd/client#12" && (await keysOf(f)) === "pr:o/r#12" && again.action === "kept" && (await keysOf(a)) === "pr:siggymd/client#12"
+           && (await edges("pr:siggymd/client#12")) === "e→a" && (await edges("pr:o/r#12")) === "f→b",
+      `the door writes a bare key to its link's repository, else the setting's, each joining its own thread, and a re-pass keeps the key (${await keysOf(e)}; ${await keysOf(f)}; ${again.action})`);
+
+    // A remap moves the keys the setting scoped and leaves a key its link scopes, the setting's own repository's included.
+    const remapped = await setRepo("o/s", true);
+    assert(remapped.ok === true && remapped.remapped === 3 && remapped.mapped === 3 && (await keysOf(b)) === "pr:o/s#12" && (await keysOf(f)) === "pr:o/s#12" && (await keysOf(d)) === "pr:o/s#5"
+           && (await keysOf(c)) === "pr:o/r#7" && (await keysOf(a)) === "pr:siggymd/client#12" && (await keysOf(p1)) === "pr:x/a#31",
+      `a remap moves the keys the setting scoped and leaves those their links scope (${JSON.stringify(remapped).slice(0, 140)})`);
+
+    // A re-apply is a no-op.
+    const census = async () => (await one<{ s: number }>(`SELECT count(*)::int AS s FROM thought_facets f JOIN thoughts t ON t.id = f.thought_id WHERE t.content LIKE '[139]%' AND f.kind = 'subject' AND f.valid_until IS NULL`)).s;
+    const c1 = await census();
+    await reapply(file.slice(0, 4));
+    assert((await census()) === c1 && (await functionsNamed("ob1_subject_linked_key")) === 1 && (await functionsNamed("set_subject_repo")) === 1,
+      `a re-apply is a no-op: the subjects stand, one of each function (${c1})`);
+  } catch (e) {
+    assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
+  } finally {
+    await db.query(`SELECT set_subject_repo(NULL, $1::jsonb)`, [JSON.stringify({ name: "[139] op", agent_id: (await q<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = '[139] op'`))[0]?.id ?? null })]).catch(() => undefined);
+    await db.exec(`DELETE FROM thoughts WHERE content LIKE '[139]%'`);
   }
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM subject_repo_settings WHERE ended_at IS NULL`)).c === 0, "the section leaves no repository standing");
 }
