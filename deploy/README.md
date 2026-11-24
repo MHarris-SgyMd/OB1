@@ -563,12 +563,12 @@ free:
   own brain's sleep. In those 12 minutes a probe sent each brain a
   search every 30 s, and sent the model server, from outside any brain
   and any broker, the metadata call a capture makes. From minute 12 a
-  harness timed captures on both brains at once. The first four rows are
-  one run each, on the build before a sleep's judge-model passes yielded
-  to extraction (SMD-4495, the sleep's `yield:` line). The two on one
-  model were made twice, the first pair disturbed, and the second is
-  shown. The last two rows are the runs on two models made again 16 to
-  19 hours later, on a build with that yield, which applies to brains
+  harness timed captures on both brains at once. The first four rows
+  show one run each, on the build before a sleep's judge-model passes
+  yielded to extraction (SMD-4495, the sleep's `yield:` line). The two
+  on one model were made twice, the first pair disturbed, and the second
+  is shown. The last two rows are the runs on two models made again 16
+  to 19 hours later, on a build with that yield, which applies to brains
   set up as these were. The one on the broker was made twice, and its
   cells give the first of those runs, then the second. The runs in
   those rows differ from the ones above them, and from each other, by
@@ -594,12 +594,12 @@ free:
     them 2.3 to 3.7 s. Why the broker's brains extracted more was not
     established: the model server generated a fifth faster in that run
     than in the fixed-shares one, and between the two fixed-shares runs
-    on two models it differed by more. All of this held while no other
-    caller asked for another model. In the first run under fixed shares
-    a third brain on the server asked for the judge model after minute
-    12, and 24 of the next 32 searches waited 120 s and were answered by
-    exact matches alone; in the first run on the broker no third brain
-    asked.
+    on two models its speed differed by more. All of this held while no
+    other caller asked for another model. In the first run under fixed
+    shares a third brain on the server asked for the judge model after
+    minute 12, and 24 of the next 32 searches waited 120 s and were
+    answered by exact matches alone; in the first run on the broker no
+    third brain asked.
   - **On two models, fixed shares left the judge model and the embedder
     unloaded.** A share is per model, so both brains kept the metadata
     model busy while each also asked for the judge model. Ollama decided
@@ -629,31 +629,32 @@ free:
     or running, 60 s at most in one stretch unless `OB1_SLEEP_MAX_WAIT`
     says otherwise; it does not see another brain's extraction. It shows
     in the broker's lines: in those 12 minutes a sweep's next ask for
-    the judge model came 14 to 49 s after its last call ended, where it
-    had come at once. What it did for extraction or cost a live call is
-    not shown either way, since more than the build differed:
+    the judge model came 14 to 49 s after its last call ended, where in
+    the earlier run it had come at once. What the yield did for
+    extraction or cost a live call is not shown either way, since more
+    than the build differed:
     - **Fixed shares** left the judge model and the embedder unloaded
-      again. One ordinary call of the judge model, admitted in the
-      instant the pause of the notes' load ended, before that brain's
-      own extraction had called, was enough: the load began 18 minutes
-      after Ollama decided it. Of the two brains only one was asking
-      for the judge model in those 12 minutes. Its 150 notes loaded
-      with 6 of each brain's saved without a vector or without tags,
-      where 16 had been.
+      again. One brain's ordinary call of the judge model, admitted in
+      the instant the pause of the notes' load ended, before that
+      brain's own extraction had called, was enough: the load began 18
+      minutes after Ollama decided it. Of the two brains only one was
+      asking for the judge model in those 12 minutes. The run's 150
+      notes loaded with 6 of each brain's saved without a vector or
+      without tags, where 16 had been.
     - **The broker's first later run** had a busy machine (a load
       average of 18, then 11, against 7 and 2 in the earlier run) and
       the server's other brains (stable and a canary) at work beside
       it. Its 150 notes took twice as long to load as in the earlier
       run, and 4 of each brain's were saved without a vector or without
       tags, where none had been. A search took 51.2 s at the median and
-      12 of 48 fell back to exact matches; 6 of 24 metadata calls timed
-      out.
+      12 of 48 were answered by exact matches alone; 6 of 24 metadata
+      calls timed out.
     - **The broker's second later run** had a quieter machine (11, then
       5.5), no other brain calling in its 12 minutes, and 150 notes that
-      loaded as quickly as before, all clean. A search took 22.4 s and
-      4 of 48 fell back to exact matches; those and its 2 timed-out
-      metadata calls were all sent in its first minute, the first of
-      them as a load of the judge model was granted.
+      loaded as quickly as in the earlier run, all clean. A search took
+      22.4 s and 4 of 48 were answered by exact matches alone; those and
+      its 2 timed-out metadata calls were all sent in its first minute,
+      the first of them as a load of the judge model was granted.
 
     In all three later runs the 30 notes that go in before the 150 took
     six to nine times as long to load as the same setup's had, and 4 to
@@ -670,16 +671,17 @@ free:
     loaded. On the two-model runs, two under fixed shares and three on
     the broker, brains whose calls between them, live and background,
     use more models than the server keeps loaded belong on the broker
-    with `ps`: under fixed shares 46 of 48 searches fell back to exact
-    matches both times, where on the broker 12 at most did. That advice
-    rests on the searches alone. The broker's price, run by run, is in
-    the table: a slower search and metadata call than fixed shares' 3.2
-    and 3.5 s, some metadata calls timed out in the two later runs, and
-    less extraction than under fixed shares, whose judge model did no
-    work. A raised `OB1_SLEEP_MAX_WAIT`, which cost live calls least in
-    the runs above with one brain backlogged, before the yield, was not
-    tried with two; since the yield it is also the most one stretch of a
-    brain's extraction calls holds its judge-model passes back.
+    with `ps`: under fixed shares 46 of 48 searches were answered by
+    exact matches alone both times, where on the broker 12 at most were.
+    That advice rests on the searches alone. The broker's price, run by
+    run, is in the table: a slower search and metadata call than fixed
+    shares' 3.2 and 3.5 s, some metadata calls timed out in the two
+    later runs, and less extraction than under fixed shares, whose judge
+    model did no work. A raised `OB1_SLEEP_MAX_WAIT`, which cost live
+    calls least in the runs above with one brain backlogged, before the
+    yield, was not tried with two; since the yield that setting is also
+    the most one stretch of a brain's extraction calls holds its
+    judge-model passes back.
 
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
