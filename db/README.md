@@ -6922,14 +6922,20 @@ client holding a read key, no database credentials) or `work_claims` itself.
   `result`), or a list of claims. A last page that says `truncated` is refused,
   the rest of the brain missing; pages holding fewer claims than the first page
   counted are warned of; a read of live claims alone says `include_ended` was
-  likely left off.
+  likely left off; entries with no `renewals` at all (`list_work_claims`' own
+  rows) are warned of as uncounted.
 - **`--sizes`:** `gh pr list --state merged --limit 500 --json
   number,additions,deletions > sizes.json`, as it prints it, or an object of
-  `{ additions, deletions }` by PR number.
-- **`--now`:** give a saved dump the time it was read, with its zone
-  (`2026-11-23T19:00:00Z`): unset, the clock reads its live claims as lapsed. A
-  claim made after it is left out, a release after it unread. A row keeps only
-  its last lease and count, so a claim renewed after `--now` reads with them.
+  `{ additions, deletions }` by PR number. Raise `--limit` once the oldest PR a
+  claim names falls outside it: the "size unknown" count shows it.
+- **`--now`:** give a saved dump the time it was read, an ISO time with its
+  zone (`2026-11-23T19:00:00Z`; one without is refused): unset, the clock reads a
+  claim live then whose lease has since ended as lapsed. A claim made after it
+  is left out, a release after it unread. A row keeps only its last lease and
+  count, so a claim renewed after `--now` reads with them.
+- **`--url`:** needs SELECT on `work_claims`' columns (the `claims` group's, by
+  `bun migrate.ts --grant <role> --groups claims`); a role without it is told
+  so. Before migration 152 every claim reads uncounted.
 
 ```bash
 bun claim-report.ts --from claims.json [--sizes sizes.json] [--now 2026-11-23T19:00:00Z] [--json]
@@ -6937,9 +6943,11 @@ bun claim-report.ts --url "$DATABASE_URL" [--sizes sizes.json]
 bun claim-report.ts --self-check
 ```
 
-- **Endings:** merged (its holder released it saying "merged", and not "not",
-  "never", "yet", "n't" or "be merged"), closed by board-sync (by the server's
-  own `closedBySync`), taken over, force-released (another key's release, an
+- **Endings:** merged (its holder released it saying "merged", in a clause, to
+  the next `.`, `;`, `:` or `,`, that doesn't first deny it with "not", "never",
+  "without", "unless", "until", "yet", "be" or "n't"; a merge of something else,
+  "merged main into the branch", reads as one too), closed by board-sync (by the
+  server's own `closedBySync`), taken over, force-released (another key's release, an
   operator's after a merge included), released (other: a split into pieces, a
   drop, a test), and lapsed, never released (timed to its lease's end). Live
   claims are left out.
