@@ -20,7 +20,8 @@
  *
  * What this code adds:
  *   - only a branch under the runner's prefix (`agent/smd-<n>-<slug>`) is pushed, by an explicit refspec, with no tags,
- *     no hooks and no force, so a branch already on GitHub at another commit is a refusal, never an overwrite;
+ *     no hooks and no force, so a branch already on GitHub at a commit this one doesn't descend from is a refusal,
+ *     never an overwrite (one at an ancestor is fast-forwarded);
  *   - the token never sits in a URL or an argument: git reads it from its environment as an `http.extraheader`, scoped
  *     to `https://github.com/`, and every word that comes back is scrubbed of it before it is returned;
  *   - opening the PR is idempotent: an open PR from this branch, opened by the App, is answered as the PR.
@@ -42,7 +43,11 @@ export const PEM_SHAPE = /^-----BEGIN (RSA )?PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]
 export const PUSH_BRANCH = /^agent\/smd-[1-9][0-9]{0,6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 /** The permissions an installation token is asked for, and all it may come back with (`metadata: read` GitHub adds to every token). */
 export const TOKEN_PERMISSIONS = { contents: "write", pull_requests: "write" } as const;
-const ALLOWED_BACK: Record<string, string> = { ...TOKEN_PERMISSIONS, metadata: "read" };
+/** All decision 13's App may hold: the two writes, and the metadata read GitHub gives every App. setup.ts checks the App against it. */
+export const APP_PERMISSIONS: Record<string, string> = { ...TOKEN_PERMISSIONS, metadata: "read" };
+const ALLOWED_BACK = APP_PERMISSIONS;
+/** The login the App's PRs carry. */
+export const botLogin = (slug: string): string => `${slug}[bot]`;
 /**
  * An installation token's shape, read as an opaque string: `ghs_` and what follows. Since 2026 GitHub mints the
  * stateless `ghs_<app id>_<JWT>` form, about 520 characters with `_`, `.` and `-` in it, and says to treat it as
@@ -176,7 +181,7 @@ export async function revokeToken(fetchImpl: Fetch, token: string): Promise<bool
  * The repositories the installation reaches, for `setup.ts check-github-app`: read with a token minted for the whole
  * installation and `metadata: read` alone (a token narrowed to one repository lists only that one), then revoked.
  */
-export async function installationRepos(fetchImpl: Fetch, app: App, pem: string, nowMs: number): Promise<{ ok: true; repos: string[] } | { ok: false; detail: string }> {
+export async function installationRepos(fetchImpl: Fetch, app: App, pem: string, nowMs: number): Promise<{ ok: true; repos: string[]; revoked: boolean } | { ok: false; detail: string }> {
   let jwt: string;
   try {
     jwt = appJwt(app.appId, pem, nowMs);
@@ -184,11 +189,15 @@ export async function installationRepos(fetchImpl: Fetch, app: App, pem: string,
     return { ok: false, detail: "the App's private key couldn't sign a JWT" };
   }
   let token: string | null = null;
-  try {
+  const read = async (): Promise<{ ok: true; repos: string[] } | { ok: false; detail: string }> => {
     const res = await fetchImpl(`${API}/app/installations/${app.installationId}/access_tokens`, init("POST", jwt, { permissions: { metadata: "read" } }));
     if (res.status !== 201) return { ok: false, detail: await refusal(res, "minting a metadata token") };
     const body = (await jsonOf(res)) as { token?: unknown } | typeof NOT_JSON;
-    if (body === NOT_JSON || !body || typeof body.token !== "string" || !INSTALLATION_TOKEN.test(body.token)) return { ok: false, detail: "GitHub's answer carried no installation token of the expected shape" };
+    if (body === NOT_JSON || !body || typeof body.token !== "string" || !INSTALLATION_TOKEN.test(body.token)) {
+      const trimmed = body !== NOT_JSON && body && typeof body.token === "string" ? body.token.trim() : "";
+      if (trimmed.startsWith("ghs_") && trimmed.length < 65_536 && !/\s/.test(trimmed)) await revokeToken(fetchImpl, trimmed);
+      return { ok: false, detail: "GitHub's answer carried no installation token of the expected shape" };
+    }
     token = body.token;
     const repos: string[] = [];
     for (let page = 1; page <= 10; page++) {
@@ -200,14 +209,19 @@ export async function installationRepos(fetchImpl: Fetch, app: App, pem: string,
       if (got.repositories.length < 100) return { ok: true, repos };
     }
     return { ok: false, detail: "the installation reaches over 1,000 repositories" };
+  };
+  let result: { ok: true; repos: string[] } | { ok: false; detail: string };
+  try {
+    result = await read();
   } catch (e) {
-    return { ok: false, detail: `the repository list failed: ${errSaid(e, token)}` };
-  } finally {
-    if (token) await revokeToken(fetchImpl, token);
+    result = { ok: false, detail: `the repository list failed: ${errSaid(e, token)}` };
   }
+  // Revoked once read, whatever the answer; whether the revoke landed is the caller's to say.
+  const revoked = token ? await revokeToken(fetchImpl, token) : true;
+  return result.ok ? { ...result, revoked } : { ok: false, detail: revoked ? result.detail : `${result.detail}; and its token couldn't be revoked (it expires within the hour)` };
 }
 
-export type TokenResult = { ok: true; token: string; expiresAt: number } | { ok: false; detail: string };
+export type TokenResult = { ok: true; token: string } | { ok: false; detail: string };
 
 /**
  * An installation token for this repo alone, with `contents: write` and `pull_requests: write` alone. A token that
@@ -252,8 +266,7 @@ export async function installationToken(fetchImpl: Fetch, app: App, pem: string,
       await revokeToken(fetchImpl, token);
       return { ok: false, detail: `the installation token isn't for ${app.repo} alone; refused unused` };
     }
-    const exp = typeof b.expires_at === "string" ? Date.parse(b.expires_at) : NaN;
-    return { ok: true, token, expiresAt: Number.isFinite(exp) ? exp : nowMs + 3_000_000 };
+    return { ok: true, token };
   } catch {
     await revokeToken(fetchImpl, token);
     return { ok: false, detail: "GitHub's answer to the token request couldn't be read; the token was revoked unused" };
@@ -261,13 +274,14 @@ export async function installationToken(fetchImpl: Fetch, app: App, pem: string,
 }
 
 /**
- * The config keys the runner's bare repository may carry: what `git clone --bare` writes, and the two run.ts sets. A
+ * The config keys the runner's bare repository may carry: what `git clone --bare` writes (`extensions.refstorage` with
+ * the reftable format, Git 3.0's planned default), the two run.ts sets, and `git maintenance register`'s strategy. A
  * push reads the repository's config, and a key outside this list (a proxy or TLS setting, a URL rewrite, a remote named
  * by the URL pushed to, an include, a credential helper, a command, an extension such as `worktreeConfig` that brings in
  * another file) could send the token elsewhere or run code. The runner writes none, so one there means tampering. An
  * allowlist, since a denylist missed `config.worktree` and `remote.<url>.url` (review pass 3).
  */
-export const REPO_CONFIG_ALLOWED = /^(core\.(repositoryformatversion|filemode|bare|ignorecase|precomposeunicode|logallrefupdates|symlinks)|remote\.origin\.(url|fetch)|gc\.auto|maintenance\.auto|extensions\.objectformat)$/i;
+export const REPO_CONFIG_ALLOWED = /^(core\.(repositoryformatversion|filemode|bare|ignorecase|precomposeunicode|logallrefupdates|symlinks)|remote\.origin\.(url|fetch)|gc\.auto|maintenance\.(auto|strategy)|extensions\.(objectformat|refstorage))$/i;
 
 /** The keys of `git config --show-scope --name-only --list` the push may not run with: any outside the allowlist, in any scope but the command line's (this call passes none of its own beyond the self-check's). */
 export function repoConfigProblems(listing: string): string[] {

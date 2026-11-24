@@ -48,6 +48,7 @@ import {
   type Runner,
 } from "./facts.ts";
 import { printable, shownText } from "./guard.ts";
+import { botLogin } from "./github.ts";
 import {
   HIDDEN_TEXT,
   boardReasons,
@@ -334,7 +335,7 @@ export async function dryRun(cfg: Config, deps: Deps): Promise<DryRun> {
     branches,
     worktrees,
     openPrs,
-    trustedAuthors: [cfg.repo.split("/")[0], ...(cfg.githubAppSlug ? [`${cfg.githubAppSlug}[bot]`] : [])],
+    trustedAuthors: [cfg.repo.split("/")[0], ...(cfg.githubAppSlug ? [botLogin(cfg.githubAppSlug)] : [])],
     claims: (id) => ("unreadable" in claimsRead ? { unreadable: claimsRead.unreadable } : (claimsRead.get(id) ?? { unreadable: "not read" })),
     prsOfBranch: (b) => (prs.has(b) ? (prs.get(b) ?? null) : undefined),
   };

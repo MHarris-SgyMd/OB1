@@ -24,6 +24,7 @@ import { gitEnv, type Fetch } from "./facts.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import { branchFor } from "./record.ts";
 import { gitRunner, LOCAL_GIT } from "./live-run.ts";
+import { checkGithubApp } from "./setup.ts";
 import { INSTALLATION_TOKEN, PEM_SHAPE, said, repoConfigProblems, PUSH_BRANCH, TOKEN_PERMISSIONS, appClient, appJwt, installationRepos, installationToken, pushCommand, pushOutcome, realGitSpawn, scrubToken, type App, type GitSpawn } from "./github.ts";
 
 const NOW = Date.parse("2026-11-24T12:00:00Z");
@@ -103,7 +104,7 @@ export async function selfCheck(): Promise<number> {
   await section("installationToken: asked for this repo alone, with the two write permissions", async () => {
     const f = stubFetch((m, u) => tokenRoute(m, u) ?? json({ message: "unrouted" }, 404));
     const t = await installationToken(f.fetch, APP, PEM, NOW);
-    ok(t.ok && t.token === TOKEN && t.expiresAt === Date.parse("2026-11-24T13:00:00Z"), "a clean answer is the token, with its expiry");
+    ok(t.ok && t.token === TOKEN, "a clean answer is the token");
     ok(TOKEN.length > 500 && INSTALLATION_TOKEN.test(TOKEN) && INSTALLATION_TOKEN.test(LEGACY), "the stateless form (over 500 characters, with _ . -) and the legacy 40 are both tokens");
     ok(!INSTALLATION_TOKEN.test("ghp_" + "a".repeat(40)) && !INSTALLATION_TOKEN.test(`${LEGACY}\r\nX-Evil: 1`) && !INSTALLATION_TOKEN.test(`${LEGACY} x`) && !INSTALLATION_TOKEN.test("ghs_" + "a".repeat(5000)), "another kind of token, one with a header line after it, a space, or 5,000 characters is not");
     const req = f.sent[0];
@@ -420,6 +421,7 @@ export async function selfCheck(): Promise<number> {
     await section("repoConfigProblems: the allowlist, in every scope but the command line's", () => {
       const listing = "local\tcore.repositoryformatversion\nlocal\tcore.bare\nlocal\tremote.origin.url\nlocal\tgc.auto\nlocal\tmaintenance.auto\ncommand\tprotocol.file.allow\n";
       ok(repoConfigProblems(listing).length === 0, "what a bare clone and run.ts write, plus the command line, pass");
+      ok(repoConfigProblems("local\textensions.refstorage\nlocal\tmaintenance.strategy\nlocal\textensions.objectformat\n").length === 0, "a reftable clone's extension, git maintenance register's strategy and a SHA-256 repo's format pass: refusing them would stop every run");
       ok(JSON.stringify(repoConfigProblems(`${listing}worktree\tcore.bare\nlocal\tremote.origin.pushurl\nglobal\tuser.name\n`)) === JSON.stringify(["core.bare (worktree)", "remote.origin.pushurl (local)", "user.name (global)"]), "an allowed key in another scope, a key past the list, and any other scope are named");
     });
 
@@ -564,6 +566,50 @@ export async function selfCheck(): Promise<number> {
     const { c, sent } = prClient(() => null);
     const r = await c.openDraftPr({ ...OPEN, head: "MHarris-SgyMd:main" });
     ok(!r.ok && r.final === true && sent.length === 0, "refused as final, no request");
+  });
+
+  await section("checkGithubApp end to end: a stand-in GitHub, a fake gh on PATH, and every failure said with its reason", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ghapp-check-"));
+    const savedPath = process.env.PATH;
+    try {
+      const rulesets = join(import.meta.dir, "../../.github/rulesets");
+      const ghScript = (ok: boolean) => `#!/bin/sh\n${ok ? `case "$*" in\n  *rulesets\\?*) printf '1\\n2\\n3\\n' ;;\n  *rulesets/1*) cat '${rulesets}/main.json' ;;\n  *rulesets/2*) cat '${rulesets}/main-merge.json' ;;\n  *rulesets/3*) cat '${rulesets}/tags.json' ;;\nesac\n` : "echo 'HTTP 401: Bad credentials' >&2\nexit 1\n"}`;
+      const bin = (name: string, ok: boolean): string => {
+        const d = join(dir, name);
+        mkdirSync(d);
+        writeFileSync(join(d, "gh"), ghScript(ok));
+        chmodSync(join(d, "gh"), 0o755);
+        return d;
+      };
+      const goodBin = bin("good", true);
+      const badBin = bin("bad", false);
+      const emptyBin = join(dir, "none");
+      mkdirSync(emptyBin);
+      const cfg = { team: "SMD", initiative: "I", maintainerLinearId: "x", repo: "MHarris-SgyMd/OB1", mainCheckout: "/x", restUrl: null, githubAppId: "123456", githubAppInstallationId: "7890", githubAppSlug: "ob1-agent-runner" };
+      const github = (over: { app?: Response; revoke?: number } = {}) =>
+        stubFetch((m, u, b) =>
+          m === "GET" && u.endsWith("/app") ? (over.app ?? json({ slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read" } }))
+          : m === "GET" && u.endsWith("/app/installations/7890") ? json({ repository_selection: "selected" })
+          : m === "POST" && u.endsWith("/access_tokens") ? ((b as { repositories?: unknown })?.repositories ? tokenAnswer() : json({ token: TOKEN, permissions: { metadata: "read" } }, 201))
+          : m === "GET" && u.includes("/installation/repositories") ? json({ total_count: 1, repositories: [{ full_name: "MHarris-SgyMd/OB1" }] })
+          : m === "DELETE" ? new Response(null, { status: over.revoke ?? 204 }) : json({}, 404));
+      process.env.PATH = `${goodBin}:/usr/bin:/bin`;
+      const good = await checkGithubApp(cfg, PEM, github().fetch);
+      ok(good.ok && good.lines.every((l) => l.startsWith("✓")) && good.lines.length === 7, "the App as decision 13's and the repo's three rulesets as recorded: seven ✓ and ok");
+      const down = await checkGithubApp(cfg, PEM, github({ app: json({ message: "boom" }, 500) }).fetch);
+      ok(!down.ok && down.lines.some((l) => l.startsWith("✗") && l.includes("GitHub answered 500")), "a 500 on GET /app is said as GitHub's 500, not as a wrong key");
+      const unrevoked = await checkGithubApp(cfg, PEM, github({ revoke: 500 }).fetch);
+      ok(!unrevoked.ok && unrevoked.lines.some((l) => l.includes("couldn't be revoked")), "a revoke that didn't land fails the check, saying so");
+      process.env.PATH = `${badBin}:/usr/bin:/bin`;
+      const loggedOut = await checkGithubApp(cfg, PEM, github().fetch);
+      ok(!loggedOut.ok && loggedOut.lines.filter((l) => l.includes("rulesets")).length === 1 && loggedOut.lines.some((l) => l.includes("Bad credentials")), "gh refused: one line, with gh's words");
+      process.env.PATH = `${emptyBin}`;
+      const noGh = await checkGithubApp(cfg, PEM, github().fetch);
+      ok(!noGh.ok && noGh.lines.some((l) => l.includes("gh isn't installed")), "no gh: said so");
+    } finally {
+      process.env.PATH = savedPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   console.log(`${passed} passed, ${failed} failed`);

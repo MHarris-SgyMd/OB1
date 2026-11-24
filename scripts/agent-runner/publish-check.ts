@@ -154,7 +154,6 @@ function makePublish(
     leaseWeekSeconds: WEEK,
     branch: "agent/smd-1234-fix-the-thing",
     commit: "d".repeat(40),
-    head: "agent/smd-1234-fix-the-thing",
     baseBranch: "main",
     title: "[core] Fix the thing (SMD-1234)",
     body: "the pre-built body",
@@ -321,7 +320,7 @@ export async function selfCheck(): Promise<number> {
       ok(r.published && r.prNumber === 777 && r.prUrl?.includes("/777"), "published, with the PR number and URL");
       ok(r.pushed && r.leaseRenewed && r.commented && r.owed.length === 0 && !r.handToPerson, "pushed, lease renewed, commented, nothing owed, not a person's");
       ok(m.pushes[0]?.branch === "agent/smd-1234-fix-the-thing" && m.pushes[0]?.commit === "d".repeat(40), "pushBranch got the run's branch and the gated commit");
-      ok(m.prs[0]?.head === m.input.head && m.prs[0]?.base === "main" && m.prs[0]?.body === m.input.body, "openDraftPr got the right head, base and body");
+      ok(m.prs[0]?.head === m.input.branch && m.prs[0]?.head === m.pushes[0]?.branch && m.prs[0]?.base === "main" && m.prs[0]?.body === m.input.body, "openDraftPr got the pushed branch as its head, the base and the body");
       ok(readRecord(m.dir).pr === 777, "the record holds the PR number");
       ok(readToken(claimsDir(root), m.input.claimId).lease_seconds === WEEK, "the token file's lease is bumped to a week after the PR opens");
       ok(m.seq.filter((s) => s === "renew").length === 2, "two renewals: the day-lease confirm, then the week lease after the PR");
@@ -417,12 +416,12 @@ export async function selfCheck(): Promise<number> {
       const m = makePublish(root, { push: false, pushDetail: `remote: https://x-access-token:${token}@github.com/bot/fork rejected` });
       const r = await publish(m.input, m.deps);
       const combined = `${r.owed.map((o) => o.why).join(" ")} ${r.reason}`;
-      ok(!combined.includes(token) && combined.includes("gh_…"), "the GitHub token is masked in owed.why and reason");
+      ok(!combined.includes(token) && combined.includes("gh…"), "the GitHub token is masked in owed.why and reason");
       const stateless = `ghs_123456_eyJhbGciOiJSUzI1NiJ9.${"eyJpc3MiOiIxIn0-_".repeat(20)}.c2ln`;
       const m2 = makePublish(root, { push: false, pushDetail: `remote: token ${stateless} refused` });
       const r2 = await publish(m2.input, m2.deps);
       const said = `${r2.owed.map((o) => o.why).join(" ")} ${r2.reason}`;
-      ok(!said.includes("eyJ") && said.includes("gh_…"), "a stateless installation token (ghs_<app id>_<JWT>) is masked whole");
+      ok(!said.includes("eyJ") && said.includes("gh…"), "a stateless installation token (ghs_<app id>_<JWT>) is masked whole");
     });
 
     await section("publish: a PR-open failure — owed (publish), pushed but not published", async () => {

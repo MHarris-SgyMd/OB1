@@ -44,7 +44,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { KEY_FILES, KEY_SHAPES, noRedirect, parseConfig, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
 import type { Config, Fetch } from "./facts.ts";
-import { APP_KEY_FILE, PEM_SHAPE, appJwt, installationRepos, installationToken, revokeToken, said, type App } from "./github.ts";
+import { APP_KEY_FILE, APP_PERMISSIONS, PEM_SHAPE, appJwt, installationRepos, installationToken, rawText, revokeToken, said, type App } from "./github.ts";
+import { NOT_JSON, SAFE_REQUEST, jsonOf } from "./facts.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import type { GitRun } from "./gate.ts";
 import { CLAUDE_DIR, INSTALL_DIR, claudeVersion, copyClaude, hostNow, makeInstall, stampReport } from "./install.ts";
@@ -58,8 +59,8 @@ const ANTHROPIC = { file: "anthropic.key", shape: /^sk-ant-[A-Za-z0-9_-]{16,}$/ 
 /** Which identity: the three keys the runner reads at start, the Anthropic key apiKeyHelper reads, and the App's key the publish reads. */
 export type Which = keyof typeof KEY_FILES | "anthropic" | "github-app";
 export const WHICHES: Which[] = [...(Object.keys(KEY_FILES) as (keyof typeof KEY_FILES)[]), "anthropic", "github-app"];
-/** `github.token` is optional since the App (decision 13, amended 2026-11-24): a read token that raises the dry run's GitHub rate limit, nothing more. */
-export const OPTIONAL: Which[] = ["github"];
+/** May be missing: `github.token`, a read token that raises the dry run's GitHub rate limit, nothing more (decision 13, amended 2026-11-24); and the App's key, which nothing reads before the first live publish (check-github-app checks it then). */
+export const OPTIONAL: Which[] = ["github", "github-app"];
 
 /** A key's file, its shape, and how to describe the shape in a message (never a value). */
 export function spec(which: Which): { file: string; shape: RegExp; label: string } {
@@ -128,6 +129,8 @@ export function installValue(dir: string, which: Which, value: string): { file: 
   const v = which === "github-app" ? normalizePem(value) : value.trim();
   if (!v) throw new Error(`there was nothing to write for the ${which} key (clipboard or stdin was empty)`);
   if (!s.shape.test(v)) throw new Error(`that value isn't shaped like a ${which} key (expected ${s.label}); nothing written, and the value is not shown`);
+  // Checked before the write, so a key that can't sign never replaces one that can (a rotation's old key is then intact).
+  if (which === "github-app" && !canSign(v)) throw new Error("that PEM isn't an RSA private key that can sign the App's JWT; nothing written, and the value is not shown");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const path = join(dir, s.file);
@@ -165,10 +168,10 @@ export type AppFacts = {
   repos: string[] | null;
   /** The repo's rulesets, each read whole (with the maintainer's gh, which sees their bypass lists). */
   rulesets: { name?: unknown; target?: unknown; enforcement?: unknown; conditions?: unknown; rules?: unknown; bypass_actors?: unknown }[] | null;
+  /** Why a field above is null, when the reader knows: GitHub's status, the transport's words, gh's. */
+  why?: { app?: string; installation?: string; repos?: string; rulesets?: string };
 };
 
-/** The permissions decision 13's App holds: these two writes, and the metadata read GitHub gives every App. */
-const APP_PERMISSIONS: Record<string, string> = { contents: "write", pull_requests: "write", metadata: "read" };
 
 /**
  * The refs a fence must cover, by the ruleset patterns that cover the whole of them. Read as a fixed list, not by
@@ -222,7 +225,8 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
     if (!good) ok = false;
     lines.push(`${good ? "✓" : "✗"} ${text}`);
   };
-  if (facts.app === null) say(false, "the App couldn't be read with its JWT (GET /app): check githubAppId and github-app.pem");
+  const because = (k: keyof NonNullable<AppFacts["why"]>): string => (facts.why?.[k] ? ` (${facts.why[k]})` : "");
+  if (facts.app === null) say(false, `the App couldn't be read with its JWT (GET /app)${because("app")}: a 401 means githubAppId or github-app.pem is wrong`);
   else {
     say(facts.app.slug === cfg.githubAppSlug, `the App's slug is ${said(JSON.stringify(facts.app.slug ?? null), 80)} (the config says ${cfg.githubAppSlug})`);
     const perms = facts.app.permissions && typeof facts.app.permissions === "object" ? (facts.app.permissions as Record<string, unknown>) : {};
@@ -232,13 +236,13 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
       .map((k) => (Object.hasOwn(APP_PERMISSIONS, k) ? `${k}: ${perms[k] === undefined ? "none" : said(perms[k], 40)} (needs ${APP_PERMISSIONS[k]})` : `${said(k, 40)}: ${said(perms[k], 40)} (allowed: none)`));
     say(off.length === 0, off.length ? `the App's permissions are not decision 13's: ${off.join(", ")}` : "the App holds contents and pull_requests write, metadata read, and nothing else (no workflows, no administration)");
   }
-  if (facts.installation === null) say(false, "the installation couldn't be read (GET /app/installations/<id>): check githubAppInstallationId");
+  if (facts.installation === null) say(false, `the installation couldn't be read (GET /app/installations/<id>)${because("installation")}: a 404 means githubAppInstallationId is wrong`);
   else say(facts.installation.repository_selection === "selected", `the App is installed on selected repositories (it says ${said(JSON.stringify(facts.installation.repository_selection ?? null), 40)})`);
-  if (facts.repos === null) say(false, "the installation's repositories couldn't be read with an installation token");
+  if (facts.repos === null) say(false, `the installation's repositories couldn't be read with an installation token${because("repos")}`);
   else say(facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase(), `the installation reaches ${facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase() ? `${cfg.repo} alone` : `${facts.repos.slice(0, 10).map((r) => said(r, 100)).join(", ") || "nothing"}${facts.repos.length > 10 ? ` and ${facts.repos.length - 10} more` : ""}, not ${cfg.repo} alone`}`);
 
   if (facts.rulesets === null) {
-    say(false, "the repo's rulesets couldn't be read (gh api repos/<repo>/rulesets)");
+    say(false, `the repo's rulesets couldn't be read with gh${because("rulesets")}`);
     return { ok, lines };
   }
   const active = facts.rulesets.filter((r) => r.enforcement === "active");
@@ -298,12 +302,15 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
 export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch): Promise<{ ok: boolean; lines: string[] }> {
   if (!cfg.githubAppId || !cfg.githubAppInstallationId || !cfg.githubAppSlug) return { ok: false, lines: ["✗ the config names no GitHub App (githubAppId, githubAppInstallationId, githubAppSlug)"] };
   const app: App = { appId: cfg.githubAppId, installationId: cfg.githubAppInstallationId, repo: cfg.repo };
-  const get = async (path: string, bearer: string): Promise<unknown> => {
+  // A GET that says why it failed: GitHub's status, or the transport's words, never a bare null.
+  const get = async (path: string, bearer: string): Promise<{ ok: true; body: unknown } | { ok: false; why: string }> => {
     try {
-      const res = await fetchImpl(`https://api.github.com${path}`, { headers: { Accept: "application/vnd.github+json", "User-Agent": "agent-runner-setup", Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(20_000) });
-      return res.ok ? await res.json() : null;
-    } catch {
-      return null;
+      const res = await fetchImpl(`https://api.github.com${path}`, { ...SAFE_REQUEST, headers: { Accept: "application/vnd.github+json", "User-Agent": "agent-runner-setup", Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(20_000) });
+      if (!res.ok) return { ok: false, why: `GitHub answered ${res.status}` };
+      const body = await jsonOf(res);
+      return body === NOT_JSON ? { ok: false, why: "GitHub answered with something that isn't JSON" } : { ok: true, body };
+    } catch (e) {
+      return { ok: false, why: `the request failed: ${said(rawText((e as Error)?.message ?? e), 120)}` };
     }
   };
   let jwt: string | null = null;
@@ -312,36 +319,38 @@ export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch)
   } catch {
     jwt = null;
   }
-  const facts: AppFacts = { app: null, installation: null, repos: null, rulesets: null };
-  if (jwt) {
-    facts.app = (await get("/app", jwt)) as AppFacts["app"];
-    facts.installation = (await get(`/app/installations/${app.installationId}`, jwt)) as AppFacts["installation"];
+  const facts: AppFacts = { app: null, installation: null, repos: null, rulesets: null, why: {} };
+  const why = facts.why as Record<string, string>;
+  if (!jwt) why.app = why.installation = "the App's key couldn't sign a JWT";
+  else {
+    const a = await get("/app", jwt);
+    if (a.ok) facts.app = a.body as AppFacts["app"];
+    else why.app = a.why;
+    const i = await get(`/app/installations/${app.installationId}`, jwt);
+    if (i.ok) facts.installation = i.body as AppFacts["installation"];
+    else why.installation = i.why;
   }
   // What the installation reaches, read with a token NOT narrowed to this repo (a narrowed one lists only its own).
   const reach = await installationRepos(fetchImpl, app, pem, Date.now());
   if (reach.ok) facts.repos = reach.repos;
-  // And the publish's own token, minted as a run mints it, then revoked.
-  const minted = await installationToken(fetchImpl, app, pem, Date.now());
-  const lines: string[] = [];
-  if (minted.ok) await revokeToken(fetchImpl, minted.token);
-  else lines.push(`✗ the publish's installation token couldn't be minted: ${minted.detail}`);
+  else why.repos = reach.detail;
   // The rulesets, each read whole with the maintainer's gh (GitHub shows a bypass list only to a caller with write access).
   const gh = (args: string[]): { ok: true; out: string } | { ok: false; why: string } => {
     // SIGKILL at the limit: a gh that ignores SIGTERM would otherwise outlive it.
     const r = spawnSync("gh", ["api", ...args], { encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL", maxBuffer: 8 << 20 });
-    if (r.error) return { ok: false, why: (r.error as NodeJS.ErrnoException).code === "ENOENT" ? "gh isn't installed" : `gh couldn't run (${(r.error as NodeJS.ErrnoException).code ?? r.error.message})` };
+    if (r.error) return { ok: false, why: (r.error as NodeJS.ErrnoException).code === "ENOENT" ? "gh isn't installed" : `gh couldn't run (${(r.error as NodeJS.ErrnoException).code ?? said(r.error.message, 80)})` };
     if (r.status !== 0) return { ok: false, why: `gh api exited ${r.status}: ${said(r.stderr || r.stdout || "", 160) || "no words"} (is gh logged in?)` };
     return { ok: true, out: r.stdout ?? "" };
   };
   const list = gh(["--paginate", `repos/${cfg.repo}/rulesets?includes_parents=true&per_page=100`, "--jq", ".[].id"]);
-  if (!list.ok) lines.push(`✗ the rulesets couldn't be listed: ${list.why}`);
+  if (!list.ok) why.rulesets = `listing them: ${list.why}`;
   else {
     const ids = list.out.split("\n").map((x) => x.trim()).filter((x) => /^\d+$/.test(x));
-    const read: AppFacts["rulesets"] = [];
+    const read: NonNullable<AppFacts["rulesets"]> = [];
     for (const id of ids) {
       const one = gh([`repos/${cfg.repo}/rulesets/${id}`]);
       if (!one.ok) {
-        lines.push(`✗ ruleset ${id} couldn't be read: ${one.why}`);
+        why.rulesets = `ruleset ${id}: ${one.why}`;
         break;
       }
       try {
@@ -349,14 +358,21 @@ export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch)
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
         read.push(parsed);
       } catch {
-        lines.push(`✗ ruleset ${id} came back as something that isn't a JSON object`);
+        why.rulesets = `ruleset ${id} came back as something that isn't a JSON object`;
         break;
       }
     }
     if (read.length === ids.length) facts.rulesets = read;
   }
   const judged = appFindings(facts, { repo: cfg.repo, githubAppId: cfg.githubAppId, githubAppSlug: cfg.githubAppSlug });
-  return { ok: judged.ok && minted.ok, lines: [...lines, ...judged.lines] };
+  // Last, the publish's own token, minted as a run mints it, then revoked; a revoke that didn't land is said (it expires within the hour).
+  const lines = [...judged.lines];
+  const minted = await installationToken(fetchImpl, app, pem, Date.now());
+  let revokedAll = reach.ok ? reach.revoked : true;
+  if (minted.ok) revokedAll = (await revokeToken(fetchImpl, minted.token)) && revokedAll;
+  lines.push(minted.ok ? "✓ the publish's installation token was minted, for this repo and the two permissions alone" : `✗ the publish's installation token couldn't be minted: ${minted.detail}`);
+  if (!revokedAll) lines.push("✗ a token this check minted couldn't be revoked: it stays live until it expires, within the hour");
+  return { ok: judged.ok && minted.ok && revokedAll, lines };
 }
 
 /**
@@ -626,6 +642,8 @@ export function selfCheck(): number {
       const lines = APP_PEM.trim().split("\n");
       const garbled = [lines[0], ...lines.slice(1, -1).map((l) => l.replace(/[A-Za-z]/g, "A")), lines.at(-1)].join("\n");
       ok(PEM_SHAPE.test(garbled) && refuses(() => installValue(join(root, "app-key-bad"), "github-app", garbled)).includes("can sign"), "a PEM-shaped key that can't sign is refused at install");
+      const before = readFileSync(join(dir, APP_KEY_FILE), "utf8");
+      ok(refuses(() => installValue(dir, "github-app", garbled)).includes("nothing written") && readFileSync(join(dir, APP_KEY_FILE), "utf8") === before && verifyOne(dir, "github-app").ok, "a rotation to a key that can't sign is refused before the write: the key in place is kept, and still verifies");
       const ec = generateKeyPairSync("ec", { namedCurve: "P-256", privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
       ok(PEM_SHAPE.test(ec.trim()) && refuses(() => installValue(join(root, "app-key-ec"), "github-app", ec)).includes("can sign"), "an EC key, PEM-shaped and able to sign, is refused: the JWT is RS256");
       const mismatched = APP_PEM.trim().replace("-----END RSA PRIVATE KEY-----", "-----END PRIVATE KEY-----");

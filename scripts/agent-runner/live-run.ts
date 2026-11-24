@@ -18,8 +18,8 @@
  *
  * It reuses dry-run.ts's loaders (the config, the keys, the hermetic fetch, the Linear client) and facts.ts's hermetic
  * git, so the one thing new here is the glue: the ticket's full fields from Linear, the bare repository, and (in the
- * execute layer) the real RunDeps and LiveDeps. The GitHub identity is cut 3, so a run commits as a placeholder bot and
- * never publishes; its branch stays in the bare repository for the maintainer.
+ * execute layer) the real RunDeps and LiveDeps. Publishing is wired in cut 3b-2 (github.ts is the App's client), so a
+ * run commits as a placeholder bot and never publishes; its branch stays in the bare repository for the maintainer.
  */
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -57,7 +57,8 @@ export const BARE_REPO = join(STATE_DIR, "repo.git");
  * (git 2.54's `hook.<name>.*`) aren't turned off by `core.hooksPath`: `ensureBareRepo` refuses a bare repository whose
  * config holds any key outside github.ts's allowlist before it fetches, so none can be there (review pass 6). Every repo the runner's own git touches is local — the main checkout, its own
  * bare repo, the per-run clone — never a remote, so the file transport stays at git's default. facts.ts's GIT_SAFE
- * (https only, no redirect) is for the GitHub `ls-remote` alone, and would wrongly refuse a local clone.
+ * (https only, no redirect) is for git's talk with GitHub (the dry run's `ls-remote`, github.ts's push), and would
+ * wrongly refuse a local clone.
  */
 export const LOCAL_GIT = ["-c", "credential.helper=", "-c", "gc.auto=0", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] as const;
 
@@ -366,7 +367,7 @@ export async function main(io: Io): Promise<number> {
       `  agent-ready label: ${agentReady ? "yes" : "NO (not labelled for the runner)"}`,
       `  branch:   ${branch}`,
       `  base:     ${bare.base} (the main checkout's origin/main, mirrored into ${BARE_REPO})`,
-      `  bot:      ${BOT.name} <${BOT.email}> (placeholder; GitHub identity is cut 3, so no PR)`,
+      `  bot:      ${BOT.name} <${BOT.email}> (placeholder; publishing is cut 3b-2, so no PR)`,
       `  Verify:   ${t.verify.length} item(s)${t.verify.length ? `\n${t.verify.map((v, i) => `    ${i + 1}. ${v}`).join("\n")}` : ""}`,
       `  names:    ${t.named.length ? t.named.join(", ") : "(none)"}`,
       `  stable:   ${cfg.restUrl}`,

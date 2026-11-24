@@ -3,7 +3,8 @@
  * runner publishes"). On a run that passed the gate, the runner publishes as its GitHub App: it confirms the claim with
  * a day-lease renewal (it must renew clean — no `ticketClosed`, no lapse another claim took over), pushes the one
  * branch from its bare repository to this repo under the runner's prefix (`agent/`), opens a draft PR with a body it builds, comments the PR link
- * on the ticket, and only then sets the claim's lease to a week. The maintainer reviews and merges (SMD-4090); the runner never merges.
+ * on the ticket, and only then sets the claim's lease to a week. The maintainer reviews and merges; the runner never
+ * merges, and a ruleset locking `main` to repository admins keeps the App from it (.github/rulesets/main-merge.json).
  *
  * Two pieces, both pure of I/O but for injected dependencies, so the self-check (publish-check.ts) drives them offline:
  *
@@ -28,6 +29,7 @@ import type { ScanSecrets } from "./gate.ts";
 import { updateRecord, type GateSummary, type OwedStep, type SessionCost } from "./record.ts";
 import type { Gql } from "../../db/linear-api.ts";
 import { maskTokens } from "./text.ts";
+import { rawText, scrubToken } from "./github.ts";
 
 // ── The PR body ────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -59,13 +61,10 @@ export type PrBodyInput = {
  * git-push error could echo a token-bearing remote URL. Its errors must be token-free (see `GitHubClient`), but scrub
  * defensively here so one 3b slip can't leak a token onto disk or the brain.
  */
-const scrubDetail = (s: string): string =>
-  maskTokens(s)
-    .replace(/gh[pousr]_[A-Za-z0-9._-]{20,}/g, "gh_…")
-    .replace(/github_pat_[A-Za-z0-9_]{20,}/g, "github_pat_…");
+const scrubDetail = (s: string): string => scrubToken(maskTokens(s), null);
 
 /** A thrown value as a short one-line string for an owed step's `why`; `scrubDetail` is still applied before it is recorded. */
-const errText = (e: unknown): string => String((e as Error)?.message ?? e).slice(0, 160);
+const errText = (e: unknown): string => rawText((e as Error)?.message ?? e).slice(0, 160);
 
 /**
  * A fence of backticks one longer than the longest run of backticks anywhere in the text (at least three). A closing
@@ -239,8 +238,7 @@ export type PublishInput = {
   branch: string;
   /** The commit the gate passed: what is pushed, so a ref moved after the gate pushes nothing it didn't check. Nothing records it yet: cut 3b-2 resolves the imported branch to a commit once, runs the gate on that commit, and records it for this. */
   commit: string;
-  /** The PR's head, the pushed branch (`agent/smd-<n>-<slug>`, a branch of this repo), and its base branch. */
-  head: string;
+  /** The PR's base branch. Its head is `branch`, the branch just pushed: one field, so the PR can't name another. */
   baseBranch: string;
   /** The PR title. It must be runner-computed or gate-scanned text (e.g. the commit subject, which the gate's secret scan covers) — never raw model output. GitHub renders a title as plain text and fires no mentions, and `publish` masks tokens in it, but it does not scan it. */
   title: string;
@@ -360,7 +358,7 @@ export async function publish(input: PublishInput, deps: PublishDeps): Promise<P
   // be runner-computed or gate-scanned, per PublishInput.title); the body was masked, scanned and fenced by buildPrBody.
   let pr: { ok: true; number: number; url: string } | { ok: false; detail: string; final?: boolean };
   try {
-    pr = await deps.github.openDraftPr({ title: maskTokens(input.title), head: input.head, base: input.baseBranch, body: input.body });
+    pr = await deps.github.openDraftPr({ title: maskTokens(input.title), head: input.branch, base: input.baseBranch, body: input.body });
   } catch (e) {
     return mk({ leaseRenewed: true, pushed: true, owed: [{ kind: "publish", why: `opening the draft PR threw: ${scrubDetail(errText(e))}`, at: at() }], reason: "opening the draft PR threw" });
   }
