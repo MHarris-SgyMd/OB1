@@ -34836,7 +34836,7 @@ if (want("47")) {
     ];
     assert(usage.every((u) => u.code === 2)
         && /^--status reads and writes nothing: it takes no --dry-run, --key or --batch$/m.test(usage[0].err) && /^--batch goes with a run over every key/m.test(usage[1].err)
-        && /^--key is a subject key — ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
+        && /^--key is a subject key — ticket:<ID>, pr:<number> or pr:<owner>\/<repo>#<number>, version:<v1\.2\.3> or version:<owner>\/<repo>@<v1\.2\.3>, or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
         && /^--batch\b.*\b200\b/m.test(usage[4].err),
       `usage refused before any connection, 2: --status beside a write, --key beside --batch, a key no subject can hold, a batch of none, a batch over 200 (${usage.map((u) => u.err.split("\n")[0].slice(0, 60)).join(" | ")})`);
 

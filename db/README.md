@@ -2520,7 +2520,8 @@ never depends on the setting, and both shapes stay valid.
 
 The setting is the operator's, in `subject_repo_settings`, 140's shape: one
 standing row at most, history after, written and ended by an operator key by
-its agent id.
+its agent id, through `set_subject_repo` alone: its guard refuses a raw write,
+which would stand a repository with no key mapped.
 - **`set_subject_repo(repo, actor)`** sets it, an operator's alone. Any other
   key answers `NOT_OPERATOR`, and a value `ob1_subject_repo_refusal` names
   answers `BAD_REPO`. The value is trimmed and lowercased, and `NULL` clears
@@ -2550,8 +2551,9 @@ its agent id.
   keeps that facet, so a thread doesn't split a member at a time after the
   repository changes or is cleared. The writer takes the advisory lock
   `ob1:subject-repo` shared and the setter takes it exclusive, so a write and a
-  mapping never interleave. A set with no bare key takes neither the lock nor
-  the setting.
+  mapping never interleave. A set with no bare key takes the lock too, since
+  it closes whatever stands, but reads no setting. 153 carries 130's
+  `close_thought_subjects` with the same lock.
 
 `ob1_subject_repo()` reads the setting and raises on a stored value the
 refusal names. `subject_repo_setting()` gives brain_info the setting without

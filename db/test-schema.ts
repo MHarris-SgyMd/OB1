@@ -18893,10 +18893,10 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
 
   // The shape: 130 the last definer of its six functions; one index per thought and key, 111's gone; statistics on a
   // facet's key; the sentinels; SECURITY INVOKER throughout; the comments.
-  // record_thought_subjects's last definer is the subject-repo file, which carries 130's body with a bare key scoped
-  // once a repository is set ([138]); by name.
+  // record_thought_subjects's and close_thought_subjects's last definer is the subject-repo file, which carries 130's
+  // bodies with a bare key scoped once a repository is set and the repository's lock taken ([138]); by name.
   for (const fn of ["ob1_thread_lock_keys", "record_thought_subjects", "record_thought_subject", "close_thought_subjects", "close_thought_subject", "ob1_thread_relink_subject"]) {
-    const by = fn === "record_thought_subjects" ? (files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql") : file;
+    const by = fn === "record_thought_subjects" || fn === "close_thought_subjects" ? (files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql") : file;
     assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === by, `one ${fn}, ${by} its last definer (${lastDefinerOf(fn)})`);
   }
   const [idx] = await q<{ uniq: string | null; old: string | null }>(`SELECT
@@ -19151,9 +19151,9 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   await reapply(file.slice(0, 4));
   const after = await census();
   assert(JSON.stringify(after) === JSON.stringify(before) && after.fns === 6 && after.old === 0, `130 applied again moves nothing: ${JSON.stringify(after)}`);
-  // 130 re-applied put its own record_thought_subjects back; the shipped one is the subject-repo file's, which scopes a
-  // bare key once a repository is set ([138]).
-  await restoreShipped("record_thought_subjects");
+  // 130 re-applied put its own record_thought_subjects and close_thought_subjects back; the shipped ones are the
+  // subject-repo file's, which scope a bare key once a repository is set and take the repository's lock ([138]).
+  await restoreShipped("record_thought_subjects", "close_thought_subjects");
 
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
 }
@@ -23793,19 +23793,19 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
         FROM pg_attribute WHERE attrelid = 'subject_repo_settings'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
     const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('subject_repo_settings_one_standing')) AS d`)).d ?? "";
     const trig = (await one<{ t: string }>(`SELECT string_agg(tgname || ':' || tgtype::text, ' ' ORDER BY tgname) AS t FROM pg_trigger WHERE tgrelid = 'subject_repo_settings'::regclass AND NOT tgisinternal`)).t;
-    const FNS = ["subject_key_valid(text)", "ob1_subject_repo_refusal(text)", "ob1_subject_scoped_key(text, text)", "ob1_subject_repo_settings_guard()", "ob1_subject_repo()", "set_subject_repo(text, jsonb)", "subject_repo_setting()", "ob1_subject_repo_map_max()"];
+    const FNS = ["subject_key_valid(text)", "ob1_subject_repo_refusal(text)", "ob1_subject_scoped_key(text, text)", "ob1_subject_repo_settings_guard()", "ob1_subject_repo()", "set_subject_repo(text, jsonb)", "subject_repo_setting()", "ob1_subject_repo_map_max()", "ob1_subject_repo_settings_by_setter()"];
     const fns = await q<{ f: string; v: string; d: boolean; c: string | null }>(
       `SELECT p.oid::regprocedure::text AS f, p.provolatile AS v, p.prosecdef AS d, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = ANY ($1::regprocedure[]) ORDER BY 1`, [FNS]);
     const vol = Object.fromEntries(fns.map((f) => [f.f, f.v]));
     assert(cols === "id bigint not null, repo text not null, set_by text not null, set_by_agent_id uuid not null, set_at timestamp with time zone not null, ended_at timestamp with time zone, ended_by text, ended_by_agent_id uuid"
            && /UNIQUE INDEX subject_repo_settings_one_standing ON public\.subject_repo_settings USING btree \(\(true\)\) WHERE \(ended_at IS NULL\)/.test(idx)
            && trig === "subject_repo_settings_history:31 subject_repo_settings_no_truncate:34"
-           && fns.length === 8 && fns.every((f) => !f.d && /[Mm]igration(s 111,)? 153 \/ (SMD-3306, )?SMD-3887/.test(f.c ?? ""))
-           && vol["subject_key_valid(text)"] === "i" && vol["ob1_subject_repo_refusal(text)"] === "i" && vol["ob1_subject_scoped_key(text,text)"] === "i" && vol["ob1_subject_repo_map_max()"] === "i"
+           && fns.length === 9 && fns.every((f) => !f.d && /[Mm]igration(s 111,)? 153 \/ (SMD-3306, )?SMD-3887/.test(f.c ?? ""))
+           && vol["subject_key_valid(text)"] === "i" && vol["ob1_subject_repo_refusal(text)"] === "i" && vol["ob1_subject_scoped_key(text,text)"] === "i" && vol["ob1_subject_repo_map_max()"] === "i" && vol["ob1_subject_repo_settings_by_setter()"] === "s"
            && vol["ob1_subject_repo()"] === "s" && vol["subject_repo_setting()"] === "s"
            && vol["set_subject_repo(text,jsonb)"] === "v" && vol["ob1_subject_repo_settings_guard()"] === "v"
-           && ["subject_key_valid", "ob1_subject_repo_refusal", "ob1_subject_scoped_key", "ob1_subject_repo_settings_guard", "ob1_subject_repo", "set_subject_repo", "subject_repo_setting", "ob1_subject_repo_map_max"].every((f) => lastDefinerOf(f) === file),
-      `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; eight functions commented by 153 with the right volatilities, none SECURITY DEFINER, 153 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
+           && ["subject_key_valid", "ob1_subject_repo_refusal", "ob1_subject_scoped_key", "ob1_subject_repo_settings_guard", "ob1_subject_repo", "set_subject_repo", "subject_repo_setting", "ob1_subject_repo_map_max", "ob1_subject_repo_settings_by_setter", "close_thought_subjects"].every((f) => lastDefinerOf(f) === file),
+      `the table's columns, its one-standing index, a row trigger before INSERT, UPDATE and DELETE and a statement trigger before TRUNCATE; nine functions commented by 153 with the right volatilities, none SECURITY DEFINER, 153 the last definer of each (${cols}; ${trig}; ${fns.map((f) => `${f.f}:${f.v}`).join(", ")})`);
     // The key shapes' sentinel stands above the function in the file (a SQL body keeps no comment); the mapping's is in the setter's body.
     assert(/ob1:subject-key-shapes[\s\S]*CREATE OR REPLACE FUNCTION subject_key_valid/.test(readFileSync(join(MIGRATIONS, file), "utf8"))
            && /ob1:subject-repo-mapping/.test(String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = 'set_subject_repo(text, jsonb)'::regprocedure`)).s)),
@@ -23940,18 +23940,26 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
       await tx.query(`SELECT record_thought_subjects($1::uuid, '{pr:12}'::text[], 'model', $2, NULL::uuid, $3, NULL::jsonb)`, [t2, K, t2fp]);
       doorMode = await repoLock(tx);
     });
-    // A set with no bare key takes no repository lock (review pass 2): it waits on no mapping.
+    // A set with no bare key takes the lock too, since it closes whatever stands (review pass 3; pass 2 had dropped it),
+    // and so does close_thought_subjects.
     await db.transaction(async (tx) => {
       await tx.query(`SELECT record_thought_subjects($1::uuid, '{ticket:SMD-91370}'::text[], 'model', $2, NULL::uuid, $3, NULL::jsonb)`, [t3, K, t3fp]);
       ticketMode = await repoLock(tx);
+    });
+    const t3facets = (await q<{ id: string }>(`SELECT id::text FROM thought_facets WHERE thought_id = $1::uuid AND kind = 'subject' AND valid_until IS NULL`, [t3])).map((r) => r.id);
+    let closeMode: string | null = "unread", closed: Record<string, unknown> = {};
+    await db.transaction(async (tx) => {
+      closed = (await tx.query<{ c: Record<string, unknown> }>(`SELECT close_thought_subjects($1::uuid, $2::uuid[], $3) AS c`, [t3, t3facets, t3fp])).rows[0].c;
+      closeMode = await repoLock(tx);
     });
     await subjects(t3, ["version:v1.2", "ticket:SMD-91370"]);
     await db.transaction(async (tx) => {
       await tx.query(`SELECT set_subject_repo('o/r', $1::jsonb)`, [JSON.stringify(OP)]);
       setterMode = await repoLock(tx);
     });
-    assert(doorMode === "ShareLock" && setterMode === "ExclusiveLock" && ticketMode === null && (await keysOf(t3)) === "ticket:SMD-91370,version:o/r@v1.2",
-      `record_thought_subjects holds the ob1:subject-repo lock shared for a bare key and none for a ticket alone, set_subject_repo exclusive (${doorMode}; ${ticketMode}; ${setterMode})`);
+    assert(doorMode === "ShareLock" && setterMode === "ExclusiveLock" && ticketMode === "ShareLock" && closeMode === "ShareLock" && closed.action === "closed"
+           && (await keysOf(t3)) === "ticket:SMD-91370,version:o/r@v1.2",
+      `record_thought_subjects holds the ob1:subject-repo lock shared, for a ticket's set too, close_thought_subjects shared, set_subject_repo exclusive (${doorMode}; ${ticketMode}; ${closeMode} ${String(closed.action)}; ${setterMode})`);
 
     // The one standing: nothing written, in the changed reply's shape. Another repository: keys scoped to the first stay, nothing
     // to map, and a bare key written under it is scoped to it. Cleared, a bare key is written bare; the first set again maps
@@ -24013,10 +24021,29 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
       await failure(`INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at) VALUES ('o/s', 'x', $1::uuid, now())`, [H.agent_id]),
       await failure(`UPDATE subject_repo_settings SET ended_at = now(), ended_by = 'x', ended_by_agent_id = $1::uuid WHERE ended_at IS NULL`, [H.agent_id]),
     ];
+    // A raw write a role holding the table's writes could make, outside the setter (review pass 3): an INSERT standing
+    // a repository with nothing mapped, refused whether one stands or none, and an ending UPDATE, each 42501, nothing
+    // changed. The one-standing index, which the guard now stands before, read with the guard off.
+    await setRepo(null, OP);
+    const rawSet = await failure(`INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at) VALUES ('o/s', 'x', $1::uuid, now())`, [OP.agent_id]);
+    await setRepo("o/r", OP);
+    const rawEnd = await failure(`UPDATE subject_repo_settings SET ended_at = now(), ended_by = 'x', ended_by_agent_id = $1::uuid WHERE ended_at IS NULL`, [OP.agent_id]);
+    let twoStanding = "taken";
+    try {
+      await db.exec(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history;
+                     INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at) VALUES ('o/s', 'x', '${OP.agent_id}', now())`);
+    } catch (e) {
+      twoStanding = `${String((e as { code?: string }).code ?? "?")} ${String((e as Error).message).split("\n")[0]}`;
+    } finally {
+      await db.exec(`ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+    }
+    assert(/^42501 subject_repo_settings is written by set_subject_repo alone/.test(rawSet) && /^42501 subject_repo_settings is written by set_subject_repo alone/.test(rawEnd)
+           && /^42501 subject_repo_settings is written by set_subject_repo alone/.test(hist[4]) && /^23505 .*subject_repo_settings_one_standing/.test(twoStanding) && (await repoNow()) === "o/r",
+      `a raw INSERT or an ending UPDATE outside set_subject_repo is refused, nothing changed; a second standing row meets the index with the guard off (${rawSet.slice(0, 70)} | ${rawEnd.slice(0, 50)} | ${twoStanding.slice(0, 60)})`);
     assert(/^23001 subject_repo_settings is history: a row changes only to end, once/.test(hist[0]) && /^23001 subject_repo_settings is history: DELETE refused/.test(hist[1])
-           && /^23001 subject_repo_settings is history: TRUNCATE refused/.test(hist[2]) && /^22023 a repository is lowercase/.test(hist[3]) && /^23505 .*subject_repo_settings_one_standing/.test(hist[4])
+           && /^23001 subject_repo_settings is history: TRUNCATE refused/.test(hist[2]) && /^22023 a repository is lowercase/.test(hist[3]) && /^42501 subject_repo_settings is written by set_subject_repo alone/.test(hist[4])
            && /^42501 subject_repo_settings: set_by_agent_id /.test(hist[5]) && /^42501 subject_repo_settings: ended_by_agent_id /.test(hist[6]),
-      `history: an UPDATE refused, a DELETE and a TRUNCATE refused, a raw row with capitals, a second standing row, an agent's maker and an agent's end refused (${hist.map((h) => h.slice(0, 36)).join(" | ")})`);
+      `history: an UPDATE refused, a DELETE and a TRUNCATE refused, a raw row with capitals, a raw second row outside the setter, an agent's maker and an agent's end refused (${hist.map((h) => h.slice(0, 36)).join(" | ")})`);
 
     // A stored value the refusal names (the trigger off): the reader raises 22000 naming the setting, the setting says it without raising; a clear mends it.
     await db.exec(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history; UPDATE subject_repo_settings SET repo = 'Bad' WHERE ended_at IS NULL; ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
