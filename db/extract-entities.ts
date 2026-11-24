@@ -884,6 +884,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
       SELECT 1 FROM derivations d JOIN thoughts t ON t.id = d.artifact_id
        WHERE d.artifact_kind = 'entities' AND d.artifact_id = c.thought_id AND d.produced_by = c.work_type
          AND d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))))`;
+  /** unvouched's four kinds in words, for the three lines that count them. */
+  const UNVOUCHED_WORDS = "failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds";
   const countRows = async (where: ReturnType<typeof readSince>): Promise<number> =>
     Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims c WHERE c.work_type = ${JOB} AND (${where})`)[0].n);
   /**
@@ -1039,12 +1041,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     const c = await counts();
     // What a run would return to the pool (SMD-2607): under another key than the recorded one, the switch's rows; under the recorded one, the rows another key read since.
     const switching = !!recordedKey && recordedKey !== JOB;
-    const settled = await countRows(switching ? unvouched() : readSince());
+    const toReturn = await countRows(switching ? unvouched() : readSince());
     printCounts(c, STATUS_ONLY ? "status" : "before");
-    if (STATUS_ONLY && settled > 0) {
+    if (STATUS_ONLY && toReturn > 0) {
       out(switching
-        ? `  the brain used ${JOB} before: a --switch-key run returns ${settled} of its row(s) to the pool — failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds`
-        : `  ${settled} finished row(s) are of thoughts another extraction key read since: the next run returns them to the pool`);
+        ? `  the brain used ${JOB} before: a --switch-key run returns ${toReturn} of its row(s) to the pool — ${UNVOUCHED_WORDS}`
+        : `  ${toReturn} finished row(s) are of thoughts another extraction key read since: the next run returns them to the pool`);
     }
     if (c.claimed > 0) for (const h of await leaseHolders(sql, JOB)) out(describeHolder(h));
     await printGraph();
@@ -1057,11 +1059,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (DRY_RUN) {
       // A partial row is a finished one, so it can be among the rows a run returns by itself too: then the sum is an upper bound, and the line says so (review pass 2).
       const retriedPartial = RETRY_PARTIAL ? c.partial : RETRY_LEFT_OUT ? c.leftOut : 0;
-      const todo = c.pending + c.unpooled + settled + (RETRY_FAILED && !switching ? c.failed : 0) + retriedPartial;
-      const atMost = settled > 0 && retriedPartial > 0 ? "at most " : "";
+      const todo = c.pending + c.unpooled + toReturn + (RETRY_FAILED && !switching ? c.failed : 0) + retriedPartial;
+      const atMost = toReturn > 0 && retriedPartial > 0 ? "at most " : "";
       out(
         `\n  would: ${recordedKey === JOB ? "" : `record ${JOB} in ob1_config so new captures enqueue; `}` +
-          `${settled > 0 ? (switching ? `return ${settled} of this key's row(s) from an earlier use to the pool (failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds); ` : `return ${settled} finished row(s) another extraction key read since to the pool; `) : ""}` +
+          `${toReturn > 0 ? (switching ? `return ${toReturn} of this key's row(s) from an earlier use to the pool (${UNVOUCHED_WORDS}); ` : `return ${toReturn} finished row(s) another extraction key read since to the pool; `) : ""}` +
           `${RETRY_FAILED && !switching ? `return ${c.failed} failed rows to the pool; ` : ""}` +
           `${RETRY_PARTIAL ? `return ${c.partial} row(s) extracted in part to the pool${c.partial ? ` (${partialKinds(c.partial, c.leftOut, c.leftOutOver)})` : ""}; ` : RETRY_LEFT_OUT ? `return ${c.leftOut} row(s) with windows left out to the pool${c.leftOut ? ` (${partialKinds(c.leftOut, c.leftOut, c.leftOutOver)})` : ""}; ` : ""}` +
           `add ${c.unpooled} thoughts to the pool; send ${atMost}${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) to ${cfg.metadataModel} ` +
@@ -1132,7 +1134,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     } else {
       out(`  ob1_config.entity_extraction_key = ${JOB}, in place of ${switched.from} — new and edited thoughts now enqueue for extraction`);
       out(switched.back > 0
-        ? `  --switch-key: the brain used ${JOB} before — ${switched.back} of its row(s) returned to the pool (failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds)`
+        ? `  --switch-key: the brain used ${JOB} before — ${switched.back} of its row(s) returned to the pool (${UNVOUCHED_WORDS})`
         : `  --switch-key: none of ${JOB}'s rows to return to the pool`);
     }
   }

@@ -5683,7 +5683,7 @@ if (want("9f")) {
 // a delete leaves no edge citing the thought, and the cost is recorded.
 
 if (want("10")) {
-  console.log("\n[10] db/extract-entities.ts: extraction through the claims, against a stub model");
+  console.log("\n[10] db/extract-entities.ts: extraction through the claims, against a stub model; --switch-key back to a key used before returns the rows that key cannot vouch for, and a key moved back with nothing returned is mended by the next run (SMD-2607)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const KEY = "extract:stub-meta@p2";
