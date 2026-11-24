@@ -27,7 +27,8 @@
 //                          brain's edge answers a busy registry (HTTP 200, JSON-RPC -32003, Retry-After 2)
 //   /control/fault/N       the same, each answered 500, as the brain's route answers when its key check throws
 //   /control/cut/N         a server that dies: every connection dropped where it stands, a listen stream with no closing
-//                          frame, then 502 for N seconds. The other controls end each stream as the SDK's close() does
+//                          frame, then 502 for N seconds. The other four of these five end each stream as the SDK's
+//                          close() does
 //
 //   The server ending a stream of its own accord, and going on serving (SMD-4493): the SDK's handler ends its streams
 //   only all at once, so the probe holds each listen stream by what can end it alone. WAY is one of:
@@ -36,10 +37,14 @@
 //     frame   a closing frame written by hand, as the SDK writes its own, and then the body's end
 //   /control/end/WAY           every open listen stream ended that way, and the tool set changed, unannounced
 //   /control/revoked/WAY/N     the same, and for N seconds every MCP request answered as the brain's edge answers a
-//                              revoked caller (HTTP 200, JSON-RPC -32001; a notification 202)
+//                              revoked caller that presents a key (HTTP 200, JSON-RPC -32001; a notification 202)
 //   /control/unknown/WAY/N     the same, in the words for a key the brain does not know
 //   /control/nolisten/WAY/N    the same, but for N seconds a listen alone is refused, as the brain refuses one at a
 //                              bound (HTTP 200, JSON-RPC -32603), every other request served
+//   What these three copy of the brain is the status and the body of a single request, of a listen and of a
+//   notification. Nothing else: not its headers, not what it answers a batch, a GET or a body that is no JSON, and
+//   not the 401 with a challenge that it gives a caller with no key or a refused token. A second refusal begun
+//   while one runs replaces it. `reset` makes Bun print an error for each stream it ends, and the probe serves on.
 //
 //   LISTEN=off bun probe.ts   declare tools.listChanged false, as the brain's server does today: a client told so
 //                             is offered no stream
@@ -157,8 +162,8 @@ function endHeld(way: "clean" | "reset" | "frame"): number {
     } catch (err) {
       log({ event: "end-error", way, message: (err as Error).message });
     }
-    // The SDK's side goes with it, its subscription freed and no frame of its own written. For `clean` this is the
-    // whole of it: the SDK closes its stream, and the client reads the body's end.
+    // For `clean` this is the whole of it: the SDK closes its stream with no frame of its own, and the client reads
+    // the body's end. After the other two the stream's end has already cancelled the SDK's side, and this does nothing.
     h.abort.abort();
   }
   return all.length;
@@ -334,7 +339,7 @@ async function control(url: URL): Promise<Response> {
   } else if (what !== "state") {
     return new Response("unknown control", { status: 404 });
   }
-  return Response.json({ toolSet: extra ? "B" : "A", ttlMs, sessions: sessions.size, requests, down: Date.now() < downUntil, listen: LISTEN, held: held.size });
+  return Response.json({ toolSet: extra ? "B" : "A", ttlMs, sessions: sessions.size, requests, down: Date.now() < downUntil, noListen: Date.now() < noListenUntil, listen: LISTEN, held: held.size });
 }
 
 const listen = () => Bun.serve({

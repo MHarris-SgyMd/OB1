@@ -165,7 +165,7 @@ This is one machine and an idle stack, with no collector running.
 
 ## The server ending one stream and serving on, measured 2026-11-24 (SMD-4493)
 
-A dated addition, for the gate of SMD-4493's second PR (`docs/mcp-listen-streams.md`, "A stream whose client or key is gone"). Every stream above was ended by the SDK's handler, which ends them all at once, or by a server that then was away. The brain is to end one caller's streams and go on serving, and may then refuse that caller. This records what Claude Code 2.1.331 on macOS does then: headless, two turns, on loopback to the probe.
+A dated addition, for the gate of SMD-4493's second PR (`docs/mcp-listen-streams.md`, "A stream whose client or key is gone"). Every stream above was ended by the SDK's handler, which ends them all at once, or by a server that then was away. The brain is to end one caller's streams and go on serving, and may then refuse that caller. This records what Claude Code 2.1.331 on macOS does then: headless, each session a new process on the model `haiku`, two turns, on loopback to the probe, which has no keys and no tokens.
 
 The probe holds each listen stream by what can end it alone, and ends it one of three ways, changing its tool set without saying so and going on serving:
 
@@ -173,7 +173,7 @@ The probe holds each listen stream by what can end it alone, and ends it one of 
 - **reset:** the stream's body errored, so the connection is reset;
 - **frame:** a closing frame written by hand, the same bytes as the SDK's own, and then the body's end.
 
-Times are seconds from the end of the stream.
+In each session of the two tables one stream was ended, once, about 29.5 seconds after it opened, the session idle between its turns. Times are seconds from the probe's log line for the step, which it writes as the streams are ended.
 
 | The stream was ended | Runs | `subscriptions/listen` after | Lists again? |
 | --- | --- | --- | --- |
@@ -182,31 +182,42 @@ Times are seconds from the end of the stream.
 | reset | 3 | 1.0: opened | Yes, in each. |
 | frame | 3 | 6.0, 6.0 and 6.2: opened | Yes, in each. |
 
-And with a refusal for the 40 seconds after the end, the probe serving again from then and the second turn 20 seconds later:
+"Lists again" is a `tools/list` sent within 30 ms of the reopening and answered; and the second turn called the tool that only the new list has.
 
-| The stream was ended | Refused for 40 s | Runs | `subscriptions/listen` after | Lists again? |
+And with a refusal for the 40 seconds after the end, the probe serving again from then, the second turn 20 seconds later, and the session watched 50 seconds after the probe served again. In those 40 seconds the client sent its listens and nothing else, so what was refused, in every row, was a listen:
+
+| The stream was ended | A listen was answered | Runs | `subscriptions/listen` after | Lists again? |
 | --- | --- | --- | --- | --- |
-| clean | every request, as a revoked caller is: HTTP 200, JSON-RPC -32001 | 3 | 1.0, 3.0, 7.0: refused. None after | No. Its tool call in the second turn was served, on the old list. |
-| frame | the same | 3 | 6.0, 8.0, 12.0: refused. None after | No. The same. |
-| clean | every request, in the words for a key not known: the same shape | 3 | 1.0, 3.0, 7.0: refused. None after | No. The same. |
-| clean | a listen alone, as at a bound: HTTP 200, JSON-RPC -32603, every other request served | 3 | 1.0, 3.0, 7.0: refused. None after | No. The same. |
-| frame | the same | 3 | 6.0, 8.0, 12.0: refused. None after | No. The same. |
+| clean | as a revoked caller is: HTTP 200, JSON-RPC -32001 | 3 | 1.0, 3.0, 7.0: refused. None after | No. |
+| frame | the same | 3 | 6.0, 8.0, 12.0: refused. None after | No. |
+| clean | in the words for a key not known: the same shape | 3 | 1.0, 3.0, 7.0: refused. None after | No. |
+| clean | as at a bound: HTTP 200, JSON-RPC -32603 | 3 | 1.0, 3.0, 7.0: refused. None after | No. |
+| frame | the same | 3 | 6.0, 8.0, 12.0: refused. None after | No. |
 
-Two further sessions, each once:
+"No" is no `tools/list` after the step. The probe then had a second tool, and the second turn called the first alone; in 15 of the 16 sessions whose listens were refused for 20 or 40 seconds, the model said the second was not available to it.
 
-- **Five minutes after a refusal.** A listen alone refused for 20 seconds after a clean end, then 280 seconds of serving, then a second turn. After its three refused attempts the client asked for no stream and no list in those 280 seconds or in that turn, whose tool call was served.
-- **Seven clean ends in one session, 15 seconds apart.** The first five were each opened again 1.0 second on, and listed. The sixth was not: no listen in the 75 seconds watched, a second turn among them. The seventh end found no stream.
+Five further sessions, each once:
 
-What that shows:
+- **Five minutes after a refusal.** A listen refused as at a bound for 20 seconds after a clean end, then 280 seconds of serving, then a second turn. After its three refused attempts the client asked for no stream and no list in those 280 seconds or in that turn, whose tool call was served.
+- **A call that meets the refusal.** Every request refused as a revoked caller's for 90 seconds after a clean end, the second turn 20 seconds in. Its three listens were refused, and then its tool call, 21.9 seconds in. It sent nothing more in the 28 seconds watched. The model was given the refusal's words, and quoted them: the key has been revoked, request a new one.
+- **Seven clean ends in one session, 15 seconds apart.** The first five were each opened again 1.0 second on, and listed; each of those streams was open 14 seconds. The sixth was not opened again in the 75 seconds watched, a second turn among them. The seventh end found no stream.
+- **Seven ends by a frame written by hand, 20 seconds apart.** The first five were each opened again 6.0 or 6.1 seconds on, and listed; each was open 14 seconds. The sixth was not opened again in the 90 seconds watched, a second turn among them. The seventh found no stream.
+- **Seven times, 15 seconds apart, a clean end with a listen refused for 2 seconds after it.** Each of the first five times the attempt 1.0 second on was refused and the one 3.0 seconds on was opened, and listed. The sixth time the client made no attempt at all, in the 85 seconds watched. So it stopped after its fifth reopening, ten attempts in: the five refused among them did not bring the stop sooner.
 
-- **No way of ending strands the client.** It opens its stream again after each, and lists. Without a closing frame it does so as after a drop, a second on; with one, six seconds on, whether the SDK wrote the frame or the server did by hand.
-- **A refusal is an attempt used up, whatever its shape.** A caller refused everything, in either wording, and a listen refused alone while calls are served, each end it after three: the same three attempts a 502 and a busy answer use up, above.
-- **Once stopped it stays stopped.** Five minutes of serving and a new turn did not start it again. Its calls are served and its list is the old one.
-- **Five reopens, and no sixth.** The limit its documentation gives, five reopens in an hour, was met in about a minute: the sixth end, 75 seconds after the first, was not opened again. The six hours it is said to wait were not watched.
+What that shows, of this client in these runs:
+
+- **None of the three ways stranded it.** It opened its stream again after each, and listed. Without a closing frame it did so as after a drop, a second on; with one, six seconds on, whether the SDK wrote the frame or the server did by hand.
+- **A refused listen is an attempt used up.** A listen answered HTTP 200 with a JSON-RPC error, -32001 in either wording or -32603, ended it after three: the same three attempts a 502 and a busy answer use up, above. That is of these answers: a closed port is treated otherwise, above, and a 401 was not run.
+- **Once stopped it stayed stopped,** for the five minutes of serving and the new turn of the one session watched that long, and for the 50 seconds of each of the fifteen others. Its calls were served and its list was the old one.
+- **A refused call goes to the model, and nothing follows it.** Once: no call again, no listen, no list.
+- **Five reopenings in a session, and no sixth,** twice: by clean ends 15 seconds apart and by frames 20 seconds apart, each stream open 14 seconds. Its documentation gives five reopens in an hour, and three for a stream that closes again within 10 seconds, which no stream here did. The six hours it is said to wait were not watched.
+- **A refused attempt did not count toward the five.** Once.
 
 How, and what is thin:
 
-- The probe's controls `end/WAY`, `revoked/WAY/N`, `unknown/WAY/N` and `nolisten/WAY/N` (`evals/mcp-clients/probe.ts`). `selfcheck.ts` holds: that each way ends two held streams as it says, and that the probe then serves on, holds none, and holds a listen made after; that the frame written by hand is the SDK's own, byte for byte; what a call, a listen and a notification are each answered under the two refusals of a caller, in the brain's words; and that under the third a call is served and a listen refused. The refusals' shapes and words are copied from the brain's code, and nothing holds the copies to it.
-- Thirty sessions: thirteen in the first table, of which three controls and the nine ends were one batch and the first control was run alone before it; fifteen in the second; the two after. All headless, all on 2.1.331, all on loopback with no proxy between: whether a reset at the MCP server reaches a client through the stack's proxy as a reset was not run.
-- Each refusal lasted 40 seconds, longer than the client's three attempts. A refusal shorter than those attempts was not run: by the table of restarts above, one success among the three is enough.
-- Not measured: an interactive session; what the `/mcp` panel shows of a server whose stream the client has stopped asking for; what starts a stopped client again short of a new session; a sign-in again after a grant is revoked, which needs the authorization server; a stream that ends again within 10 seconds of being opened, for which its documentation gives three reopens; and any other client.
+- The probe's controls `end/WAY`, `revoked/WAY/N`, `unknown/WAY/N` and `nolisten/WAY/N` (`evals/mcp-clients/probe.ts`). `selfcheck.ts` holds: that each way ends two held streams, and one alone, as it says, and that the probe then serves on with a call's result, holds none, and holds a listen made after; that the frame written by hand is the SDK's own, byte for byte, once and no more, for a number's id and for a string's, which is what this client sends; what a call, a listen, a call at another path and a notification are each answered under the two refusals of a caller, in the brain's words whole; that under the third a call is served and a listen refused; that each refusal lasts what it was asked to; that the tool set changes; and each of these after each way the runs here used. `reset` is held as an error at the reader, which a body cut short gives too: that it is a reset at TCP was seen by hand, with Bun 1.4.3 on macOS.
+- What the probe's refusals copy of the brain is the status and the body of a single request, a listen and a notification, for a caller that presents a key. Nothing holds the copies to the brain's code. Its headers are not copied, nor what it answers a batch or a GET, which this client did not send. And the probe cannot stand in for the brain's answer to a caller with a token or with nothing at its public origin, a 401 with a challenge: no session here held a credential, so none could be refused in a way the client could act on.
+- Thirty-three sessions: thirteen in the first table, of which three controls and the nine ends were one batch and the first control was run alone before it; fifteen in the second; the five after. All headless, all on 2.1.331, one after another, on loopback with no proxy between: whether a reset at the MCP server reaches a client through the stack's proxy as a reset was not run.
+- One control session's first turn failed before its tool call, the headless client answering "Credit balance is too low". Its stream had opened; the end, the reopening 6.0 seconds on, the list and the second turn were as in the other three.
+- Each refusal in the second table lasted 40 seconds, longer than the client's three attempts. The last of the five sessions has one shorter than them: an attempt that is refused, and a later one that opens.
+- Not measured: an interactive session; what the `/mcp` panel shows of a server whose stream the client has stopped asking for; what starts a stopped client again short of a new session; a stream ended in the middle of a turn, or within 10 seconds of its opening; a refusal that never ends, beyond the 90 seconds of one session; a 401, and so a caller with a token, and a sign-in again after a grant is revoked, which need the authorization server; and any other client.
