@@ -154,7 +154,7 @@ export async function run(opts: ThreadsOptions): Promise<number> {
   }
   // 111's rule, before any connection: a key no subject can hold has no thread.
   if (KEY !== undefined && !subjectKeyValid(KEY)) {
-    err(`--key is a subject key — ticket:<ID>, pr:<number>, version:<v1.2.3> or phrase:<lower-case words> — got ${JSON.stringify(KEY.slice(0, 80))}\n${flagList(FLAGS, HINTS)}`);
+    err(`--key is a subject key — ticket:<ID>, pr:<number> or pr:<owner>/<repo>#<number>, version:<v1.2.3> or version:<owner>/<repo>@<v1.2.3>, or phrase:<lower-case words> — got ${JSON.stringify(KEY.slice(0, 80))}\n${flagList(FLAGS, HINTS)}`);
     return 2;
   }
   const BATCH = opts.batch ?? DEFAULT_BATCH;
