@@ -43,10 +43,10 @@ delete process.env.OB1_CAPTURE_KEY;
 const {
   stripInjected, sniffHarness, parseClaudeCode, parseCodex, summariseTranscript, renderSummary, headerTickets, provenanceOf,
   scanForSecrets, scanSummary, SECRET_PATTERNS, redactSecrets, redactEpisode, cleanEpisode, secretMode, SECRET_MODES, redactionMarker, describeRedactions, parseRpcBody, postCapture, CaptureError, prepare, postPending, hookJson, shellWord, readState, LIMITS, REFUSAL_RE, checkpointOf, EVENTS, HOOK_EVENTS, DEFAULT_EVENTS, eventSpec, HARNESS, HARNESSES, TRIGGER_EVENTS, INTERVAL_EVENTS, aheadOf, newerInFlight, landedBefore, landedAfter, pointerFor, segment, ticketsIn, episodeChain, RUN_MAX, verdictOf,
-  loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl,
+  loadConfig, modelSummary, egressRefusalForModel, modelStatusLine, assistantExcerpt, endpointOf, shownUrl, gateFindings,
   loadBrains, useStateRoot, HOOK_VERSION, VERSION_RE,
 } = await import(SCRIPT);
-/** The version metadata.json gives the hook (SMD-4378): the script's own must equal it. */
+/** The version metadata.json gives the hook (SMD-4378): the hook's own (lib/hook.mjs, re-exported by the script) must equal it. */
 const META_VERSION = JSON.parse(readFileSync(join(HERE, "metadata.json"), "utf8")).version;
 /** The line --version prints and --check opens with; --dry-run opens with it after `--- `. */
 const VERSION_LINE = `session-capture ${META_VERSION}`;
@@ -485,6 +485,25 @@ let episodesLines;
   const longTitle = titledLong.text.split("\n").find((l) => l.startsWith("Title:")) ?? "";
   assert(/\[redacted:/.test(longTitle) && !/sk-ant|Ab1Ab1/.test(longTitle) && titledLong.redactions.some((r) => r.in === "the title"),
     `a key the title's clip would cut is blanked whole in the title, before the clip (${longTitle.slice(-40)})`);
+  // SMD-4502: the rendered text's scan re-judged a prompt the 200-character clip cuts (and the title's 120), so a run the
+  // whole prompt's scan cleared was blanked in the listed line while a ticket-shaped part of it headed the summary, and
+  // under refuse the clipped line refused the episode. One verdict per prompt: the listed lines are the whole prompt's.
+  const oneVerdict = (ask) => {
+    const ep = segment([CWD("/wt/ob1"), BR("main"), P(ask)]).episodes[0], r = redactEpisode(ep), lines = r.text.split("\n");
+    const line = (pre) => lines.find((l) => l.startsWith(pre)) ?? "";
+    return { head: /ABC-1234/.test(lines[0]), prompt: /\[redacted:/.test(line("- ")), title: /\[redacted:/.test(line("Title:")),
+      gate: gateFindings(r, r.text).length, refuse: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length };
+  };
+  const tailWords = "thequickbrownfoxjumpsoverthelazydogagainandagainandagain".repeat(2);
+  const cutEntropy = oneVerdict("here is the build id " + "x".repeat(134) + " Kx9QzR7mP2vL8nT4wY6bH3jF5cD1gA0eS-ABC-1234-" + tailWords + " ok");
+  const cutGoogle = oneVerdict("y".repeat(159) + " AIza-ABC-1234-" + "b".repeat(100) + " ok"); // the prompt's clip leaves AIza and 35 before its `…`
+  const cutTitle = oneVerdict("z".repeat(79) + " AIza-ABC-1234-" + "c".repeat(60) + " ok"); // the title's 120 does, the prompt is shown whole
+  assert([cutEntropy, cutGoogle, cutTitle].every((v) => v.head && !v.prompt && !v.title && v.gate === 0 && v.refuse === 0),
+    `a run the whole prompt's scan cleared is judged so in the listed line and the title too, as in the header, and refuses nothing under refuse: the entropy rule's cut run, the Google key's \\b at the clip, the title's clip (SMD-4502) (${JSON.stringify([cutEntropy, cutGoogle, cutTitle])})`);
+  // …and the whole prompt's verdict still blanks a key the clip cuts, whole, in the line and the title (SMD-2127's rule).
+  const cutKey = redactEpisode(segment([CWD("/wt/ob1"), BR("main"), P("w".repeat(170) + " sk-ant-api03-" + "Ab1".repeat(12) + " now")]).episodes[0]);
+  assert(/\[redacted:anthropic key\]/.test(cutKey.text.split("\n").find((l) => l.startsWith("- ")) ?? "") && !/sk-ant|Ab1Ab1/.test(cutKey.text),
+    `a key the prompt's clip cuts is still blanked whole by the whole prompt's scan (${cutKey.text.split("\n").find((l) => l.startsWith("- "))?.slice(-40)})`);
   // Review pass 2 (cold read, mutants): the move to a branch by its own ticket; the gate judged where the session moved to;
   // a cd within any of the episode's roots.
   assert(asks(CWD("/wt/ob1"), BR("main"), P("do SMD-700"), BR("me/node-22-smd-700-x"), P("go")) === "do SMD-700|go",
@@ -960,7 +979,7 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     "ACTIONLINT_SHA256=" + "9f86".repeat(16), "--sha256 " + "9f86".repeat(16), "\n" + "9f86".repeat(16) + "  actionlint_1.7.7_linux_amd64.tar.gz", "\n" + "9f86".repeat(16) + "  a.tgz: OK\n" + "8e75".repeat(16) + "  b.tgz: OK", "sha256: " + "9f86".repeat(16), "SHA-256 = " + "9f86".repeat(16), "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>",
     "/Users/mharris/.claude/projects/-Users-mharris-Projects-OB1/memory/ob1-compose-loopback-1844.md",
     "/private/tmp/claude-501/-Users-mharris-Projects-OB1/8de5e1e1-c72c-4b7f-aa81-ccbce6558ef6/scratchpad/smd1298/patch1-server.py",
-    // A bracketed value is a placeholder — this script's own marker first of all: the second scan must not read it as a value (SMD-2127).
+    // A bracketed value is a placeholder — the hook's own marker first of all: the second scan must not read it as a value (SMD-2127).
     "password: [redacted:password assignment]", "psql --password [redacted:password flag] -h db", "tool --token [redacted:credential flag]", "MCP_ACCESS_KEY=[redacted:credential assignment, high-entropy token]",
     "postgres://u:[redacted:url with a password]@h/db", "Authorization: Bearer [redacted:bearer token]", "http://127.0.0.1:8010/?key=[redacted:access key in a URL]", "api_key = [YOUR_API_KEY_1]", "POSTGRES_PASSWORD=[set in the vault, rotated 2026]",
   ];
@@ -1309,6 +1328,70 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const bsAgain = scanSummary(bsDry.ep, bsDry.text);
   assert(bsDry.redactions.map((r) => r.in).join() === "prompt 1,the text,the text" && /https:\/\/u:\[redacted:url with a password\]@h\/blobs\/\[redacted:64-hex token/.test(bsDry.text) && !/3f9a3f9a/.test(bsDry.text) && bsAgain.length === 1 && /^64-hex token .* in prompt 1$/.test(bsAgain[0].reason),
     `…the source round took the password, the text round the digest the un-URL'd path then showed (title and ask); the prompt, read whole and unclipped, still carries it, and that is the hit (${bsDry.redactions.map((r) => r.in).join()})`);
+
+  // SMD-4542: three shapes of password the rule let by, each blanked in a prompt and in the outcome, and found nowhere
+  // in the payload or the dry run: a second keyword taken as the value, a getter's default, a quoted value whose first
+  // word is short. A bare reference and unquoted prose stay as they were.
+  const pwShapes = [
+    ["the db line reads password: password = Tr0ub4dor3x now", "Tr0ub4dor3x"],
+    ['I changed it to password = os.environ.get("DB_PASSWORD", "Kp7mWq2zR9") so it falls back locally', "Kp7mWq2zR9"],
+    ["PASSWORD = os.getenv('DB_PASS', 'Zx8vBn3mQw') for the local run", "Zx8vBn3mQw"],
+    ['set password="Kp7m Wq2z R9x" in the vault', "Wq2z R9x"],
+    // Review pass 4: a value that only begins with a keyword is a value (the lookahead needs the keyword's `:` or `=`),
+    // and `env.get` and `ENV.fetch` are stepped over as `os.environ.get` is.
+    ["the db line reads password: Password-2024! now", "Password-2024!"],
+    ['const password = Deno.env.get("DB_PW", "Qw3rTy9Uio") ?? "";', "Qw3rTy9Uio"],
+    ['password = ENV.fetch("DB_PW", "Mn4bVc8Xzl")', "Mn4bVc8Xzl"],
+  ];
+  const pwBlanked = pwShapes.map(([text, secret]) => {
+    const inPrompt = redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]);
+    const inOutcome = redactEpisode(segment([{ t: "prompt", text: "tidy the vault notes" }, { t: "outcome", text }]).episodes[0]);
+    return { secret, prompt: !inPrompt.text.includes(secret) && /\[redacted:password assignment/.test(inPrompt.text), outcome: !inOutcome.text.includes(secret) && /\[redacted:password assignment/.test(inOutcome.text) };
+  });
+  // Unquoted words with digits and a quote later on the line: the quoted branch applies only after an opening quote.
+  const pwKept = ['the password: ab12 cd34 "x" later', 'password: Kp7m Wq2z "x"'].map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text.includes(text));
+  // A quoted value stops at its line's end: run on, it would be a block the episode is refused for (SMD-4543's).
+  pwKept.push(scanForSecrets('password="Kp7m Wq2z\nlater "x"', { every: true }).length === 0);
+  assert(pwBlanked.every((b) => b.prompt && b.outcome) && pwKept.every(Boolean),
+    `a second keyword, a getter's default and a quoted value with a short first word are blanked in a prompt and in the outcome; unquoted short words before a later quote, and a quoted value cut by its line's end, are not (SMD-4542) (${JSON.stringify([pwBlanked, pwKept])})`);
+  // Review pass 3: a bare reference stays a value, as main read it, so a line naming one with a fallback after it is
+  // found and refused under refuse (an exclusion of references sent these whole, and the model's excerpt with them).
+  const pwRefs = ['const password = process.env.DB_PASSWORD || "Kp7mWq2zR9";', 'password = os.environ.get("DB_PASSWORD") or "Kp7mWq2zR9"', 'PGPASSWORD = os.environ.get("PGPASS") or "Kp7mWq2zR9"', 'const POSTGRESPASSWORD = process.env.PG_PW ?? "Kp7mWq2zR9";']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0; });
+  // …and a getter whose default is blanked is not found again by the second scan (the end-to-end case below), while a
+  // password glued onto a getter's name is not read as its receiver: blanked, as before, with the default.
+  const pwGlued = redactEpisode(segment([{ t: "prompt", text: 'password=hunter22os.getenv("PW", "Kp7mWq2zR9")' }, { t: "outcome", text: "ok" }]).episodes[0]).text;
+  assert(pwRefs.every(Boolean) && !/hunter22/.test(pwGlued),
+    `a bare reference with a fallback after it is found and refused under refuse, as before, and a password glued onto a getter is blanked (SMD-4542 review pass 3) (${JSON.stringify([pwRefs, pwGlued])})`);
+  // Review pass 4: the second scan passes a getter's blanked default, and only a whole marker ending the
+  // argument: one with more after it, unclosed or unquoted, is found, as main found the call (a text that already carried one).
+  // Review passes 5 and 6: a nested or expression default, a bare name and unpaired quotes are read as main read them,
+  // so a secret-free line is not refused.
+  const pwSecond = ['PASSWORD = getenv("PW", Kp7mWq2zR9x)', "password = os.environ.get('PW', 'Kp7mWq2zR9')", 'password = os.getenv("DB_PASSWORD", os.getenv("PGPASSWORD", ""))', 'password = os.getenv("DB_PASSWORD", "changeme" if DEBUG else None)', 'password = os.getenv("DB_PASSWORD", DEFAULTS["password"])',
+    // Review pass 6: a bare-name default with more after the call, and a default whose quotes do not pair.
+    'password = os.environ.get("DB_PASSWORD", DEFAULT_PASSWORD).encode("utf-8")', 'conn = connect(password=os.getenv("PW", DEFAULT_PW),host="db")', 'password = os.getenv("X", \u201cKp7mWq2z hunter")']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; const c = cleanEpisode(ep, "redact"); return gateFindings(c, c.text).length; });
+  const pwMarked = ['PGPASSWORD=os.getenv("X", "[redacted:x]Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", "[redacted:pw Kp7mWq2zR9")', 'PGPASSWORD = os.getenv("X", [redacted:x])']
+    .map((text) => scanForSecrets(text, { every: true }).length);
+  assert(pwSecond.every((n) => n === 0) && pwMarked.every((n) => n > 0),
+    `the second scan passes a getter's blanked default, and a bare-name, unpaired, nested or expression default read as before; a marker with more after it, unclosed or unquoted does not hide the call (SMD-4542 review passes 4 to 6) (${JSON.stringify([pwSecond, pwMarked])})`);
+  // Review pass 1 (secrets adversary): a password given as a `${VAR:-<it>}` default is blanked, as main blanked it (an
+  // exclusion of `${` sent it); and quoted prose or a placeholder is read as main read it, blanked nowhere and refusing
+  // nothing under refuse (the quoted branch had widened to them).
+  const pwDefaults = ["POSTGRES_PASSWORD: ${POSTGRES_PW:-Kp7mWq2zR9}", "export PGPASSWORD=${PGPASS:-Kp7mWq2zR9}", 'password: "${DB_PASS:-Kp7mWq2zR9}"', "password=${PW:-hunter22} now"]
+    .map((text) => redactEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]).text);
+  const pwProse = ['errors = { password: "is too short (minimum is 8 characters)" }', 'password: "Enter your password"', 'password: "<your password>"', 'POSTGRES_PASSWORD: "set me"', 'the error said password: "too weak" so I changed it', 'password: "*** ***"', 'password = "xx yy zz"', 'password: "{{ db_pass_2 }}"', 'password: "<pw 1>"', 'password: "${ PW1 }"']
+    .map((text) => { const ep = segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0]; return { kept: redactEpisode(ep).text.includes(text), refused: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0 }; });
+  assert(pwDefaults.every((t) => !/Kp7mWq2zR9|hunter22/.test(t) && /\[redacted:password assignment/.test(t)) && pwProse.every((p) => p.kept && !p.refused),
+    `a password as a \${VAR:-…} default is blanked as before; quoted prose and a placeholder are not blanked, and refuse nothing (SMD-4542 review pass 1) (${JSON.stringify(pwProse)})`);
+  writeFileSync(join(TMP, "pw-shapes.jsonl"), [user(pwShapes[0][0], { origin: { kind: "human" } }), user(pwShapes[1][0], { origin: { kind: "human" } }), user(pwShapes[3][0], { origin: { kind: "human" } }), assistant([{ type: "text", text: pwShapes[2][0] }])].join("\n"));
+  const shapePrep = prepare({ ...base, session_id: "s-pw-shapes", transcript_path: join(TMP, "pw-shapes.jsonl") });
+  const shapePayload = shapePrep.payloadPath ? readFileSync(shapePrep.payloadPath, "utf8") : "";
+  const shapeDry = await spawnScript(["--dry-run", join(TMP, "pw-shapes.jsonl")]);
+  const shapeLeft = pwShapes.map(([, secret]) => secret).filter((x) => shapePayload.includes(x) || shapeDry.out.includes(x) || shapeDry.err.includes(x));
+  assert(shapePrep.code === 0 && shapePayload && shapeDry.code === 0 && shapeLeft.length === 0,
+    `…and none of the four passwords is in the payload written or the dry run's output (SMD-4542) (${shapePrep.code} ${shapeDry.code} ${JSON.stringify(shapeLeft)})`);
+  if (shapePrep.payloadPath) unlinkSync(shapePrep.payloadPath);
 }
 
 // ── [6] Posting ──────────────────────────────────────────────────────────────
@@ -2546,7 +2629,7 @@ console.log("\n[8] Detached: the hook returns inside the SessionEnd budget and t
   assert(received.length === 1 && received[0].args.source === "claude-code", `the detached child posted (${received.length} capture(s), after ${Date.now() - t0} ms)`);
   while (!readState("s-detached") && Date.now() - t0 < 10_000) await sleep(50);
   assert(readState("s-detached")?.thought_id !== undefined, "…and recorded the id");
-  // The child writes its state, then logs the capture (session-capture.mjs's
+  // The child writes its state, then logs the capture (lib/post.mjs's
   // bookkeeping order), so the state alone does not say the line is there:
   // wait for the line too, as for the post and the state (SMD-2471, one
   // failure on main).
@@ -2597,8 +2680,8 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const printTypo = await spawnScript(["--print-hook", "claude-code"], { env: { OB1_CAPTURE_ON_SECRET: "x" } });
   assert(noCfgTypo.code === 1 && /not "x"/.test(noCfgTypo.err) && !/no endpoint or key/.test(noCfgTypo.err) && printTypo.code === 2 && /not "x"/.test(printTypo.err) && !printTypo.out.trim(),
     `a misspelt mode is named before a missing config, and --print-hook refuses it too, exit 2, printing no hook (first review pass: the one path that let it by; exits ${noCfgTypo.code}/${printTypo.code})`);
-  // The hook says its version (SMD-4378): one source, the script's constant, which metadata.json must give too.
-  assert(HOOK_VERSION === META_VERSION && VERSION_RE.test(HOOK_VERSION), `the script's version is metadata.json's (${HOOK_VERSION}, ${META_VERSION}): bump both; and in the shape postCapture sends, or no summary would be stamped (SMD-4378, review pass 3)`);
+  // The hook says its version (SMD-4378): one source, lib/hook.mjs's constant, which metadata.json must give too.
+  assert(HOOK_VERSION === META_VERSION && VERSION_RE.test(HOOK_VERSION), `lib/hook.mjs's version is metadata.json's (${HOOK_VERSION}, ${META_VERSION}): bump both; and in the shape postCapture sends, or no summary would be stamped (SMD-4378, review pass 3)`);
   const sentBefore = received.length;
   const ver = await spawnScript(["--version"]);
   const verPiped = await runHook({ session_id: "s-version", transcript_path: CLAUDE_T, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { OB1_SESSION_CAPTURE_SYNC: "1" }, ["--version"]);
@@ -2628,6 +2711,18 @@ console.log("\n[9] The printed hook carries no secret; --check tells a capture k
   const copyVer = await runCopy(["--version"]), copyHook = await runCopy(["--print-hook", "claude-code", "--claims"]);
   assert(copyVer.code === 0 && copyVer.out === `${VERSION_LINE}\n` && copyHook.code === 0 && copyHook.out.includes(realpathSync(renamed)) && !copyHook.out.includes(SCRIPT),
     `a renamed copy with its lib/ runs, and the hook it prints re-runs the copy, not the checkout (SMD-4338 review pass 1) (${copyVer.code} ${JSON.stringify(copyVer.out)} ${copyHook.code})`);
+  // lib/ imported without the script, in a process of its own (SMD-4338 PR 3 review pass 2): SELF is the recipe's
+  // session-capture.mjs until an entry sets it, so a printed hook (and a detached child) names a real file, not `bun ''`.
+  const libProbe = join(TMP, "lib-alone-probe.mjs");
+  writeFileSync(libProbe, `import { hookJson } from ${JSON.stringify(join(HERE, "lib", "cli.mjs"))};\nconsole.log(hookJson("claude-code", { runtime: "bun" }).hooks.SessionEnd[0].hooks[0].command);\n`);
+  const libAlone = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [libProbe], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.on("close", (code) => resolve({ code, out: out.trim() }));
+  });
+  assert(libAlone.code === 0 && libAlone.out === `bun ${shellWord(realpathSync(SCRIPT))}`,
+    `lib/ imported alone prints a hook naming the recipe's session-capture.mjs, not an empty path (SMD-4338 PR 3 review pass 2) (${libAlone.code} ${JSON.stringify(libAlone.out)})`);
   assert([ver, verPiped, verWith].every((r) => r.code === 0 && r.out === `${VERSION_LINE}\n` && !r.err) && received.length === sentBefore,
     `--version prints "session-capture <version>" and exits 0, stdin piped or not, captures nothing, and is first: beside --check, a bad --harness, a misspelt mode and no config (SMD-4378) (${JSON.stringify([ver, verPiped, verWith].map((r) => [r.code, r.out, r.err.slice(0, 60)]))})`);
   assert(ok.out.split("\n")[0] === VERSION_LINE && noCfgTypo.out.split("\n")[0] === VERSION_LINE,
@@ -2879,8 +2974,53 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   // A joined excerpt over the cap keeps the recent TAIL, where decisions land,
   // not the head; and the per-episode window keeps the most recent messages,
   // bounding memory during the parse (review pass 2 teeth).
-  const longExc = assistantExcerpt({ assistant: ["HEAD_MARK" + "a".repeat(LIMITS.modelInputChars), "TAIL_MARK"] });
+  const longExc = assistantExcerpt({ assistant: ["HEAD_MARK" + "a".repeat(LIMITS.modelInputChars), "TAIL_MARK"] }).text;
   assert(longExc.length <= LIMITS.modelInputChars && longExc.includes("TAIL_MARK") && !longExc.includes("HEAD_MARK"), "assistantExcerpt keeps the recent tail when the joined excerpt exceeds the cap");
+  // SMD-3656: the excerpt is scanned whole, then clipped. Clipped first, a cut through a secret's prefix (`w|c_`, `wc|_`,
+  // inside `sk-ant-`) left a body no rule matched — the 64-hex rule refuses a run after `_` or `-`, the entropy rule hex —
+  // and it went to the model. The cut is placed `k` characters into the secret; a hit anywhere withholds the excerpt.
+  const hexBody = "3f9a".repeat(16);
+  const cutExcerpt = (secret, k) => {
+    const filler = " the tests pass and the work is done.";
+    const tail = filler.repeat(Math.ceil((LIMITS.modelInputChars + k) / filler.length)).slice(0, LIMITS.modelInputChars + k - secret.length);
+    return assistantExcerpt({ assistant: ["an earlier message. " + secret + tail] });
+  };
+  const cuts = [cutExcerpt(`wc_${hexBody}`, 1), cutExcerpt(`wc_${hexBody}`, 2), cutExcerpt(`sk-ant-${hexBody}`, 4)];
+  assert(cuts.every((c) => c.text === undefined && /(?:work-claim token|anthropic key) at char \d+ in the assistant messages/.test(c.withheld ?? "")),
+    `an excerpt whose clip would cut a secret at w|c_, wc|_ or inside sk-ant- is withheld, the secret found in its whole message before the clip (SMD-3656) (${cuts.map((c) => c.withheld ?? c.text?.slice(0, 30)).join(" | ")})`);
+  // Review pass 2: the scan reads whole each message the cut reaches, and no other. A digest quoted in an early message
+  // the cut leaves out withholds nothing (main sent that episode to the model); a password before the cut in a message
+  // the cut reaches withholds the excerpt, since the rest of that message is sent.
+  const fillerMsg = "we read the parser, changed one branch and ran the tests again; ".repeat(13);
+  const earlyDigest = assistantExcerpt({ assistant: [`the file hash I computed is ${hexBody} — recorded.`, ...Array(20).fill(fillerMsg)] });
+  const reachedMsg = 'password = "correct horse battery staple 42" in the vault. ' + fillerMsg.repeat(3);
+  const reachedPw = assistantExcerpt({ assistant: [reachedMsg, ...Array(14).fill(fillerMsg)] });
+  const reachedFrom = [reachedMsg, ...Array(14).fill(fillerMsg)].join("\n\n----\n\n").length - LIMITS.modelInputChars;
+  assert(typeof earlyDigest.text === "string" && !earlyDigest.withheld && !earlyDigest.text.includes(hexBody) && earlyDigest.text.length === LIMITS.modelInputChars
+      && reachedFrom > 0 && reachedFrom < reachedMsg.length && /password assignment at char \d+ in the assistant messages/.test(reachedPw.withheld ?? ""),
+    `a secret in a message the cut leaves out withholds nothing; one before the cut in a message the cut reaches withholds the excerpt (SMD-3656 review pass 2) (${JSON.stringify([earlyDigest.withheld ?? "sent", reachedFrom, reachedPw.withheld ?? "sent"])})`);
+  // Review pass 3: the cut exactly on the separator after a message leaves that message out (mutant: `>=` reached it);
+  // and each reached message is read on its own, so a key ending one, which the joiner's blank line made read as
+  // sha256sum's output to the 64-hex rule, withholds the excerpt.
+  const onSep = assistantExcerpt({ assistant: [`the hash: ${hexBody} recorded`, "k".repeat(LIMITS.modelInputChars - 8)] });
+  const keyLast = assistantExcerpt({ assistant: [`Your key is:\n${hexBody}`, "Done."] });
+  assert(typeof onSep.text === "string" && !onSep.text.includes(hexBody) && /64-hex token/.test(keyLast.withheld ?? ""),
+    `the cut on the separator leaves the message before it out, its digest withholding nothing; a key ending a message withholds the excerpt (SMD-3656 review pass 3) (${JSON.stringify([onSep.withheld ?? "sent", keyLast.withheld ?? keyLast.text?.slice(0, 20)])})`);
+  // Any secret withholds the messages, a key block or one line alike: they are not blanked and sent, since a blanking's
+  // residue reached the model where nothing did before (review pass 1, secrets adversary: a quoted passphrase's second
+  // line, a password after a second keyword or in `os.environ.get(…, "…")`, a `> `-quoted key block's short lines).
+  const blockExc = assistantExcerpt({ assistant: ["here it is:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + "q8Zr2".repeat(8) + "\n" + "Pm4Kx".repeat(9) + "\n-----END RSA PRIVATE KEY-----\nthat one"] });
+  const oneLineExc = assistantExcerpt({ assistant: [`we set the token to sk-ant-api03-${hexBody} and moved on`] });
+  const residues = [
+    'I set the database password: password = "correct horse\nbattery staple 42" in the vault.',
+    'I changed it to password = os.environ.get("DB_PASSWORD", "Kp7mWq2zR9") so it falls back locally.',
+    "the db line reads password: password = Tr0ub4dor3x now",
+    "the key:\n> Kx9QzR7mP2vL8nT4wY6bH3jF5cD1gA0eSu3Wq7Zp/\n> Rt5Yh8Jn2Mb6Vc9Xz1Qa4Ws7Ed3Fg0Lk8Pq/\n> ab==",
+  ].map((m) => assistantExcerpt({ assistant: ["an earlier message", m] }));
+  const cleanExc = assistantExcerpt({ assistant: ["we renamed the parser and the tests pass", "see a11d2acf"] });
+  assert(blockExc.text === undefined && /private key block/.test(blockExc.withheld ?? "") && oneLineExc.text === undefined && /anthropic key/.test(oneLineExc.withheld ?? "")
+      && residues.every((r) => r.text === undefined && /in the assistant messages$/.test(r.withheld ?? "")) && cleanExc.text === "we renamed the parser and the tests pass\n\n----\n\nsee a11d2acf" && !cleanExc.withheld,
+    `a secret in the messages the cut reaches withholds them, a key block, one line, and each blanking residue the review found; clean messages are sent as they are (SMD-3656) (${JSON.stringify([blockExc.withheld, oneLineExc.withheld, ...residues.map((r) => r.withheld)])})`);
   const windowed = segment([{ t: "prompt", text: "do it" }, ...Array.from({ length: LIMITS.modelMsgs + 5 }, (_, i) => ({ t: "outcome", text: `m${i}` }))]);
   assert(windowed.episodes[0].assistant.length === LIMITS.modelMsgs && windowed.episodes[0].assistant.at(-1) === `m${LIMITS.modelMsgs + 4}` && windowed.episodes[0].assistant[0] === "m5", "the assistant window keeps the most recent LIMITS.modelMsgs messages per episode");
   assert(/summary: model at .*llama3\.1:8b/.test(modelStatusLine(mc)) && /no model_url\/model/.test(modelStatusLine({ summary: "model" })), "the status line names a configured model, and says so when model mode is on but unconfigured");
@@ -2898,7 +3038,7 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const modelCfg = (over = {}) => ({ summary: "model", modelUrl: MODEL_URL, model: "test-model", modelLocal: true, egress: "deny", ...over });
 
   const ep = summariseTranscript(CLAUDE_T);
-  const basePayload = { chain_id: "s-model", text: renderSummary(ep), assistant: assistantExcerpt(ep) };
+  const basePayload = { chain_id: "s-model", text: renderSummary(ep), assistant: assistantExcerpt(ep).text };
   const good = await modelSummary(modelCfg(), { ...basePayload });
   assert(good?.text === modelReply && good.model === "test-model", `modelSummary returns the model's text and the model that wrote it (${JSON.stringify(good).slice(0, 60)})`);
   assert(modelSeen?.messages?.length === 2 && modelSeen.messages[0].role === "system" && /Derived summary:/.test(modelSeen.messages[1].content) && /assistant's messages/.test(modelSeen.messages[1].content),
@@ -2949,9 +3089,9 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   // event) is the model's.
   modelReply = "the durable summary.";
   const beforeCp = modelCalls;
-  assert(await modelSummary(modelCfg(), { chain_id: "s-cp", event: "PreCompact", trigger: "auto", text: renderSummary(ep), assistant: assistantExcerpt(ep) }) === null && modelCalls === beforeCp,
+  assert(await modelSummary(modelCfg(), { chain_id: "s-cp", event: "PreCompact", trigger: "auto", text: renderSummary(ep), assistant: assistantExcerpt(ep).text }) === null && modelCalls === beforeCp,
     "a running checkpoint keeps its derived summary — the model is not called");
-  assert((await modelSummary(modelCfg(), { chain_id: "s-end", event: "SessionEnd", text: renderSummary(ep), assistant: assistantExcerpt(ep) }))?.text === "the durable summary.",
+  assert((await modelSummary(modelCfg(), { chain_id: "s-end", event: "SessionEnd", text: renderSummary(ep), assistant: assistantExcerpt(ep).text }))?.text === "the durable summary.",
     "…while the durable end-of-episode summary is written by the model");
 
   // A secret in the assistant messages themselves — a message that is not the
@@ -2974,6 +3114,25 @@ console.log("\n[3d] The opt-in model summary (SMD-2014)");
   const cpPayload = JSON.parse(readFileSync(cpPrep.payloadPath, "utf8"));
   assert(cpPayload.event === "PreCompact" && !("assistant" in cpPayload), "a running-checkpoint payload carries no assistant excerpt at rest — only durable payloads do");
   unlinkSync(onPrep.payloadPath); unlinkSync(offPrep.payloadPath); unlinkSync(cpPrep.payloadPath); // not posted here: keep them out of the drain below
+  // SMD-3656 end to end: a key block, and a work-claim token the 12,000-character cut would have cut at wc|_, each leave
+  // the payload without an excerpt, and the log says why; nothing of either is on the payload.
+  const blockT = join(TMP, "model-block.jsonl");
+  const ccLine = (type, content) => JSON.stringify({ type, sessionId: "s-prep-block", cwd: "/repo/proj", gitBranch: "main", timestamp: "2026-11-23T10:00:00.000Z", message: { role: type, content } });
+  writeFileSync(blockT, [ccLine("user", "rotate the deploy key"), ccLine("assistant", [{ type: "text", text: "here it is:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA" + "q8Zr2".repeat(8) + "\n" + "Pm4Kx".repeat(9) + "\n-----END RSA PRIVATE KEY-----" }]), ccLine("assistant", [{ type: "text", text: "rotated." }])].join("\n"));
+  const blockPrep = prepare({ session_id: "s-prep-block", transcript_path: blockT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { summary: "model" });
+  const blockPayload = blockPrep.payloadPath ? JSON.parse(readFileSync(blockPrep.payloadPath, "utf8")) : {};
+  const cutT = join(TMP, "model-cut.jsonl");
+  const cutFiller = " the tests pass and the work is done.";
+  const cutTail = cutFiller.repeat(Math.ceil((LIMITS.modelInputChars + 2) / cutFiller.length)).slice(0, LIMITS.modelInputChars + 2 - 67);
+  writeFileSync(cutT, [ccLine("user", "renew the claim"), ccLine("assistant", [{ type: "text", text: `an earlier message. wc_${hexBody}${cutTail}` }])].join("\n"));
+  const cutPrep = prepare({ session_id: "s-prep-cut", transcript_path: cutT, cwd: "/repo/proj", hook_event_name: "SessionEnd" }, { summary: "model" });
+  const cutPayload = cutPrep.payloadPath ? JSON.parse(readFileSync(cutPrep.payloadPath, "utf8")) : {};
+  const prepLog = existsSync(join(STATE, "log")) ? readFileSync(join(STATE, "log"), "utf8") : "";
+  assert(blockPrep.payloadPath && !("assistant" in blockPayload) && /model summary withheld for s-prep-block: private key block at char \d+ in the assistant messages/.test(prepLog) && !JSON.stringify(blockPayload).includes("Pm4KxPm4Kx")
+      && cutPrep.payloadPath && !("assistant" in cutPayload) && /model summary withheld for s-prep-cut: work-claim token at char \d+ in the assistant messages/.test(prepLog) && !JSON.stringify(cutPayload).includes("3f9a3f9a"),
+    `prepare in model mode leaves a key block's excerpt and a cut token's off the payload, logged, and the derived summary goes (SMD-3656) (${JSON.stringify([Object.keys(blockPayload).includes("assistant"), Object.keys(cutPayload).includes("assistant")])})`);
+  if (blockPrep.payloadPath) unlinkSync(blockPrep.payloadPath);
+  if (cutPrep.payloadPath) unlinkSync(cutPrep.payloadPath);
 
   // End to end through the detached child, run synchronously: the posted content
   // is the model's, metadata.summary_model rides along, source stays the harness.

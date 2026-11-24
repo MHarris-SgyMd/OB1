@@ -5057,6 +5057,203 @@ The labels were returned as a list and written into a copy of the sheet by scrip
 `fixtures/inferred-priority.json` records the run's calls, both raters' labels, the population's counts and the
 registration's hash.
 
+## Does the validity read agree with the truth? (SMD-3887)
+
+`eval-claim-validity.ts`, its rules in `claim-validity.ts`. Migration 149's `thought_validity` reads a thought's
+validity, review and freshness from the records the brain keeps (`docs/claim-validity.md`). This measures it against
+what a person reads in the texts, on a sample of the canary drawn before it is read (SMD-3887 PR 2c).
+
+```bash
+bun eval-claim-validity.ts --self-check                 # the rules, the registration and the fixture's shape; no database
+D=~/.cache/smd-3887/2c/<run>   # private files live outside any repo; every step refuses one in a git work tree
+bun eval-claim-validity.ts --print-sql --pilot 1 > $D/draw.sql     # or --salt <the announcing comment's uuid>, once pinned
+podman exec -i open-brain-canary-postgres-1 psql -U postgres -d openbrain -v ON_ERROR_STOP=1 -tA -f - < $D/draw.sql > $D/draw.jsonl
+bun eval-claim-validity.ts --sheets $D/draw.jsonl --out $D --pilot 1 [--replace]   # parts A and B, each with a reply file; the maintainer's apart
+bun eval-claim-validity.ts --kappa $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> --pilot 1   # two raters' κ per axis, each disagreement
+bun eval-claim-validity.ts --splits $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> --salt <uuid> --out $D/splits.txt [--replace]
+bun eval-claim-validity.ts --freeze $D/draw.jsonl <a-1> <b-1> <a-2> <b-2> <m-a> <m-b> [$D/splits.txt] --salt <uuid> --note "…" [--replace]
+bun eval-claim-validity.ts --adjudicate $D/adjudication.txt [--replace]   # each miss's cause, into the fixture
+bun eval-claim-validity.ts                              # the report and the verdict, from the fixture
+```
+
+The maintainer's choices, 2026-11-21, before any draw:
+
+* **The criterion is the truth, on all three axes,** not the records:
+  * **validity:** whether the thought still holds;
+  * **review:** whether a question about it is still open;
+  * **freshness:** whether its derived views still describe its text.
+
+  A rater reads the texts and never the read's answer. Freshness covers the views a person can read: entities,
+  metadata and subjects. A vector, chunks, a judged relation and a proposal are judged by their fingerprint alone,
+  and are left out.
+* **The raters:**
+  * two blind agent raters, on different models, label every item;
+  * the maintainer labels 20 of the items blind;
+  * a 10-item pilot checks κ before the registration is pinned.
+* **The gold:**
+  * where the two agents agree, their label;
+  * where they split, the maintainer's;
+  * if the maintainer's 20 agree with the agents' gold on under 0.8 of items on any axis, the maintainer labels
+    every item, and those labels are the gold.
+* **The sample:** 120 thoughts, 40 from each stratum: in a supersedes pointer, in a proposal, in neither. The draw
+  key uses the id of the SMD-3887 comment that announces the draw, posted after the pin. Two pilots come first, each
+  by a fixed salt, and both are kept out of the main draw:
+  * the first, 10 items from the whole population (`--pilot 1`);
+  * the second, 3 items from each stratum, chosen once the first had drawn 7 of its 10 from neither (`--pilot 2`).
+
+  Agreement is weighted back to each stratum's population.
+* **The bar is every miss explained.** A miss is one of:
+  * **a label error;**
+  * **a read bug,** fixed before 2c merges;
+  * **a record gap:** the read reported its records right, but they are wrong or missing. It is filed to the
+    writer's ticket;
+  * **a rule divergence:** the read follows an accepted row of the record, and the truth differs. It is reported by
+    row.
+
+  `unresolved` and `legacy` make no single claim, and are counted apart. A gold of `unclear` is not scored.
+
+**Each item has two parts.** Part A shows the item's text, its views, and up to eight texts a record links it to,
+with no record's verdict. It also shows the five nearest later texts that no record links, so a record gap can show.
+These are listed in one fixed order. Part B shows the questions judges raised on the item, and is opened only after
+part A is labelled.
+
+**The snapshot** is one read-only, repeatable-read transaction. It holds:
+* the population and its strata;
+* the draw, keyed as the rules key it, which `--sheets` re-draws and checks;
+* each item's material;
+* the read's answer for each item.
+
+It holds texts and the read's answers, so it lives outside any repo. The fixture holds only ids and indexes.
+
+### Results, 2026-11-21: PASSES, every miss explained, no read bug
+
+**How it ran:**
+- **The registration:** pinned as `0275b08cf87e7bf1` after two pilots, with the maintainer settling the conventions between them.
+- **The salt:** the id of the SMD-3887 comment that announced the draw, `11826482-b198-4f0c-8ef3-2ec5d1864559`.
+- **The draw:** the canary held 4,143 thoughts (pointer 1,123, proposal 683, neither 2,337), and the read was taken in the same snapshot.
+- **The raters:** two blind agents labelled all 120 items (Opus 5.5 and Sonnet 5.5, 4 shards of 30 each), and the maintainer labelled 20 blind.
+
+| Axis | Read agrees | Weighted | On the reads that commit | Weighted | Misses | Record gap | Rule divergence | Read bug | No claim |
+|---|---|---|---|---|---|---|---|---|---|
+| validity | 88 of 120 | 0.789 | 86 of 118 | 0.786 | 32 | 28 | 4 (row 2) | 0 | 2 |
+| review | 119 of 120 | 0.996 | 119 of 120 | 0.996 | 1 | 1 | 0 | 0 | 0 |
+| freshness | 105 of 120 | 0.882 | 76 of 91 | 0.857 | 15 | 14 | 1 (row 6) | 0 | 29 |
+
+**The registered score counts a read that makes no single claim as agreeing.** That is `unresolved` on validity and `legacy` on freshness, and the score counts them as hits whatever the gold says. Review pass 1 caught this after the freeze.
+- **The fix:** the report also gives agreement on the reads that commit to a state, shown in the table. The registered score stays as pinned.
+- **The verdict cannot move:** a read with no single claim is never a miss.
+
+**The raters:**
+- **κ between the agents:** validity 0.793, review 0.984, freshness 0.656.
+- **The maintainer's blind 20** matched the agents' agreed label on validity 17 of 20, review 18 of 20 and freshness 19 of 20. That clears the 0.8 bar on every axis, so the agents' labels are the gold.
+- **The agents' 19 splits** all fell outside the 20, and the maintainer decided each one: 10 validity, 8 freshness, 1 review.
+
+**Each miss was checked against the read's records,** and the unchallenged ones against the canary directly. The maintainer confirmed every cause.
+
+The record gaps:
+- **14 validity items read contested** from a pending judge proposal that the texts don't bear out. The proposals come from `@p4d1` (10), `@p4d3` (2) and `@p4d4` (2): evidence on SMD-3288. One more review miss is a proposal still pending though a later text answers it.
+- **13 validity items read unchallenged** where later work moved past a session summary's end state, and no pointer or proposal records it. Filed as SMD-4523.
+- **1 validity item reads superseded** from a pointer the texts don't bear out.
+- **14 freshness items read current** where the extractor named a subject the text never discusses: PostgreSQL 13 times, "tweak" once. Across the canary, 692 of the 1,234 thoughts tagged PostgreSQL never name it, 691 of them from `extract:qwen2.5:7b@p2`. Filed as SMD-4522.
+
+The rule divergences:
+- **Row 2:** 4 correct proposals, never reviewed, read contested until accepted.
+- **Row 6:** 1 edited text whose views still fit reads stale, because freshness is the fingerprint.
+
+**What it leaves untested:** `supported`, `checked` and `unchecked` occur nowhere on the canary, which has no citations and no deliverable events.
+
+**What the reader should know:**
+- **Blind by instruction only.** The agents were told to open nothing outside their own shard. I wrote the read and drew the sample, and I am not blind. The read's answers stayed sealed in the snapshot until the labels were frozen.
+- **Three rater slips, none changing a label anyone can see:**
+  - The Opus rater of items 61–90 wanted to relabel item 086's freshness as stale after writing it. The never-relabel rule blocked the rewrite, so the label stands as written. The agents then split on 086, and the maintainer decided it stale.
+  - The Sonnet rater of items 1–30 read its whole part B before writing it. Part B is about three lines an item.
+  - The Opus rater of items 31–60 read two part B pages together. Neither had a question.
+- **The maintainer's files were reshaped before the freeze, not relabelled.** They came tab-separated with short ids, and the splits as one truth a line. Each was converted to the reply format, and the conversion was refused if a short id did not match its item or a truth did not fit its axis.
+- **Who adjudicated:** I adjudicated each miss by its pattern, and the maintainer confirmed the causes.
+- **Limits of the pinned rules, found by review pass 1 after the freeze.** None moves this run, so the rules stay as pinned, and a new registration would fix them for a later run:
+  - **The SQL's relation-target guard is loose.** It would abort the snapshot on a malformed target, and skip an uppercase one. No target on the canary is either: 0 of 29,860.
+  - **The nearest later texts are chosen by when they were written, while raters judge "later" by the last edit.** A ticket written before the item but edited after it is never offered as a nearest text. That can only hide a record gap, never a read bug: texts a record links are always shown, whatever their dates.
+  - **A rule divergence may name any row from 1 to 13,** though the read follows only rows 1 to 7 and 9 to 11. This run's divergences name rows 2 and 6.
+  - **The maintainer's check passes an axis with no agent-agreed item in the subset.** This run's check had all 20 items on every axis.
+- **Found by review pass 2, after the freeze:**
+  - **The "last edited" stamp was any write, not a content edit,** and the maintainer chose disclosure (2026-11-22). The sheets showed `updated_at`, and convention 2 told raters to judge "later" by it, but metadata re-extraction and embedding writes bump it too.
+    - **The size, measured against the audit log's content edits:** 366 of the 933 texts on the main sheets show a stamp later than their last content edit. The shown order differs from the content order on 208 of 1,041 item/other pairs, touching 64 of the 120 items.
+    - **Labels that may lean on it:** 38 of those 64 items have a rater note that leans on a time, 17 of them with a miss. The pattern match is broad, so this is an upper bound.
+    - **The effect:** the gold on those items may rest on a wrong order. That can move a miss between record gap and rule divergence, and move the agreement figures. It cannot hide a read bug, because the read never uses these times.
+  - **The review axis is not blind to its record.** Part B showed each proposal's status and review stamp, the same fields the read takes review from. So review's 119 of 120 mostly compares the record with itself. What it does test is whether a later text answered a pending question, and it found one that did.
+  - **The rest move nothing in this run:**
+    - **Time zone:** the snapshot never set one, but the canary's session time zone is `Etc/UTC`, and every time in it carries `+00:00`.
+    - **Code that decides the verdict but is not hashed:** `readStates`, the gold rule and the adjudication live outside the registered section. All 120 frozen read states re-derive the same with today's code, every read answers for its own item, and every item's stratum is its population line's.
+- **What review pass 2 fixed in the runner:**
+  - the snapshot check now refuses a read answering for another item, and an item whose stratum differs from its population line;
+  - the freeze refuses a split decision where no split is open;
+  - a short stratum is printed at the draw and the freeze;
+  - the usage lines give the files before the flags.
+- **Found by review pass 3, measured on this run:**
+  - **The nearest later texts can come up short.** The vector index filters after it searches (pgvector's `ef_search`, with no iterative scan, as in migrations 014 and 019), so an item can be shown fewer than five later texts.
+    - **In this run:** 119 of the 120 items show at least five later texts. The other one was written about 12 hours before the draw, and the brain held exactly 2 later thoughts.
+  - **The link cap hides more than it says.** A linked text past the cap of eight is barred from the nearest texts too, so it is shown nowhere.
+    - **In this run:** one item had more than eight links, ten in all, so 2 texts were shown nowhere.
+- **What review pass 3 fixed in the runner:**
+  - **The fallback rule can now finish.** Before, the freeze refused any maintainer label outside the 20, so the verdict could only wait. As review pass 4 then settled it, those labels come in through the splits file.
+  - **A failed query is caught.** A snapshot with no population is refused, and the usage line runs psql with `ON_ERROR_STOP`.
+  - **Times are shown in UTC** whatever offset the database wrote.
+  - **A freeze over a committed fixture,** which would erase its adjudications, needs `--replace`.
+  - **A fixture without an adjudication key** takes one.
+- **What review pass 4 fixed in the runner.** Two of these undo a flaw in pass 3's fallback, and none moves this run:
+  - **The blind check stays blind.** The maintainer's pair holds the blind 20 alone. A label made later, with the agents' context in view, goes in the splits file. That file decides open splits while the agents are the gold, and carries every other item when the maintainer's labels are.
+  - **A decided split no longer stays open.** The maintainer's label is taken per axis: the blind one, else the splits file's. Before, a partial label could hide a decided split.
+  - **A confirmed cause changes only with `--replace`,** and `--adjudicate` refuses a fixture frozen at another registration.
+  - **A view's object is shown as JSON** on the sheet, never `[object Object]`.
+- **Found by review pass 5, disclosed:**
+  - **Part A's choice of texts can reveal a record link.** The nearest texts are always written after the item, and there are at most five. So an earlier text, or a sixth, can only be on the page because a pointer, a proposal or a relation links it. Convention 2 says the order tells nothing, but which texts appear does. Raters were blind to verdicts, not to links.
+  - **A stratum with nothing scored would drop out of the weighted figure,** leaving a mean over the rest. In this run, every stratum has scored items on every axis, on the reads that commit too: the fewest is 22, freshness in the proposal stratum.
+- **What review pass 5 fixed in the runner:**
+  - When the maintainer's check fails, `--splits` writes a line for every axis of every item outside the subset, not only the agents' splits.
+  - The self-check pins the committed fixture's published counts and verdict.
+  - A judge's reason on part B is kept on its own line.
+  - A fixture missing a read or an agent's labels is named, not thrown.
+  - A private file rewritten is set to 0600 again.
+- **Found by review pass 6, measured on this run:**
+  - **The pilots are kept out of the main draw by re-drawing them.** The main draw computes the pilots again from the population as it stands, not from the ids the pilots labelled, so a population that moved between the draws could let a pilot item in.
+    - **In this run:** none of the 19 pilot items is among the 120, checked against both pilot snapshots.
+  - **A text could copy the page's own lines** (a section rule, a view line, another text's head) and mislead a rater about where a page's parts begin. Only an item's head was indented.
+    - **In this run:** each marker appears exactly once a page, and each other text's head once a text, 1,041 in all.
+- **What review pass 6 fixed in the runner:**
+  - every line of a text that reads as the page's own structure is indented;
+  - a read with no answer, or a drawn thought not found, is refused as a failed read;
+  - `--sheets` and `--splits` will not write over a file, which may hold filled answers, without `--replace`;
+  - the private-file guard follows a symlink before looking for a work tree.
+- **Declined:** the branch is `michaelharris/…`, not the `contrib/<github-username>/…` that CLAUDE.md asks of contributions. That is the maintainer's own convention for this ticket's PRs.
+- **Three pinned limits now enforced by the runner,** after review pass 6 found them again and the maintainer asked to fix the findings. The registered section is unchanged, since a change there would void this run's verdict, and this run meets each stricter rule:
+  - **Rows:** `--adjudicate` refuses a rule divergence naming a row the read does not follow. It takes only rows 1 to 7 and 9 to 11 (`READ_ROWS`), where the registered verdict takes any row from 1 to 13. This run's divergences name rows 2 and 6.
+  - **The maintainer's check:** an axis the check measured on no item fails it (`checkWithEvidence`), in the gold, the freeze and the splits template alike. This run measured 20 items on every axis.
+  - **The weighted figure:** when a stratum has nothing scored, the report says which strata the figure covers. Every stratum has scored items in this run.
+
+  The loose relation-target cast stays in the pinned SQL, as the snapshot's own text. It goes to SMD-4524 with the other limits, which a new registration fixes.
+- **Found by review pass 7, measured on this run:** the sheet shows a subject facet only when it is neither superseded nor closed, while the read counts any facet not closed. A facet superseded but still open would be scored by the read and never shown.
+  - **In this run:** no subject facet on the canary is superseded but open: 0 of 9,710.
+- **What review pass 7 fixed in the runner:**
+  - the private-file guard resolves a file that is itself a symlink, not only the folder it sits in;
+  - the report fails a committed rule divergence that names a row the read does not follow, not only `--adjudicate`;
+  - the maintainer's check counts an axis on the items whose maintainer label holds it, so a label left out is no disagreement;
+  - the item's own written line and the sheet's head join the indented page lines;
+  - a fixture item without its `m` or `s` key holds neither, and a fixture without a top-level list is named, not thrown on;
+  - `--splits` refuses to run off the pin;
+  - the self-check's "inside a repo" case runs on a temp directory, so it passes in a copy without `.git`.
+- **What review pass 8 fixed in the runner.** Passes 6 and 7 each closed one symlink case in the private-file guard, and pass 8 found two more, so this closes the class:
+  - **No symlinks at all.** A private file is never a symlink, whether its target exists or not. A dangling one had passed the guard, and the write would then make its target, wherever that was.
+  - **Every write is guarded.** `writePrivate` runs the guard on each file it writes. `--sheets` had guarded only its first file and written seven more unchecked.
+  - **A view value can't fake a page line.** Its newlines are flattened.
+  - **`--adjudicate` refuses an unsound fixture,** which would otherwise check misses against the items that parsed.
+  - **More malformed fixtures are reported, not crashed on.** A fixture without its population, or with a null adjudication entry, is named.
+- **Declined again:** the branch name. Recording an exception would be the maintainer's to write in CLAUDE.md, not this PR's.
+
+**The follow-ups:**
+- **SMD-4524:** the next run fixes these limits and the no-claim score under a new registration. It also measures `supported`, `checked` and `unchecked`, once a brain holds citations and deliverables and the sheets show them: this run's material carries neither, so a rater could never see what those states rest on (review pass 9).
+- **SMD-4525:** whether rows 2 and 6 change.
+- **SMD-4526:** the one unfounded pointer, a note that reports a ticket done superseding the ticket's own thought (7 such on the canary).
+
 ## The query-log replay loop — measuring against real use (SMD-1295)
 
 Every number above is measured on the same 441 Linear issues, where the baseline

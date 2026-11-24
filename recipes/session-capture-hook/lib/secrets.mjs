@@ -113,7 +113,27 @@ export const SECRET_PATTERNS = [
   ["credential flag", /(?<![\w-])--(?:[a-z]+-)*(?:api-?key|access-?token|auth-?token|client-?secret|refresh-?token|token|secret(?:-?key)?)(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)(?=[^\s"'`‘’“”«»]*\d)[^\s"'`‘’“”«»]{16,})/di],
   ["password flag", /(?<![\w-])--(?:[a-z]+-)*password(?:\s+|=)(?<q>["'`‘“«])?(?<v>(?!\$|<|%|\[|[\/~.]|\w+=)[^\s"'`‘’“”«»]{6,})/di],
   // A password can be short — `POSTGRES_PASSWORD=hunter2` reached the brain under the 16-character floor (first review pass).
-  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?<q>["'`‘“«])?(?<v>(?!\[)[^\s"'`‘’“”«»]{6,})/di],
+  // SMD-4542: a second keyword is no value (`password: password = <it>` takes the second's); a getter's call is
+  // stepped over to its default (`os.environ.get("X", "<it>")`); and after an opening quote a value that reads as a
+  // token — a digit in it, no whole word of three letters or more — runs to its closing quote on the line, spaces and
+  // all, though its first word is short (`password="Kp7m Wq2z R9x"`).
+  // - Review pass 1: `${…}` stays a value, as before, since an exclusion sent `${PG_PW:-<it>}`'s default; and quoted
+  //   prose or a placeholder (`"Enter your password"`, `"<your password>"`) is read as before, not blanked.
+  // - Review pass 2: nor does the quoted branch start a value at a placeholder's `{`, `<` or `$` (`"{{ db_pass_2 }}"`,
+  //   `"<pw 1>"`), which db/sensitivity.ts's own password rule skips too.
+  // - Review pass 3: a bare reference (`process.env.X`, `os.environ[…]`, `getenv(…)`) stays a value, as before.
+  //   Excluding it left `password = process.env.X || "<it>"` with no finding, so refuse sent it whole, the model's
+  //   excerpt carried it, and the brain read `PGPASSWORD=process.env.X` standard. The getter's receiver is dotted names
+  //   of letters (`os.`, `process.`), so a password glued onto the getter (`<it>getenv(`) is not taken for one.
+  // - Review pass 4: a getter's call whose default is already a whole marker, the argument's last, is no value, or the
+  //   second scan would find the call once the first had blanked its default.
+  // - Review pass 5: the step-over applies only when the default ends the argument. A nested call or an expression
+  //   there (`getenv("A", getenv("B"))`, `"<it>" + SUFFIX`) is read as before, the outer call blanked, not half-blanked
+  //   into a line the second scan would refuse.
+  // - Review pass 6: the default is a quoted literal closed by its own quote's partner, then `,` or `)`. A bare name
+  //   (`getenv("X", DEFAULT_PW).encode()`) let the value run past the call's `)`, and a mismatched quote past the
+  //   default's end, each into a line the second scan refused; both are read as before, the call blanked.
+  ["password assignment", /\b(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]\s*(?:(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*(?=(?:"[^"'`‘’“”«»\n]*"|'[^"'`‘’“”«»\n]*'|`[^"'`‘’“”«»\n]*`|‘[^"'`‘’“”«»\n]*’|“[^"'`‘’“”«»\n]*”|«[^"'`‘’“”«»\n]*»)\s*[,)]))?(?<q>["'`‘“«])?(?<v>(?!\[|(?:passw(?:or)?d|[A-Z_]*PASSWORD|PGPASSWORD)\b["']?\s*[:=]|(?:[A-Za-z_]+\.)*(?:environ\.get|getenv|env\.get|ENV\.fetch)\s*\(\s*["'`][^"'`\n]*["'`]\s*,\s*["'`‘“«]\[redacted:[^\]\n]*\]["'`’”»]\s*[,)])(?:(?<=["'`‘“«])(?=[^"'`‘’“”«»\n]*\d)(?![^"'`‘’“”«»\n]*\b[a-z]{3,}\b)[^\s"'`‘’“”«»{<$][^"'`‘’“”«»\n]{5,}(?=["'`’”»])|[^\s"'`‘’“”«»]{6,}))/di],
   // Daemonic Brain's own access keys are 64 hex characters (keygen.ts), as are
   // their digests — told apart only by where they sit: a digest follows
   // `name:scope:` in MCP_ACCESS_KEYS or `sha256:`; a bare 64-hex run is a key
@@ -131,6 +151,12 @@ export const SECRET_PATTERNS = [
   ["64-hex token (a raw key, or a digest out of its context)", /(?<![0-9a-f])(?<!:(?:read|write|capture|forward):)(?<!sha-?256\s*[:=]\s*)(?<!--sha-?256\s+)(?<![A-Za-z0-9_-])(?:0x)?[0-9a-f]{64}(?![0-9a-f])(?!(?<=(?:^|\n)[ \t]*(?:0x)?[0-9a-f]{64})\s{2}\S)/i],
 ];
 
+/** The patterns that read the URL-blanked text: shapes, not prefixes. */
+const URL_BLIND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
+/** Each pattern once more with the `g` flag, for matchAll — the table's own objects stay stateless for exec. */
+const GLOBAL = new Map();
+const globalOf = (re) => { let g = GLOBAL.get(re); if (!g) { g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`); GLOBAL.set(re, g); } return g; };
+
 /**
  * Scan a text. Returns [] when clean, else one entry per finding: the pattern's
  * name and where — `at`, a 0-based character offset, to `end` — never the
@@ -143,15 +169,11 @@ export const SECRET_PATTERNS = [
  * (`getUserAccountBalanceById2026Version3`: mostly lowercase runs). The bar is
  * 4.5 bits per character under 48 characters and 4.2 from there — a real key
  * measures 5 and up; an identifier 4.4 (first review pass: six realistic
- * false positives, each of which would have refused a whole session).
+ * false positives, each of which would have refused a whole session). `skip`
+ * lists `[at, end)` spans another scan has judged whole: a hit wholly inside one
+ * is passed over (SMD-4502).
  */
-/** The patterns that read the URL-blanked text: shapes, not prefixes. */
-const URL_BLIND = new Set(["64-hex token (a raw key, or a digest out of its context)"]);
-/** Each pattern once more with the `g` flag, for matchAll — the table's own objects stay stateless for exec. */
-const GLOBAL = new Map();
-const globalOf = (re) => { let g = GLOBAL.get(re); if (!g) { g = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`); GLOBAL.set(re, g); } return g; };
-
-export function scanForSecrets(text, { every = false } = {}) {
+export function scanForSecrets(text, { every = false, skip = [] } = {}) {
   const findings = [];
   // URLs and base64 payloads blanked in place (offsets kept) for the shape
   // rules — the 64-hex rule and the token scan: a hex id in a URL's path (a
@@ -179,6 +201,9 @@ export function scanForSecrets(text, { every = false } = {}) {
         // longer run is the value's own (first and second review passes).
         for (let n = 0; n < 2 && end > at + 1 && /[.,;:)\]}`>]/.test(m.input[end - 1]); n++) end--;
       }
+      // A hit wholly inside a span another scan judged is that scan's (SMD-4502): passed over, so the rule's next
+      // match, outside it, is still this scan's first.
+      if (judgedElsewhere({ at, end }, skip)) continue;
       findings.push({ reason: name, at, end });
       if (!every) break;
     }
@@ -191,6 +216,7 @@ export function scanForSecrets(text, { every = false } = {}) {
     if (wordish >= 0.6) continue; // an identifier, not a key
     if (entropyBits(t) < (t.length >= 48 ? 4.2 : 4.5)) continue;
     const [at, end] = tokenSpan(blanked, m.index, m.index + t.length); // the span, the token widened and its name dropped (SMD-2127)
+    if (judgedElsewhere({ at, end }, skip)) continue;
     findings.push({ reason: "high-entropy token", at, end });
   }
   return findings.sort((a, b) => a.at - b.at || a.end - b.end);
@@ -280,6 +306,8 @@ function growBlock(text, at, end) {
   grow(true); grow(false);
   return [at, end];
 }
+/** Whether a finding lies wholly inside one of the `[at, end)` spans another scan has judged (SMD-4502). */
+export const judgedElsewhere = (f, skip) => skip.some(([at, end]) => f.at >= at && f.end <= end);
 /** The marker a span becomes: what kind of thing was there — never how long, never what. */
 export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
 /**
@@ -291,8 +319,11 @@ export const redactionMarker = (reasons) => `[redacted:${reasons.join(", ")}]`;
  * each its reasons and its offset in the text returned (where its marker sits);
  * `blocks` are the spans that cross a newline — a multi-line key blob the caller
  * refuses rather than trust a precise blanking (SMD-2127). Nothing of the match.
+ * `skip` lists `[at, end)` spans of the text another scan has already judged
+ * whole: a finding wholly inside one is left as it is (SMD-4502, the summary's
+ * listed prompts and title, which the scan of each whole prompt judged).
  */
-export function redactSecrets(text) {
+export function redactSecrets(text, { skip = [] } = {}) {
   const spans = [];
   // Key material grown over its block first (third review pass). Growth never
   // reorders: findings come sorted by start; a key-material span grows left
@@ -300,7 +331,7 @@ export function redactSecrets(text) {
   // material too and grows to the same block start, while a named hit's
   // `name=value` run is not a block line and stops the growth — so the array
   // stays sorted for the coalescing below.
-  const found = scanForSecrets(text, { every: true }).map((f) => { if (!KEY_MATERIAL.has(f.reason)) return f; const [at, end] = growBlock(text, f.at, f.end); return { ...f, at, end }; });
+  const found = scanForSecrets(text, { every: true, skip }).map((f) => { if (!KEY_MATERIAL.has(f.reason)) return f; const [at, end] = growBlock(text, f.at, f.end); return { ...f, at, end }; });
   for (const f of found) {
     const last = spans[spans.length - 1];
     if (last && f.at <= last.end) { last.end = Math.max(last.end, f.end); if (!last.reasons.includes(f.reason)) last.reasons.push(f.reason); continue; }

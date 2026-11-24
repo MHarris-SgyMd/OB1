@@ -370,6 +370,7 @@ free_rows() {
   nodb evals              eval-stated-status.ts --self-check
   nodb evals              eval-priority.ts --self-check
   nodb evals              eval-inferred-priority.ts --self-check
+  nodb evals              eval-claim-validity.ts --self-check
   nodb evals              board-replay.ts --self-check
   nodb evals              eval-plan-context.ts --self-check
   nodb evals              eval-little.ts --self-check
@@ -390,6 +391,7 @@ free_rows() {
   nodb db                 ingest-records.ts --self-check
   nodb db                 bench-live.ts --self-check
   nodb db                 bench-brains.ts --self-check
+  nodb db                 claim-report.ts --self-check
   nodb db                 test-replay.ts
   nodb db                 test-brain-compare.ts
   nodb db                 test-cli.ts

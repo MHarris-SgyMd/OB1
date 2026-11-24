@@ -655,6 +655,17 @@ jobs:
         working-directory: evals
         run: bun eval-inferred-priority.ts --self-check
 
+      # The claim-validity measurement's rules (SMD-3887 PR 2c): the
+      # registration (the read-to-truth mapping, the strata, the draw and its
+      # SQL, the gold, the bar of every miss explained), the draw re-drawn as
+      # the SQL keys it, the sheets blind to the read, the reply files read
+      # back, the score weighted to the population, the verdict at its edges,
+      # and the committed fixture's shape (ids and numbers only). No database;
+      # the snapshot reads the canary by hand.
+      - name: Claim validity eval rules
+        working-directory: evals
+        run: bun eval-claim-validity.ts --self-check
+
       # The board replay's rules (SMD-3669 PR 3): an issue rebuilt from
       # Linear's history (state, priority, due date, parent, project, labels,
       # title and relations undone after the moment, every relation-change
@@ -994,6 +1005,15 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         working-directory: db
         run: bun bench-live.ts --self-check && bun bench-brains.ts --self-check
+
+      # claim-report.ts (SMD-4540 PR 2): how long work claims run, read from a
+      # list_claims dump or work_claims — each ending read from its release, the
+      # merged PRs from the reason, the quartiles, the tables, --now, and both
+      # inputs' shapes and pages, on fixtures. No database.
+      - name: Claim report rules
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        working-directory: db
+        run: bun claim-report.ts --self-check
 
       # This job's suite counts, for publish-test-counts (SMD-3614): on a push
       # to main alone, the one run that publishes them, and after a failed

@@ -1398,6 +1398,8 @@ export type WorkClaim = {
   releasedBy: string | null;
   releasedByKind: string | null;
   releaseReason: string | null;
+  /** How many renewals of the claim landed (migration 152, SMD-4540): 0 for a new claim; null for one made before 152 (uncounted) or read from a brain before it. */
+  renewals: number | null;
   state: "live" | "lapsed" | "released";
 };
 /** A list_work_claims page's place on its order (SMD-3606 PR 2): a claim's issue, piece_key (folded, '' for a whole-ticket claim), claimed_at (Postgres's text) and id. The store's `after` and the page's `next`. */
@@ -1470,7 +1472,10 @@ export function normaliseWorkClaim(r: unknown, what: string): WorkClaim {
     holderAgentId: text(o.holder_agent_id), holderKind: text(o.holder_kind), label: text(o.label),
     claimedAt: time(o.claimed_at) as string, renewedAt: time(o.renewed_at), expiresAt: time(o.expires_at) as string,
     releasedAt: time(o.released_at), releasedBy: text(o.released_by), releasedByKind: text(o.released_by_kind),
-    releaseReason: text(o.release_reason), state: o.state as WorkClaim["state"],
+    releaseReason: text(o.release_reason),
+    // 152's count: a whole number, or null where uncounted (a claim from before 152) or not read (a brain before it).
+    renewals: typeof o.renewals === "number" && Number.isInteger(o.renewals) && o.renewals >= 0 ? o.renewals : null,
+    state: o.state as WorkClaim["state"],
   };
 }
 
