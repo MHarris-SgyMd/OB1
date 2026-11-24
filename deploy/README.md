@@ -652,9 +652,10 @@ free:
     - **The broker's second later run** had a quieter machine (11, then
       5.5), no other brain calling in its 12 minutes, and 150 notes that
       loaded as quickly as in the earlier run, all clean. A search took
-      22.4 s and 4 of 48 were answered by exact matches alone; those and
-      its 2 timed-out metadata calls were all sent in its first minute,
-      the first of them as a load of the judge model was granted.
+      22.4 s at the median and 4 of 48 were answered by exact matches
+      alone; those and its 2 timed-out metadata calls were all sent in
+      its first minute, the first of them as a load of the judge model
+      was granted.
 
     In all three later runs the 30 notes that go in before the 150 took
     six to nine times as long to load as the same setup's had, and 4 to
@@ -674,14 +675,14 @@ free:
     with `ps`: under fixed shares 46 of 48 searches were answered by
     exact matches alone both times, where on the broker 12 at most were.
     That advice rests on the searches alone. The broker's price, run by
-    run, is in the table: a slower search and metadata call than fixed
-    shares' 3.2 and 3.5 s, some metadata calls timed out in the two
-    later runs, and less extraction than under fixed shares, whose judge
-    model did no work. A raised `OB1_SLEEP_MAX_WAIT`, which cost live
-    calls least in the runs above with one brain backlogged, before the
-    yield, was not tried with two; since the yield that setting is also
-    the most one stretch of a brain's extraction calls holds its
-    judge-model passes back.
+    run, is in the table: a search of tens of seconds at the median, a
+    metadata call slower than fixed shares' 3.2 and 3.5 s, some metadata
+    calls timed out in the two later runs, and less extraction than
+    under fixed shares, whose judge model did no work. A raised
+    `OB1_SLEEP_MAX_WAIT`, which cost live calls least in the runs above
+    with one brain backlogged, before the yield, was not tried with two;
+    since the yield that setting is also the most one stretch of a
+    brain's extraction calls holds its judge-model passes back.
 
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
