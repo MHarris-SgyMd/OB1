@@ -2525,7 +2525,8 @@ which would stand a repository with no key mapped.
 - **`set_subject_repo(repo, actor)`** sets it, an operator's alone. Any other
   key answers `NOT_OPERATOR`, and a value `ob1_subject_repo_refusal` names
   answers `BAD_REPO`. The value is trimmed and lowercased, and `NULL` clears
-  it, leaving scoped keys as they are.
+  it, leaving scoped keys as they are. Setting the repository that stands
+  writes no setting, but maps any bare key a raw write left under it.
 - **Setting a repository maps the standing keys** in the same transaction:
   every standing unscoped `pr:` or `version:` subject is closed and its scoped
   twin written with the same `by` and judge key. The closed facet's lineage row
@@ -2535,7 +2536,10 @@ which would stand a repository with no key mapped.
   (`ob1_subject_repo_map_max()`). It holds two thread locks a key to its
   commit, and taking every one first, in key order, keeps it from deadlocking
   with `db/threads.ts`. A brain past the cap answers `TOO_MANY_KEYS` and
-  nothing is set; mapping in batches is SMD-4559.
+  nothing is set; mapping in batches is SMD-4559. The cap bounds keys, not a
+  key's members: 130's trigger re-links a thread once per member moved, so a
+  key held by 1,000 thoughts took 4.7 s to map (2026-11-24); re-linking each
+  key once is SMD-4564.
 - **A moved text is mapped too.** It is not refused, as
   `record_thought_subjects` would refuse it. A thought already holding the
   scoped key has the bare one closed alone.

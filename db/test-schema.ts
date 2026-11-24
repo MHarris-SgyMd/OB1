@@ -23996,9 +23996,37 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     assert(same.ok === true && same.changed === false && same.mapped === 0 && same.closed_alone === 0 && same.unscopable === 0 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(String(same.set_at))
            && other.changed === true && other.repo === "o3/x" && other.previous === "o/r" && other.mapped === 0 && (await keysOf(t1)) === "pr:o/r#12"
            && (await keysOf(t7)) === "pr:o3/x#99"
-           && back.changed === true && back.previous === null && back.mapped === 1 && back.unscopable === 1 && (await keysOf(t9)) === "pr:o/r#98" && (await keysOf(t10)) === LONG
+           && back.changed === true && back.previous === null && back.mapped === 1 && back.unscopable === 1 && back.thoughts === 1 && (await keysOf(t9)) === "pr:o/r#98" && (await keysOf(t10)) === LONG
            && (await keysOf(t11)) === LONG && (await keysOf(t7)) === "pr:o3/x#99",
       `the repository standing writes nothing, its reply in the changed one's shape; another maps nothing scoped already, and scopes a key written under it to itself; cleared, a bare key is written bare and mapped when one is set again, while a version too long once scoped stands bare, counted, in the setter and the door alike (${JSON.stringify(same).slice(0, 90)}; ${other.mapped}; ${JSON.stringify(back).slice(0, 120)})`);
+
+    // The standing repository set again maps a bare key a raw write left under it, writing no setting (review pass 4).
+    const t13 = await thought("t13");
+    await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'subject', jsonb_build_object('key', 'pr:55', 'by', 'model', 'judge_key', $2::text))`, [t13, K]);
+    const settingBefore = await settingNow();
+    const repair = await setRepo("o/r", OP);
+    const again2 = await setRepo("o/r", OP);
+    assert(repair.ok === true && repair.changed === false && repair.repo === "o/r" && repair.previous === "o/r" && repair.mapped === 1 && repair.thoughts === 1 && repair.set_at === settingBefore.set_at
+           && (await keysOf(t13)) === "pr:o/r#55" && (await settingNow()).set_at === settingBefore.set_at
+           && again2.changed === false && again2.mapped === 0 && again2.thoughts === 0,
+      `the repository standing, set again, maps a bare key a raw write left, writing no setting; once none stands it maps nothing (${JSON.stringify(repair).slice(0, 160)}; ${JSON.stringify(again2).slice(0, 60)})`);
+
+    // The guard reads the setter's frame schema-qualified too: a session whose search_path shows another function of
+    // its name first calls public.set_subject_repo by its schema, and PL/pgSQL names its frame public.set_subject_repo.
+    await db.exec(`CREATE SCHEMA ob1_shadow_138; CREATE FUNCTION ob1_shadow_138.set_subject_repo(p_repo text, p_actor jsonb) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$`);
+    let shadowed: Record<string, unknown>[] = [];
+    const pathBefore = (await one<{ p: string }>(`SELECT current_setting('search_path') AS p`)).p;  // the suite's own, which RESET would lose
+    try {
+      await db.exec(`SET search_path = ob1_shadow_138, ${pathBefore}`);
+      for (const repo of ["o/q", "o/r"]) shadowed.push((await one<{ r: Record<string, unknown> }>(`SELECT public.set_subject_repo($1, $2::jsonb) AS r`, [repo, JSON.stringify(OP)])).r);
+    } catch (e) {
+      shadowed = [{ threw: String((e as Error).message).split("\n")[0] }];
+    } finally {
+      await db.query(`SELECT set_config('search_path', $1, false)`, [pathBefore]);
+      await db.exec(`DROP FUNCTION ob1_shadow_138.set_subject_repo(text, jsonb); DROP SCHEMA ob1_shadow_138`);
+    }
+    assert(shadowed.length === 2 && shadowed.every((r) => r.ok === true && r.changed === true) && (await repoNow()) === "o/r",
+      `the setter, called by its schema where its name is another's on the path, writes its setting past the guard (${JSON.stringify(shadowed).slice(0, 160)})`);
 
     // A clear is a NULL passed on purpose: a call naming the actor alone matches no function (review pass 1).
     const actorOnly = await failure(`SELECT set_subject_repo(p_actor => $1::jsonb)`, [JSON.stringify(OP)]);
