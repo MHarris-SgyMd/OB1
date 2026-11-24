@@ -16,14 +16,17 @@
  * array of claims, a page (an object with a `claims` array: REST's
  * `GET /v1/claims` body), or an array of pages walked to the end (each page's
  * `cursor` as the next call's `after`); the server's camelCase or work_claims'
- * snake_case. An MCP tool result is unwrapped (its `structuredContent`, else its
- * text; a JSON-RPC answer's `result`). A page that says `truncated` as the last
- * one read is refused: the rest of the brain is missing; pages that hold fewer
- * claims than the first page counted are warned of. A walk without include_ended
- * holds live claims alone. A brain's claims reach it that way through any
- * client holding a read key, with no database credentials.
- * --url reads work_claims directly (SELECT on it, the `claims` group's). Give
- * one of the two.
+ * snake_case. Any client holding a read key can save them, with no database
+ * credentials. An MCP tool result is unwrapped (its `structuredContent`, else
+ * its text; a JSON-RPC answer's `result`). A page that says `truncated` as the
+ * last one read is refused: the rest of the brain is missing. Pages that hold
+ * fewer entries than the first page counted are warned of, as are claims with
+ * no `renewals` key; a read of live claims alone says include_ended was likely
+ * left off.
+ * --url reads work_claims directly, its columns by name (SELECT on them, the
+ * `claims` group's; a role without it is told which grant it lacks), renewals
+ * only where migration 152 made the column (before it every claim reads
+ * uncounted). Give one of the two.
  * --sizes reads merged PRs' sizes: `gh pr list --state merged --limit 500 --json
  * number,additions,deletions` as it prints them, or an object by number,
  *   { "869": { "additions": 540, "deletions": 23 } }
@@ -64,10 +67,6 @@
  * and long test run, its session hook at compactions and the session's end and,
  * with the claims hook pasted, each quarter of the lease; the agent runner when
  * it publishes. So counts compare within one client.
- *
- * --url reads work_claims' columns by name, renewals only where the column is
- * there (before migration 152 every claim reads uncounted); a role without
- * SELECT on it is told which grant it lacks.
  */
 import { readFileSync } from "node:fs";
 import { commandLine } from "./cli.ts";
@@ -87,10 +86,14 @@ export const ENDINGS = ["merged", "closed by board-sync", "taken over", "force-r
 export type Ending = (typeof ENDINGS)[number];
 /**
  * A merge named in a release reason: "Merged: OB1 PR 869 → main …", "SMD-3379 PR 2b-2a merged: OB1 PR 706 …". The
- * word, not a PR's number: a split's reason names its pieces ("Split into PR 1 … and PR 2 …").
+ * word, not a PR's number: a split's reason names its pieces ("Split into PR 1 … and PR 2 …"). Not where a denial
+ * comes first in its clause, to the next . ; : or , ("not", "never", "without", "unless", "until", "yet", "be", "n't").
  */
 const MERGED_RE = /(?<!\b(?:not|never|without|unless|until|yet|be)\b[^.;:,]*|n['’]t\b[^.;:,]*)\bmerged\b/i;
-/** The repository's PRs, as the claim rule writes them ("OB1 PR 869"), each with the list that follows it ("…, PR 710 and PR 719"); else any "PR N". */
+/**
+ * The repository's PRs, as the claim rule writes them ("OB1 PR 869"), each with the list that follows it
+ * ("…, PR 710 and PR 719"); else any "PR N".
+ */
 const OB1_PR_RE = /\bOB1 PR (\d+)((?:,? (?:and )?PR \d+\b)*)/g;
 const PR_RE = /\bPR (\d+)\b/g;
 /** An ISO time with its zone, as --now takes it: a time without one would be read in the machine's own. */
@@ -143,10 +146,11 @@ export function clientOf(c: ClaimRow): string {
 }
 
 /**
- * The merged PRs' numbers, from the reason's first sentence: each it writes "OB1 PR N", the claim rule's form, with the
- * list that follows one ("OB1 PR 705, PR 710 and PR 719"); else the last "PR N" it names. A piece's own name comes
- * either side ("SMD-1723 PR 1 merged: OB1 PR 776", "OB1 PR 869 → main (SMD-4540 PR 1)"), and a later sentence may name
- * earlier pieces' PRs ("PR 3b-2 merged: OB1 PR 860 … . PR 3b is done: 3b-1 (OB1 PR 839) …"), which are not this claim's.
+ * The merged PRs' numbers, once each, from the reason's first sentence (to a full stop before a capital): each
+ * "OB1 PR N" it names, the claim rule's form, with the list that follows one ("OB1 PR 705, PR 710 and PR 719"); else
+ * the last "PR N" it names. A piece's own name comes either side ("SMD-1723 PR 1 merged: OB1 PR 776", "OB1 PR 869 →
+ * main (SMD-4540 PR 1)"), and a later sentence may name earlier pieces' PRs ("PR 3b-2 merged: OB1 PR 860 … . PR 3b
+ * is done: 3b-1 (OB1 PR 839) …"), which are not this claim's.
  */
 export function prsOf(c: ClaimRow): number[] {
   const first = (c.releaseReason ?? "").split(/\.\s+(?=[A-Z])/)[0];
@@ -165,7 +169,7 @@ export function sizeBucket(lines: number | null): (typeof SIZE_BUCKETS)[number] 
 export type Stats = { n: number; p25: number | null; median: number | null; p75: number | null; max: number | null };
 /** Quartiles by linear interpolation between ranks (n − 1 spacing), so an even count's median is the middle two's mean. */
 export function stats(values: number[]): Stats {
-  const v = [...values].filter(Number.isFinite).sort((a, b) => a - b);
+  const v = values.filter(Number.isFinite).sort((a, b) => a - b);
   const q = (p: number) => {
     if (!v.length) return null;
     const i = (v.length - 1) * p, lo = Math.floor(i), hi = Math.ceil(i);
@@ -182,8 +186,10 @@ export type Report = {
   /** Claims made after `at`, left out. */
   later: number;
 };
+/** --sizes as the report reads it: each PR's changed lines by its number. */
+export type Sizes = Record<string, { additions?: number; deletions?: number }>;
 
-/** Each claim's hours from claim to release (or, lapsed and never released, to its lease's end). */
+/** A claim's hours from claim to release (or, lapsed and never released, to its lease's end). */
 const hoursOf = (c: ClaimRow) => (Date.parse(c.releasedAt ?? c.expiresAt) - Date.parse(c.claimedAt)) / 3_600_000;
 
 function groupsOf(rows: ClaimRow[], keyOf: (c: ClaimRow) => string, order?: readonly string[]): Group[] {
@@ -192,13 +198,13 @@ function groupsOf(rows: ClaimRow[], keyOf: (c: ClaimRow) => string, order?: read
   const keys = order ? order.filter((k) => by.has(k)) : [...by.keys()].sort((a, b) => by.get(b)!.length - by.get(a)!.length || a.localeCompare(b));
   return keys.map((key) => {
     const cs = by.get(key)!;
-    const counted = cs.filter((c) => c.renewals !== null).map((c) => c.renewals as number);
+    const counted = cs.flatMap((c) => (c.renewals === null ? [] : [c.renewals]));
     return { key, hours: stats(cs.map(hoursOf)), renewals: stats(counted), uncounted: cs.length - counted.length };
   });
 }
 
-/** The report over `rows` at `now` (ms), sizes by PR number where given. */
-export function report(all: ClaimRow[], now: number, sizes?: Record<string, { additions?: number; deletions?: number }>): Report {
+/** The report over `all` at `now` (ms), sizes by PR number where given. */
+export function report(all: ClaimRow[], now: number, sizes?: Sizes): Report {
   // As the brain stood at `now`: a claim not yet made left out, a release still to come not read.
   const rows = all.filter((c) => Date.parse(c.claimedAt) <= now)
     .map((c) => (c.releasedAt !== null && Date.parse(c.releasedAt) > now ? { ...c, releasedAt: null, releasedBy: null, releasedByKind: null, releaseReason: null } : c));
@@ -207,7 +213,10 @@ export function report(all: ClaimRow[], now: number, sizes?: Record<string, { ad
   const timed = ended.filter((x) => x.e !== "live").map((x) => x.c);
   const endingKey = new Map(ended.map((x) => [x.c, x.e]));
   const merged = ended.filter((x) => x.e === "merged").map((x) => x.c);
-  /** The changed lines of every PR the claim names, summed; null where any is not in --sizes with numeric additions and deletions. */
+  /**
+   * The changed lines of every PR the claim names, summed; null where it names none, there is no --sizes, or one is
+   * not in it with numeric additions and deletions.
+   */
   const linesOf = (c: ClaimRow) => {
     const prs = prsOf(c);
     if (!prs.length || !sizes) return null;
@@ -284,14 +293,15 @@ export type FromFile = { rows: ClaimRow[]; unread: number; warning: string | nul
 /**
  * Claims from a --from file's text: an array of claims, a page, or an array of pages, a page as pageOf unwraps it;
  * null where it is none of them, "truncated" where the last page says more follow. A claim on two pages counts once.
- * Pages holding fewer claims than the first page counted (its claims and `remaining`) are warned of: a page missed.
+ * Pages holding fewer entries than the first page counted (its claims and `remaining`) are warned of: a page missed;
+ * so are claims with no `renewals` key at all, which read uncounted.
  */
 export function claimsFromText(text: string): FromFile | null | "truncated" {
   let v: unknown;
   try { v = JSON.parse(text); } catch { return null; }
   const one = pageOf(v);
   const many = Array.isArray(v) && v.length > 0 ? v.map((x) => pageOf(x)) : null;
-  const pages = one ? [one] : many && many.every((p) => p !== null) ? (many as Page[]) : null;
+  const pages = one ? [one] : many && many.every((p): p is Page => p !== null) ? many : null;
   if (pages && pages[pages.length - 1].truncated === true) return "truncated";
   const list = pages ? pages.flatMap((p) => p.claims) : Array.isArray(v) ? v : null;
   if (!list) return null;
@@ -309,18 +319,18 @@ export function claimsFromText(text: string): FromFile | null | "truncated" {
 }
 
 /** --sizes as `gh pr list --json number,additions,deletions` prints it, or an object by number; null where it is neither. */
-export function sizesOf(v: unknown): Record<string, { additions?: number; deletions?: number }> | null {
+export function sizesOf(v: unknown): Sizes | null {
   if (Array.isArray(v)) {
     if (!v.every((x) => isObject(x) && typeof x.number === "number")) return null;
     return Object.fromEntries((v as { number: number; additions?: number; deletions?: number }[]).map((x) => [String(x.number), { additions: x.additions, deletions: x.deletions }]));
   }
   // An object by number: every key a PR number, every value an object (`gh pr view`'s one PR, or a claims page, is not).
-  return isObject(v) && Object.entries(v).every(([k, x]) => /^\d+$/.test(k) && isObject(x)) ? (v as Record<string, { additions?: number; deletions?: number }>) : null;
+  return isObject(v) && Object.entries(v).every(([k, x]) => /^\d+$/.test(k) && isObject(x)) ? (v as Sizes) : null;
 }
 
 export function selfCheck(): number {
   let pass = 0, fail = 0;
-  const ok = (cond: boolean, msg: string) => { if (cond) pass++; else { fail++; } console.log(`  ${cond ? "✓" : "✗"}  ${msg}`); };
+  const ok = (cond: boolean, msg: string) => { if (cond) pass++; else fail++; console.log(`  ${cond ? "✓" : "✗"}  ${msg}`); };
   const NOW = Date.parse("2026-11-23T12:00:00Z");
   const H = 3_600_000;
   const at = (hoursBefore: number) => new Date(NOW - hoursBefore * H).toISOString();
@@ -357,7 +367,7 @@ export function selfCheck(): number {
   const otherTicket = claim({ id: "ot", releasedAt: at(1), releasedBy: "board-sync", releasedByKind: "ingested", releaseReason: "SMD-2 closed: Done (completed); db/sync-linear.ts@x" });
   ok(e(opClosed) === "force-released" && e(ownClosed) === "merged" && e(otherTicket) === "force-released",
     `board-sync only as the server reads it: an operator's (force-released), the holder's own (merged), another ticket's (force-released) (${[opClosed, ownClosed, otherTicket].map(e).join(", ")})`);
-  ok(endingOf(claim({ id: "le", expiresAt: at(0) }), NOW) === "lapsed, never released", "a claim whose lease ends at the report's time has lapsed");
+  ok(e(claim({ id: "le", expiresAt: at(0) })) === "lapsed, never released", "a claim whose lease ends at the report's time has lapsed");
   const noReleaser = claim({ id: "nr", releasedAt: at(1), releasedBy: null, releaseReason: "Merged: OB1 PR 5" });
   const lapsedWords = claim({ id: "lw", releasedAt: at(1), releasedBy: "claude-code", releaseReason: "lapsed while the session was away; dropped" });
   ok(e(noReleaser) === "merged" && e(lapsedWords) === "released (other)",
@@ -471,7 +481,7 @@ async function main(): Promise<number> {
   const nowText = cli.value("now");
   const now = nowText === undefined ? Date.now() : nowOf(nowText);
   if (!Number.isFinite(now)) { console.error("claim-report.ts: --now is an ISO time with its zone: 2026-11-23T12:00:00Z, or 2026-11-23T07:00:00-05:00"); return 2; }
-  let sizes: Record<string, { additions?: number; deletions?: number }> | undefined;
+  let sizes: Sizes | undefined;
   if (cli.has("sizes")) {
     let v: unknown;
     let text: string;
