@@ -24016,6 +24016,24 @@ console.log("\n[138] Migration 153: a settled part that is no longer a judgement
     assert((await functionsNamed("settle_stale_part")) === 1 && (await functionsNamed("thought_validity")) === 1 && JSON.stringify(await q(`SELECT id::text AS id, status FROM settled_parts ORDER BY id`)) === partsBefore
         && (await both(VO.id, VN.id)) === "absent/absent" && (await settle(pa, O.fingerprint, nNow)).error === "DECIDED",
       `${NUM} applied again is a no-op: one function of each name, every part as it was, the read and the settle answering as before`);
+
+    // Three of 151's catalog comments named no removal (review pass 1): the table's, the status column's and
+    // rebuild_derived's, which said of a decided part that nothing settles a part yet. Each names the settle since
+    // this file, once: the apply above was this section's second, after an earlier section's re-apply of 151 had
+    // written 151's own back, and it appended to none a second time.
+    const [cm] = (await q(`SELECT obj_description('settled_parts'::regclass, 'pg_class') AS t,
+                                  col_description('settled_parts'::regclass, (SELECT attnum::int FROM pg_attribute WHERE attrelid = 'settled_parts'::regclass AND attname = 'status')) AS s,
+                                  obj_description('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)'::regprocedure, 'pg_proc') AS r`)) as { t: string | null; s: string | null; r: string | null }[];
+    const namesSettle = (c: string | null) => (c ?? "").split("settle_stale_part").length - 1;
+    await reapply(file.slice(0, 4));
+    const [cmAgain] = (await q(`SELECT obj_description('settled_parts'::regclass, 'pg_class') AS t,
+                                       col_description('settled_parts'::regclass, (SELECT attnum::int FROM pg_attribute WHERE attrelid = 'settled_parts'::regclass AND attname = 'status')) AS s,
+                                       obj_description('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)'::regprocedure, 'pg_proc') AS r`)) as { t: string | null; s: string | null; r: string | null }[];
+    assert(namesSettle(cm.t) === 1 && namesSettle(cm.s) === 1 && namesSettle(cm.r) === 1 && JSON.stringify(cmAgain) === JSON.stringify(cm)
+        && (cm.t ?? "").startsWith("One row per settled part:") && (cm.t ?? "").endsWith(`is removed with its lineage row (settle_stale_part, migration ${NUM}).`)
+        && (cm.s ?? "").startsWith("pending: the part awaits a reviewer.") && (cm.s ?? "").endsWith(`is removed (settle_stale_part, migration ${NUM}).`)
+        && !(cm.r ?? "").includes("nothing settles a part yet") && (cm.r ?? "").includes(`a rejection included: the pass removes a part it settles and rejects none (settle_stale_part, migration ${NUM}), so a rejection is a person's)`),
+      `151's comments on the parts' table, its status column and rebuild_derived name the pass's removal since ${NUM}, each once, the rest of each as 151 wrote it, and a further apply changes none (${namesSettle(cm.t)}, ${namesSettle(cm.s)} and ${namesSettle(cm.r)} time(s); the same after: ${JSON.stringify(cmAgain) === JSON.stringify(cm)})`);
   } catch (e) {
     // A throw is a failed row, not the suite's end: the cleanup below runs, and so does whatever follows this section.
     assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);

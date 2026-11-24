@@ -52,6 +52,8 @@
 --     in unread, and freshness unknown for a thought such a row names. Nothing
 --     else of the read changes: its validity and review axes read no part
 --     (the mark for an accepted part is SMD-4446's PR 3).
+--   * Three of 151's catalog comments, which named no removal: the table's,
+--     the status column's and rebuild_derived's gain it, in place.
 --
 -- WHO READS
 --   No grant changes. The settle deletes one row of settled_parts: the worker
@@ -61,16 +63,17 @@
 --   settled_parts (151) reads the part.
 --
 -- SAFETY
---   One new function, and one redefined with its signature unchanged. No
---   table, column, trigger or index; nothing runs at apply time but the DDL,
---   and no row is written. Nothing calls settle_stale_part yet: the pass does
---   from SMD-4446's PR 2b-2. MINOR under MAINTAINING.md's versioning.
+--   One new function, one redefined with its signature unchanged, and three
+--   comments amended. No table, column, trigger or index; nothing runs at
+--   apply time but the DDL, and no row is written. Nothing calls
+--   settle_stale_part yet: the pass does from SMD-4446's PR 2b-2. MINOR under
+--   MAINTAINING.md's versioning.
 --   test-schema [138], test-upgrade [20cp].
 --
 -- Prerequisites
 --   149 (thought_validity and everything it reads) and 151 (settled_parts).
 --   Applied by `bun db/migrate.ts`. Re-applied, both functions are replaced as
---   they were.
+--   they were, and the comments are left as the first apply made them.
 -- =============================================================================
 
 -- Refused up front, by name, on a schema the ledger records but does not hold
@@ -653,3 +656,35 @@ $$;
 
 COMMENT ON FUNCTION thought_validity(uuid[]) IS
   'A thought''s state on three axes, read from the records that already exist (docs/claim-validity.md, rows 1 to 7 and 9 to 11; migration 149 / SMD-3887). Up to 100 distinct ids (a repeat answered once; over the cap refused whole, TOO_MANY; NULL NO_IDS), answered in the order first given (a list over ten times the cap refused before de-duplication; a role that cannot read thoughts NOT_READABLE): {ok, cap, thoughts:[{id, found:false, forgotten (true, false, or null when the ledger could not be read), forgotten_at, unread} | {id, found:true, version:{fingerprint (the stored key, else the text''s, as 061 and 067 read it), seq}, validity:{state, found, records}, review:{state, records}, freshness:{state, kinds, records}, unread}]}. Validity: superseded (068''s ob1_superseded_by), contested (a pending proposal on it as the falling side, both texts as judged; a corrected verification whose checkpoint reads current or unmatched), unresolved (a pending proposal on it as the falling side with a text moved since judged, or a stale one; a corrected verification at an earlier checkpoint, a stale stored key among them; a checkpoint is current only at the text''s own key), supported (an active citation whose source stands and, one level deep, is not superseded or challenged), else unchallenged; unknown when a record kind the role could not read could have set a state above the one found, or a corrected checkpoint could not be placed without the log. Review: pending, decided, checked, unchecked, none; unknown when proposals or verifications were not read. Freshness: over the lineage rows naming it whose artifact still stands, the worst of stale, requested, legacy, current, or none; an orphaned row (067''s test) listed as orphaned and not read; a pass-settled rejection read, a key''s decision not; a source: pass''s extraction kept on a moved text, as 067''s entities arm keeps it; a kind''s moved from its stale rows; a relation''s judge number carried; no_pool on a stale or requested kind no pool re-runs; unknown when lineage, proposals or facets were not read. Judges'' numbers carry calibrated:false. STABLE, SECURITY INVOKER: it reads what the caller may, and names in unread what it may not. Labels only; ranks nothing. Migration 149 / SMD-3887. Since migration 153 (SMD-4446) a settled part''s lineage row (151) is read by its part''s status: pending or stale it stands, stale it reads requested, a reviewer''s decision is history and not read, and with no part it is listed as orphaned; a role that may not read settled_parts has part in unread, and freshness unknown for a thought such a row names.';
+
+-- ---------------------------------------------------------------------------
+-- 3. 151's catalog comments, which name no removal
+-- ---------------------------------------------------------------------------
+-- 151 wrote the part's contract into three comments before anything removed
+-- a part: the table's and the status column's name no removal, and
+-- rebuild_derived's says of a decided part "nothing settles a part yet". Each
+-- standing comment gains what this file adds, in place: a sentence appended,
+-- or the clause replaced, where it is not there already. So a re-apply changes
+-- nothing, and a comment another file has rewritten since is left as it is.
+-- (151 applied by hand over this file writes its own comments back.)
+DO $$
+DECLARE
+  v_table   text := obj_description('settled_parts'::regclass, 'pg_class');
+  v_status  text := col_description('settled_parts'::regclass,
+                      (SELECT attnum::int FROM pg_attribute WHERE attrelid = 'settled_parts'::regclass AND attname = 'status'));
+  v_fn      regprocedure := 'rebuild_derived(uuid, text, boolean, text[], boolean, boolean)'::regprocedure;
+  v_rebuild text := obj_description(v_fn, 'pg_proc');
+BEGIN
+  IF v_table IS NOT NULL AND position('settle_stale_part' IN v_table) = 0 THEN
+    EXECUTE format('COMMENT ON TABLE settled_parts IS %L', v_table
+      || ' An undecided part that is no longer a judgement of its texts, and that the pass names no more when it judges the pair again, is removed with its lineage row (settle_stale_part, migration 153).');
+  END IF;
+  IF v_status IS NOT NULL AND position('settle_stale_part' IN v_status) = 0 THEN
+    EXECUTE format('COMMENT ON COLUMN settled_parts.status IS %L', v_status
+      || ' An undecided row the pass names no more when it judges the pair again is removed (settle_stale_part, migration 153).');
+  END IF;
+  IF v_rebuild IS NOT NULL AND position('nothing settles a part yet' IN v_rebuild) > 0 THEN
+    EXECUTE format('COMMENT ON FUNCTION %s IS %L', v_fn, replace(v_rebuild, 'nothing settles a part yet',
+      'the pass removes a part it settles and rejects none (settle_stale_part, migration 153), so a rejection is a person''s'));
+  END IF;
+END $$;
