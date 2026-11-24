@@ -3184,7 +3184,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
-| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; decide version 6 writes them): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. Since 153 it is the settle's too: `settle_stale_part` removes an undecided part the pass no longer names. `UPDATE` is the pass's own as well: a decide-mode run sets stale each pending part whose text has moved (SMD-4446 PR 2b-2). 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
+| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; decide version 6 writes them): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. Since 153 it is the settle's too: `settle_stale_part` removes an undecided part the pass no longer names. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
 | | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks, and `sleep.ts` at its start and each poll for a migration (SMD-3379 PR 1c-1); without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -5090,10 +5090,10 @@ tier gives each pair's verdict, not the judge:
     statement already held is then answered as standing.
   - **Judged again after an edit:** a pending part whose text moves after it
     was recorded is no longer a judgement of its texts. Nothing runs a
-    rebuild after an edit, so each run finds such parts itself, sets them
-    stale and pools their thoughts again; it records in a stale row's place
-    the statement the writer names again, and removes a stale part it names
-    no more (Stale parts, under `consolidate.ts` below).
+    rebuild after an edit, so each run finds such parts itself and pools
+    their thoughts again; it records in the part's place the statement the
+    writer names again, and removes a part it names no more (Parts whose
+    text has moved, under `consolidate.ts` below).
   - **Reported:**
     - The summary has a line for the writer's calls: with a settled part,
       with no part named, with parts named and none that stands, unparsed,
@@ -5331,10 +5331,10 @@ ticket's later cuts.
 - **An edit is not followed by a rebuild.** `rebuild_derived` runs from
   `db/rebuild.ts`, from a forget, and from the sleep scheduler's sweep, which
   deletes orphans and marks nothing; not after `update_thought`. Until one
-  runs for the thought, or a decide-mode run of the pass starts (it sets
-  such a part stale itself: Stale parts, under `consolidate.ts` below), a
-  part recorded before the edit stays pending at the old text: an accept of
-  it is refused unless forced. When a rebuild does run, of
+  runs for the thought, or a decide-mode run of the pass judges its pair
+  again (Parts whose text has moved, under `consolidate.ts` below), a part
+  recorded before the edit stays pending at the old text: an accept of it
+  is refused unless forced. When a rebuild does run, of
   either thought, it sets a pending part stale and queues its newer thought
   again, as it does a proposal (`stale_parts` in its result; a leaving
   thought's parts are `cascading.parts`). A part already stale is queued
@@ -5383,21 +5383,25 @@ ticket's later cuts.
   surface brings the one its listing needs. `judged_at` is when the write's
   transaction began, not the order rows commit in.
 - **What an operator sees.** A run of the pass counts the parts it reads
-  and what became of each (Decide mode, above), and the stale parts it met
-  (Stale parts, under `consolidate.ts` below); its dump holds the parts
-  read. The parts that wait for a decide-mode run are counted in three
-  places, from one read (`PARTS_WAITING_SQL`):
+  and what became of each (Decide mode, above), and the parts of a moved
+  text it met (Parts whose text has moved, under `consolidate.ts` below);
+  its dump holds the parts read. The parts that wait are counted and placed
+  in three places, from one read (`partsStandingSql`):
   - `db/consolidate.ts --status`, on its `settled parts:` line, beside the
     pending, accepted and rejected counts;
   - `db/rebuild.ts --status`, on its `parts:` line;
-  - preflight's `lineage` row, in its coverage.
+  - preflight's `lineage` row, in its coverage, over at most 10,001 of them.
 
-  Each counts the stale parts, and the pending ones at a text that has moved
-  with no rebuild since. Both censuses of stale lineage rows still leave a
-  part's row out, as they do a proposal's: a decided part keeps the
-  fingerprints it was judged at for good. `thought_validity` reads a part's
-  lineage row by its part (migration 153, next): both thoughts of a pending
-  part at a moved text read `stale` there, and `requested` once the part is
+  Each counts the stale parts and the pending ones at a text that has moved
+  with no rebuild since, and says how many a decide-mode run judges again.
+  The others wait for something else, and each line says for what: a
+  vector, a rebuild (the part's pair holds a proposal at a moved text that
+  none has set stale), or `--retry-failed` (the thought's claim failed).
+  Both censuses of stale lineage rows still leave a part's row out, as they
+  do a proposal's: a decided part keeps the fingerprints it was judged at
+  for good. `thought_validity` reads a part's lineage row by its part
+  (migration 153, next): both thoughts of a pending part at a moved text
+  read `stale` there, and `requested` once a rebuild has set the part
   stale. So a part with no lineage row stands unseen by that read, and
   preflight's `lineage` row fails on one as on any derived row, with a
   remedy of the part's own: the row recorded again from the part, which
@@ -5472,7 +5476,8 @@ stayed: stale, or pending at fingerprints that are no longer its texts'.
   pair again. It runs under READ COMMITTED alone, echoes no argument, and
   writes no thought. It asks `DELETE` on `settled_parts`, which the worker
   group holds; the server group's role is refused by the table. The pass
-  calls it since PR 2b-2 (Stale parts, under `consolidate.ts` below).
+  calls it since PR 2b-2 (Parts whose text has moved, under `consolidate.ts`
+  below).
 - **`thought_validity` reads a part's lineage row by its part.** The file
   carries 149's function whole and adds one arm to its freshness read:
   pending or stale, the row stands; stale, it reads `requested`, as a stale
@@ -5622,60 +5627,83 @@ the next run (a claim under another judge's key named beside it; `rebuild.ts
 rejections apart from a person's; `--list stale` tags each row's standing
 and still offers the reviewer's decision (an accept takes `--force`).
 
-**Stale parts (151, 153; decide mode, SMD-4446 PR 2b-2).** A settled part is
-a judgement of two texts. One whose text has moved is the next decide-mode
-run's work whatever key wrote it, as a stale proposal is:
+**Parts whose text has moved (151, 153; decide mode, SMD-4446 PR 2b-2).** A
+settled part is a judgement of two texts. An undecided one that is no longer
+a judgement of its texts waits for a decide-mode run, whatever key wrote it:
+stale, which is a rebuild's mark, or pending at a text that has moved.
 
-- **The run sets it stale itself.** Nothing runs a rebuild after an edit, so
-  such a part is still pending. At its start each pass, and each poll of
-  `--follow`, compares every pending part's two fingerprints with the ones
-  its thoughts store. For the parts that differ it compares each text's own
-  (`content_fingerprint_of`): a thought's stored fingerprint is NULL where
-  another thought holds its text, and is left behind by a raw `UPDATE`. A
-  part whose text has moved is set stale, as `rebuild_derived` sets one.
-  The update takes the supersession advisory lock before a part's row, as
-  a rebuild, a decision, a part's write and its settle do.
-- **It pools each stale part's newer thought again,** under its own key: a
-  pair both sides of which have a vector, with no live or failed claim
-  there. The pool line says how many parts were set stale and how many
-  thoughts were pooled for them.
-- **The thought's pairs are judged again.** A pair that holds a stale part
-  is judged though `--k` leaves it out, where it still meets the candidate
-  rule.
-- **A statement the writer names again** is recorded in the stale row's
-  place, by the part's own write (`replaced`).
-- **A stale part the judgement does not name is removed**
-  (`settle_stale_part`, at the fingerprints of the texts judged). A
-  judgement that asks no writer names none: the tier's verdict is no
-  outdates, an outdates is under the floor, or the link step caps the pair.
-  Nor does a writer's answer that could not be read.
+- **The pass writes no mark of its own.** Nothing runs a rebuild after an
+  edit, so a part whose text moved is still pending. The pass reads that
+  fact where it needs it. It compares a pending part's two fingerprints
+  with the ones its thoughts store, and for the parts that differ with each
+  text's own (`content_fingerprint_of`): a thought's stored fingerprint is
+  NULL where another thought holds its text, and is left behind by a raw
+  `UPDATE`.
+- **It pools each such part's newer thought again,** at each pass's start
+  and each poll of `--follow`, under its own key: both sides with a vector,
+  no live or failed claim there, and no proposal holding the part (below).
+  The pool line says how many thoughts it pooled for them.
+- **The thought's pairs are judged again.** A pair that holds such a part is
+  judged though `--k` leaves it out, where it still meets the candidate
+  rule. A thought in hand reads its own parts that wait as it is judged, a
+  part recorded a moment before a put-back among them.
+- **A statement the writer names again** is recorded in the part's place,
+  by the part's own write (`replaced`).
+- **A part the judgement does not name is removed** (`settle_stale_part`,
+  at the fingerprints of the texts judged). A judgement that asks no writer
+  names none: the tier's verdict is no outdates, an outdates is under the
+  floor, or the link step caps the pair.
 - **Not removed:**
   - a part of a pair whose judgement is not recorded: a text moved while it
     was judged, a thought is gone, or the store refused a part's write;
   - a part of a pair whose call failed: the claim fails, for
     `--retry-failed`;
+  - a part of a pair whose answer could not be read, the writer's or the
+    link step's. The claim fails saying so: a removal is for good, and an
+    answer that names the statement again may be among the unread;
   - a part a reviewer decided meanwhile, which stands.
-- **A pair that is not judged again** has its stale parts removed too. The
-  candidate rule no longer admits it, or it holds a whole-thought proposal
-  that is not stale, pending or decided, which closes it to the rule. A
-  side without a vector waits, as a stale proposal's does.
+- **A pair that is not judged again** has such a part removed too, where
+  nothing will judge it again: the candidate rule no longer admits the
+  pair, under this run's `--min-sim` as a stale proposal's pair is settled;
+  a person decided its whole-thought proposal; or its proposal is a
+  judgement of the texts as they stand. A side without a vector waits, as a
+  stale proposal's does.
+- **A part whose pair's proposal itself waits for a rebuild is left for
+  it.** A pending proposal, or one the pass rejected, at a text that has
+  moved closes its pair until a rebuild sets it stale. The part beside it is
+  neither pooled for nor removed, and both are judged again after the
+  rebuild. Decide version 6 writes every whole beside the part that shows
+  it, so this is the state of a pending whole after an edit of either
+  thought.
 - **A text that moves again** between the judgement and the removal leaves
-  the part stale (`EDITED_SINCE`). The claim succeeds, and the next run
+  the part as it was (`EDITED_SINCE`). The claim succeeds, and the next run
   pools the thought again.
 - **A removal the store refuses fails the claim,** with the store's own
   words: its refusal above READ COMMITTED, or an answer this pass does not
-  know. The part stays stale, and no run pools the thought for it again
-  until `--retry-failed`.
-- **The summary** has a `stale parts:` line for those the run met and did
-  not name again: removed (judged again and named no more, or on a pair
-  that is not judged again), waiting on a vector, decided by a reviewer
-  meanwhile, gone, left stale for a text that moved again, and refused by
-  the store. One named again is counted with the parts recorded, in place
-  of an earlier judgement.
+  know. The part waits on, and no run pools the thought for it again until
+  `--retry-failed`.
+- **What it costs.** A pooled thought has every candidate pair asked again,
+  not the pair that holds the part alone, since a claim does not say why
+  its thought was pooled. An edit of an older thought that holds parts with
+  several newer ones pools each of them: M newer thoughts, up to `--k`
+  pairs each.
+- **The summary** has a `parts whose text moved:` line for those the run met
+  and did not name again, each once by its last outcome: removed (judged
+  again and named no more, or on a pair that is not judged again), waiting
+  on a vector, left for a rebuild, decided by a reviewer meanwhile, gone,
+  left for a text that moved again, refused by the store, and kept for an
+  unread answer. One named again is counted with the parts recorded, in
+  place of an earlier judgement.
 - **A run that would judge refuses at its start** on a brain without
   `settle_stale_part`, naming migration 153. `--status` and `--dry-run` go
-  on: `--status` counts the parts on a `settled parts:` line, and a dry run
-  the thoughts a run would judge again for them.
+  on: `--status` counts and places the parts on a `settled parts:` line,
+  and a dry run counts the thoughts a run would pool again for them. The
+  `tickets:` line counts those thoughts too.
+- **The sleep scheduler** counts those thoughts among consolidation's work
+  (`db/sleep.ts`), with the thoughts not yet in its pool: no claim row
+  shows them until the pass's pool step has run. So a whole read begins a
+  period for them, and a period does not end before the pass has pooled
+  them.
 
 A judge-mode pass does none of this: it names no part.
 
@@ -5763,9 +5791,9 @@ gone while the thought stands — preflight's `lineage` WARN names this flag —
 and calls the function once per thought. `--status` is the census: rows per
 kind, the stale-by-fingerprint count, the marked count, the orphans, the
 legacy rows, the stale proposals and where each stands against the judge
-pools (067), the settled parts that wait for a decide-mode run of the pass
-(151: the stale ones, and the pending ones at a text that has moved with no
-rebuild since), and the pools with pending rows.
+pools (067), the settled parts that wait (151: the stale ones, and the
+pending ones at a text that has moved with no rebuild since, each placed as
+the pass's `--status` places it), and the pools with pending rows.
 `--dry-run` runs the call inside a transaction and rolls it back: the report
 is the function's own and nothing is kept. The tool calls no model and holds
 no lease. Exit 0 ran; 1 the function refused as a value (`NOT_FOUND`,
@@ -5889,7 +5917,11 @@ update whose diff says `embedding_present` true, the vector mender's or a
 re-embed's — brings the next whole read forward, at most once a minute after
 the end of the last whole read or a period's end read (so within that and a
 `--poll`), and a vector read once is not read again; the rescan keeps its own
-clock (SMD-3379 PR 1d). What else no claim row shows — the orphans a raw
+clock (SMD-3379 PR 1d). In decide mode consolidation's pool also counts
+the thoughts its pass would pool again for a settled part whose text has
+moved (SMD-4446): no claim row shows them until the pass's pool step has
+run, so a whole read begins a period for them, and a period does not end
+before the pass has pooled them. What else no claim row shows — the orphans a raw
 delete of a window or a replay leaves, re-embed's backlog — waits for the
 rescan, or goes with a period other work begins (deleting a thought leaves
 none: its lineage rows go with it); the next poll reads it whole after a

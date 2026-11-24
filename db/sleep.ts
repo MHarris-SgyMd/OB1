@@ -592,7 +592,7 @@ import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { DEFAULT_MAX_WAIT_S, installBackgroundSlots, MAX_MAX_WAIT_S, shareOf, slotsSettingFrom } from "../server-portable/slots.ts";
 import { watchPassCalls } from "../server-portable/model-call.ts";
 import { extractionKey, windowingFor } from "../server-portable/entities.ts";
-import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
+import { consolidatePassKey, isDecideKey, PARTS_STORE_SQL, partsToPoolSql } from "../server-portable/consolidate-decide.ts";
 import { budgetWords, heldWords, NAME_CHARS, REEMBED_DOWN, reembedKeyUnfit, shellWord, SLEEP_HELD_NAMED, SLEEP_HOLD_WHY, SLEEP_STALLED_JOIN, STALE_AFTER_INTERVALS, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepAside, type SleepHeld, type SleepHold, type SleepHoldWhy } from "../server-portable/brain-info.ts";
 import { run as runExtract, STALL_FLOOR_MS } from "./extract-entities.ts";
 import { JUDGE_TIMEOUT_S, run as runConsolidate } from "./consolidate.ts";
@@ -1146,6 +1146,18 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
   // process's worker id: a container restarted in place keeps its hostname and
   // pid, and its last run's lease lives on for its TTL (post-merge review).
   const since = mineSince === undefined ? sql`'-infinity'::timestamptz` : sql`${mineSince}::timestamptz`;
+  // Decide mode's settled parts (SMD-4446 PR 2b-2, review pass 1): the thoughts the pass's pool step would pool
+  // again for a part that waits are consolidation's work, with no claim row to show it until that step has run.
+  // They are counted with the thoughts not yet in the pool, so a period begins for them, and none ends before the
+  // pass has pooled them (unread, no period began for one on an idle brain, and a period could end between the
+  // pass's start and its first pool step). Read BEFORE the claims: a thought the pass pools between the two reads
+  // is then counted twice for a poll, where the other order counted it nowhere and the pool read drained. A
+  // judge-mode pass pools nothing for a part, so its key reads none; nor does a claims-only read.
+  let forParts = 0;
+  if (pass === "consolidate" && !claimsOnly && isDecideKey(job)) {
+    const [store] = (await sql.unsafe(PARTS_STORE_SQL)) as { has: boolean; reads: boolean }[];
+    if (store.has && store.reads) forParts = Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM (${partsToPoolSql()}) w`, [job])) as { n: number }[])[0].n);
+  }
   // One statement, so one snapshot: read apart, a claim made between the two
   // reads counted neither claimed nor unpooled, and a pool just being claimed
   // read drained — extraction resumed 14 ms after consolidation joined, before
@@ -1196,7 +1208,7 @@ async function poolOf(sql: SQL, pass: PassName, job: string, stalledUnder?: stri
       unread?.(e as Error);
     }
   }
-  const whole: Pool = { pending: Number(by.pending), claimed: Number(by.claimed), failed: Number(by.failed), unpooled: Number(by.n), stalled: Number(s), stalledPending: Number(sp), stalledRead: read, mine: Number(by.mine), stalledMine: Number(sm) };
+  const whole: Pool = { pending: Number(by.pending), claimed: Number(by.claimed), failed: Number(by.failed), unpooled: Number(by.n) + forParts, stalled: Number(s), stalledPending: Number(sp), stalledRead: read, mine: Number(by.mine), stalledMine: Number(sm) };
   return bounded ? { ...whole, backlogLeft: by.bl === true || Number(by.bn) > 0 } : whole;
 }
 

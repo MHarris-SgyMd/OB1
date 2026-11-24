@@ -1607,11 +1607,16 @@ else {
   // The parts that wait for a decide-mode run of the pass are counted in the coverage (PR 2b-2): the undecided one at
   // a text that has moved, which no rebuild has seen and no lineage row marks, then, once a rebuild has run, as
   // stale. The accepted one is counted in neither: a decision stands whatever its texts do.
-  const waiting = (out: string) => /; (\d+) settled part\(s\) stale and (\d+) pending at a text that has moved since \(a decide-mode run of the consolidation pass judges their pairs again, records in its place the statement it names again and removes the rest: bun db\/consolidate\.ts\)/.exec(out)?.slice(1, 3).join("/") ?? "no parts clause";
+  // …and placed (review pass 1: the clause said a run judges every one's pair again): these two thoughts were
+  // captured with no vector, so the one part that waits is said to wait for a vector, and a run to judge none.
+  const waiting = (out: string) => {
+    const m = /; (\d+) settled part\(s\) stale and (\d+) pending at a text that has moved since( \(a decide-mode run of the pass \(bun db\/consolidate\.ts\) judges the pair of 0 again; 1 wait for a vector\))?/.exec(out);
+    return m === null ? "no parts clause" : `${m[1]}/${m[2]}${m[3] === undefined ? "" : " placed"}`;
+  };
   await ctx.unsafe(`SELECT rebuild_derived('${partO}'::uuid, 'preflight: the text moved')`);
   const rebuilt151 = (await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" })).out;
-  assert(waiting(before151) === "0/0" && waiting(after151) === "0/1" && waiting(rebuilt151) === "1/0" && /✓  lineage\s/.test(rebuilt151),
-         `the coverage counts the settled parts that wait for the pass: none while the texts stand, the undecided one as pending at a moved text once a text moves, and as stale once a rebuild has run; the accepted one in neither (${waiting(before151)}, ${waiting(after151)}, ${waiting(rebuilt151)})`);
+  assert(waiting(before151) === "0/0" && waiting(after151) === "0/1 placed" && waiting(rebuilt151) === "1/0 placed" && /✓  lineage\s/.test(rebuilt151),
+         `the coverage counts the settled parts that wait and places them: none while the texts stand, the undecided one as pending at a moved text once a text moves, and as stale once a rebuild has run, waiting for a vector each time; the accepted one in neither (${waiting(before151)}, ${waiting(after151)}, ${waiting(rebuilt151)})`);
   // A part without its lineage row is refused as any derived row is, named, and its remedy is the part's own: the
   // row written again from the part, which holds both fingerprints. Followed, the check is ok again.
   await ctx.unsafe(`DELETE FROM derivations WHERE artifact_kind = 'part' AND artifact_id = '${part151b.id}'::uuid`);
@@ -1620,7 +1625,7 @@ else {
   if (partRemedy) await ctx.unsafe(partRemedy.replace("<part id>", part151b.id));
   const partRowBack = await run({ ...BASE_OK, ...NO_DB, OB1_STORE: "sql", DATABASE_URL: LIVE, OB1_CHUNK_CONTEXT: "on" });
   assert(noPartRow.code === 1 && new RegExp(`✗  lineage\\s+derived rows without a lineage row — 1 settled part\\(s\\) \\(${part151b.id}\\)`).test(noPartRow.out) && /A settled part's row is written with it by 151's record_settled_part/.test(noPartRow.out)
-      && partRemedy !== "" && /✓  lineage\s+every derived row has its lineage row/.test(partRowBack.out) && waiting(partRowBack.out) === "1/0",
+      && partRemedy !== "" && /✓  lineage\s+every derived row has its lineage row/.test(partRowBack.out) && waiting(partRowBack.out) === "1/0 placed",
          `a settled part without its lineage row does not start, the part named, and the remedy is the part's own; followed as printed, the check is ok again (exit ${noPartRow.code}: ${noPartRow.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 200)}; then ${partRowBack.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l))?.trim().slice(0, 80)})`);
   await ctx.unsafe(`SELECT delete_thought('${partN}'::uuid)`);
   await ctx.unsafe(`SELECT delete_thought('${partO}'::uuid)`);

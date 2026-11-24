@@ -63,7 +63,7 @@ import type { SQL } from "bun";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { staleStandings, staleStandingsText, STALE_STANDING_ROWS_SQL, type StaleStandingRow } from "../server-portable/consolidate.ts";
-import { PARTS_STORE_SQL, PARTS_UNREAD, PARTS_WAITING_SQL } from "../server-portable/consolidate-decide.ts";
+import { PARTS_STORE_SQL, PARTS_UNREAD, partsStandingSql, partsWaitWords, type PartsStanding } from "../server-portable/consolidate-decide.ts";
 
 // Every argument accounted for (db/cli.ts, SMD-2134): a flag this door does not
 // have is refused rather than ignored, and a blank --reason is refused as every
@@ -452,16 +452,17 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       out(`  orphans:     ${c.orphans} row(s) whose artifact is gone${Number(c.orphans) ? " — bun db/rebuild.ts --orphans deletes them" : ""}`);
       out(`  legacy:      ${c.legacy} row(s) backfilled by 061 at the thought's current text (read as current; --force re-records a vector and re-runs the rest)`);
       out(`  proposals:   ${c.stale_proposals} stale (a text moved under the verdict${standings.total ? `: ${staleStandingsText(standings, null, "bun db/consolidate.ts --retry-failed")}` : ""}; the pass replaces one it finds in conflict again and settles one it does not — a reviewer may decide one sooner: bun db/consolidate.ts --list stale)`);
-      // 151 (SMD-4446): the settled parts that wait for a decide-mode run of the pass, where the store stands. The
-      // lineage rows above do not count them: a part's row is left out of `stale`, as a proposal's is, and a pending
-      // part at a text that has moved with no rebuild since has no mark at all. The pass's own read
-      // (PARTS_WAITING_SQL), so this command, the pass's --status and preflight say the same of one brain. A role
-      // that reads the proposals may not read the parts: it is told so, and the rest stands.
+      // 151 (SMD-4446): the settled parts that wait, where the store stands, and where each stands. The lineage
+      // rows above do not count them: a part's row is left out of `stale`, as a proposal's is, and a pending part
+      // at a text that has moved with no rebuild since has no mark at all. The pass's own read (partsStandingSql),
+      // so this command, the pass's --status and preflight say the same of one brain. A role that reads the
+      // proposals may not read the parts: it is told so, and the rest stands.
       const [partsStore] = (await sql.unsafe(PARTS_STORE_SQL)) as { has: boolean; reads: boolean }[];
       if (partsStore.has && !partsStore.reads) out(`  parts:       ${PARTS_UNREAD}`);
       else if (partsStore.has) {
-        const [w] = (await sql.unsafe(PARTS_WAITING_SQL)) as { stale: number; moved: number }[];
-        out(`  parts:       ${w.stale} stale (a text moved under the settled part)${Number(w.moved) ? `, ${w.moved} pending at a text that has moved since, which no rebuild has seen` : ""} — a decide-mode run of the pass (bun db/consolidate.ts) judges each one's pair again, records in its place the statement it names again and removes the rest`);
+        const [w] = (await sql.unsafe(partsStandingSql())) as PartsStanding[];
+        const waits = partsWaitWords(w);
+        out(`  parts:       ${w.stale} stale (a text moved under the settled part), ${w.moved} pending at a text that has moved since, which no rebuild has seen${waits ? ` — ${waits}` : ""}`);
       }
       const pools = (await sql`SELECT work_type AS w, count(*)::int AS n FROM thought_work_claims WHERE status = 'pending' GROUP BY 1 ORDER BY 1`) as { w: string; n: number }[];
       // The named subject pool, read for the drainer: a role that cannot read ob1_config is told so on a subject

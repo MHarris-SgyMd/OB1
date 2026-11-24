@@ -26,7 +26,7 @@ import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, isDecideKey, partsWaitWords, repooled, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
 import { askOwnSubject, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
@@ -2606,9 +2606,39 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
       && settleRefusal(pgError("42501", "permission denied for table settled_parts")) === null && settleRefusal(pgError("40P01", "deadlock detected")) === null && settleRefusal(pgError("0A000", "settle_stale_parts_later must run elsewhere")) === null
       && settleRefusal(new Error("Connection closed")) === null && settleRefusal("settle_stale_part: a string") === null && settleRefusal(null) === null,
     "a settle that threw is the store's own refusal where its words begin with the function's name, kept and cut to 200; a missing function or grant, a deadlock, another function's refusal, a lost connection and a value that is no error are none");
-  assert(unsettledWords([]) === "" && unsettledWords(["settle_stale_part: first"]) === "a stale settled part was not removed — settle_stale_part: first"
-      && unsettledWords(["settle_stale_part: first", "settle_stale_part: second"]) === "2 stale settled parts were not removed — settle_stale_part: first",
-    "a thought's stale parts the store would not remove are one clause of its claim's error: how many, and the store's words for the first; none is no clause");
+  assert(unsettledWords([]) === "" && unsettledWords(["settle_stale_part: first"]) === "a settled part of a moved text was not removed — settle_stale_part: first"
+      && unsettledWords(["settle_stale_part: first", "the answer could not be read"]) === "2 settled parts of a moved text were not removed — settle_stale_part: first",
+    "a thought's waiting parts that were not removed are one clause of its claim's error: how many, and why for the first; none is no clause");
+  // Where the parts that wait stand, in the status lines' words (partsWaitWords, review pass 1): how many a
+  // decide-mode run judges again, then those that wait for something else, each with what it waits for; nothing where
+  // none waits.
+  const waitsAll = partsWaitWords({ stale: 2, moved: 5, vector: 1, held: 2, failed: 3 });
+  assert(partsWaitWords({ stale: 0, moved: 0, vector: 0, held: 0, failed: 0 }) === ""
+      && partsWaitWords({ stale: 0, moved: 4, vector: 0, held: 0, failed: 0 }) === "a decide-mode run of the pass (bun db/consolidate.ts) judges the pair of 4 again"
+      && partsWaitWords({ stale: 1, moved: 0, vector: 1, held: 0, failed: 0 }) === "a decide-mode run of the pass (bun db/consolidate.ts) judges the pair of 0 again; 1 wait for a vector"
+      && waitsAll === "a decide-mode run of the pass (bun db/consolidate.ts) judges the pair of 1 again; 1 wait for a vector; 2 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale; 3 wait for --retry-failed, their thought's claim having failed",
+    `the parts that wait are placed in words: those a run judges again, then those waiting for a vector, a rebuild or --retry-failed, and nothing where none waits (${waitsAll})`);
+  // A decide key by its shape (isDecideKey): the sleep scheduler reads the parts' work under such a key alone.
+  assert(isDecideKey(decideKey("h2o", "writer")) && !isDecideKey(consolidateKey("judge")) && !isDecideKey(`extract:m@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION}`) && !isDecideKey(`${decideKey("h2o", "writer")}x`) && !isDecideKey(""),
+    "a decide-mode key is known by its prefix and its two versions, and no judge key, other pass's key or longer key is one");
+  // A re-pool statement tried again for a thought deleted under it or a deadlock, three tries in all, and thrown on at
+  // once for anything else (repooled, review pass 1).
+  const tried: string[] = [];
+  const failing = (codes: string[], via: "errno" | "code" = "errno") => {
+    let i = 0;
+    return async () => {
+      const state = codes[i++];
+      tried.push(state ?? "ok");
+      if (state !== undefined) throw Object.assign(new Error(`state ${state}`), { [via]: state });
+      return i;
+    };
+  };
+  const ended = (p: Promise<number>) => p.then((v) => `returned ${v}`, (e: Error) => e.message);
+  const [poolTwice, poolThrice, otherState, byCode, bare, once2] = [await ended(repooled(failing(["23503", "40P01"]))), await ended(repooled(failing(["23503", "23503", "40P01"]))), await ended(repooled(failing(["42501"]))),
+    await ended(repooled(failing(["40P01"], "code"))), await ended(repooled(async () => { throw new Error("no state"); })), await ended(repooled(failing(["23503"]), 1))];
+  assert(poolTwice === "returned 3" && poolThrice === "state 40P01" && otherState === "state 42501" && byCode === "returned 2" && bare === "no state" && once2 === "state 23503"
+      && tried.join() === "23503,40P01,ok,23503,23503,40P01,42501,40P01,ok,23503",
+    `a re-pool statement is tried again for a deleted thought (23503) or a deadlock (40P01), three tries in all, its state read from errno or code, and any other error is thrown at once (${[poolTwice, poolThrice, otherState, byCode, bare, once2].join(" | ")}; tried ${tried.join()})`);
 
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
