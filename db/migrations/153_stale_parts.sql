@@ -26,7 +26,8 @@
 --   * settle_stale_part(p_id, p_older_fingerprint, p_newer_fingerprint) → jsonb.
 --     The pass's removal of an undecided part that is not a judgement of the
 --     texts as they stand. It is called with the fingerprint of each text as
---     the pass judged it, when that judgement did not name the part. Under the
+--     the pass read it: where it judged the pair again and that judgement did
+--     not name the part, or where nothing will judge the pair again. Under the
 --     supersession advisory lock and the row's own, it answers, as values:
 --       {ok: false, error: NOT_FOUND, id}: no such part (a later judgement
 --         replaced it, a reviewer's client or another worker removed it, a
@@ -125,7 +126,8 @@ $qc$;
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION settle_stale_part(
   p_id                uuid,
-  -- The fingerprint of each text as the caller judged it.
+  -- The fingerprint of each text as the caller read it, when it judged the
+  -- pair or found that nothing will.
   p_older_fingerprint text,
   p_newer_fingerprint text
 )
@@ -189,7 +191,8 @@ BEGIN
   -- judgement of the same texts that does not name it is no reason to
   -- remove it: what a later decide version does with an earlier one's
   -- parts is not decided here. A stale row goes whatever its fingerprints:
-  -- a re-run was asked for it, and the re-run did not name it.
+  -- a re-run was asked for it, and the re-run did not name it, or found
+  -- nothing to judge.
   IF r.status = 'pending' AND r.older_fingerprint = v_old AND r.newer_fingerprint = v_new THEN
     RETURN jsonb_build_object('ok', false, 'error', 'NOT_STALE', 'id', p_id, 'status', r.status);
   END IF;
@@ -201,7 +204,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION settle_stale_part(uuid, text, text) IS
-  'The consolidation pass''s removal of a settled part it no longer names (153, SMD-4446): the part''s id, and the fingerprint of each text as the pass judged it when that judgement did not name the part. Removes an undecided part that is not a judgement of the texts as they stand: a stale one, or a pending one at fingerprints that are no longer its texts''. Four answers remove nothing and are values, each {ok: false, error, id}: NOT_FOUND (no such part: a later judgement replaced it, another caller removed it, or a thought of its pair is gone and took it); DECIDED, with status (accepted or rejected: a reviewer''s decision stands whatever its texts have done since); EDITED_SINCE, with older_edited and newer_edited (a fingerprint given is not its text''s as it stands: the caller judged other texts, and its judgement says nothing of this part); NOT_STALE, with status (pending at the fingerprints given, a judgement of these very texts, which another judgement of them that names it no more does not remove). Otherwise {ok: true, action: removed, id, was}: the row is deleted, its lineage row with it (151''s settled_parts_drop_derivation), was being the status it had. It removes and does not reject: nobody decided the part, and a rejection would keep its statement from being proposed on the pair again. Raises (invalid_parameter_value) on a missing id or fingerprint, echoing none, and (feature_not_supported) above READ COMMITTED, where its read of the two texts would predate its lock. Takes the supersession advisory lock, then the row, as review_settled_part does, and locks no thought''s row; the lock is held to the end of the caller''s transaction, so call it as a statement of its own. Writes no thought. Migration 153 / SMD-4446.';
+  'The consolidation pass''s removal of a settled part it no longer names (153, SMD-4446): the part''s id, and the fingerprint of each text as the pass read it, where it judged the pair again and that judgement did not name the part, or where nothing will judge the pair again. Removes an undecided part that is not a judgement of the texts as they stand: a stale one, or a pending one at fingerprints that are no longer its texts''. Four answers remove nothing and are values, each {ok: false, error, id}: NOT_FOUND (no such part: a later judgement replaced it, another caller removed it, or a thought of its pair is gone and took it); DECIDED, with status (accepted or rejected: a reviewer''s decision stands whatever its texts have done since); EDITED_SINCE, with older_edited and newer_edited (a fingerprint given is not its text''s as it stands: the caller judged other texts, and its judgement says nothing of this part); NOT_STALE, with status (pending at the fingerprints given, a judgement of these very texts, which another judgement of them that names it no more does not remove). Otherwise {ok: true, action: removed, id, was}: the row is deleted, its lineage row with it (151''s settled_parts_drop_derivation), was being the status it had. It removes and does not reject: nobody decided the part, and a rejection would keep its statement from being proposed on the pair again. Raises (invalid_parameter_value) on a missing id or fingerprint, echoing none, and (feature_not_supported) above READ COMMITTED, where its read of the two texts would predate its lock. Takes the supersession advisory lock, then the row, as review_settled_part does, and locks no thought''s row; the lock is held to the end of the caller''s transaction, so call it as a statement of its own. Writes no thought. Migration 153 / SMD-4446.';
 
 -- ---------------------------------------------------------------------------
 -- 2. thought_validity — 149's read, with an arm for a settled part's row
@@ -677,11 +680,11 @@ DECLARE
 BEGIN
   IF v_table IS NOT NULL AND position('settle_stale_part' IN v_table) = 0 THEN
     EXECUTE format('COMMENT ON TABLE settled_parts IS %L', v_table
-      || ' An undecided part that is no longer a judgement of its texts, and that the pass names no more when it judges the pair again, is removed with its lineage row (settle_stale_part, migration 153).');
+      || ' An undecided part that is no longer a judgement of its texts, and that the pass names no more when it judges the pair again or whose pair nothing will judge again, is removed with its lineage row (settle_stale_part, migration 153).');
   END IF;
   IF v_status IS NOT NULL AND position('settle_stale_part' IN v_status) = 0 THEN
     EXECUTE format('COMMENT ON COLUMN settled_parts.status IS %L', v_status
-      || ' An undecided row the pass names no more when it judges the pair again is removed (settle_stale_part, migration 153).');
+      || ' An undecided row the pass names no more when it judges the pair again, or whose pair nothing will judge again, is removed (settle_stale_part, migration 153).');
   END IF;
   IF v_rebuild IS NOT NULL AND position('nothing settles a part yet' IN v_rebuild) > 0 THEN
     EXECUTE format('COMMENT ON FUNCTION %s IS %L', v_fn, replace(v_rebuild, 'nothing settles a part yet',
