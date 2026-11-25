@@ -517,7 +517,12 @@ export function restartCommand(worker, job) {
   // key is given as it was.
   if (worker === "reembed") return `cd db && bun reembed.ts --url $DATABASE_URL --follow${job && poolModelFor(job) === null ? ` --job ${job}` : ""}`;
   if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
-  return `${service}cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL)` : ""}`;
+  // A decide-mode job names a decider and a writer: started without OB1_CONSOLIDATE_DECIDER the follower runs judge
+  // mode, under another key (SMD-4446 PR 2b-2, review pass 5: the words gave the judge's knobs for every job).
+  const follows = job && new RegExp(DECIDE_KEY_TAIL_SQL).test(job)
+    ? "follows OB1_CONSOLIDATE_DECIDER and its writer, OB1_JUDGE_MODEL, else OB1_METADATA_MODEL: without the decider's knob it runs judge mode, under another key"
+    : "follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL";
+  return `${service}cd db && bun consolidate.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, ${follows})` : ""}`;
 }
 
 /**
@@ -1241,6 +1246,14 @@ export function poolModelFor(key) {
  * one to reembed.ts, without importing the prompt module.
  */
 export const CONSOLIDATE_KEY_PREFIX = "consolidate:";
+
+/**
+ * …and the ending of decide mode's (SMD-3115): `consolidate:<decider>+<writer>@p<prompt version>d<decide version>`,
+ * built by server-portable/consolidate-decide.ts's decideKey(). As a regular expression that SQL's reads too: the
+ * one spelling for a read that knows no key, for isDecideKey (server-portable/consolidate.ts) and for
+ * restartCommand above, which names the knobs a follower of such a job needs.
+ */
+export const DECIDE_KEY_TAIL_SQL = "@p[0-9]+d[0-9]+$";
 
 /**
  * The shape of a re-tag pool key (SMD-2298): `retag:<metadata model>@p<prompt

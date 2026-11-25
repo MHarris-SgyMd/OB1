@@ -33,7 +33,7 @@ import { isRecord } from "./is-record.ts";
 import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
-import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
+import { CONSOLIDATE_KEY_PREFIX, DECIDE_KEY_TAIL_SQL } from "../db/config.mjs";
 
 /**
  * Bumped when the prompt or the parsing rules change what gets recorded. Part
@@ -169,14 +169,16 @@ export type Judgement = {
   unread?: string[];
   /**
    * Decide version 6 (SMD-4446 PR 2b-2): the statements the writer's answer quotes in items that make no row, each
-   * with the thought it was said to be in, null where the item gave no side. An item whose quotes fail the check
-   * or are not read back (the statement in its thought's own characters where it was read back, as typed where
-   * not), one of the wrong shape, one past the cap. The pass asks the store which settled part waiting on the
-   * pair such an item names again (consolidate-decide.ts's PartAside), and keeps that part. `asideMore`: items
-   * of the wrong shape or past the cap that quote a statement and are not among them, the list being bounded.
-   * In no recipe and no row; absent when there was none.
+   * read back in its thought's own characters, as a recorded part's statement is (consolidate-decide.ts's asidesOf).
+   * An item whose quotes fail the check, one of the wrong shape, one past the cap. The pass asks the store which
+   * settled part waiting on the pair such an item names again, and keeps that part. `asideUnread`: the thoughts in
+   * which such an item quotes a statement that is there and could not be read back, so the pass cannot say which
+   * statement it names: every part of that thought that waits on the pair and is not recorded again is kept.
+   * `asideMore`: items of the wrong shape or past the cap that quote a statement and are not among them, the list
+   * being bounded. In no recipe and no row; absent when there was none.
    */
-  aside?: { holder: "older" | "newer" | null; statement: string }[];
+  aside?: { holder: "older" | "newer"; statement: string }[];
+  asideUnread?: ("older" | "newer")[];
   asideMore?: number;
 };
 
@@ -782,11 +784,14 @@ export function passSettledNote(why: string, key: string): string {
  * vector; the pass does not pool it) → `decide` (below) → `failed` →
  * `pooled` → `waiting` (the next run under the key re-pools it). `decide`
  * (SMD-4446, review pass 5) is a judge-mode reader's alone, which marks the
- * row `left`: the pair holds a settled part that waits, and a judge-mode pass
+ * row `left`: the pair holds an undecided settled part, and a judge-mode pass
  * leaves such a pair and its stale proposal to a decide-mode one, whatever
  * claim the thought holds under its key. It does not pool the thought for the
- * row, and "waiting for the next run" was said of it. With a key, failed and
- * pooled mean
+ * row, and "waiting for the next run" was said of it. The mark holds the
+ * decide-mode keys under which the thought's claim failed, and the row then
+ * stands as `decideFailed`: a decide-mode run does not pool it either until
+ * that claim is retried, and the words say so (the fifth review: they named
+ * a run that pooled nothing). With a key, failed and pooled mean
  * THIS key's claim — a failed claim under another judge's key is not this
  * pass's to retry and does not stop its re-pool, and a live claim under
  * another key (063's requeue under the row's key after a judge change) is
@@ -796,8 +801,18 @@ export function passSettledNote(why: string, key: string): string {
  * named a --retry-failed that returned nothing). Without a key, any failed
  * or live claim counts and its key is named.
  */
-export type StaleStanding = "vector" | "decide" | "failed" | "pooled" | "waiting";
-export type StaleStandingRow = { id: string; vectorless: boolean; failed_keys: string[]; live_keys: string[]; left?: boolean };
+export type StaleStanding = "vector" | "decide" | "decideFailed" | "failed" | "pooled" | "waiting";
+export type StaleStandingRow = { id: string; vectorless: boolean; failed_keys: string[]; live_keys: string[]; left?: string[] };
+
+// A decide-mode key's ending as SQL's regular expression reads it (db/config.mjs's DECIDE_KEY_TAIL_SQL, beside the
+// prefix): isDecideKey's own, for a read that knows no key. Given on from here to the readers of a decide key.
+export { DECIDE_KEY_TAIL_SQL };
+/** DECIDE_KEY_TAIL_SQL as this file's own test: one spelling of the tail for the SQL and for isDecideKey. */
+const DECIDE_KEY_TAIL = new RegExp(DECIDE_KEY_TAIL_SQL);
+/** Whether a pass key is decide mode's (consolidate-decide.ts's decideKey's shape): a decider and a writer, and two versions. */
+export function isDecideKey(key: string): boolean {
+  return key.startsWith(CONSOLIDATE_KEY_PREFIX) && DECIDE_KEY_TAIL.test(key);
+}
 export const STALE_STANDING_ROWS_SQL = `SELECT p.id::text AS id,
        EXISTS (SELECT 1 FROM thoughts t WHERE t.id IN (p.older_id, p.newer_id) AND t.embedding IS NULL) AS vectorless,
        COALESCE((SELECT array_agg(c.work_type ORDER BY c.work_type) FROM thought_work_claims c
@@ -811,7 +826,7 @@ export type StaleStandingOf = { s: StaleStanding; keys: string[] };
 export function staleStandingOf(row: StaleStandingRow, key: string | null): StaleStandingOf {
   const failed = row.failed_keys ?? [], live = row.live_keys ?? [];
   if (row.vectorless) return { s: "vector", keys: [] };
-  if (row.left) return { s: "decide", keys: [] };
+  if (row.left) return row.left.length ? { s: "decideFailed", keys: row.left } : { s: "decide", keys: [] };
   if (key === null) {
     if (failed.length) return { s: "failed", keys: failed };
     if (live.length) return { s: "pooled", keys: live };
@@ -838,12 +853,29 @@ export function staleStandings(rows: StaleStandingRow[], key: string | null): St
 }
 
 const keysText = (keys: string[]) => keys.join(", ");
+/** The words for a retry in decide mode: the bare retry is judge mode, which returns no claim under a decide-mode key. */
+const DECIDE_RETRY = "in decide mode with that key's decider and writer";
+/**
+ * How a claim that failed under each of `keys` is retried, for a reader that knows no key: a judge key's with that
+ * judge's model, a decide-mode key's in decide mode, each named where both kinds are among them. (The fifth review:
+ * every key got "with that judge's model", and that retry, run for a decide-mode key, is a judge-mode run that
+ * returns no such claim and pools the brain under another key.)
+ */
+const retryWords = (keys: string[], retry: string): string => {
+  const decide = keys.filter(isDecideKey), judge = keys.filter((k) => !isDecideKey(k));
+  const both = decide.length > 0 && judge.length > 0;
+  return [
+    judge.length ? `${retry} with that judge's model${both ? ` (${keysText(judge)})` : ""}` : "",
+    decide.length ? `${retry} ${DECIDE_RETRY}${both ? ` (${keysText(decide)})` : ""}: a judge-mode run returns no such claim` : "",
+  ].filter(Boolean).join("; ");
+};
 /** One standing as --list stale prints it beside the status. `retry` is the --retry-failed command as the door spells it. */
 export function staleStandingText(st: StaleStandingOf, key: string | null, retry = "--retry-failed"): string {
   switch (st.s) {
     case "vector": return "waiting for a vector the reembed pool writes";
-    case "decide": return "waiting for a decide-mode run: its pair holds a settled part that waits, and a judge-mode pass leaves such a pair";
-    case "failed": return key === null ? `failed in a pass under ${keysText(st.keys)} — ${retry} with that judge's model` : `failed in this pass — ${retry}`;
+    case "decide": return "waiting for a decide-mode run: its pair holds an undecided settled part, and a judge-mode pass judges no such pair";
+    case "decideFailed": return `left to decide mode, where its thought's claim failed under ${keysText(st.keys)} — ${retry} ${DECIDE_RETRY}`;
+    case "failed": return key === null ? `failed in a pass under ${keysText(st.keys)} — ${retryWords(st.keys, retry)}` : `failed in this pass — ${retry}`;
     case "pooled": return key === null ? `in a pass's pool under ${keysText(st.keys)}` : "in this pass's pool";
     default: return `waiting for the next run to re-pool it${st.keys.length ? ` (a claim stands under ${keysText(st.keys)}, another judge's pool)` : ""}`;
   }
@@ -855,8 +887,9 @@ export function staleStandingsText(st: StaleStandings, key: string | null, retry
   return [
     part("pooled", key === null ? `in a pass's pool under ${keysText(st.keys.pooled ?? [])}` : "in this pass's pool"),
     part("vector", "waiting for a vector the reembed pool writes"),
-    part("decide", "waiting for a decide-mode run, their pair holding a settled part that waits"),
-    part("failed", key === null ? `failed in a pass under ${keysText(st.keys.failed ?? [])} — ${retry} with that judge's model` : `failed in this pass — ${retry}`),
+    part("decide", "waiting for a decide-mode run, their pair holding an undecided settled part"),
+    part("decideFailed", `left to decide mode behind a claim of their thought that failed under ${keysText(st.keys.decideFailed ?? [])} — ${retry} ${DECIDE_RETRY}`),
+    part("failed", key === null ? `failed in a pass under ${keysText(st.keys.failed ?? [])} — ${retryWords(st.keys.failed ?? [], retry)}` : `failed in this pass — ${retry}`),
     part("waiting", `waiting for the next run${key !== null && st.keys.waiting?.length ? ` (a claim stands under ${keysText(st.keys.waiting)}, another judge's pool)` : ""}`),
   ].filter(Boolean).join(", ");
 }

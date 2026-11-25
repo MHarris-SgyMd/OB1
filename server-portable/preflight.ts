@@ -32,7 +32,7 @@ import { EGRESS_UNITS, KEYED_UNITS, hostOf, localKnob, type EgressTerm, type Egr
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
-import { consolidatePassKey, decideKeyModels, partsClaimsFor, partsStanding, type PartsStanding } from "./consolidate-decide.ts";
+import { consolidatePassKey, decideKeyModels, pairHoldsPartSql, PARTS_STORE_SQL, partsClaimsFor, partsStanding, type PartsStanding } from "./consolidate-decide.ts";
 import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, PRIORITY_GRANT_FIX, priorityFindingsRow, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
@@ -5111,9 +5111,11 @@ if (configFailed) {
               // (review pass 2).
               const currentKey = key === consolidatePassKey(resolvedEmbed);
               const ownKey = currentKey || (resolvedEmbed.decider ? decided?.decider === resolvedEmbed.decider && decided.writer === judgeModel : judged === judgeModel);
+              // The names are text read from the store, each printed as one shell word (review pass 5: unquoted, a
+              // name with a space or a semicolon in it printed a command that ran something else).
               const envPrefix = ownKey ? ""
-                : decided ? `OB1_CONSOLIDATE_DECIDER=${decided.decider} OB1_JUDGE_MODEL=${decided.writer} `
-                : judged ? `${resolvedEmbed.decider ? "OB1_CONSOLIDATE_DECIDER= " : ""}OB1_JUDGE_MODEL=${judged} ` : "";
+                : decided ? `OB1_CONSOLIDATE_DECIDER=${shellWord(decided.decider)} OB1_JUDGE_MODEL=${shellWord(decided.writer)} `
+                : judged ? `${resolvedEmbed.decider ? "OB1_CONSOLIDATE_DECIDER= " : ""}OB1_JUDGE_MODEL=${shellWord(judged)} ` : "";
               const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts with entities — ");
               // Running: a worker holds a live lease, or the key's follower
               // stamped a fresh heartbeat and has not ended — between its polls
@@ -5245,7 +5247,28 @@ if (configFailed) {
             const board = bu
               ? `; board pairs not counted (${bu.reason === "refused" ? bu.message : bu.reason === "timeout" ? "not read in time" : bu.reason === "deadline" ? "not read before the deadline" : bu.message})`
               : p.boardPairs ? `; ${p.boardPairs} pair two tickets the board does not link` : "";
-            const stale = p.stale ? `; ${p.stale} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not)` : "";
+            // A judge-mode server's pass leaves a stale proposal on a pair that holds an undecided settled part to a
+            // decide-mode pass: it neither judges the pair, settles the proposal nor pools its thought for it
+            // (SMD-4446 PR 2b-2, review pass 5: this row said of every stale proposal that the next pass settles
+            // it, and that pass, run twice, left them). Counted where this server runs judge mode and its role may
+            // read the parts, with the bound the census reads to; a read that fails says nothing more than before.
+            let staleLeft = 0;
+            if (p.stale > 0 && !resolvedEmbed.decider) {
+              try {
+                const [store] = (await sql.unsafe(PARTS_STORE_SQL)) as { has: boolean; reads: boolean }[];
+                if (store?.has && store.reads) {
+                  const [l] = (await sql.unsafe(`SELECT count(*)::int AS n FROM (SELECT 1 FROM public.supersession_proposals p WHERE p.status = 'stale' AND ${pairHoldsPartSql("p")} LIMIT 10001) x`)) as { n: number }[];
+                  staleLeft = Math.min(Number(l.n), p.stale);
+                }
+              } catch { /* said as before */ }
+            }
+            const NEXT_PASS = "replaces one it finds in conflict again and settles one it does not";
+            const LEFT = "on a pair that holds an undecided settled part: this server's judge-mode pass leaves those to a decide-mode pass";
+            const stale = !p.stale ? ""
+              : staleLeft === 0 ? `; ${p.stale} stale (a text moved under the verdict; the next pass ${NEXT_PASS})`
+              : staleLeft === p.stale ? `; ${p.stale} stale (a text moved under the verdict, each ${LEFT}, which ${NEXT_PASS})`
+              : `; ${p.stale} stale (a text moved under the verdict; the next pass ${NEXT_PASS}, but for ${staleLeft} ${LEFT})`;
+            const settles = staleLeft === 0 ? "the next pass settles them" : staleLeft === p.stale ? "a decide-mode pass settles them" : "the next pass settles the others, and a decide-mode pass those";
             const words = p.pending === 0
               ? `none pending${stale}`
               : `${p.pending} pending review, the oldest judged ${p.oldestPendingS === null ? "at an unknown time" : `${ago(p.oldestPendingS)} ago`}${board}${stale}`;
@@ -5261,7 +5284,7 @@ if (configFailed) {
             if (fixes.length) add("proposals", "warn", detail, fixes.join(" "));
             // Stale alone: the next pass settles them, and --list stale shows each with the decision it takes (review pass 5).
             else add("proposals", "ok", p.pending > 0 ? `${words} — review with ${review}`
-              : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
+              : p.stale > 0 ? `${words} — ${settles}; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
           }
         }

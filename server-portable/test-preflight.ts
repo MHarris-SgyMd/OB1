@@ -2740,6 +2740,37 @@ else {
   const consStale = await run(SQL_ENV);
   assert(/^\s*✓\s+proposals\s+none pending; 1 stale \(a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not\) — the next pass settles them; to decide one sooner, cd db && bun consolidate\.ts --url \$DATABASE_URL --list stale shows each with its --accept --force or --reject\s*$/m.test(consStale.out) && /consolidate pass\s+none unfinished\s*$/m.test(consStale.out),
          `a stale proposal alone is counted with the pass's rule (067), ok (${row(consStale.out, "proposals").slice(0, 240)})`);
+  // SMD-4446 PR 2b-2, review pass 5: a judge-mode server's pass leaves a stale proposal on a pair that holds an
+  // undecided settled part to a decide-mode pass: it neither judges the pair nor settles the proposal. The row says
+  // so of the one such, and of one among two; a decide-mode server's row reads as before, and so does a judge-mode
+  // server's once the pair's part is decided. (It said of every stale proposal that the next pass settles it, and
+  // that pass, run twice, left them.) The part is a row made by hand:
+  // this far into the suite 061's own ob1_record_derivation stands again, which knows no part, so the store's write
+  // would be refused its lineage row; the proposals row reads the part's row alone.
+  const fpNow = (id: string) => `(SELECT content_fingerprint_of(content) FROM thoughts WHERE id = '${id}'::uuid)`;
+  const [{ id: heldPart }] = (await claims.unsafe(`
+    INSERT INTO settled_parts (older_id, newer_id, holder, statement, shown_by, word, reason, older_fingerprint, newer_fingerprint, judge_key)
+    VALUES ('${ids[0]}'::uuid, '${ids[1]}'::uuid, 'older', 'a statement for this row', 'the words that show it', 'resolves', 'for this row', ${fpNow(ids[0])}, ${fpNow(ids[1])}, 'consolidate:for-this-row@p4d6')
+    RETURNING id::text AS id`)) as { id: string }[];
+  const LEFT_WORDS = "on a pair that holds an undecided settled part: this server's judge-mode pass leaves those to a decide-mode pass";
+  const NEXT_WORDS = "replaces one it finds in conflict again and settles one it does not";
+  const SOONER = "to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject";
+  const leftAll = row((await run(SQL_ENV)).out, "proposals").trimEnd();
+  const leftDecideMode = row((await run({ ...SQL_ENV, OB1_CONSOLIDATE_DECIDER: "h2o-z", OB1_JUDGE_MODEL: "other-judge" })).out, "proposals").trimEnd();
+  // …a second stale proposal, on a pair that holds no part…
+  const [{ id: freeStale }] = (await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.6, 'stub reason', 0.9, ${CONS}, NULL) AS id`) as { id: string }[];
+  await claims`UPDATE supersession_proposals SET status = 'stale' WHERE id = ${freeStale}::uuid`;
+  const leftSome = row((await run(SQL_ENV)).out, "proposals").trimEnd();
+  await claims`DELETE FROM supersession_proposals WHERE id = ${freeStale}::uuid`;
+  // …and that part decided: a pair whose part a reviewer has decided is the next pass's again.
+  await claims.unsafe(`UPDATE settled_parts SET status = 'rejected', reviewed_at = now(), review_note = 'for this row' WHERE id = '${heldPart}'::uuid`);
+  const leftDecided = row((await run(SQL_ENV)).out, "proposals").trimEnd();
+  await claims.unsafe(`DELETE FROM settled_parts WHERE id = '${heldPart}'::uuid`);
+  assert(typeof heldPart === "string" && leftDecided.endsWith(`none pending; 1 stale (a text moved under the verdict; the next pass ${NEXT_WORDS}) — the next pass settles them; ${SOONER}`)
+      && leftAll.endsWith(`none pending; 1 stale (a text moved under the verdict, each ${LEFT_WORDS}, which ${NEXT_WORDS}) — a decide-mode pass settles them; ${SOONER}`)
+      && leftSome.endsWith(`none pending; 2 stale (a text moved under the verdict; the next pass ${NEXT_WORDS}, but for 1 ${LEFT_WORDS}) — the next pass settles the others, and a decide-mode pass those; ${SOONER}`)
+      && leftDecideMode.endsWith(`none pending; 1 stale (a text moved under the verdict; the next pass ${NEXT_WORDS}) — the next pass settles them; ${SOONER}`),
+    `a stale proposal on a pair that holds an undecided settled part is said to be a decide-mode pass's where this server's pass runs judge mode: the one, then one of two, and none on a decide-mode server or once the part is decided (${leftAll.slice(-330)} | ${leftSome.slice(-330)} | ${leftDecideMode.slice(-200)} | ${leftDecided.slice(-200)})`);
   await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, ${CONS}, NULL)`;
   const consBoth = await run(SQL_ENV);
   assert(/^\s*✓\s+proposals\s+1 pending review, the oldest judged \d+ s ago; 1 stale \(a text moved under the verdict[^)]*\) — review with cd db && bun consolidate\.ts --url \$DATABASE_URL --list \(--list stale for the stale ones\), or the list_supersession_proposals tool/m.test(consBoth.out),
@@ -5817,7 +5848,14 @@ else {
     await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:%'`;
     await beat("heartbeat:extract:qwen2.5:7b@p2", v({ job: "extract:qwen2.5:7b@p2", every_s: 60, malformed: { answers: 50, bad: 12, alarm: true } }), 600);
     await beat("heartbeat:consolidate:qwen2.5:7b@p3", v({ job: "consolidate:qwen2.5:7b@p3", every_s: 60 }), 600);
+    // …and a decide-mode follower's (SMD-4446 PR 2b-2, review pass 5): its job names a decider and a writer, and the
+    // words name both knobs. (They gave the judge's for every job: started so, the follower runs judge mode, under
+    // another key.)
+    await beat("heartbeat:consolidate:h2o+qwen2.5:7b@p4d6", v({ job: "consolidate:h2o+qwen2.5:7b@p4d6", every_s: 60 }), 600);
     const claimFix = fix((await run(SQL_ENV)).out, "workers");
+    assert(claimFix.includes("--follow (its job, consolidate:h2o+qwen2.5:7b@p4d6, follows OB1_CONSOLIDATE_DECIDER and its writer, OB1_JUDGE_MODEL, else OB1_METADATA_MODEL: without the decider's knob it runs judge mode, under another key). Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:h2o+qwen2.5:7b@p4d6'.")
+        && claimFix.split("without the decider's knob").length === 2,
+      `a decide-mode follower's stale row names the decider's knob beside the writer's, and a judge-mode follower's does not (${claimFix.slice(-520)})`);
     assert(/extract:qwen2\.5:7b@p2 has not stamped for 10 min: start it again, once OB1_METADATA_MODEL, the endpoint and the prompt are checked \(its last block passed the malformed alarm\) — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun extract-entities\.ts --url \$DATABASE_URL --follow --job extract:qwen2\.5:7b@p2 .*DELETE FROM ob1_config WHERE key = 'heartbeat:extract:qwen2\.5:7b@p2'\./.test(claimFix)
         && /consolidate:qwen2\.5:7b@p3 has not stamped for 10 min: start it again — podman compose -f deploy\/compose\.yaml up -d --no-deps --force-recreate coordinator, with workers and not sleep in deploy\/\.env's OB1_PASSES and the -f files and -p the stack was started with \(docker compose alike\); from a checkout, cd db && bun consolidate\.ts --url \$DATABASE_URL --follow \(its job, consolidate:qwen2\.5:7b@p3, follows OB1_JUDGE_MODEL, else OB1_METADATA_MODEL\)\. Retired on purpose: DELETE FROM ob1_config WHERE key = 'heartbeat:consolidate:qwen2\.5:7b@p3'\./.test(claimFix),
       `each claim worker's stale row names its own restart and row, a stale alarm its restart first (${claimFix})`);
