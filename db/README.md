@@ -343,7 +343,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and fifty-three (153) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and fifty-four (154) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -384,7 +384,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298, 151 SMD-4446, 152 SMD-4540, 153 SMD-4446).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298, 151 SMD-4446, 152 SMD-4540, 153 SMD-3887, 154 SMD-4446).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -2523,6 +2523,73 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 153 has a `pr:` or `version:` subject key name its repository, on a
+brain whose operator names one (SMD-3887 PR 3a, row 13 of
+`docs/claim-validity.md`). `subject_key_valid` admits `pr:<owner>/<repo>#<n>`
+and `version:<owner>/<repo>@v<n>.<n>[…]` beside 111's shapes, the owner and the
+repository lowercase as GitHub names them. It reads no table, so a key's shape
+never depends on the setting, and both shapes stay valid.
+
+The setting is the operator's, in `subject_repo_settings`, 140's shape: one
+standing row at most, history after, written and ended by an operator key by
+its agent id, through `set_subject_repo` alone: its guard refuses a raw write,
+which would stand a repository with no key mapped.
+- **`set_subject_repo(repo, actor, remap_previous)`** sets it, an operator's
+  alone. Any other key answers `NOT_OPERATOR`, and a value
+  `ob1_subject_repo_refusal` names answers `BAD_REPO`. The value is trimmed and
+  lowercased, and `NULL` clears it, leaving scoped keys as they are. With
+  `remap_previous`, a change of repository also moves the keys scoped to the
+  one it replaces, so a mistaken setting can be corrected (with no repository
+  named, it answers `REMAP_NEEDS_REPO`); without it they stay, since after a
+  real move they name the old repository truly. Setting the repository that
+  stands writes no setting, but maps any bare key a raw write left under it.
+- **Setting a repository maps the standing keys** in the same transaction:
+  every standing unscoped `pr:` or `version:` subject is closed and its scoped
+  twin written with the same `by` and judge key. The closed facet's lineage row
+  is copied to the twin, its recipe noting `scoped_from` and `repo`, with any
+  rebuild asked of it (`stale_since`, `stale_reason`).
+- **A moved text is mapped too.** It is not refused, as
+  `record_thought_subjects` would refuse it. A thought already holding the
+  scoped key has the bare one closed alone.
+- **The thread triggers re-link both keys at the commit,** so each thread
+  keeps its members under the scoped key.
+- **A key too long once scoped stays bare,** counted `unscopable`; the reply
+  takes the same shape whether anything changed or not.
+- **One mapping moves at most 2,000 distinct keys**
+  (`ob1_subject_repo_map_max()`). It holds two thread locks a key to its
+  commit, and taking every one first, in key order, keeps it from deadlocking
+  with `db/threads.ts`. A brain past the cap answers `TOO_MANY_KEYS` and
+  nothing is set; mapping in batches is SMD-4559. The cap bounds keys, not a
+  key's members: 130's trigger re-links a thread once per member moved, so a
+  key held by 1,000 thoughts took 4.7 s to map (2026-11-24); re-linking each
+  key once is SMD-4564.
+- **The writer scopes too.** 153 carries 130's `record_thought_subjects` with
+  one change: once a repository is set, a bare `pr:` or `version:` key it is
+  handed is written scoped, so a write after the setting cannot undo the
+  mapping. A bare key the thought already holds scoped, to any repository,
+  keeps that facet, so a thread doesn't split a member at a time after the
+  repository changes or is cleared. The writer takes the advisory lock
+  `ob1:subject-repo` shared and the setter takes it exclusive, so a write and a
+  mapping never interleave. A set with no bare key takes the lock too, since
+  it closes whatever stands, but reads no setting. 153 carries 130's
+  `close_thought_subjects` with the same lock.
+
+`ob1_subject_repo()` reads the setting and raises on a stored value the
+refusal names. `subject_repo_setting()` gives brain_info the setting without
+raising. `ob1_subject_scoped_key(key, repo)` scopes a bare key.
+
+Nothing changes until an operator sets a repository. The sweep's own reading
+of the setting and of a pull request's URL, a bare key's thread read and the
+operation that sets it over REST and MCP come in PR 3b.
+153 carries `SELECT` on the setting to every role reading or writing
+`thought_facets`, and `INSERT, UPDATE` to one writing `thought_sources` too,
+the structure group's mark: a deliverables writer never sets it. It is refused
+by name without 016, 046, 061, 111, 113, 115, 120 or 130's index, and a
+re-apply is a no-op.
+`subjectKeyValid` in `server-portable/subject.ts` mirrors the key shapes, so
+the thread read takes a scoped key; resolving a bare one to the setting is 3b's.
+Covered by test-schema [138] and test-upgrade [20cp].
+
 Migration 150 has `rebuild_derived` hand a stale tags row to the re-tag pool
 (SMD-2298 PR 2). 063's metadata arm marked the row and counted it unqueued: the
 tags had no pool. `db/retag.ts` records its key in `ob1_config.retag_key` on its
@@ -3176,6 +3243,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
 | | `thought_audit` (008) | `SELECT, INSERT` — since 055 `ob1_append_thought_event` reads the row it inserts (`INSERT … RETURNING`), and since 060 the audit trigger's check and the projector read the event; the row lacked `SELECT` from 055 to 058 (SMD-2116) |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
+| | `subject_repo_settings` (153) | `SELECT` — the operator's subject-key repository (SMD-3887): `record_thought_subjects`, run as the caller, reads it to scope a bare `pr:` or `version:` key it writes, and the thread read will resolve a bare key by it (SMD-3887 PR 3b). 153 carries it to every role reading or writing `thought_facets` |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
@@ -3189,14 +3257,14 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
-| | `settled_parts` (151) | `SELECT, UPDATE` — a settled part (SMD-4446) is listed and decided as a proposal is, through 151's `review_settled_part`, which runs as the caller. An accept reads both thoughts' texts, which the capture group grants: with this group alone a reject is made and an accept is refused on `thoughts`. The server's role reads the table in two places: the validity read takes a part's lineage row by its part (153), and preflight's `lineage` row counts the parts that wait and looks for one with no lineage row (SMD-4446 PR 2b-2); each says so where the role may not. The surfaces that list and decide parts come later in SMD-4446. 151 carries this grant to every role holding `SELECT` and `UPDATE` on `supersession_proposals`, so such a role granted before 151 needs nothing more. One granted before SMD-3338 holds `SELECT` alone there, gains nothing from 151, and needs `--grant <role> --groups server` as it does for a proposal's decisions. Recording a part (`INSERT`, `DELETE`) stays the worker group's |
+| | `settled_parts` (151) | `SELECT, UPDATE` — a settled part (SMD-4446) is listed and decided as a proposal is, through 151's `review_settled_part`, which runs as the caller. An accept reads both thoughts' texts, which the capture group grants: with this group alone a reject is made and an accept is refused on `thoughts`. The server's role reads the table in two places: the validity read takes a part's lineage row by its part (154), and preflight's `lineage` row counts the parts that wait and looks for one with no lineage row (SMD-4446 PR 2b-2); each says so where the role may not. The surfaces that list and decide parts come later in SMD-4446. 151 carries this grant to every role holding `SELECT` and `UPDATE` on `supersession_proposals`, so such a role granted before 151 needs nothing more. One granted before SMD-3338 holds `SELECT` alone there, gains nothing from 151, and needs `--grant <role> --groups server` as it does for a proposal's decisions. Recording a part (`INSERT`, `DELETE`) stays the worker group's |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
 | | `forget_thought(uuid, jsonb, boolean)` (144) | `EXECUTE` — `forget_thought`, which runs as its owner since 144 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 144 carries a grant 139's function held to the wrapper; a role granted before 144 needs `--grant` again |
 | | `ob1_forget_leftovers()` (144) | `EXECUTE` — preflight's `forgotten` row, which reads every store `forget_thought` reaches as the function's owner; without it the row says it could not verify |
 | **worker** — `reembed.ts`, `consolidate.ts`, `extract-entities.ts`: claim work, upsert a job key into `ob1_config` (and a long-running worker's heartbeat, `heartbeat:…` — `sync-linear.ts --trigger` and the followers, SMD-2261), and (consolidate) record/resolve proposals — a consolidation role holds `--groups capture,server,worker,extraction,structure`: capture's reads and row locks, server's agent registration for the worker key, extraction's entity reads, structure's relation writes (SMD-1873) | `thought_work_claims` (015) | `SELECT, INSERT, UPDATE, DELETE` |
 | | `ob1_config` (006) | `SELECT, INSERT, UPDATE` — the read too: reembed reads the model and its job keys, and a role given this group should not need the server group's key writes for it (SMD-2289) |
 | | `supersession_proposals` (029) | `SELECT, INSERT, UPDATE` |
-| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; decide version 6 writes them): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. Since 153 it is the settle's too: `settle_stale_part` removes an undecided part that is no longer a judgement of its texts and that the pass does not record again. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
+| | `settled_parts` (151) | `SELECT, INSERT, UPDATE, DELETE` — the pass's settled parts (SMD-4446; decide version 6 writes them): `record_settled_part` and `review_settled_part` run as the caller, and `rebuild_derived` sets a part stale as it does a proposal. `DELETE` is the write's, and a proposal's write has no need of it: an undecided part that is stale, or pending at other texts, is deleted when its statement is judged again, and the judgement recorded as another row. Since 154 it is the settle's too: `settle_stale_part` removes an undecided part that is no longer a judgement of its texts and that the pass does not record again. 151 carries `SELECT, UPDATE` to every role holding both on `supersession_proposals`, and `INSERT, DELETE` to one holding `INSERT` there besides |
 | | `ob1_embedding_snapshot` (063) | `DELETE` — `rebuild_derived`'s forget arm removes the snapshot rows at a leaving thought's fingerprints (SMD-1732); `rebuild.ts` and, later, SMD-1723's forget run it. Here and not in capture, so no server role granted before 063 fails preflight over it |
 | | `schema_migrations` (the migrator's ledger, before 001) | `SELECT` — `reembed.ts` reads it on every start to name the migration a brain lacks, and `sleep.ts` at its start and each poll for a migration (SMD-3379 PR 1c-1); without it every pass under a `--grant` role stopped at "permission denied" (SMD-2289, measured as the orchestration runner's role) |
 | **extraction** — the entity-extraction worker, and a structured pass for its `source:` mentions, additionally | `ob1_entities` (016) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -3207,6 +3275,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `extraction_progress` (093) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 093's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873), and since 111 `record_thought_subject` adds `subject` facets (SMD-3306). Postgres grants INSERT per table, so this group writes any facet kind — links, citations, relations and subjects alike; capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `subject_repo_settings` (153) | `SELECT, INSERT, UPDATE` — the operator's subject-key repository (SMD-3887): a subject writer reads it to scope its keys (`record_thought_subjects` since 153, the sweep itself in SMD-3887 PR 3b), and `set_subject_repo`, which runs as the caller, writes it and maps the standing keys, a trigger holding the write to an operator key by its agent id. 153 carries these to every role writing both `thought_facets` and `thought_sources`, this group's mark |
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
 | | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
@@ -3232,6 +3301,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **deliverables** — deliverables (134, SMD-1715): a role whose clients record and verify deliverables through `record_deliverable` and `verify_deliverable`, or read them through `deliverable_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence, its KEY SHARE locks and its author (`thought_audit`) are the **capture** group's `SELECT` and `UPDATE`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `deliverable_events` (134; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; its trigger draws `seq` by `nextval`, so the sequence row below) | `SELECT, INSERT` |
 | | sequence `deliverable_events_seq_seq` (134; the trigger draws each event's `seq` itself, under the deliverable's lock, by `nextval`, which the identity's own draw does not need) | `USAGE` |
 | | `thought_facets` (042; the `deliverable` facet, the events' projection, written and replaced — INSERT only the **structure** group grants otherwise; Postgres grants it per table, so the group writes any facet kind, as structure does) | `SELECT, INSERT, UPDATE` |
+| | `subject_repo_settings` (153; the operator's subject-key repository, SMD-3887 — 153 carries `SELECT` to every role reading or writing thought_facets, this group's among them, so a role provisioned from the list holds what one carried at the upgrade does; its writes are the **structure** group's alone) | `SELECT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -5430,7 +5500,7 @@ ticket's later cuts.
   Both censuses of stale lineage rows still leave a part's row out, as they
   do a proposal's: a decided part keeps the fingerprints it was judged at
   for good. `thought_validity` reads a part's lineage row by its part
-  (migration 153, next): both thoughts of a pending part at a moved text
+  (migration 154, next): both thoughts of a pending part at a moved text
   read `stale` there, and `requested` once a rebuild has set the part
   stale. So a part with no lineage row stands unseen by that read, and
   preflight's `lineage` row fails on one as on any derived row, with a
@@ -5479,12 +5549,12 @@ three know no part (its lineage writer refuses the kind, so a part's write
 fails), and neither its `rebuild_derived` nor 067's nor 150's has an arm for
 one. Where preflight finds `rebuild_derived` from before 067 and the parts'
 table standing, its remedy names 151 after 067, in place of 150, whose body
-151 carries, and 153 after it, which amends three catalog comments 151
+151 carries, and 154 after it, which amends three catalog comments 151
 writes. It does not see 067 or 150 alone re-applied over 151:
 `migrate.ts --reapply` runs every file in order.
 test-schema [136], test-upgrade [20cn].
 
-**Migration 153 is for a part that is no longer a judgement of its texts**
+**Migration 154 is for a part that is no longer a judgement of its texts**
 (SMD-4446 PR 2b-1). A part keeps the fingerprint of each text it was judged
 at. Judged again at the texts as they stand, a statement the pass records
 again takes its earlier row's place (`replaced`, above). One it does not
@@ -5531,7 +5601,7 @@ own back.
 Needs 149 and all it reads, and 151. No table, column, trigger or grant, and
 no row is written at apply time. 149 applied by hand over it puts back the
 read with no arm; where the parts' table stands, preflight's by-hand remedy
-for 149 names 153 after it. test-schema [138], test-upgrade [20cp].
+for 149 names 154 after it. test-schema [139], test-upgrade [20cq].
 
 ### `consolidate.ts`
 
@@ -5660,7 +5730,7 @@ the next run (a claim under another judge's key named beside it; `rebuild.ts
 rejections apart from a person's; `--list stale` tags each row's standing
 and still offers the reviewer's decision (an accept takes `--force`).
 
-**Parts whose text has moved (151, 153; decide mode, SMD-4446 PR 2b-2).** A
+**Parts whose text has moved (151, 154; decide mode, SMD-4446 PR 2b-2).** A
 settled part is a judgement of two texts. An undecided one that is no longer
 a judgement of its texts waits for a decide-mode run, whatever key wrote it:
 stale, which is a rebuild's mark, or pending at a text that has moved.
@@ -5766,7 +5836,7 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
   was unread or not read whole. One recorded again is counted with the
   parts recorded, in place of an earlier judgement.
 - **A run that would judge refuses at its start** on a brain without
-  `settle_stale_part`, naming migration 153. `--status` and `--dry-run` go
+  `settle_stale_part`, naming migration 154. `--status` and `--dry-run` go
   on: `--status` counts and places the parts on a `settled parts:` line,
   and a dry run counts the thoughts a run would pool again for them. The
   `tickets:` line counts those thoughts too.

@@ -29,7 +29,7 @@ import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSO
 import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, isDecideKey, DECIDE_KEY_TAIL_SQL, partsClaimsFor, partsStanding, partsStandingSql, partsWaitWords, repooled, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
-import { askOwnSubject, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM } from "./subject.ts";
+import { askOwnSubject, heldAs, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM, unscopedKey } from "./subject.ts";
 import { probeTier } from "../db/worker-bootstrap.ts";
 import { chunkContent, DEFAULT_EXTRACT_WINDOW_TOKENS, DEFAULT_MAX_TOKENS, DEFAULT_OVERLAP_TOKENS, estimateTokens } from "./chunk.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, gatePeople, IDENTIFIER_SHAPES, normalizeEntityName, refusalOf } from "./entity-gate.ts";
@@ -3395,11 +3395,18 @@ console.log("\n[16] The provider's state (SMD-2890): a change is one line, an ou
 
 console.log("\n[17] A thought's own subject (SMD-3306), the key's version 2: the rules read the ticket it is filed under, else a session summary's header ticket its prompts name; the model's question is the subject's own, pinned by hash; an answer is read into 111's key shapes, a ticket first and one PR alone; a subject is current under its rule's key or the current question");
 {
-  // The key's shapes, as 111's subject_key_valid reads them.
-  for (const k of ["ticket:SMD-1", "ticket:A-1", "pr:502", "pr:0", "version:v1.9", "version:v1.9.0.1", "phrase:dolphin sleep", "phrase:ob1 fork: inventory — 2 & more", "phrase:σίσυφος", `phrase:${"a".repeat(200)}`])
+  // The key's shapes, as 153's subject_key_valid reads them: 111's, and a pr: or version: key scoped to its repository.
+  for (const k of ["ticket:SMD-1", "ticket:A-1", "pr:502", "pr:0", "version:v1.9", "version:v1.9.0.1", "pr:mharris-sgymd/ob1#12", "pr:a/.x#1", "version:o-1/r_2.x@v1.4", "phrase:dolphin sleep", "phrase:ob1 fork: inventory — 2 & more", "phrase:σίσυφος", `phrase:${"a".repeat(200)}`])
     assert(subjectKeyValid(k), `a key: ${k.slice(0, 40)}`);
-  for (const k of ["ticket:smd-1", "ticket:SMD-", "pr:", "pr:1234567890", "version:1.9.0", "version:v1", "version:v1.2.3.4.5", "phrase:", "phrase:Dolphin", "phrase: x", "phrase:x  y", "phrase:x ", "phrase:a\nb", `phrase:${"a".repeat(201)}`, "topic:x", "SMD-1"])
+  for (const k of ["ticket:smd-1", "ticket:SMD-", "pr:", "pr:1234567890", "version:1.9.0", "version:v1", "version:v1.2.3.4.5", "pr:O/r#1", "pr:o/r#", "pr:-o/r#1", "pr:o-/r#1", `pr:${"o".repeat(40)}/r#1`, `pr:o/${"r".repeat(101)}#1`, "pr:o/..#1", "pr:o/.#1", "version:o/..@v1.2", "version:o/r@1.2", "version:o/r#v1.2", "phrase:", "phrase:Dolphin", "phrase: x", "phrase:x  y", "phrase:x ", "phrase:a\nb", `phrase:${"a".repeat(201)}`, "topic:x", "SMD-1"])
     assert(!subjectKeyValid(k), `not a key: ${JSON.stringify(k.slice(0, 40))}`);
+  // 153's unscoping, and the standing key a found one is written as (review pass 5).
+  assert(["pr:o/r#12", "version:o-1/r.x@v1.2.3", "pr:12", "ticket:SMD-1", "phrase:pr:a/b#1"].map(unscopedKey).join(",") === "pr:12,version:v1.2.3,pr:12,ticket:SMD-1,phrase:pr:a/b#1",
+    "unscopedKey gives a scoped key's bare form, and any other key as given");
+  const standing = ["pr:o3/x#12", "pr:o/r#12", "ticket:SMD-1"];
+  assert(heldAs("pr:12", standing) === "pr:o/r#12" && heldAs("pr:12", standing, "o3/x") === "pr:o3/x#12" && heldAs("ticket:SMD-1", standing) === "ticket:SMD-1"
+         && heldAs("pr:13", standing) === undefined && heldAs("pr:o2/y#12", standing) === undefined && heldAs("pr:12", ["pr:12"]) === "pr:12",
+    "heldAs reads a bare key as the scoped one standing from it (the setting's first, else the first by key), any other key as itself, none as none");
 
   // An answer read into a key: a ticket first, then a PR, then a release, else a phrase.
   const keyed: [string, string | null][] = [

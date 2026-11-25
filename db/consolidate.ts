@@ -167,7 +167,7 @@
  * own such parts as it is judged. A pair that holds one is judged though --k
  * leaves it out. A statement the judgement records again takes the part's
  * place (record_settled_part). One it does not record again is removed
- * (153's settle_stale_part): one it names no more, and one it names again in
+ * (154's settle_stale_part): one it names no more, and one it names again in
  * a form that is no part of these texts, its quotes failing the check or not
  * read back. So is one on a pair that is not judged again: the candidate rule
  * no longer admits it, or a person's decision on a proposal closes it. None
@@ -771,7 +771,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     if (!store.has_151) return refused("tables", "\n  Decide mode records settled parts (decide version 6, SMD-4446), and this brain has no store for them. Apply migration 151 first:\n    cd db && bun migrate.ts --url …");
     // PR 2b-2: the pass removes a part that waits and that it does not record again, through the stale parts' migration's
     // function. Without it every thought holding such a part would fail at that call, after its model calls were paid for.
-    if (!store.has_settle) return refused("tables", "\n  Decide mode removes a settled part whose text has moved and that it does not record again (SMD-4446), and this brain lacks settle_stale_part. Apply migration 153 first:\n    cd db && bun migrate.ts --url …");
+    if (!store.has_settle) return refused("tables", "\n  Decide mode removes a settled part whose text has moved and that it does not record again (SMD-4446), and this brain lacks settle_stale_part. Apply migration 154 first:\n    cd db && bun migrate.ts --url …");
   }
 
   // ── The provider, for a follower (SMD-2599) ─────────────────────────────────

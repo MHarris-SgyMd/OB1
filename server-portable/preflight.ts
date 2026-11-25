@@ -633,7 +633,7 @@ const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
  * 2): 151 applied by hand writes its three catalog comments as it first had
  * them, naming no removal of a part, and that file amends them.
  */
-const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql, then db/migrations/153_stale_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused; and 153 amends three catalog comments 151 writes, which 151 alone leaves naming no removal of a part (bun migrate.ts --reapply runs every file in order).";
+const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql, then db/migrations/154_stale_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused; and 154 amends three catalog comments 151 writes, which 151 alone leaves naming no removal of a part (bun migrate.ts --reapply runs every file in order).";
 /**
  * 149's thought_validity is last defined by the stale parts' file (SMD-4446),
  * which carries it whole with an arm for a settled part's lineage row. 149
@@ -645,7 +645,7 @@ const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db
  * guard would refuse a hand apply ahead of 151.
  */
 const APPLY_149 = "Apply db/migrations/149_thought_validity.sql.";
-const APPLY_149_PARTS = "Apply db/migrations/149_thought_validity.sql, then db/migrations/153_stale_parts.sql — 153 last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.";
+const APPLY_149_PARTS = "Apply db/migrations/149_thought_validity.sql, then db/migrations/154_stale_parts.sql — 154 last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
