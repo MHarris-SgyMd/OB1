@@ -12147,9 +12147,12 @@ function checkReadsRecorded() {
   if (wrongWatch.length) fail(SELF, `check 55 no longer reads its probe of the jobs that watch as written: ${JSON.stringify(wrongWatch)} — each case's why says what it holds (SMD-2435)`);
   const ungated = readsProblems(wf(lint(), good("a"), good("b")), ["a", "b"], "lint", ["c"]);
   if (ungated.length !== 1 || !ungated[0].startsWith("WATCHED names c, which is no gated job")) fail(SELF, `check 55 no longer refuses a job named as watching that is not gated: ${JSON.stringify(ungated)} (SMD-2435)`);
-  // A marker is held to its job's whole name: b watches, and WATCHED names bb and a job that b's name ends.
+  // A marker is held to its job's whole name, both ways: b watches, and WATCHED names bb and a job that b's name
+  // ends; and WATCHED names b, where b-more and more-b do not watch.
   const partName = readsProblems(wf(lint(), good("a"), watching("b")), ["a", "b"], "lint", ["bb", "ab"]);
   if (!partName.some((m) => m.includes("job b's marker step runs") && m.includes("WATCHED does not name it"))) fail(SELF, `check 55 no longer holds a marker to its job's whole name: ${JSON.stringify(partName)} (SMD-2435)`);
+  const longerName = readsProblems(wf(lint(), good("a"), watching("b"), good("b-more"), good("more-b")), ["a", "b", "b-more", "more-b"], "lint", ["b"]);
+  if (longerName.length) fail(SELF, `check 55 no longer holds a watching job's name to that job alone: ${JSON.stringify(longerName)} (SMD-2435)`);
   const wrong = cases.map(([why, text, says]) => ({ why, says, got: readsProblems(text, ["a", "b"], "lint") }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
   if (wrong.length) fail(SELF, `check 55 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-2435)`);
@@ -12168,10 +12171,10 @@ checkReadsRecorded();
 // lists hold differs from the commit they were recorded on. That is sound
 // only for a job whose list is whole. A matrix job's cells each keep one, so
 // MAP_LISTS names every cell, and a cell added to the matrix and not there
-// would be skipped by the others' reads. A job that runs a compose stack,
-// builds an image or mounts a path into a container reads through the
-// container, where no access time moves on the checkout, so its list says
-// less than it read: such a job stays out. So does one with a step that
+// would be skipped by the others' reads. A job that runs a compose stack
+// or mounts a path into a container reads through the container, where no
+// access time moves on the checkout, so its list says less than it read:
+// such a job stays out, and one that builds an image with it. So does one with a step that
 // runs, or reads otherwise, on a pull request: the lists are recorded on a
 // push to main, and hold nothing a pull request's run alone reads. And one
 // that has git name or read the tracked files, which it does from its index
@@ -12492,8 +12495,8 @@ function checkMapLists() {
   if (longer.length !== 2 || !longer[0].includes("job s-more, which MAP_LISTS names, runs") || !longer[1].includes("job more-s, which MAP_LISTS names, runs")) fail(SELF, `check 56 no longer holds a watching job's name to that job alone: ${JSON.stringify(longer)} (SMD-2435)`);
   // Each message is its file's: MAP_LISTS is changes.sh's, MAP_ALWAYS_RUN and the choice between the two this file's, the rest the workflow's.
   // With WATCHED unread the section before this one has said so: each step of a watching job that runs a container
-  // would be refused here. What else this section would say of the workflow waits for the list to be read: one
-  // line to mend first, as when --map-lists cannot be read.
+  // would be refused here. Every finding of this comparison waits for the list to be read, MAP_LISTS's and
+  // MAP_ALWAYS_RUN's with the workflow's: one line to mend first. The CHARGES rows below are read all the same.
   if (READS_WATCHED.length) for (const msg of mapListsProblems(lists, readFileSync(join(ROOT, WORKFLOW), "utf8"), AGGREGATE_GATED, MAP_ALWAYS_RUN, READS_WATCHED)) fail(msg.startsWith("MAP_LISTS") ? CHANGES_SCRIPT : msg.startsWith("MAP_ALWAYS_RUN") || msg.startsWith("gated job") ? SELF : WORKFLOW, msg);
   // A CHARGES row may leave a job to its list (`job:list`) only where there is a list to leave it to.
   const table = chargesTable();
