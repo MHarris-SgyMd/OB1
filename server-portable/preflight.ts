@@ -4558,7 +4558,7 @@ if (configFailed) {
         let recorded: Record<string, string> = {};
         try {
           const cfg = await sql`
-            SELECT key, value FROM ob1_config WHERE key IN ('embedding_dim','embedding_model')`;
+            SELECT key, value FROM ob1_config WHERE key IN ('embedding_dim','embedding_model','retag_key')`;
           recorded = Object.fromEntries((cfg as { key: string; value: string }[]).map((r) => [r.key, r.value]));
         } catch (e) {
           // Never swallow this: a silent catch here previously made the whole
@@ -5671,6 +5671,14 @@ if (configFailed) {
                   return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs re-embed here instead${when}, which will not run beside a re-embed follower: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.${backfill}`;
                 }
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: the coordinator runs no follower beside it, so retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
+                // A re-tag follower under a key other than ob1_config.retag_key — a --switch-key since, or a start
+                // refused under another model — is no worker's: started again under this configuration it follows the
+                // recorded key, beside any follower there, or is refused. Its row is retired (SMD-2298 PR 4a-2 review
+                // pass 2, walkthrough: the restart ran a second follower on the new key).
+                const retagRecorded = recorded.retag_key || null;
+                if ((h.stale || h.ended) && h.worker === "retag" && retagRecorded !== null && h.job !== undefined && h.job !== retagRecorded) {
+                  return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, under a key other than ob1_config.retag_key (${retagRecorded}): db/retag.ts follows the recorded key alone, so started again it would follow that one, beside any follower there, or be refused — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
+                }
                 // Held by its supervisor, which runs it again on its own (SMD-3214).
                 const held = heldFix(h, name);
                 if (held !== null) return held;

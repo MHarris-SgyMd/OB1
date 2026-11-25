@@ -77,7 +77,11 @@
  *     again, and past the pauses recorded failed and the worker stopped, its
  *     other leases back to the pool; a timeout is the thought's, recorded
  *     failed; a 401, 402, 403, 404 or any other 4xx not below is the
- *     request's, every worker stopped, exit 2, nothing marked failed;
+ *     request's, every worker stopped, exit 2, nothing marked failed. A
+ *     follower reads them as the other followers do (worker-bootstrap.ts's
+ *     fault): an outage waited out — a 404 naming the model among them, a
+ *     model gone missing mid-run — or the probe's to decide, a 402 the
+ *     account's and fatal (review pass 2);
  *   - an answer that is not tags (not JSON, no content), or a 400, 413 or
  *     422, which are this thought's (its length, a filter): the claim is
  *     failed and nothing is written — the tags the thought had stand. A
@@ -86,7 +90,10 @@
  *     to three thoughts in a row, none answered between, is the request's
  *     shape (a field the server refuses: reasoning_effort, response_format),
  *     not the thoughts': the run stops, exit 2, those three failed for
- *     --retry-failed once it is fixed (review pass 2);
+ *     --retry-failed once it is fixed (review pass 2). A follower asks first
+ *     (SHAPE_NOTE, one more call): only the note refused as the thoughts
+ *     were stops it; answered, they were the thoughts'; anything else (an
+ *     outage, the gate) stops nothing, and the next refusal asks again;
  *   - a thought whose metadata is null or no JSON object (a raw writer's)
  *     takes no patch through update_thought: it is failed before any call,
  *     nothing sent (review pass 1).
@@ -180,6 +187,8 @@ const SHAPE_STREAK = 3;
  * stop would hold it down until an operator acted. Exported for test-live [29], which looks for it among the calls.
  */
 export const SHAPE_NOTE = "A short note to tag: the request's shape, checked after three thoughts in a row were refused.";
+/** What a follower's shape check found (shapeOf): the request's shape refused, taken, or not known. */
+type ShapeVerdict = "refused" | "taken" | "unknown";
 /** The tag keys whose value is a list: cleared to [], not null, so a reader's jsonb_array_length or _elements meets a list (review pass 2). */
 const LIST_TAGS: ReadonlySet<string> = new Set(["people", "action_items", "dates_mentioned", "topics"]);
 
@@ -641,11 +650,11 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   let before0: Counts = { pending: 0, claimed: 0, succeeded: 0, failed: 0 };
   let retagged = 0, changedTags = 0, current = 0, failed = 0, refused = 0, changedMeanwhile = 0, vanished = 0, lost = 0, beats = 0, calls = 0;
   let configError = null as string | null;
-  /** 400s and 422s to thoughts in a row, none answered between; at SHAPE_STREAK the run stops (configError). */
+  /** 400s and 422s to thoughts in a row, none answered between; at SHAPE_STREAK the run stops (configError), a follower once its shape check agrees (shapeOf). */
   let shapeStreak = 0;
   let shapeStopped = false;
   /** A follower's shape check in flight, which every worker reaching the streak meanwhile awaits (review pass 1). */
-  let shapeCheck: Promise<boolean> | null = null;
+  let shapeCheck: Promise<ShapeVerdict> | null = null;
   /** A one-shot run stopped at the admit gate before its pass: it ends as it did before the gate joined the pass. */
   let gateStopped = false;
   const activeWorkers = new Set<string>();
@@ -683,14 +692,24 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   }
 
   /**
-   * The shape check (SHAPE_NOTE): true where the note is answered with tags. Anything else — the same refusal, an
-   * outage, a stop, the egress gate — keeps the streak's reading, the request's shape (review pass 1).
+   * The shape check (SHAPE_NOTE), read three ways (review pass 2: one way, anything but tags read as the shape, so an
+   * outage, an abort or the gate stopped the follower):
+   * - "refused": the note met a 400 or 422, as the thoughts did — the request's shape;
+   * - "taken": it was answered at all — tags, or prose, as a thought's prose answer resets the streak;
+   * - "unknown": anything else — an outage, a timeout, another status, a throw, an abort (a stop, or another worker's
+   *   outage halting the pass), the egress gate — which stops nothing and leaves the streak, so the next refusal asks
+   *   again.
+   * The gate judges it under the thought's metadata, whose call it stands for: only the note's own text leaves.
    */
-  async function shapeTaken(): Promise<boolean> {
+  async function shapeOf(metadata: Record<string, unknown>): Promise<ShapeVerdict> {
     calls++;
-    const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata: {}, content: SHAPE_NOTE };
+    const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata, content: SHAPE_NOTE };
     const answer = await extractMetadata(SHAPE_NOTE, subject, cfg, halt.signal).catch(() => null);
-    return answer !== null && typeof answer.metadata_extraction_failed !== "string" && metadataRecipe(cfg, answer) !== null;
+    if (answer === null) return "unknown";
+    const mark = answer.metadata_extraction_failed;
+    if (typeof mark !== "string") return "taken";
+    if (mark === "provider_400" || mark === "provider_422") return "refused";
+    return mark.startsWith("provider_") || mark === REFUSED_MARK ? "unknown" : "taken";
   }
 
   /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read; a call aborted in hand, as AbortedInHand. */
@@ -728,6 +747,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       if (mark === REFUSED_MARK) return { outcome: "failed", refused: true, error: "the egress gate refused the call; --retry-failed revisits it" };
       if (mark === "provider_timeout") throw new ProviderError(`the tags' call timed out after ${cfg.timeoutMs / 1000} s (--timeout, else OB1_LLM_TIMEOUT)`, "timeout");
       const status = /^provider_(\d{3})$/.exec(mark);
+      const noTags: Outcome = { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
       // Any other marker is an answer (prose, a shape that is no tags): the request's shape was taken (review pass 3).
       if (!status) shapeStreak = 0;
       // A 400, 413 or 422 is this thought's (its length, a filter); any other status the claim workers' rule reads.
@@ -735,18 +755,19 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       if (status && status[1] !== "413" && ++shapeStreak >= SHAPE_STREAK && !configError) {
         // A follower asks the shape first (SHAPE_NOTE): three long thoughts in a row are no reason to hold it down. A
         // one-shot run stops, as before: the operator re-runs it (review pass 1).
-        if (FOLLOW && await (shapeCheck ??= shapeTaken().finally(() => { shapeCheck = null; }))) {
-          shapeStreak = 0;
-          return { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
+        if (FOLLOW) {
+          const verdict = await (shapeCheck ??= shapeOf(row.metadata as Record<string, unknown>).finally(() => { shapeCheck = null; }));
+          if (verdict === "taken") shapeStreak = 0;
+          // Stopped only where the note was refused as the thoughts were and the streak still stands when it comes back:
+          // a thought answered meanwhile reset it (review pass 2), and a stop or another worker's stop reads first.
+          if (verdict !== "refused" || shapeStreak < SHAPE_STREAK || stopping || configError) return noTags;
         }
-        // A stop that came while the note was out is the stop's, not the provider's.
-        if (configError || (FOLLOW && stopping)) return { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
         configError = `the provider answered ${status[1]} to ${SHAPE_STREAK} thoughts in a row, none answered between — the request's shape, not the thoughts' (often a field the server refuses: reasoning_effort, which OB1_METADATA_REASONING sets, or response_format)`;
         shapeStopped = true;
         stopping = true;
         halt.abort();
       }
-      return { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
+      return noTags;
     }
     if (hardStopped) return { outcome: "abandoned" };
     const recipe = metadataRecipe(cfg, answer);
@@ -964,7 +985,8 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   const stamper = opts.stamper !== undefined ? (FOLLOW ? opts.stamper : null) : FOLLOW
     ? passStamper({
         sql, worker: "retag", job: JOB, intervalS: FOLLOW,
-        onError: (e) => err(`  heartbeat ${stampKey("retag", JOB)} not written: ${e.message.split("\n")[0]} — a role needs the worker grant group (INSERT, UPDATE on ob1_config); the follower goes on`),
+        // The database gone is said as such, as reembed.ts says it (review pass 2, walkthrough: a grant was blamed).
+        onError: (e) => err(`  heartbeat ${stampKey("retag", JOB)} not written: ${e.message.split("\n")[0]} — ${databaseUnavailable(e) ? "the database is not answering" : "a role needs the worker grant group (INSERT, UPDATE on ob1_config)"}; the follower goes on`),
       })
     : null;
   /**
@@ -995,6 +1017,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   let firstPass = true;
   /** A poll that found nothing to do keeps the last pass's word on the heartbeat. */
   let lastPassIdle = false;
+  const workersLine = `\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`;
   /**
    * One pass: the leases a worker could not return, the admit gate, the pool — every pass, the backlog having no
    * capture trigger (the header) — and the workers until the pool is empty, a stop or --limit.
@@ -1036,7 +1059,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       firstPass = false;
       return before;
     }
-    if (firstPass) say(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`);
+    if (firstPass && !FOLLOW) say(workersLine);
     firstPass = false;
     if (isolated) err(`  retrying the last outage's ${outage.suspected} suspect thought(s) one at a time${WORKERS > 1 ? `, one worker, before the pass goes back to ${WORKERS}` : ""}; one that errs again alone is blamed only on a one-token call made at once`);
     // A worker that throws stops the rest after the thought in hand, and the pass rejects with its error once they have
@@ -1084,6 +1107,9 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     writer: { out, err },
   });
 
+  // A follower says its workers and its polling once, before a first pass that may find nothing (review pass 2,
+  // walkthrough: on a brain caught up it never said it was polling); a one-shot run, before the workers start.
+  if (FOLLOW) say(workersLine);
   let passed = await followed();
   if (gateStopped) {
     err(STOPPED_EARLY);

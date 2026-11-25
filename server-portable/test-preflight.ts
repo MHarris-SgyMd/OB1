@@ -4969,6 +4969,19 @@ else {
     assert(/retag:tag-model@p1 ended 3\d s ago on its start's refusal \(key\): the re-tag key is retag\.ts's to switch: cd db && bun retag\.ts --url \$DATABASE_URL --switch-key .*Then start it again — cd db && bun retag\.ts --url \$DATABASE_URL --follow/.test(retagKeyFix) && !/extract-entities/.test(retagKeyFix)
         && /retag:tag-model@p1 ended 3\d s ago on its start's refusal \(model\): pull the model its log names \(OB1_METADATA_MODEL\)/.test(retagModelFix) && !/OB1_JUDGE_MODEL/.test(retagModelFix),
       `a re-tag follower ended on its key's or its model's refusal names retag.ts's remedies, not the extraction key's (${retagKeyFix} | ${retagModelFix})`);
+    // A re-tag follower's row under a key other than the recorded one (a --switch-key since, or a start refused under
+    // another model): retired, not started again — the restart ran a second follower on the recorded key (review pass
+    // 2, walkthrough); under the recorded key, its restart as before.
+    await claims`INSERT INTO ob1_config (key, value) VALUES ('retag_key', 'retag:switched-model@p1')`;
+    await beat("heartbeat:retag:tag-model@p1", v({ job: "retag:tag-model@p1", every_s: 60, outcome: "ok", ended: true }), 30);
+    const retagSupersededFix = fix((await run(SQL_ENV)).out, "workers");
+    await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:retag:tag-model@p1'`;
+    await beat("heartbeat:retag:switched-model@p1", v({ job: "retag:switched-model@p1", every_s: 60, outcome: "ok", ended: true }), 30);
+    const retagOwnFix = fix((await run(SQL_ENV)).out, "workers");
+    await claims`DELETE FROM ob1_config WHERE key = 'retag_key' OR key LIKE 'heartbeat:retag:%'`;
+    assert(/retag:tag-model@p1 stopped, under a key other than ob1_config\.retag_key \(retag:switched-model@p1\): .* retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:retag:tag-model@p1' — rather than start it again\./.test(retagSupersededFix) && !/bun retag\.ts --url/.test(retagSupersededFix)
+        && /retag:switched-model@p1 stopped \d+ s ago: start it again — cd db && bun retag\.ts --url \$DATABASE_URL --follow/.test(retagOwnFix),
+      `a re-tag follower's row under a key no longer recorded is retired, not started again; under the recorded key, restarted (${retagSupersededFix} | ${retagOwnFix})`);
     // Its own row waiting mid-pass for the provider (SMD-2679 PR 4a-2b): said as the provider's, not a pass running.
     await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", running: true, waitingMidPass: ["reembed"] }), 5);
     const reembedWaitFix = fix((await run(SQL_ENV)).out, "workers");

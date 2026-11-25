@@ -6766,7 +6766,7 @@ bun retag.ts --url … --retry-failed     # failed rows back into the pool first
 bun retag.ts --url … --switch-key       # a model or prompt version other than ob1_config.retag_key's
 bun retag.ts --url … --follow [SECONDS] # then poll every SECONDS (15 bare), pooling again at each, until a signal
 #   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (OB1_LLM_TIMEOUT's)   --job <retag:model@pN>
-#   exits 0 clean (a follower stopped by a signal too) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal
+#   exits 0 clean (a follower stopped by a signal too) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
 ```
 
 The tags' re-run path (SMD-2298), the last of the lineage kinds to get one. The
@@ -6796,7 +6796,8 @@ tags row at the text, the mark cleared, even when the tags came out the same
 is failed naming the rule, nothing sent; an answer that is not tags, or a 400,
 413 or 422, is failed and nothing written (but a 400 or 422 to three thoughts
 in a row, none answered between, is the request's shape and stops the run,
-exit 2), as is a thought whose metadata is null or no JSON object, before any
+exit 2 — a follower first sends a short note in the same shape, and stops
+only if it is refused too), as is a thought whose metadata is null or no JSON object, before any
 call; a tag key the row holds and the answer leaves out is cleared (a list to
 `[]`, the type keys to null); a provider error is read by `claim-loop.ts`'s rule; an
 edit meanwhile (`STALE_READ`) puts the thought back in the pool. The recorded
