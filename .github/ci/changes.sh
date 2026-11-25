@@ -95,9 +95,10 @@ db/ci-parity.sh	"
 # 2026-11-20). The last three run containers and are here since PR 3c-2: each
 # watches (WATCHED, below). Not here, so run by any path off the lists above:
 # deploy-stack and deploy-stack-brains, which run containers and do not
-# watch, so their lists lack what a container read through a mount (watching,
-# each would skip almost no pull request: one reads half the tree, and the
-# other has git read all of it back), and compat-shim, which greps the whole
+# watch, so their lists lack whatever a container reads through a mount
+# (deploy-stack's lacks two files today; watching, each would skip almost no
+# pull request: one reads half the tree, and the other has git read all of it
+# back), and compat-shim, which greps the whole
 # tree. Check 56 holds each name to a gated job and its cells, and each gated
 # job to this list or to its reason.
 MAP_LISTS="portable-server db-schema replay-gate data-layer preflight-rest db-live.rest db-live.sleep db-live.long db-live.extract db-live.sweep db-live.claims deploy-stack-auth deploy-stack-observability auth-poc"
@@ -115,14 +116,13 @@ WATCHED="deploy-stack-auth deploy-stack-observability auth-poc"
 # watches JOB: whether WATCHED names it, read word by word and with no glob,
 # as --watched prints it for the checker: read as a string here and as words
 # there, a name with a ? in it, or two names a tab apart, was one job to the
-# checker and another, or none, to by_map (review pass 1).
-watches() {
-  local w rc=1
+# checker and another, or none, to by_map (review pass 1). In a shell of its
+# own, so the caller's globbing is as it was (review pass 2).
+watches() (
   set -f
-  for w in $WATCHED; do if [ "$w" = "$1" ]; then rc=0; fi; done
-  set +f
-  return "$rc"
-}
+  for w in $WATCHED; do if [ "$w" = "$1" ]; then exit 0; fi; done
+  exit 1
+)
 # The names a runtime or git looks for in each folder above a file it loads,
 # without opening what is not there: one added above a file a job read counts
 # against the job, though no list could hold it. Beside them by_map counts
@@ -358,9 +358,10 @@ fetch_lists() {
 # HEAD, main's own commits since X with the pull request's: a job's list says
 # what it read at X, and holds here only if none of that has moved. A job runs
 # when its list, or one of its cells', is missing, cut short, short of a path
-# it could not write, or not a passing job's that saw access times; when it is
-# a job WATCHED names and its list does not end watch=ok, or is not one and
-# its list says anything of a watch; or when, between X and HEAD:
+# it could not write, holds a NUL, or is not a passing job's that saw access
+# times; when it is a job WATCHED names and its list does not end watch=ok,
+# or is not one and its list says anything of a watch; or when, between X and
+# HEAD:
 # - a file its list holds (opened, or gone by its end) is modified or deleted;
 # - a path is added or deleted, or a file's mode changes, in a folder the job
 #   listed or opened a file in (or, the folder itself new or gone, the nearest
@@ -381,7 +382,7 @@ fetch_lists() {
 # With ONLY, the jobs judged are those alone: the ones a CHARGES row marked
 # `:list`, in a pull request whose other paths by_job has answered for.
 by_map() {
-  local why=$1 default=$2 only=${3:-} d x='' name job cell f head re jobs='' bad='' ok='' meta p oldmode newmode s j wf=0 held='' changed='' charged='' id skip='' hit n=0 want what pre lost none asked
+  local why=$1 default=$2 only=${3:-} d x='' name job cell f head re jobs='' bad='' ok='' meta p oldmode newmode s j wf=0 held='' changed='' charged='' id skip='' hit n=0 want what pre word at nolist=''
   d=$(mktemp -d) || { printf 'true\t\t%s\n' "$why"; return; }
   # no_map REASON: every job runs, as before PR 3b-2, and the answer says why.
   no_map() { printf 'true\t\t%s; %s\n' "$why" "$1"; rm -rf "$d"; }
@@ -397,8 +398,9 @@ by_map() {
     # ended: one cut short in its download, a row or part of one, would pass for a job that read less. And
     # when it left no path out: reads.sh counts in odd= the paths it could not write, a tab or a newline in
     # their names, and a list with one says less than its job read.
-    # And when it holds no NUL: read drops one, so more could follow a header's end unseen (reads.sh writes
-    # none; review pass 1).
+    # And when it holds no NUL: read cuts the line at one (bash 3.2) or drops it alone (5.2), so a NUL, and on
+    # 3.2 whatever followed it on the line, would go unseen; one in a row, or for the last newline, is no
+    # path's (reads.sh writes none; review pass 1). Asked before the last byte is: bash 5.2 warns of a NUL there.
     # A job WATCHED names is held to a header that ends " watch=ok", which reads.sh writes only for a watch that
     # was heard from, lost nothing and heard the list's own script opened; any other job to one that ends at
     # odd=0, as a job that does not watch writes it. So each job's pattern ends its own way, and nothing may
@@ -407,23 +409,34 @@ by_map() {
     if watches "$job"; then want=' watch=ok'; fi
     pre="^# reads v1 job=$job cell=$cell commit=([0-9a-f]{40}) status=success sight=ok files=([0-9]+) dirs=([0-9]+) gone=([0-9]+) odd=0"
     re="$pre$want$"
-    if [[ "$head" =~ $re ]] && [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]}" = "$(awk -F '\t' 'NR > 1 { n[$1]++ } END { print n["f"] + 0, n["d"] + 0, n["g"] + 0 }' "$f")" ] && [ -z "$(tail -c 1 "$f")" ] \
-      && [ "$(LC_ALL=C tr -d '\000' < "$f" | wc -c)" -eq "$(wc -c < "$f")" ]; then
+    # shellcheck disable=SC2094 # tr and cmp both read the list; neither writes it
+    if [[ "$head" =~ $re ]] && LC_ALL=C tr -d '\000' < "$f" | cmp -s - "$f" \
+      && [ "${BASH_REMATCH[2]} ${BASH_REMATCH[3]} ${BASH_REMATCH[4]}" = "$(awk -F '\t' 'NR > 1 { n[$1]++ } END { print n["f"] + 0, n["d"] + 0, n["g"] + 0 }' "$f")" ] && [ -z "$(tail -c 1 "$f")" ]; then
       if [ -n "$x" ] && [ "$x" != "${BASH_REMATCH[1]}" ]; then no_map "main's lists of what its jobs read are of more than one commit"; return; fi
       x=${BASH_REMATCH[1]}
       sed 1d "$f" >> "$d/rows.$job"
       case " $jobs " in *" $job "*) ;; *) jobs="$jobs $job" ;; esac
     else
       bad="$bad $job"
-      what='is not here, is not whole, or is not one a passing job with sight wrote'
-      # The watch said apart, where the header is a passing job's with sight in all but its end: main's run
-      # says why at that job's list. A header at fault elsewhere too, a failed job's or a blind one's, gets
-      # the words above, whatever it says of a watch.
-      lost="$pre watch=(lost|none)$" none="$pre$" asked="$pre watch=[a-z]+$"
-      if [ -n "$want" ] && [[ "$head" =~ $lost ]]; then what="says its watch was ${BASH_REMATCH[5]}, so it may hold less than the job read"
-      elif [ -n "$want" ] && [[ "$head" =~ $none ]]; then what='says nothing of a watch, and this job is one that watches'
-      elif [ -z "$want" ] && [[ "$head" =~ $asked ]]; then what='says a watch was asked for, and this job is not one that watches'; fi
-      case " ${only:-$job} " in *" $job "*) echo "changes.sh: $job runs: its list $name $what" >&2 ;; esac
+      # Why, for whoever reads the log. A list that is not here was never kept, or could not be fetched; one
+      # that is, is main's to answer for, on the run at its commit. The watch is said apart only where the
+      # header is a passing job's with sight in all but its last word: a failed job's list, or one cut short
+      # in its header, gets the plain words whatever it says of a watch.
+      if [ ! -f "$f" ]; then what="is not here: main's run kept none, or it could not be fetched"
+      else
+        what='is not whole, or is not one a passing job with sight wrote'
+        word="$pre( watch=([a-z]+))?$"
+        if [[ "$head" =~ $word ]]; then
+          at=${BASH_REMATCH[1]:0:12}
+          case "${want:+w}:${BASH_REMATCH[6]}" in
+            w:lost) what="says its watch was lost on main's run at $at: the job runs, and a reads.sh warning on that run says why" ;;
+            w:none) what="says no watch began on main's run at $at: the job runs, and a reads.sh warning on that run says why" ;;
+            w:) what="says nothing of a watch, and this job watches: a list from before it did, which the next green run of main replaces" ;;
+            :?*) what="speaks of a watch, and WATCHED does not name this job: the next green run of main replaces it" ;;
+          esac
+        fi
+      fi
+      case " ${only:-$job} " in *" $job "*) echo "changes.sh: $job runs: its list $name $what" >&2; case " $nolist " in *" $job "*) ;; *) nolist="$nolist $job" ;; esac ;; esac
     fi
   done
   for job in $jobs; do case " $bad " in *" $job "*) ;; *) ok="$ok $job" ;; esac; done
@@ -529,9 +542,9 @@ by_map() {
   done
   skip=${skip# }
   if [ -n "$only" ]; then
-    printf 'true\t%s\t%s; of those CHARGES leaves %s to what it read on main at %s, and job(s) %s read nothing among the %s path(s) that differ since\n' "$skip" "$why" "$only" "${x:0:12}" "${skip:-none}" "$n"
+    printf 'true\t%s\t%s; of those CHARGES leaves %s to what it read on main at %s, and job(s) %s read nothing among the %s path(s) that differ since%s\n' "$skip" "$why" "$only" "${x:0:12}" "${skip:-none}" "$n" "${nolist:+; no list to go by for:$nolist}"
   else
-    printf 'true\t%s\t%s; of what main'"'"'s jobs read at %s, job(s) %s read nothing among the %s path(s) that differ since\n' "$skip" "$why" "${x:0:12}" "${skip:-none}" "$n"
+    printf 'true\t%s\t%s; of what main'"'"'s jobs read at %s, job(s) %s read nothing among the %s path(s) that differ since%s\n' "$skip" "$why" "${x:0:12}" "${skip:-none}" "$n" "${nolist:+; no list to go by for:$nolist}"
   fi
   rm -rf "$d"
 }
@@ -580,8 +593,9 @@ self_check() {
   # The caller's, under which a case that expects no lists would fetch main's, or read another's, and
   # every case's answer would go on the run's own summary page (79 lines of them, on repo-consistency's).
   unset GH_TOKEN READS_MAP_DIR GITHUB_STEP_SUMMARY
-  # So are the cases' own knobs: a WATCH or a SAYS of the caller's would be in every list, or asked of every log.
-  unset BASE_OPS MAIN_OPS LISTS SKIP SAYS STATUS SIGHT COMMIT AS AT FILES ODD WATCH TAIL
+  # So are the cases' own knobs: a WATCH or a SAYS of the caller's would be in every list, or asked of every log,
+  # and a MODE of the caller's in every change the first cases make (review pass 2).
+  unset BASE_OPS MAIN_OPS LISTS SKIP SAYS WHY STATUS SIGHT COMMIT AS AT FILES ODD WATCH TAIL MODE OLDMODE CHARGED
   # git exports GIT_DIR and its like to whatever it runs, a hook above all, and
   # under them the scratch repository's commits would land on the caller's
   # branch (reads.sh's self-check has a case for its own; SMD-2435 PR 3b-1).
@@ -684,7 +698,9 @@ self_check() {
     got=$(sed -n 's/^skip=//p' "$out")
     if [ "$(grep -c '^skip=' "$out")" != 1 ] || [ "$got" != "${SKIP:-}" ]; then echo "changes.sh: the run for $event into $base after '$ops' wrote skip=$(tr '\n' ',' <<<"$got"), not '${SKIP:-}'" >&2; fails=$((fails + 1)); fi
     # SAYS=…: words the run's log must hold, where a case is about why a job runs and not only that it does.
-    if [ -n "${SAYS:-}" ] && ! grep -qF -- "$SAYS" "$dir/said"; then echo "changes.sh: the run for $event into $base after '$ops' did not say '$SAYS', but: $(grep ' runs: ' "$dir/said" | tr '\n' '|' | cut -c1-600)" >&2; fails=$((fails + 1)); fi
+    # WHY=…: words its answer must hold, which is what the run's summary page shows.
+    if [ -n "${SAYS:-}" ] && ! grep -qF -- "$SAYS" "$dir/said"; then echo "changes.sh: the run for $event into $base after '$ops' did not say '$SAYS', but: $(grep ' runs: ' "$dir/said" | tr '\n' '|')" >&2; fails=$((fails + 1)); fi
+    if [ -n "${WHY:-}" ] && ! grep -F -- "$WHY" "$out" | grep '^why=' > /dev/null; then echo "changes.sh: the run for $event into $base after '$ops' did not answer '$WHY', but: $(grep '^why=' "$out")" >&2; fails=$((fails + 1)); fi
   }
   # A workflow for the by-job runs: the changes job, three gated jobs (g, h
   # with a heading of its own, and data-layer, which CHARGES names), and r,
@@ -803,11 +819,28 @@ EOF
     # shellcheck disable=SC2016 # run() evals it in the scratch repository, where $dir and $WF expand
     local mb='mkdir -p .github/workflows db/migrations ext && cp "$dir/wfm.yml" "$WF" && echo a > db/a.ts && echo t > db/tool.sh && echo m > db/migrations/1.sql && echo x > ext/x.ts'
     local std='list data-layer "f server-portable/api.ts" "f ext/x.ts" "d ext/"; list db-schema "f db/migrations/1.sql" "d db/migrations/"; live "f db/a.ts"'
+    # The same with the three jobs that watch, each gated: a rule that reads WATCHED for one of them alone is seen.
+    { cat "$dir/wfm.yml"; for v in deploy-stack-auth deploy-stack-observability auth-poc; do printf "  %s:\n    needs: changes\n    if: \${{ !cancelled() && (needs.changes.result != 'success' || (needs.changes.outputs.code != 'false' && !contains(format(' {0} ', needs.changes.outputs.skip), ' %s '))) }}\n    steps:\n      - run: echo %s\n" "$v" "$v" "$v"; done; } > "$dir/wf3.yml"
+    # nul NAME WHERE: a NUL in NAME's list: after its header's end (head), in its rows' paths, each a of them
+    # (row), or for its last newline (end). Its counts and its header's words are as they were.
+    # shellcheck disable=SC2317,SC2329 # as list
+    nul() {
+      local f="$dir/map/$1.txt"
+      case "$2" in
+        head) { head -n 1 "$f" | tr -d '\n'; printf '\000\n'; sed 1d "$f"; } > "$f.n" ;;
+        row) { head -n 1 "$f"; sed 1d "$f" | LC_ALL=C tr a '\000'; } > "$f.n" ;;
+        end) { sed '$d' "$f"; tail -n 1 "$f" | LC_ALL=C tr '\n' '\000'; } > "$f.n" ;;
+      esac
+      mv "$f.n" "$f"
+    }
     # The watched job's list (PR 3c-2): auth-poc read evals/auth.ts and is a list only with its watch ok.
     # stdw: std with auth-poc's list as a watch that held wrote it.
     # shellcheck disable=SC2016 # as mb
     local mbw="$mb"' && cp "$dir/wfw.yml" "$WF" && mkdir -p evals && echo e > evals/auth.ts'
     local stdw="$std"'; WATCH=ok list auth-poc "f evals/auth.ts"'
+    # shellcheck disable=SC2016 # as mb
+    local mb3="$mb"' && cp "$dir/wf3.yml" "$WF" && mkdir -p evals deploy && echo e > evals/auth.ts && echo a > deploy/a.ts && echo o > deploy/o.ts'
+    local std3="$stdw"'; WATCH=ok list deploy-stack-auth "f deploy/a.ts"; WATCH=ok list deploy-stack-observability "f deploy/o.ts"'
     # A file no job read: the three skip. One job's file: the other two skip. With no lists, none.
     BASE_OPS=$mb LISTS=$std SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS=$std SKIP='db-schema db-live' run true pull_request main 'echo x >> server-portable/api.ts'
@@ -831,16 +864,16 @@ EOF
     BASE_OPS=$mb LISTS="$std; STATUS=failure list db-schema" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS="$std; SIGHT=blind list db-live.rest" SKIP='db-schema data-layer' run true pull_request main 'echo x >> db/tool.sh'
     # shellcheck disable=SC2016 # as above
-    BASE_OPS=$mb LISTS="$std"'; rm "$dir/map/db-live.sweep.txt"' SKIP='db-schema data-layer' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="$std"'; rm "$dir/map/db-live.sweep.txt"' SKIP='db-schema data-layer' SAYS='its list db-live.sweep is not here' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS="$std; AS=data-layer list db-schema" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     # …nor does one cut short: a header that counts two files over one row.
     BASE_OPS=$mb LISTS="$std; FILES=2 list db-schema 'f db/migrations/1.sql'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS="$std; ODD=1 list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     # …nor one whose header ends in the word of a watch (reads.sh mark --watch), here a lost one, for a job
     # WATCHED does not name: not the list expected of that job. The jobs that watch have their cases further down.
-    BASE_OPS=$mb LISTS="$std; WATCH=lost list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live' SAYS='its list db-schema says a watch was asked for' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="$std; WATCH=lost list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live' SAYS='its list db-schema speaks of a watch, and WATCHED does not name this job' run true pull_request main 'echo x >> db/tool.sh'
     # shellcheck disable=SC2016 # as above
-    BASE_OPS=$mb LISTS="$std"'; printf %s "$(cat "$dir/map/data-layer.txt")" > "$dir/map/cut" && mv "$dir/map/cut" "$dir/map/data-layer.txt"' SKIP='db-schema db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="$std"'; printf %s "$(cat "$dir/map/data-layer.txt")" > "$dir/map/cut" && mv "$dir/map/cut" "$dir/map/data-layer.txt"' SKIP='db-schema db-live' SAYS='its list data-layer is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
     # Lists of two commits, or of one that is not here, skip nothing at all.
     BASE_OPS=$mb LISTS="$std; AT=HEAD^1~1 list db-schema" run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS="COMMIT=0123456789012345678901234567890123456789; $std" run true pull_request main 'echo x >> db/tool.sh'
@@ -884,31 +917,45 @@ EOF
     BASE_OPS=$mbw LISTS=$stdw SKIP='db-schema data-layer db-live' SAYS='auth-poc runs: it read evals/auth.ts, which differs' run true pull_request main 'echo x >> evals/auth.ts'
     # Its watch lost, or none begun, or no word of a watch (the header of a job that does not watch): it runs,
     # and the log says which, since main's run has the reason at that job's list.
-    BASE_OPS=$mbw LISTS="$std; WATCH=lost list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc says its watch was lost' run true pull_request main 'echo x >> db/tool.sh'
-    BASE_OPS=$mbw LISTS="$std; WATCH=none list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc says its watch was none' run true pull_request main 'echo x >> db/tool.sh'
-    BASE_OPS=$mbw LISTS="$std; list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc says nothing of a watch' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$std; WATCH=lost list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS="its list auth-poc says its watch was lost on main's run at " WHY='; no list to go by for: portable-server replay-gate preflight-rest deploy-stack-auth deploy-stack-observability auth-poc' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$std; WATCH=none list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS="its list auth-poc says no watch began on main's run at " run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$std; list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc says nothing of a watch, and this job watches' run true pull_request main 'echo x >> db/tool.sh'
     # A word that is none of reads.sh's, the word twice, a space after it, lost before ok, two spaces before it:
     # nothing but the one word ends a watching job's header.
-    BASE_OPS=$mbw LISTS="$std; WATCH=okay list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc is not here, is not whole' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$std; WATCH=okay list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mbw LISTS="$std; WATCH=OK list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mbw LISTS="$std; TAIL=' watch=ok watch=ok' list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mbw LISTS="$std; TAIL=' watch=ok ' list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
-    BASE_OPS=$mbw LISTS="$std; TAIL=' watch=lost watch=ok' list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$std; TAIL=' watch=lost watch=ok' list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mbw LISTS="$std; TAIL='  watch=ok' list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     # A watch's ok on a job that does not watch is not the list expected of it: that job runs, a cell's too, and
     # the job that watches still skips.
-    BASE_OPS=$mbw LISTS="$stdw; WATCH=ok list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live auth-poc' SAYS='its list db-schema says a watch was asked for' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$stdw; WATCH=ok list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live auth-poc' SAYS='its list db-schema speaks of a watch' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mbw LISTS="$stdw; WATCH=ok list db-live.rest 'f db/a.ts'" SKIP='db-schema data-layer auth-poc' run true pull_request main 'echo x >> db/tool.sh'
-    BASE_OPS=$mbw LISTS="$stdw; WATCH=none list db-live.rest 'f db/a.ts'" SKIP='db-schema data-layer auth-poc' SAYS='its list db-live.rest says a watch was asked for' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$stdw; WATCH=none list db-live.rest 'f db/a.ts'" SKIP='db-schema data-layer auth-poc' SAYS='its list db-live.rest speaks of a watch' run true pull_request main 'echo x >> db/tool.sh'
     # A broken list (reads.sh: a command that names the paths failed) holds no row and says so: the job runs,
     # one that watches with its watch ok, and one that does not. So does a watching job that failed with its
     # watch lost, and the log gives the words of a list at fault, not the watch's.
-    BASE_OPS=$mbw LISTS="$std; STATUS=failure WATCH=lost list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc is not here, is not whole' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$std; STATUS=failure WATCH=lost list auth-poc 'f evals/auth.ts'" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mbw LISTS="$std; SIGHT=broken WATCH=ok list auth-poc" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
-    BASE_OPS=$mbw LISTS="$stdw; SIGHT=broken list db-schema" SKIP='data-layer db-live auth-poc' SAYS='its list db-schema is not here, is not whole' run true pull_request main 'echo x >> db/tool.sh'
-    # A NUL after a watching job's header: read drops it, and what followed it would be unseen. No list.
-    # shellcheck disable=SC2016 # as mb
-    BASE_OPS=$mbw LISTS="$stdw"'; f="$dir/map/auth-poc.txt"; { head -n 1 "$f" | tr -d "\n"; printf "\000 watch=lost\n"; sed 1d "$f"; } > "$f.n" && mv "$f.n" "$f"' SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$stdw; SIGHT=broken list db-schema" SKIP='data-layer db-live auth-poc' SAYS='its list db-schema is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
+    # A NUL in a list, three ways, each leaving a header both bashes read whole: after its end, in a row's
+    # path, and for the last newline. No list, the job's own alone.
+    BASE_OPS=$mbw LISTS="$stdw; nul auth-poc head" SKIP='db-schema data-layer db-live' SAYS='its list auth-poc is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$stdw; nul auth-poc row" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$stdw; nul auth-poc end" SKIP='db-schema data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$stdw; nul db-schema row" SKIP='data-layer db-live auth-poc' run true pull_request main 'echo x >> db/tool.sh'
+    # A job that does not watch, its list a failed job's or its word not one of reads.sh's or said twice: the
+    # plain words, not the watch's.
+    BASE_OPS=$mbw LISTS="$stdw; STATUS=failure WATCH=ok list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live auth-poc' SAYS='its list db-schema is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$stdw; WATCH=OK list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live auth-poc' SAYS='its list db-schema is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mbw LISTS="$stdw; TAIL=' watch=ok watch=ok' list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live auth-poc' SAYS='its list db-schema is not whole, or is not one' run true pull_request main 'echo x >> db/tool.sh'
+    # The three jobs that watch, each held by its own name: all three skip with their watches ok, and each runs
+    # alone for a list of its own that says nothing of a watch, or lost.
+    BASE_OPS=$mb3 LISTS=$std3 SKIP='db-schema data-layer db-live deploy-stack-auth deploy-stack-observability auth-poc' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb3 LISTS="$std3; list deploy-stack-auth 'f deploy/a.ts'" SKIP='db-schema data-layer db-live deploy-stack-observability auth-poc' SAYS='its list deploy-stack-auth says nothing of a watch' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb3 LISTS="$std3; WATCH=lost list deploy-stack-observability 'f deploy/o.ts'" SKIP='db-schema data-layer db-live deploy-stack-auth auth-poc' SAYS='its list deploy-stack-observability says its watch was lost' WHY='; no list to go by for: portable-server replay-gate preflight-rest deploy-stack-observability' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb3 LISTS=$std3 SKIP='db-schema data-layer db-live deploy-stack-observability auth-poc' SAYS='deploy-stack-auth runs: it read deploy/a.ts, which differs' run true pull_request main 'echo x >> deploy/a.ts'
     # A file opened and then deleted under the watch is an f row and a g row of one path: counted as the header
     # counts them, and read as one path.
     BASE_OPS=$mbw LISTS="$std; WATCH=ok list auth-poc 'f evals/auth.ts' 'g evals/auth.ts'" SKIP='db-schema data-layer db-live auth-poc' run true pull_request main 'echo x >> db/tool.sh'

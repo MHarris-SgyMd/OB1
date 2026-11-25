@@ -346,6 +346,18 @@ reproduce a 768-only failure on its own:
 cd db && OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text bun test-schema.ts
 ```
 
+**Why a job ran that might have skipped (SMD-2435).** The `changes` job's log
+says `changes.sh: <job> runs: <reason>` for each job that might have skipped
+by the list of what it read on main, and its line on the run's summary page
+says `no list to go by for: <jobs>` when main's lists could not be used for
+some. A reason that begins `its list` is about main's lists, or their fetch,
+and not about the pull request: the job runs to be safe, which costs time and
+risks nothing. For `its watch was lost` or `no watch began`, open main's run
+at the commit the line names: a `reads.sh` warning on the page of the job
+whose id the line gives says why. Main's next green run writes new lists. A
+watch lost run after run is a fault to mend, and nothing counts the runs for
+you.
+
 ---
 
 ## Review passes: what caught a finding is written at the catch

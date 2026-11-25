@@ -662,8 +662,9 @@
  *      into a container, whose reads no list sees, or reads the event,
  *      since the lists are a push run's: both by allowlist, the commands a
  *      mapped job may give docker and the github names it may read, but that
- *      a job WATCHED names is not read for its containers (PR 3c-2: its
- *      marker watches, and by_map takes its list only with the watch ok); and a
+ *      the steps of a job WATCHED names are not read for the containers they
+ *      run (PR 3c-2: its marker watches, and by_map takes its list only with
+ *      the watch ok); and a
  *      CHARGES row leaves a job to its list (`job:list`) only if MAP_LISTS has
  *      one (SMD-2435 PR 3b-2). Its probe pins what it refuses and passes
  *
@@ -12004,7 +12005,7 @@ const READS_WATCHED_READ = watchedJobs();
  * the checkout moves no access time (deploy-stack-auth binds three tracked paths so today; the other two bind none,
  * and their lists would be whole without the watch until one did). The list is changes.sh's WATCHED since PR 3c-2:
  * by_map takes a watching job's list only when its watch stood ok, and of the jobs MAP_LISTS names check 56 reads
- * every one but these for its containers, so one list names them for all three. Not read off the workflow, so a
+ * the steps of every one but these for the containers they run, so one list names them for all three. Not read off the workflow, so a
  * `--watch` taken off a marker is a failure, not a job that quietly watches no longer. The other two jobs that run
  * the compose stack do not watch: deploy-stack reads half the tree and deploy-stack-brains nearly all of it, so a
  * list would skip either for almost no pull request (SMD-2435's replay, 2026-11-23: 3 and 2 of 100).
@@ -12146,6 +12147,9 @@ function checkReadsRecorded() {
   if (wrongWatch.length) fail(SELF, `check 55 no longer reads its probe of the jobs that watch as written: ${JSON.stringify(wrongWatch)} — each case's why says what it holds (SMD-2435)`);
   const ungated = readsProblems(wf(lint(), good("a"), good("b")), ["a", "b"], "lint", ["c"]);
   if (ungated.length !== 1 || !ungated[0].startsWith("WATCHED names c, which is no gated job")) fail(SELF, `check 55 no longer refuses a job named as watching that is not gated: ${JSON.stringify(ungated)} (SMD-2435)`);
+  // A marker is held to its job's whole name: b watches, and WATCHED names bb and a job that b's name ends.
+  const partName = readsProblems(wf(lint(), good("a"), watching("b")), ["a", "b"], "lint", ["bb", "ab"]);
+  if (!partName.some((m) => m.includes("job b's marker step runs") && m.includes("WATCHED does not name it"))) fail(SELF, `check 55 no longer holds a marker to its job's whole name: ${JSON.stringify(partName)} (SMD-2435)`);
   const wrong = cases.map(([why, text, says]) => ({ why, says, got: readsProblems(text, ["a", "b"], "lint") }))
     .filter((c) => c.got.length !== c.says.length || c.says.some((s, i) => !c.got[i].includes(s)));
   if (wrong.length) fail(SELF, `check 55 no longer reads its probe as written: ${JSON.stringify(wrong)} — each case's why says what it holds (SMD-2435)`);
@@ -12176,15 +12180,18 @@ checkReadsRecorded();
 // in neither list was never decided: MAP_ALWAYS_RUN gives each job left out
 // its reason.
 //
-// A job changes.sh's WATCHED names is not read for its containers at all
-// (PR 3c-2), whatever runtime it names. Its marker watches (reads.sh mark
-// --watch), so the list is told of each open of a tracked folder, or of a
-// file in one by its name there, through whatever mount, and reads.sh's
-// header names what the watch is not told of; by_map takes the list only
-// when that watch stood ok. An image build, refused the other jobs with the
-// rest, reads its context on the runner, where access times move. In no
-// list: a build from a context that is not the checkout's files, a URL or a
-// git reference. No job builds from one, and nothing here refuses it.
+// The steps of a job changes.sh's WATCHED names are not read for the
+// containers they run (PR 3c-2), whatever runtime they name; its container
+// and services keys and its actions are read as any mapped job's. Its marker
+// watches (reads.sh mark --watch), so the list is told of each open of a
+// tracked folder, or of a file in one by its name there, through whatever
+// mount, and reads.sh's header names what the watch is not told of; by_map
+// takes the list only when that watch stood ok. Of what the paragraph above
+// refuses, a build alone is seen by access times, its context read on the
+// runner (PR 3c-1's survey); it is refused a job that does not watch with
+// the rest. In no list: a build from a context that is not the checkout's
+// files, a URL or a git reference. No job builds from one, and nothing here
+// refuses it.
 const MAP_ALWAYS_RUN: Record<string, string> = {
   "deploy-stack": "runs the compose stack and does not watch, so its list lacks what a container read through a mount; it reads half the tree, and watching would skip it for almost no pull request (3 of 100, SMD-2435's replay of 2026-11-23)",
   "deploy-stack-brains": "runs the compose stack twice over, and canary.sh has git read the tree back",
@@ -12350,7 +12357,7 @@ function mapListsProblems(lists: readonly string[], text: string, gated: readonl
       const lines = typeof step.run === "string" ? step.run.replace(/\s*\\\n\s*/g, " ").split("\n").filter((l) => !/^\s*#/.test(l)) : [];
       const byGit = lines.find((l) => [...l.matchAll(/(?:^|[\s;|&(`"'=])(?:[\w.\/-]*\/)?git["')]*((?:\s+-[cC]\s+\S+)*)\s+([A-Za-z-]+)/g)].some((m) => !MAP_GIT_MAY.has(m[2])));
       if (byGit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${byGit.trim().slice(0, 80)}\` in step ${i + 1} — git names the tracked files from its index and reads their bytes from its own store, listing no folder and opening no file, so the job's list would say less than it read; a mapped job asks git only to ${[...MAP_GIT_MAY].join(", ")} (check 56, SMD-2435)`);
-      // A job that watches is not read for its containers (PR 3c-2): the section's second paragraph has why.
+      // A job that watches: its steps are not read for containers (PR 3c-2). The section's second paragraph has why.
       const hit = watched.includes(key) ? undefined : lines.map((l) => [l, containerProblem(l)] as const).find(([, why]) => why !== null);
       if (hit) problems.push(`job ${key}, which MAP_LISTS names, runs \`${hit[0].trim().slice(0, 80)}\` in step ${i + 1}: ${hit[1]} — a container reads the checkout where no access time moves, so the job's list would say less than it read; write it one of the ways check 56 can read, have the job watch (changes.sh's WATCHED, and its marker), or take the job out of MAP_LISTS and give MAP_ALWAYS_RUN its reason (check 56, SMD-2435)`);
     });
@@ -12480,8 +12487,13 @@ function checkMapLists() {
   // A job whose name begins a watching job's, or ends it, is not one: s runs compose, and s-more and more-s watch.
   const byName = mapListsProblems(W, good, G, {}, ["s-more", "more-s"]);
   if (byName.length !== 1 || !byName[0].includes("job s, which MAP_LISTS names, runs `docker compose up -d`")) fail(SELF, `check 56 no longer holds a job that watches to its whole name: ${JSON.stringify(byName)} (SMD-2435)`);
+  // Nor is one whose name a watching job's begins or ends: s watches, and s-more and more-s run compose unwatched.
+  const longer = mapListsProblems([...W, "s-more", "more-s"], wf(job("a", step("bun test.ts")), job("m", PG, MATRIX), job("s", step("docker compose up -d")), job("s-more", step("docker compose up -d")), job("more-s", step("docker compose up -d"))), [...G, "s-more", "more-s"], {}, ["s"]);
+  if (longer.length !== 2 || !longer[0].includes("job s-more, which MAP_LISTS names, runs") || !longer[1].includes("job more-s, which MAP_LISTS names, runs")) fail(SELF, `check 56 no longer holds a watching job's name to that job alone: ${JSON.stringify(longer)} (SMD-2435)`);
   // Each message is its file's: MAP_LISTS is changes.sh's, MAP_ALWAYS_RUN and the choice between the two this file's, the rest the workflow's.
-  // With WATCHED unread the section before this one has said so: every step of a job that watches would be refused here.
+  // With WATCHED unread the section before this one has said so: each step of a watching job that runs a container
+  // would be refused here. What else this section would say of the workflow waits for the list to be read: one
+  // line to mend first, as when --map-lists cannot be read.
   if (READS_WATCHED.length) for (const msg of mapListsProblems(lists, readFileSync(join(ROOT, WORKFLOW), "utf8"), AGGREGATE_GATED, MAP_ALWAYS_RUN, READS_WATCHED)) fail(msg.startsWith("MAP_LISTS") ? CHANGES_SCRIPT : msg.startsWith("MAP_ALWAYS_RUN") || msg.startsWith("gated job") ? SELF : WORKFLOW, msg);
   // A CHARGES row may leave a job to its list (`job:list`) only where there is a list to leave it to.
   const table = chargesTable();
