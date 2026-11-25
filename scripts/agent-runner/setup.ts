@@ -136,10 +136,25 @@ export function installValue(dir: string, which: Which, value: string): { file: 
   if (!s.shape.test(v)) throw new Error(`that value isn't shaped like a ${which} key (expected ${s.label}); nothing written, and the value is not shown`);
   // Checked before the write, so a key that can't sign never replaces one that can (a rotation's old key is then intact).
   if (which === "github-app" && !canSign(v)) throw new Error("that PEM isn't an RSA private key that can sign the App's JWT; nothing written, and the value is not shown");
+  writeSecretFile(dir, s.file, `${v}\n`);
+  const back = verifyOne(dir, which);
+  if (!back.ok) throw new Error(`stored ${s.file}, but it didn't read back cleanly: ${back.detail}`);
+  return { file: s.file, bytes: v.length };
+}
+
+/**
+ * Write a secret to `<dir>/<file>` whole or not at all: to a new file beside it (0600, opened exclusively, never
+ * through a link), synced, renamed over the old, and the directory synced. A link or anything but a plain file at the
+ * path is refused, never written through or over. A write or a rename that fails removes the new file and leaves the old
+ * in place; a hard link to the old file keeps its content. Temp files an interrupted install left (`.<file>.<pid>.<hex>.tmp`,
+ * each holding a secret) are removed first. `rename` is injected so the self-check can fail it.
+ */
+export function writeSecretFile(dir: string, file: string, data: string, rename: (from: string, to: string) => void = renameSync): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
-  const path = join(dir, s.file);
-  // What's there now: a link or anything but a plain file is refused, never written through or over.
+  const path = join(dir, file);
+  const tempName = new RegExp(`^\\.${file.replace(/[.]/g, "\\.")}\\.\\d+\\.[0-9a-f]{12}\\.tmp$`);
+  for (const name of readdirSync(dir)) if (tempName.test(name)) rmSync(join(dir, name), { force: true });
   let st: ReturnType<typeof lstatSync> | null = null;
   try {
     st = lstatSync(path);
@@ -148,30 +163,41 @@ export function installValue(dir: string, which: Which, value: string): { file: 
   }
   if (st?.isSymbolicLink()) throw new Error(`${path} is a symlink; refusing to write a secret through it`);
   if (st && !st.isFile()) throw new Error(`${path} is not a regular file; refusing to write a secret over it`);
-  // Written whole to a new file beside it, synced, then renamed over the old: a write that fails (a full disk, a size
-  // limit) leaves the old key in place, and a hard link to the old file keeps its content.
-  const tmp = join(dir, `.${s.file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
+  const tmp = join(dir, `.${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let fd: number;
   try {
     fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   } catch (e) {
-    throw new Error(`${dir} can't take a new file (${(e as NodeJS.ErrnoException).code}); nothing written, the old ${s.file} in place`);
+    throw new Error(`${dir} can't take a new file (${(e as NodeJS.ErrnoException).code}); nothing written, the old ${file} in place`);
   }
   try {
-    const buf = Buffer.from(`${v}\n`);
+    const buf = Buffer.from(data);
     for (let off = 0; off < buf.length; ) off += writeSync(fd, buf, off);
     fsyncSync(fd);
   } catch (e) {
     closeSync(fd);
     rmSync(tmp, { force: true });
-    throw new Error(`the new ${s.file} couldn't be written (${(e as NodeJS.ErrnoException).code ?? "error"}); the old one is in place`);
+    throw new Error(`the new ${file} couldn't be written (${(e as NodeJS.ErrnoException).code ?? "error"}); the old one is in place`);
   }
   closeSync(fd);
-  renameSync(tmp, path);
+  try {
+    rename(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw new Error(`the new ${file} couldn't take the old one's place (${(e as NodeJS.ErrnoException).code ?? "error"}); the old one is in place`);
+  }
   chmodSync(path, 0o600);
-  const back = verifyOne(dir, which);
-  if (!back.ok) throw new Error(`stored ${s.file}, but it didn't read back cleanly: ${back.detail}`);
-  return { file: s.file, bytes: v.length };
+  // The rename reaches the disk with the directory's own sync (best effort: macOS's fsync doesn't flush the drive's cache).
+  try {
+    const dfd = openSync(dir, constants.O_RDONLY);
+    try {
+      fsyncSync(dfd);
+    } finally {
+      closeSync(dfd);
+    }
+  } catch {
+    // A filesystem that can't sync a directory still has the file renamed.
+  }
 }
 
 /** Install from the clipboard or stdin. */
@@ -682,7 +708,7 @@ export function selfCheck(): number {
       writeFileSync(keyFile, generateKeyPairSync("rsa", { modulusLength: 4096, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey);
       const child = Bun.spawnSync(["/bin/sh", "-c", `ulimit -f 1; trap '' XFSZ; exec "$0" -e "$1"`, process.execPath, `import { installValue } from ${JSON.stringify(join(import.meta.dir, "setup.ts"))}; import { readFileSync } from "node:fs"; try { installValue(${JSON.stringify(limited)}, "github-app", readFileSync(${JSON.stringify(keyFile)}, "utf8")); console.log("WROTE"); } catch (e) { console.log("REFUSED " + e.message); }`], { stdout: "pipe", stderr: "pipe" });
       const childSaid = child.stdout.toString();
-      ok(childSaid.includes("REFUSED") && childSaid.includes("the old one is in place") && readFileSync(join(limited, APP_KEY_FILE), "utf8") === kept && readdirSync(limited).every((f) => !f.endsWith(".tmp")), "a write that fails under a size limit leaves the old key whole and no temp file");
+      ok(childSaid.includes("REFUSED") && childSaid.includes("the old one is in place") && readFileSync(join(limited, APP_KEY_FILE), "utf8") === kept && readdirSync(limited).every((f) => !f.endsWith(".tmp")), `a write that fails under a size limit leaves the old key whole and no temp file (child exit ${child.exitCode}, signal ${child.signalCode ?? "none"}, said ${JSON.stringify(childSaid.trim().slice(0, 120))}${child.stderr.length ? `, stderr ${JSON.stringify(child.stderr.toString().trim().slice(0, 200))}` : ""})`);
       // A hard link at the key path: the rename replaces the name, and the linked file keeps its content.
       const linked = join(root, "app-key-linked");
       mkdirSync(linked, { mode: 0o700 });
@@ -696,6 +722,17 @@ export function selfCheck(): number {
       mkdirSync(fifoDir, { mode: 0o700 });
       Bun.spawnSync(["mkfifo", join(fifoDir, APP_KEY_FILE)]);
       ok(refuses(() => installValue(fifoDir, "github-app", APP_PEM)).includes("not a regular file"), "a FIFO at the key path is refused, not opened");
+      // A rename that fails: the new file is removed, the old key in place, and the message says so.
+      const renameDir = join(root, "rename-fails");
+      installValue(renameDir, "brain", "a".repeat(64));
+      const renameErr = refuses(() => writeSecretFile(renameDir, KEY_FILES.brain, `${"b".repeat(64)}\n`, () => { throw Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" }); }));
+      ok(renameErr.includes("couldn't take the old one's place") && renameErr.includes("EPERM") && readKey(renameDir, "brain") === "a".repeat(64) && readdirSync(renameDir).every((f) => !f.endsWith(".tmp")), "a rename that fails leaves the old key and no temp file holding the new one");
+      // Temp files an interrupted install left are swept; another file is left alone.
+      writeFileSync(join(renameDir, `.${KEY_FILES.brain}.4242.abcdef012345.tmp`), "c".repeat(64), { mode: 0o600 });
+      writeFileSync(join(renameDir, ".notes.tmp"), "mine", { mode: 0o600 });
+      writeFileSync(join(renameDir, `.${KEY_FILES.brain}.4242.abcdef012345.tmp.keep`), "mine too", { mode: 0o600 });
+      installValue(renameDir, "brain", "d".repeat(64));
+      ok(!existsSync(join(renameDir, `.${KEY_FILES.brain}.4242.abcdef012345.tmp`)) && existsSync(join(renameDir, ".notes.tmp")) && existsSync(join(renameDir, `.${KEY_FILES.brain}.4242.abcdef012345.tmp.keep`)) && readKey(renameDir, "brain") === "d".repeat(64), "an interrupted install's temp file is swept at the next install, and nothing else");
       const mismatched = APP_PEM.trim().replace("-----END RSA PRIVATE KEY-----", "-----END PRIVATE KEY-----");
       ok(refuses(() => installValue(join(root, "app-key-bad2"), "github-app", mismatched)) !== "", "a key whose BEGIN and END lines disagree is refused");
     });

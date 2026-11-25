@@ -234,6 +234,18 @@ export const OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.
  * bit. Null when there is no file.
  */
 export function readOwnedFile(path: string, secret: boolean): string | null {
+  // A file renamed over while it was open (setup.ts installs a key by rename) shows no links: read the new one instead.
+  for (let tries = 0; tries < 3; tries++) {
+    const got = readOwnedOnce(path, secret);
+    if (got !== REPLACED) return got;
+  }
+  throw new Error(`${path} was replaced three times while being read`);
+}
+
+/** What readOwnedOnce answers for a file renamed over while it was open (no links left). */
+const REPLACED = Symbol("replaced");
+
+function readOwnedOnce(path: string, secret: boolean): string | null | typeof REPLACED {
   let fd: number;
   try {
     fd = openSync(path, OPEN_FLAGS);
@@ -247,6 +259,7 @@ export function readOwnedFile(path: string, secret: boolean): string | null {
     const st = fstatSync(fd);
     if (!st.isFile()) throw new Error(`${path} is not a regular file`);
     if (st.uid !== process.getuid?.()) throw new Error(`${path} must be yours`);
+    if (st.nlink === 0) return REPLACED;
     if (secret && st.nlink !== 1) throw new Error(`${path} has other links to it`);
     if (secret && (st.mode & 0o077) !== 0) throw new Error(`${path} can be read by others (mode ${(st.mode & 0o777).toString(8)}): chmod 600 it`);
     if (!secret && (st.mode & 0o022) !== 0) throw new Error(`${path} can be written by others (mode ${(st.mode & 0o777).toString(8)}): chmod go-w it`);
