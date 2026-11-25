@@ -858,8 +858,8 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * The claim row is the only sign (SMD-4579). The other key's lineage on the
    * thought's entities was a second one, and it is true as well of a thought
    * another model was run over on purpose, with no pool: both dogfood brains
-   * held 22 the 27B had read once, the long-document gold's corpus, which an
-   * unattended run would have read again under the recorded key. A reading
+   * held 22 the 27B had read once, in September, which an unattended run
+   * would have read again under the recorded key. A reading
    * written outside the pools is the operator's, and stands until a
    * --switch-key asks for the brain under this key (unvouched, below). What
    * that gives up: a thought the other key's pool read and that was then

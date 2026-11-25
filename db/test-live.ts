@@ -8256,7 +8256,7 @@ if (want("10")) {
          `…and a run under the key now recorded returns nothing: no call, the rows left finished (exit ${settledA.code}; ${calls - callsBeforeBack - 5} call(s))`);
   // A reading written outside the pools (SMD-4579): another model run over one thought on purpose, as an eval's corpus
   // is, its entities under that model's key and no claim row for it. A run under the recorded key leaves it: no call,
-  // nothing returned, --status counting none. (Both dogfood brains held 22 such, the long-document gold's.)
+  // nothing returned, --status counting none. (Both dogfood brains held 22 such, the 27B's.)
   const KEY_BIG = "extract:stub-big@p2";
   await sql`SELECT record_thought_entities(${back.kept}::uuid, ${KEY_BIG}, ${[{ name: "Gold", type: "project", confidence: 0.9 }]}::jsonb, '[]'::jsonb)`;
   const statusOutside = await extractInProcess({ status: true });
