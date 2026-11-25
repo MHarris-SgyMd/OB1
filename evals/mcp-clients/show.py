@@ -26,6 +26,9 @@ for n, raw in enumerate(open(path), 1):
             said.append(" ".join(bits))
         print(at, d["path"], d["http"], d["era"], mcp, "|", "; ".join(said), "| ua:", d["headers"].get("user-agent"))
     elif d["event"] == "response":
-        print(at, "    ->", d["status"], d.get("type"), ("sid " + d["sid"][:8]) if d.get("sid") else "")
+        # The status, the type and the session; then `away` or `refused`, where the line has one.
+        how = [f"{k}={d[k]}" for k in ("away", "refused") if d.get(k)]
+        sid = ("sid " + d["sid"][:8]) if d.get("sid") else ""
+        print(at, "    ->", d["status"], d.get("type"), *([sid, *how] if sid or not how else how))
     else:
         print(at, "  *", d["event"], {k: v for k, v in d.items() if k not in ("at", "event")})
