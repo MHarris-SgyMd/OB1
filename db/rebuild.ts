@@ -63,7 +63,7 @@ import type { SQL } from "bun";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
 import { staleStandings, staleStandingsText, STALE_STANDING_ROWS_SQL, type StaleStandingRow } from "../server-portable/consolidate.ts";
-import { PARTS_STORE_SQL, PARTS_UNREAD, partsStanding, type PartsStanding } from "../server-portable/consolidate-decide.ts";
+import { decideKeyModels, PARTS_STORE_SQL, PARTS_UNREAD, partsStanding, type PartsStanding } from "../server-portable/consolidate-decide.ts";
 
 // Every argument accounted for (db/cli.ts, SMD-2134): a flag this door does not
 // have is refused rather than ignored, and a blank --reason is refused as every
@@ -127,7 +127,14 @@ export function drainer(pool: string, subjectPool: string | null = null): string
     return `${question[1] ? "" : "OB1_SUBJECT_REASONING=off "}bun db/extract-entities.ts --url <url> --subjects`;
   }
   if (pool.startsWith("extract:")) return "bun db/extract-entities.ts --url <url>";
-  if (pool.startsWith("consolidate:")) return "bun db/consolidate.ts --url <url>";
+  if (pool.startsWith("consolidate:")) {
+    // A decide-mode key's pool is drained by a decide-mode run alone. The bare command is judge mode: it pools
+    // under another key, leaves this one, and a pair it closes is one whose settled part the decide-mode pass
+    // then removes with no judgement of it (SMD-4446 PR 2b-2, review pass 4). So the key's decider and writer are
+    // given, as preflight gives them.
+    const decide = decideKeyModels(pool);
+    return `${decide ? `OB1_CONSOLIDATE_DECIDER=${decide.decider} OB1_JUDGE_MODEL=${decide.writer} ` : ""}bun db/consolidate.ts --url <url>`;
+  }
   if (pool.startsWith("retag:")) return "bun db/retag.ts --url <url>";
   return "(no worker in this tree drains this key)";
 }

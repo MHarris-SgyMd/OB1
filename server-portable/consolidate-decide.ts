@@ -326,12 +326,14 @@ export const UNREAD_MAX = 600;
 /**
  * The writer's parts answer. `falls` names the thought it says falls whole, null for neither. `dropped` counts the
  * items of its list that were not a part of the asked shape (no side, a quote or the reason missing, a word outside
- * the eight), and `over` the items that came once PARTS_MAX parts had been read, whatever their shape. `malformed`:
+ * the eight), and `over` the items that came once PARTS_MAX parts had been read, whatever their shape. `unnamed`
+ * counts the dropped items that quote no statement (an empty object, a bare string, an item whose `stale` is empty):
+ * such an item names no statement, so it cannot be one named again in a form the pass does not read. `malformed`:
  * the answer was not the JSON asked for. `unread`: what was not read as a part, for the dump, which carries every
  * answer kept or not: the answer itself when it is malformed, else each item dropped or over, as JSON on one line,
  * each cut to UNREAD_MAX and at most PARTS_MAX of them.
  */
-export type PartsAnswer = { parts: NamedPart[]; dropped: number; over: number; falls: "older" | "newer" | null; malformed: boolean; unread: string[] };
+export type PartsAnswer = { parts: NamedPart[]; dropped: number; unnamed: number; over: number; falls: "older" | "newer" | null; malformed: boolean; unread: string[] };
 
 /**
  * The parts answer, read as SMD-3340 read it: lenient about wrapping (jsonObject), strict about the keys and the
@@ -348,7 +350,7 @@ export function parseParts(raw: string): PartsAnswer {
     try { said = typeof v === "string" ? v : JSON.stringify(v) ?? String(v); } catch { said = "an item that could not be printed"; }
     return cutByCodePoint(wellFormed(oneLine(said)), UNREAD_MAX);
   };
-  const bad: PartsAnswer = { parts: [], dropped: 0, over: 0, falls: null, malformed: true, unread: [kept(raw)] };
+  const bad: PartsAnswer = { parts: [], dropped: 0, unnamed: 0, over: 0, falls: null, malformed: true, unread: [kept(raw)] };
   const o = jsonObject(raw);
   if (!o || Array.isArray(o) || !Array.isArray(o.parts)) return bad;
   const yn = (v: unknown) => { const s = typeof v === "string" ? v.trim().toLowerCase() : ""; return s === "yes" ? true : s === "no" ? false : null; };
@@ -356,7 +358,7 @@ export function parseParts(raw: string): PartsAnswer {
   if (a === null || b === null || (a && b)) return bad;
   const parts: NamedPart[] = [];
   const unread: string[] = [];
-  let dropped = 0, over = 0;
+  let dropped = 0, unnamed = 0, over = 0;
   for (const item of o.parts as unknown[]) {
     // Once PARTS_MAX parts are read, every further item is over the cap, whatever its shape.
     const full = parts.length >= PARTS_MAX;
@@ -372,13 +374,16 @@ export function parseParts(raw: string): PartsAnswer {
     const whole = (v: unknown) => typeof v !== "string" || [...oneLine(v)].length <= REASON_MAX;
     if (full || holder === null || !(PART_WORDS as readonly string[]).includes(word) || !stale || !shown_by || !reason || !whole(p?.stale) || !whole(p?.shown_by)) {
       if (full) over++;
-      else dropped++;
+      else {
+        dropped++;
+        if (!stale) unnamed++;
+      }
       if (unread.length < PARTS_MAX) unread.push(kept(item));
       continue;
     }
     parts.push({ holder, stale, shown_by, word: word as PartWord, reason });
   }
-  return { parts, dropped, over, falls: a ? "older" : b ? "newer" : null, malformed: false, unread };
+  return { parts, dropped, unnamed, over, falls: a ? "older" : b ? "newer" : null, malformed: false, unread };
 }
 
 /**
@@ -622,6 +627,8 @@ export type DecideNote = {
     against?: true;
     parts?: PartNote[];
     dropped?: number;
+    /** Those of `dropped` that quote no statement, so name none (parseParts): absent when there is none. */
+    unnamed?: number;
     /** The items that came once PARTS_MAX parts had been read: absent when none did. */
     over?: number;
   };
@@ -748,6 +755,7 @@ export function partsNote(model: string, answer: PartsAnswer, checked: CheckedPa
       own: { statement: c.statement !== null, shown_by: c.shown !== null }, ...(c.repeated ? { repeated: true as const } : {}),
     })),
     dropped: answer.dropped,
+    ...(answer.unnamed ? { unnamed: answer.unnamed } : {}),
     ...(answer.over ? { over: answer.over } : {}),
   };
 }
@@ -812,7 +820,8 @@ export function partWriteError(e: unknown, sqlstate: string): Error {
 
 /**
  * The count of put-backs running, by thought (decide version 6): how many attempts in a row ended with the thought put
- * back because a text of one of its pairs moved while the pair was judged. One object for one run of the pass.
+ * back because a text of one of its pairs moved while the thought was in hand (found by a part's write, by a waiting
+ * part's removal, or as the thought was read again before a pair). One object for one run of the pass.
  * `attempt` wraps a worker's whole handling of one claimed thought, and the count ends with every end of an attempt
  * but a put-back: a judgement, a failure, a claim lost, a stop of the worker, a throw. So a follower that runs for days
  * counts no edit of last week against one of today. The bookkeeping is in this one place whatever the attempt's
@@ -836,7 +845,7 @@ export class PutBacks {
 }
 
 /**
- * Which text moved while a pair was judged, in the words of the two lines that say so (decide version 6): the line a
+ * Which text moved while the thought was in hand, in the words of the two lines that say so (decide version 6): the line a
  * worker prints as it puts the thought back, and the failed claim's error past the bound. `olderId` is the pair's
  * older thought. The write's answer names the side; neither named reads as the thought's own.
  */
@@ -1048,7 +1057,7 @@ export function partsWaitWords(p: PartsStanding, claims: PartsClaims): string {
     Number(p.vector) ? `${p.vector} wait for a vector` : "",
     Number(p.held) ? `${p.held} wait for a rebuild, their pair holding a proposal at a moved text that none has set stale` : "",
     !Number(p.failed) ? ""
-      : claims === "any" ? `${p.failed} wait behind a claim of their thought that failed in a pass under ${(p.failed_keys ?? []).join(", ")} (bun db/consolidate.ts --retry-failed with that judge's model)`
+      : claims === "any" ? `${p.failed} wait behind a claim of their thought that failed in a pass under ${(p.failed_keys ?? []).join(", ")} (bun db/consolidate.ts --retry-failed, in decide mode with that key's decider and writer: a judge-mode run returns no such claim)`
       : `${p.failed} wait for --retry-failed, their thought's claim under the pass's key having failed`,
     claims === "unread" ? "a claim that failed is not read (this role holds no SELECT on thought_work_claims), and a part behind one is counted the run's" : "",
   ].filter(Boolean);
@@ -1067,7 +1076,22 @@ export function partsStanding(claims: PartsClaims, limit?: number): { sql: strin
 
 /** Whether a pass key is decide mode's (decideKey's shape): the sleep scheduler reads the parts' work for such a key alone, since a judge-mode pass pools nothing for a part. */
 export function isDecideKey(key: string): boolean {
-  return key.startsWith(CONSOLIDATE_KEY_PREFIX) && /@p\d+d\d+$/.test(key);
+  return key.startsWith(CONSOLIDATE_KEY_PREFIX) && DECIDE_KEY_TAIL.test(key);
+}
+/** DECIDE_KEY_TAIL_SQL as this file's own test: one spelling of the tail for the SQL and for isDecideKey. */
+const DECIDE_KEY_TAIL = new RegExp(DECIDE_KEY_TAIL_SQL);
+/** A decide key's decider and writer, with the tail's one spelling; the last `+` parts them, as preflight has read it. */
+const DECIDE_KEY_MODELS = new RegExp(`^(.+)\\+(.+)${DECIDE_KEY_TAIL_SQL}`);
+
+/**
+ * The decider and the writer a decide-mode pass key names (`consolidate:<decider>+<writer>@p<n>d<m>`), null for any
+ * other key. For the command that runs under such a key: a run without the decider's knobs is judge mode, pools
+ * under another key and names no part (review pass 4: db/rebuild.ts printed the bare command for a decide key).
+ */
+export function decideKeyModels(key: string): { decider: string; writer: string } | null {
+  if (!key.startsWith(CONSOLIDATE_KEY_PREFIX)) return null;
+  const m = DECIDE_KEY_MODELS.exec(key.slice(CONSOLIDATE_KEY_PREFIX.length));
+  return m ? { decider: m[1], writer: m[2] } : null;
 }
 
 /**

@@ -32,7 +32,7 @@ import { EGRESS_UNITS, KEYED_UNITS, hostOf, localKnob, type EgressTerm, type Egr
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
-import { consolidatePassKey, partsClaimsFor, partsStanding, type PartsStanding } from "./consolidate-decide.ts";
+import { consolidatePassKey, decideKeyModels, partsClaimsFor, partsStanding, type PartsStanding } from "./consolidate-decide.ts";
 import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, PRIORITY_GRANT_FIX, priorityFindingsRow, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
@@ -5104,15 +5104,15 @@ if (configFailed) {
               // the extractor where it is. A key of this server's own models
               // needs none, whatever its versions, as before decide mode.
               const rest = key.slice(CONSOLIDATE_KEY_PREFIX.length);
-              const decided = /^(.+)\+(.+)@p\d+d\d+$/.exec(rest);
+              const decided = decideKeyModels(key);
               const judged = decided ? undefined : /^(.+)@p\d+$/.exec(rest)?.[1];
               // The key the scheduler runs now: this configuration's, whatever a
               // model name holds — the parse splits a `+` in a name wrongly
               // (review pass 2).
               const currentKey = key === consolidatePassKey(resolvedEmbed);
-              const ownKey = currentKey || (resolvedEmbed.decider ? decided?.[1] === resolvedEmbed.decider && decided[2] === judgeModel : judged === judgeModel);
+              const ownKey = currentKey || (resolvedEmbed.decider ? decided?.decider === resolvedEmbed.decider && decided.writer === judgeModel : judged === judgeModel);
               const envPrefix = ownKey ? ""
-                : decided ? `OB1_CONSOLIDATE_DECIDER=${decided[1]} OB1_JUDGE_MODEL=${decided[2]} `
+                : decided ? `OB1_CONSOLIDATE_DECIDER=${decided.decider} OB1_JUDGE_MODEL=${decided.writer} `
                 : judged ? `${resolvedEmbed.decider ? "OB1_CONSOLIDATE_DECIDER= " : ""}OB1_JUDGE_MODEL=${judged} ` : "";
               const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts with entities — ");
               // Running: a worker holds a live lease, or the key's follower

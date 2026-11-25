@@ -26,7 +26,7 @@ import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
 import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, isDecideKey, DECIDE_KEY_TAIL_SQL, partsClaimsFor, partsStanding, partsStandingSql, partsWaitWords, repooled, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, isDecideKey, decideKeyModels, DECIDE_KEY_TAIL_SQL, partsClaimsFor, partsStanding, partsStandingSql, partsWaitWords, repooled, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
 import { askOwnSubject, heldAs, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM, unscopedKey } from "./subject.ts";
@@ -2190,6 +2190,14 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   const shapes = parseParts(ans([part, { ...part, in: "C" }, { ...part, word: "outdates" }, { ...part, stale: "" }, { ...part, shown_by: 7 }, { ...part, reason: "  " }, "a string", null, [part]]));
   assert(shapes.parts.length === 1 && shapes.dropped === 8 && !shapes.malformed,
     `an item with no side, a word outside the eight, a quote or the reason missing, or no object at all is dropped and counted, and the rest stand (${shapes.parts.length} kept, ${shapes.dropped} dropped)`);
+  // Review pass 4: of the dropped items, those that quote no statement are counted apart. Such an item names none,
+  // so it cannot be a statement named again in a form the pass does not read, and the pass holds no waiting part
+  // back for it (one filler item kept every waiting part of its pair and failed the claim at each retry).
+  const fillers = parseParts(ans([{}, "none", null, { in: "A", stale: "", shown_by: "", word: "", reason: "" }, { in: "A", stale: "   ", shown_by: part.shown_by, word: "implements", reason: "r" }, { ...part, word: "fixes" }, { ...part, in: "C" }]));
+  const pastTheCap = parseParts(ans([...Array.from({ length: 12 }, (_, i) => ({ ...part, stale: `statement ${i}` })), {}, { ...part, stale: "a thirteenth" }]));
+  assert(shapes.unnamed === 4 && fillers.parts.length === 0 && fillers.dropped === 7 && fillers.unnamed === 5 && one.unnamed === 0 && parseParts("not json").unnamed === 0
+      && pastTheCap.parts.length === 12 && pastTheCap.over === 2 && pastTheCap.dropped === 0 && pastTheCap.unnamed === 0,
+    `…and of the dropped, those that quote no statement are counted apart: an empty object, a bare word, a null, an item whose statement is empty or blank; not one that quotes a statement under a word outside the eight or with no side, and not one past the twelve read, whatever it holds (${fillers.unnamed} of ${fillers.dropped} dropped; ${shapes.unnamed} of ${shapes.dropped}; past the cap ${pastTheCap.unnamed} of ${pastTheCap.over})`);
   assert(parseParts(ans([part], "yes")).falls === "older" && parseParts(ans([part], "no", " YES ")).falls === "newer" && parseParts(ans([])).falls === null && parseParts(ans([])).parts.length === 0 && !parseParts(ans([])).malformed,
     "the thought it says falls whole: A the older, B the newer, or neither; an empty list is an answer");
   const unread = ["not json", "{}", "[]", ans("none"), ans([part], "yes", "yes"), ans([part], true, false), ans([part], "maybe"), JSON.stringify({ parts: [part], a_falls: "no" })].map((raw) => parseParts(raw));
@@ -2626,9 +2634,9 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   // keys named, for a reader that knows none; or not read at all, said so, for a role that may not read the claims.
   const waitsAny = partsWaitWords({ stale: 0, moved: 3, vector: 0, held: 0, failed: 2, failed_keys: ["consolidate:a@p4d5", "consolidate:b@p4d6"] }, "any");
   const waitsUnread = partsWaitWords({ stale: 0, moved: 3, vector: 1, held: 0, failed: 0, failed_keys: [] }, "unread");
-  assert(waitsAny === `${RUN} takes up 1, the pair judged again or, where nothing will judge it again, the part removed; 2 wait behind a claim of their thought that failed in a pass under consolidate:a@p4d5, consolidate:b@p4d6 (bun db/consolidate.ts --retry-failed with that judge's model)`
+  assert(waitsAny === `${RUN} takes up 1, the pair judged again or, where nothing will judge it again, the part removed; 2 wait behind a claim of their thought that failed in a pass under consolidate:a@p4d5, consolidate:b@p4d6 (bun db/consolidate.ts --retry-failed, in decide mode with that key's decider and writer: a judge-mode run returns no such claim)`
       && waitsUnread === `${RUN} takes up 2, the pair judged again or, where nothing will judge it again, the part removed; 1 wait for a vector; a claim that failed is not read (this role holds no SELECT on thought_work_claims), and a part behind one is counted the run's`,
-    `…a failed claim read under any key names the keys, and one not read is said to be not read (${waitsAny} | ${waitsUnread})`);
+    `…a failed claim read under any key names the keys and says the retry is a decide-mode run's, the keys being decide mode's alone, and one not read is said to be not read (${waitsAny} | ${waitsUnread})`);
   // …and the read itself: under the pass's key it compares the key given; under any it reads the pass's decide-mode
   // keys, by the prefix and the ending, and gathers them; and unread it names no claims table at all, so a role
   // without SELECT there can run it.
@@ -2636,7 +2644,7 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   const ANY_KEY = "c.work_type LIKE 'consolidate:%' AND c.work_type ~ '@p[0-9]+d[0-9]+$' AND c.status = 'failed'";
   assert(/c\.work_type = \$1 AND c\.status = 'failed'/.test(standKey) && !/LIKE 'consolidate:%'/.test(standKey) && /ARRAY\[\]::text\[\] AS failed_keys/.test(standKey)
       && standAny.split(ANY_KEY).length === 3 && /array_agg\(DISTINCT c\.work_type ORDER BY c\.work_type\)/.test(standAny)
-      && !/thought_work_claims/.test(standUnread) && !/'failed' END/.test(standUnread) && /ELSE 'next' END AS standing/.test(standUnread) && /LIMIT 5\b/.test(standUnread),
+      && !/thought_work_claims/.test(standUnread) && !/THEN 'failed'/.test(standUnread) && /THEN 'failed'/.test(standKey) && /THEN 'failed'/.test(standAny) && /ELSE 'next' END AS standing/.test(standUnread) && /LIMIT 5\b/.test(standUnread),
     "the standing read places a part behind a failed claim under the key it is given, or under any decide-mode key of the pass with the keys gathered, or reads no claim, naming no claims table");
   // Review pass 3. The keyless read's pattern for a decide-mode key is isDecideKey's own: a judge-mode key's failed
   // claim keeps no part from a decide run, and the read took one for a claim that does. The pattern holds no
@@ -2664,11 +2672,17 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   assert(/pend AS MATERIALIZED \(SELECT id, older_id, newer_id, status, older_fingerprint, newer_fingerprint FROM public\.settled_parts WHERE status = 'pending' LIMIT 7\)/.test(standBound)
       && /SELECT s\.id FROM pend s JOIN/.test(standBound) && standBound.includes("((SELECT count(*) FROM pend) >= 7 OR (SELECT count(*) FROM w) >= 7) AS cut") && /\) x LIMIT 7\)/.test(standBound)
       && standKey.includes(", false AS cut") && !/\bpend\b/.test(standKey) && /SELECT s\.id FROM public\.settled_parts s JOIN/.test(standKey)
-      && [standKey, standAny, standUnread, standBound].every((q) => q.includes("placed AS MATERIALIZED (")),
-    "the bounded read tests the pending parts of one bounded source, counts that source and the parts placed against the bound, and says whether either was reached; a read with no bound says false; the placed parts are materialized");
+      && [standKey, standAny, standUnread, standBound].every((q) => q.includes("placed AS MATERIALIZED ("))
+      && partsStanding(KEYED, 7).sql === standBound && partsStanding("any", 7).sql === partsStandingSql(7, "any") && /LIMIT 7\)/.test(partsStanding("any", 7).sql) && !/LIMIT/.test(partsStanding(KEYED).sql),
+    "the bounded read tests the pending parts of one bounded source, counts that source and the parts placed against the bound, and says whether either was reached; a read with no bound says false; the placed parts are materialized; and the bound given with the reader reaches the read whichever reader it is");
   // A decide key by its shape (isDecideKey): the sleep scheduler reads the parts' work under such a key alone.
   assert(isDecideKey(decideKey("h2o", "writer")) && !isDecideKey(consolidateKey("judge")) && !isDecideKey(`extract:m@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION}`) && !isDecideKey(`${decideKey("h2o", "writer")}x`) && !isDecideKey(""),
     "a decide-mode key is known by its prefix and its two versions, and no judge key, other pass's key or longer key is one");
+  // Review pass 4: the key's two models, for the command that runs under it (db/rebuild.ts, preflight). The last
+  // `+` parts them, as preflight has read it; any other key names none.
+  const models = [decideKey("h2o", "writer"), "consolidate:a+b+c@p4d6", consolidateKey("judge"), `extract:a+b@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION}`, `${decideKey("h2o", "writer")}x`, "consolidate:+w@p4d6", ""].map((k) => decideKeyModels(k));
+  assert(JSON.stringify(models) === JSON.stringify([{ decider: "h2o", writer: "writer" }, { decider: "a+b", writer: "c" }, null, null, null, null, null]),
+    `a decide-mode key names its decider and its writer, parted at the last plus sign, and no other key names any (${JSON.stringify(models)})`);
   // A re-pool statement tried again for a thought deleted under it or a deadlock, three tries in all, and thrown on at
   // once for anything else (repooled, review pass 1).
   const tried: string[] = [];
@@ -2684,8 +2698,12 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   const ended = (p: Promise<number>) => p.then((v) => `returned ${v}`, (e: Error) => e.message);
   const [poolTwice, poolThrice, otherState, byCode, bare, once2] = [await ended(repooled(failing(["23503", "40P01"]))), await ended(repooled(failing(["23503", "23503", "40P01"]))), await ended(repooled(failing(["42501"]))),
     await ended(repooled(failing(["40P01"], "code"))), await ended(repooled(async () => { throw new Error("no state"); })), await ended(repooled(failing(["23503"]), 1))];
+  // The states beside the two (review pass 4: with every class 23 or 40 state tried again, or a lock's timeout,
+  // every row passed): a serialization failure, a unique violation, a lock not available, each thrown at once.
+  const near = [await ended(repooled(failing(["40001"]))), await ended(repooled(failing(["23505"]))), await ended(repooled(failing(["55P03"]))), await ended(repooled(failing(["23502"], "code")))];
   assert(poolTwice === "returned 3" && poolThrice === "state 40P01" && otherState === "state 42501" && byCode === "returned 2" && bare === "no state" && once2 === "state 23503"
-      && tried.join() === "23503,40P01,ok,23503,23503,40P01,42501,40P01,ok,23503",
+      && near.join() === "state 40001,state 23505,state 55P03,state 23502"
+      && tried.join() === "23503,40P01,ok,23503,23503,40P01,42501,40P01,ok,23503,40001,23505,55P03,23502",
     `a re-pool statement is tried again for a deleted thought (23503) or a deadlock (40P01), three tries in all, its state read from errno or code, and any other error is thrown at once (${[poolTwice, poolThrice, otherState, byCode, bare, once2].join(" | ")}; tried ${tried.join()})`);
 
   // decidePair end to end, against an in-process tier and writer.
