@@ -5683,7 +5683,7 @@ if (want("9f")) {
 // a delete leaves no edge citing the thought, and the cost is recorded.
 
 if (want("10")) {
-  console.log("\n[10] db/extract-entities.ts: extraction through the claims, against a stub model");
+  console.log("\n[10] db/extract-entities.ts: extraction through the claims, against a stub model; --switch-key back to a key used before returns the rows that key cannot vouch for, and a key moved back with nothing returned is mended by the next run (SMD-2607)");
   await sql`DELETE FROM thoughts`;
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   const KEY = "extract:stub-meta@p2";
@@ -5903,6 +5903,11 @@ if (want("10")) {
       await Bun.sleep(5 + slowMs);
       if ((hemlockIsProse && /hemlock/.test(prompt)) || [...proseKeys].some((k) => prompt.includes(k))) {
         return Response.json({ choices: [{ message: { content: "I'm sorry, I can't help with that." } }] });
+      }
+      // One entity a model, so a graph says whose reading it holds (SMD-2607).
+      if (prompt.includes("switchback")) {
+        const reading = { entities: [{ name: body.model === "stub-other" ? "Borealis" : "Aurora", type: "project", confidence: 0.9 }], relationships: [] };
+        return Response.json({ choices: [{ message: { content: JSON.stringify(reading) } }], model: body.model });
       }
       const key = Object.keys(answers).find((k) => prompt.includes(k));
       if (key === "ledger") ledgerCalls++;
@@ -8190,6 +8195,105 @@ if (want("10")) {
   assert(goneInFlight && goneAborted === 1 && goneAbortCode <= 1 && /, 1 deleted mid-pass/.test(goneAbortSummary) && !/set back/.test(goneAbortSummary) && goneAbortLines.some((l) => l.includes(`${vanishing}: deleted while it was leased`)),
          `…a note deleted while its call is in hand, then aborted, is counted deleted, not set back (${goneAborted} aborted; exit ${goneAbortCode}: ${goneAbortSummary.trim().slice(0, 200)})`);
 
+  // --switch-key back to a key the brain used before (SMD-2607): key A, then
+  // B, then A again. Each key's model names its own entity, so the graph says
+  // whose reading it holds. Six thoughts, one for each way a row of A's can
+  // stand when the brain comes back to it:
+  //   read     A read it, then B did                      -> returned (another key read it since)
+  //   failed   A failed it, B read it                     -> returned (failed)
+  //   kept     A read it, B failed it                     -> LEFT: A's reading stands, at the text it holds
+  //   empty    A read it and named nothing, B failed it   -> returned (no lineage row vouches for it)
+  //   moved    A read it, B failed it, then it was edited -> returned (its lineage is of other text)
+  //   lapsed   A read it, B read it, A's row left leased  -> returned (a lease expired with no holder)
+  await sql`DELETE FROM thoughts`;
+  await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
+  const KEY_B = "extract:stub-other@p2";
+  const envB = { ...env, OB1_METADATA_MODEL: "stub-other" };
+  const back = {
+    read: await seed("The first switchback note."),
+    failed: await seed("The switchfail entry of the switchback set."),
+    kept: await seed("A switchkeep switchback note."),
+    empty: await seed("A switchkeep note that names nothing."),
+    moved: await seed("A switchkeep switchback note that will move."),
+    lapsed: await seed("The last switchback note."),
+  };
+  const readings = async () => (await sql`
+    SELECT e.name, te.extraction_key AS key, count(*)::int AS c FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id
+     WHERE te.thought_id = ANY(${sql.array(Object.values(back), "TEXT")}::uuid[]) GROUP BY 1, 2 ORDER BY 1, 2`).map((r: { name: string; key: string; c: number }) => `${r.c} ${r.name} under ${r.key}`).join(", ");
+  const readingOf = async (id: string) => (await sql`SELECT e.name FROM thought_entities te JOIN ob1_entities e ON e.id = te.entity_id WHERE te.thought_id = ${id}::uuid`).map((r: { name: string }) => r.name).join(",") || "nothing";
+  const rowsUnder = async (k: string) => (await sql`SELECT status, count(*)::int AS c FROM thought_work_claims WHERE work_type = ${k} GROUP BY 1 ORDER BY 1`).map((r: { status: string; c: number }) => `${r.c} ${r.status}`).join(", ");
+  const recordedNow = async () => String((await sql`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key'`)[0]?.value);
+  const lineOf = (text: string, re: RegExp) => text.split("\n").find((l) => re.test(l))?.trim().slice(0, 260);
+  proseKeys.add("switchfail");
+  const underA = await extractInProcess();
+  proseKeys.delete("switchfail");
+  assert(underA.code === 1 && (await readings()) === `4 Aurora under ${KEY}` && (await rowsUnder(KEY)) === "1 failed, 5 succeeded",
+         `key A's first run reads five notes as its model does, one of them naming nothing, and fails the sixth (exit ${underA.code}; ${await readings()}; ${await rowsUnder(KEY)})`);
+  proseKeys.add("switchkeep");
+  const toB = await extractInProcess({ switchKey: true, env: envB });
+  proseKeys.delete("switchkeep");
+  assert(toB.code === 1 && (await readings()) === `2 Aurora under ${KEY}, 3 Borealis under ${KEY_B}` && (await rowsUnder(KEY)) === "1 failed, 5 succeeded" && (await rowsUnder(KEY_B)) === "3 failed, 3 succeeded"
+      && toB.stdout.includes(`ob1_config.entity_extraction_key = ${KEY_B}, in place of ${KEY}`) && toB.stdout.includes(`--switch-key: none of ${KEY_B}'s rows to return to the pool`) && /pool: 6 thought\(s\) added/.test(toB.stdout),
+         `a switch to a key never used is the switch as it was: every thought pooled, none returned, B's model reading the three it can and A's rows left as they ended (exit ${toB.code}; ${await readings()}; ${lineOf(toB.stdout, /--switch-key:/)})`);
+  // While B is the recorded key: one note edited (016's trigger pools it under B alone), and one of A's rows left leased by a worker long gone.
+  await sql`SELECT update_thought(${back.moved}::uuid, 'A switchkeep switchback note that has moved.', NULL::jsonb, NULL::vector)`;
+  await sql`UPDATE thought_work_claims SET status = 'claimed', ttl_expires_at = now() - interval '1 hour', finished_at = NULL WHERE work_type = ${KEY} AND thought_id = ${back.lapsed}::uuid`;
+  // Back to A, asked first: --status and --dry-run count what the switch returns, and write nothing.
+  const callsBeforeBack = calls;
+  const statusBack = await extractInProcess({ status: true });
+  const dryBack = await extractInProcess({ dryRun: true, switchKey: true, retryFailed: true });
+  assert(statusBack.code === 0 && statusBack.stdout.includes(`the brain used ${KEY} before: a --switch-key run returns 5 of its row(s) to the pool`)
+      && dryBack.code === 0 && dryBack.stdout.includes(`record ${KEY} in ob1_config so new captures enqueue; return 5 of this key's row(s) from an earlier use to the pool (failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds); add 0 thoughts to the pool; send 5 thought(s) to stub-meta`)
+      && (await rowsUnder(KEY)) === "1 claimed, 1 failed, 4 succeeded" && (await readings()) === `2 Aurora under ${KEY}, 3 Borealis under ${KEY_B}` && calls === callsBeforeBack && (await recordedNow()) === KEY_B,
+         `--status and --dry-run under the earlier key count the five rows a switch returns, the failed one once beside --retry-failed, and write and send nothing (${lineOf(dryBack.stdout, /would:/)})`);
+  const backToA = await extractInProcess({ switchKey: true, retryFailed: true });
+  assert(backToA.code === 0 && backToA.stdout.includes(`--switch-key: the brain used ${KEY} before — 5 of its row(s) returned to the pool (failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds)`)
+      && backToA.stdout.includes(`ob1_config.entity_extraction_key = ${KEY}, in place of ${KEY_B}`) && backToA.stdout.includes("--retry-failed: the switch returned this key's failed rows with the rest")
+      && calls === callsBeforeBack + 5 && (await readings()) === `5 Aurora under ${KEY}` && (await readingOf(back.empty)) === "nothing" && (await rowsUnder(KEY)) === "6 succeeded" && (await recordedNow()) === KEY,
+         `--switch-key back to the earlier key returns the five rows it cannot vouch for and reads them again — the one B read, the failed, the one that named nothing, the edited and the lapsed — and leaves the sixth, whose reading stands: five calls, the graph A's (exit ${backToA.code}; ${calls - callsBeforeBack} call(s); ${await readings()}; ${await rowsUnder(KEY)}; ${lineOf(backToA.stdout, /--switch-key:/)})`);
+  const settledA = await extractInProcess();
+  assert(settledA.code === 0 && calls === callsBeforeBack + 5 && !/returned to the pool/.test(settledA.stdout) && (await rowsUnder(KEY)) === "6 succeeded",
+         `…and a run under the key now recorded returns nothing: no call, the rows left finished (exit ${settledA.code}; ${calls - callsBeforeBack - 5} call(s))`);
+  // A key moved back with nothing returned — a switch before this rule, or the record set by hand: B's three finished
+  // rows are of thoughts A has read since. --status counts them and the next run returns them, with no flag; the
+  // edited note, pending under B since its edit, is read with them, and the two B failed stay failed.
+  // One of the three was edited after A read it: A's row is pending again, so it is no finished row later than B's, and
+  // the sign left is A's lineage on the thought's entities (review pass 2).
+  await sql`SELECT update_thought(${back.lapsed}::uuid, 'The last switchback note, edited.', NULL::jsonb, NULL::vector)`;
+  const lapsedUnderA = (await sql`SELECT status FROM thought_work_claims WHERE work_type = ${KEY} AND thought_id = ${back.lapsed}::uuid`)[0].status;
+  await sql`UPDATE ob1_config SET value = ${KEY_B} WHERE key = 'entity_extraction_key'`;
+  const [{ t0: mendFrom }] = await sql`SELECT clock_timestamp() AS t0`;
+  const callsBeforeMend = calls;
+  const statusMend = await extractInProcess({ status: true, env: envB });
+  const mend = await extractInProcess({ env: envB });
+  const mendCalls = calls - callsBeforeMend;
+  const mendAgain = await extractInProcess({ env: envB });
+  const mendDatedNow = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY_B} AND enqueued_at >= ${mendFrom}
+                                          AND thought_id = ANY(${sql.array([back.read, back.failed, back.lapsed], "TEXT")}::uuid[])`)[0].c);
+  assert(lapsedUnderA === "pending" && mendDatedNow === 3
+      && statusMend.stdout.includes("3 finished row(s) are of thoughts another extraction key read since: the next run returns them to the pool")
+      && mend.code === 1 && mend.stdout.includes(`3 finished row(s) returned to the pool, behind what is pending: another extraction key read their thoughts after ${KEY_B} did`) && !/--switch-key:/.test(mend.stdout)
+      && mendCalls === 4 && (await readings()) === `1 Aurora under ${KEY}, 4 Borealis under ${KEY_B}` && (await readingOf(back.kept)) === "Aurora" && (await rowsUnder(KEY_B)) === "2 failed, 4 succeeded"
+      && calls === callsBeforeMend + 4 && !/returned to the pool/.test(mendAgain.stdout),
+         `a key moved back with nothing returned is mended by its next run: --status counts the three finished rows another key read since, one of them known only by the other key's lineage on its entities, the run returns them behind what is pending and reads them with no flag, and the run after it returns none (exit ${mend.code}; ${mendCalls} call(s); ${await readings()}; ${await rowsUnder(KEY_B)}; ${lineOf(mend.stdout, /finished row\(s\) returned/)})`);
+  // The record moved by another run between this run's read of it and its switch: read again under the lock, the
+  // switch is not made twice. A follower, since it alone waits at its start for a provider that is away.
+  {
+    const lines: string[] = [];
+    const ac = new AbortController();
+    downUntil = Date.now() + 60_000;
+    down = "503";
+    const running = runExtract({ url: URL_!, env, workers: 1, follow: 1, switchKey: true, signal: ac.signal, writer: { out: (l) => lines.push(l), err: (l) => lines.push(l) } });
+    const readIt = await pollUntil(async () => lines.some((l) => l.includes(`ob1_config.entity_extraction_key is ${KEY_B}; this run uses ${KEY}`)), 20_000);
+    await sql`UPDATE ob1_config SET value = ${KEY} WHERE key = 'entity_extraction_key'`;
+    downUntil = 0;
+    const said = await pollUntil(async () => lines.some((l) => l.includes(`ob1_config.entity_extraction_key was ${KEY} by the time this run came to record it`)), 60_000);
+    ac.abort();
+    const code = await running;
+    assert(readIt && said && !lines.some((l) => /--switch-key:/.test(l)) && (await recordedNow()) === KEY,
+           `a switch whose key another run recorded while it waited for the provider says so and returns nothing of its own (exit ${code}; ${lines.find((l) => /by the time/.test(l))?.trim().slice(0, 160)})`);
+  }
+
   model.stop(true);
   await sql`DELETE FROM ob1_config WHERE key = 'entity_extraction_key'`;
   await sql`DELETE FROM thoughts`;
@@ -9749,6 +9853,13 @@ if (want("10h")) {
         await sql.unsafe(`GRANT SELECT ON thought_work_claims TO ${SROLE}`);
         assert(noClaimSelect.code === 2 && /This role cannot claim from the subject pool: it needs SELECT, INSERT and UPDATE on thought_work_claims/.test(noClaimSelect.stderr) && ownCalls === asked,
           `…and without SELECT on the claims, refused too, before any question (exit ${noClaimSelect.code})`);
+        // …or without SELECT on 153's subject-key repository, which the door reads for a bare pr: or version: key
+        // (SMD-3887 review pass 2: the check passed the role, and its first write was refused).
+        await sql.unsafe(`REVOKE SELECT ON subject_repo_settings FROM ${SROLE}`);
+        const noRepoRead = await sweep({}, sEnv, sUrl);
+        await sql.unsafe(`GRANT SELECT ON subject_repo_settings TO ${SROLE}`);
+        assert(noRepoRead.code === 2 && noRepoRead.stderr.includes(`record_thought_subjects needs ${DOOR_GRANTS}`) && DOOR_GRANTS.includes("SELECT on subject_repo_settings") && ownCalls === asked,
+          `…and without SELECT on the subject-key repository, refused before any question, naming it (exit ${noRepoRead.code}: ${noRepoRead.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         await sql.unsafe(`REVOKE SELECT ON ob1_config FROM ${SROLE}`);
         const noConfigRead = await sweep({ dryRun: true }, sEnv, sUrl);
         // …and a run, not dry, heard as the tables' refusal (PR 6b-1's review pass 2, mutant: heard as usage, it lived).
@@ -19597,8 +19708,9 @@ if (want("16")) {
     // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
     // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 134's validator, which
     // carries 120's with the deliverable kind (SMD-1715), and the settled parts' file, whose lineage writer carries
-    // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) });
+    // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row),
+    // and the subject-repo file, whose key rule replaces 111's with a key scoped to its repository (SMD-3887).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) || /^\d{3}_subject_repo_scope\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an
@@ -24522,10 +24634,19 @@ if (want("29")) {
     let raceId = "";
     /** A thought whose text a session moves and rebuilds while its call is out (SMD-2298 PR 2, review pass 1). */
     let rebuiltId = "";
+    /** A thought whose answer waits on the test (PR 4a-1 review pass 1): seen, then answered once `writeHeld` resolves. */
+    let heldMarker = "";
+    let heldSeen: () => void = () => {};
+    let writeHeld: Promise<void> = Promise.resolve();
     let rebuiltDone = false;
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
       const body = await req.text();
       bodies.push(body);
+      if (heldMarker && body.includes(heldMarker)) {
+        heldMarker = "";
+        heldSeen();
+        await writeHeld;
+      }
       if (!rebuiltDone && rebuiltId && body.includes("[29] rebuilt")) {
         rebuiltDone = true;
         const edited = "[29] rebuilt, its text moved while the call was out";
@@ -24827,6 +24948,95 @@ if (want("29")) {
       SPECIAL.delete("[29] P401");
       assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
         `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
+
+      // SMD-2298 PR 4a-1: the options a caller like the sleep scheduler passes. abortInHand aborts the tags call in
+      // hand: the thought goes to the back of the queue, nothing written, and the run re-tags it after; onStart hears
+      // the start; banner and summary false keep their lines out; session settings reach the run's own connections.
+      const AB = await tagged("[29] AB, its call aborted in hand");
+      await move(AB, "[29] AB, its call aborted in hand, moved");
+      SPECIAL.set("[29] AB", "slow");
+      let abortInHand: InHandAbort | null = null;
+      const starts: StartResult[] = [];
+      const abRun = retag({ pausesMs: [10], onPass: (_stop, abort) => { abortInHand = abort; }, onStart: (r) => starts.push(r), banner: false, summary: false, session: { application_name: "retag-29-session" } });
+      for (let i = 0; i < 200 && !bodies.some((b) => b.includes("[29] AB")); i++) await Bun.sleep(25);
+      // The abort at once, while the slow answer is out; the session's connections read after it, still open
+      // (review pass 2: the read before it could outlast the stub's window on a loaded box).
+      const abortedN = abortInHand ? (abortInHand as InHandAbort)() : -1;
+      const sessions = Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'retag-29-session'`) as { n: number }[])[0].n);
+      SPECIAL.delete("[29] AB");
+      const abDone = await abRun;
+      const abClaim = (await claims()).find((c) => c.id === AB);
+      assert(abortedN === 1 && bodies.filter((b) => b.includes("[29] AB")).length === 2 && settled(await tagsRow(AB)) && abClaim?.status === "succeeded"
+          && abDone.code !== 2 && starts.length === 1 && starts[0].ok === true && sessions > 0
+          && !/job: {4}/.test(abDone.out) && !/OB1_WORKER_KEY is not set/.test(abDone.out + abDone.err) && !/re-tagged \(/.test(abDone.out),
+        `abortInHand aborts the call in hand: the thought set back, re-tagged after from its text, settled; onStart heard once, through; banner and summary left out; the session's settings on its connections (${abortedN} aborted; ${sessions} session(s); ${JSON.stringify(starts)})`);
+      // The admit gate: nothing pooled or sent while it is shut; opened, the run goes on.
+      const G = await tagged("[29] G, behind the admit gate");
+      await move(G, "[29] G, behind the admit gate, moved");
+      let openGate: () => void = () => {};
+      const shut = new Promise<void>((r) => { openGate = r; });
+      let admitAsks = 0;
+      const admit: Admit = (signal) => new Promise<void>((resolve, reject) => {
+        admitAsks++;
+        void shut.then(resolve);
+        signal.addEventListener("abort", () => reject(new Error("stopped at the gate")), { once: true });
+      });
+      const gRun = retag({ pausesMs: [10], admit });
+      // The first ask is the pool's: until it is answered nothing is pooled (review pass 1: a fixed sleep proved less).
+      for (let i = 0; i < 200 && admitAsks < 1; i++) await Bun.sleep(25);
+      await Bun.sleep(200);
+      const asksShut = admitAsks;
+      const gPooledShut = (await claims()).some((c) => c.id === G);
+      const gSentShut = bodies.some((b) => b.includes("[29] G"));
+      openGate();
+      const gDone = await gRun;
+      assert(!gPooledShut && !gSentShut && asksShut === 1 && admitAsks === 3 && gDone.code !== 2 && settled(await tagsRow(G)) && (await claims()).find((c) => c.id === G)?.status === "succeeded",
+        `the admit gate shut: nothing pooled or sent; opened, the run pools and re-tags, the gate asked before the pool and each claim (${gPooledShut}/${gSentShut}; ${admitAsks} ask(s); ${line(gDone.out, "re-tagged (")})`);
+      // abortInHand counts only a call that is out (review pass 1): a worker writing — its update_thought held behind
+      // a row lock the test takes as the answer goes back — has no call to abort, and the thought is written, not set
+      // back.
+      const W = await tagged("[29] W, written while abortInHand is asked");
+      await move(W, "[29] W, written while abortInHand is asked, moved");
+      let releaseAnswer: () => void = () => {};
+      writeHeld = new Promise<void>((r) => { releaseAnswer = r; });
+      const seen = new Promise<void>((r) => { heldSeen = r; });
+      heldMarker = "[29] W";
+      let wAbort: InHandAbort | null = null;
+      const wRun = retag({ pausesMs: [10], onPass: (_stop, abort) => { wAbort = abort; } });
+      await seen;
+      const locker = new SQL({ url: URL_!, max: 1 });
+      await locker.unsafe("BEGIN");
+      await locker.unsafe("SELECT 1 FROM thoughts WHERE id = $1::uuid FOR UPDATE", [W]);
+      releaseAnswer();
+      await Bun.sleep(300);
+      const midWrite = wAbort ? (wAbort as InHandAbort)() : -1;
+      await locker.unsafe("COMMIT");
+      await locker.close();
+      const wDone = await wRun;
+      assert(midWrite === 0 && wDone.code !== 2 && settled(await tagsRow(W)) && (await claims()).find((c) => c.id === W)?.status === "succeeded",
+        `abortInHand asked while the worker writes — no call out — aborts and counts nothing, and the thought is written (${midWrite}; ${line(wDone.out, "re-tagged (")})`);
+      // A worker waiting at a shut admit gate is woken when the run stops of its own accord (review pass 1): two
+      // workers, the gate shut after the pool's ask and one claim's; the worker through meets a 401, the run's fatal
+      // refusal, and the run returns, not waiting for the gate.
+      const X = await plant("[29] X401, the key refused while another waits at the gate", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] X401", 401);
+      let xAsks = 0;
+      const xGate: Admit = (signal) => new Promise<void>((resolve, reject) => {
+        if (++xAsks <= 2) { resolve(); return; }
+        signal.addEventListener("abort", () => reject(new Error("stopped at the gate")), { once: true });
+      });
+      const xRun = retag({ workers: 2, pausesMs: [10], admit: xGate });
+      const xDone = await Promise.race([xRun, Bun.sleep(15_000).then(() => null)]);
+      SPECIAL.delete("[29] X401");
+      assert(xDone !== null && xDone.code === 2 && /The provider refused the request itself/.test(xDone.err) && xAsks >= 3 && (await claims()).find((c) => c.id === X)?.status === "pending",
+        `a worker at a shut admit gate is woken by the run's own stop — another worker's fatal 401 — and the run returns 2, the thought pending (${xDone === null ? "it hung" : xDone.code}; ${xAsks} ask(s))`);
+      // onStart hears a refusal by its kind: the key's, and the input's.
+      const keyStarts: StartResult[] = [];
+      const usageStarts: StartResult[] = [];
+      const keyRefused = await retag({ onStart: (r) => keyStarts.push(r) }, { ...base, OB1_METADATA_MODEL: "stub-meta-other" });
+      const usageRefused = await retag({ workers: 0, onStart: (r) => usageStarts.push(r) });
+      assert(keyRefused.code === 2 && JSON.stringify(keyStarts) === '[{"ok":false,"refused":"key"}]' && usageRefused.code === 2 && JSON.stringify(usageStarts) === '[{"ok":false,"refused":"usage"}]',
+        `onStart hears a refusal by its kind: the key's, the input's (${JSON.stringify(keyStarts)} ${JSON.stringify(usageStarts)})`);
 
       // --switch-key (PR 3b): the key is the tags' target recipe, and every tags row made under another is behind it.
       // A dry run under another model counts them (every row: none is under the new key yet); the switch, cut short
@@ -34828,7 +35038,7 @@ if (want("47")) {
     ];
     assert(usage.every((u) => u.code === 2)
         && /^--status reads and writes nothing: it takes no --dry-run, --key or --batch$/m.test(usage[0].err) && /^--batch goes with a run over every key/m.test(usage[1].err)
-        && /^--key is a subject key — ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
+        && /^--key is a subject key — ticket:<ID>, pr:<number> or pr:<owner>\/<repo>#<number>, version:<v1\.2\.3> or version:<owner>\/<repo>@<v1\.2\.3>, or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
         && /^--batch\b.*\b200\b/m.test(usage[4].err),
       `usage refused before any connection, 2: --status beside a write, --key beside --batch, a key no subject can hold, a batch of none, a batch over 200 (${usage.map((u) => u.err.split("\n")[0].slice(0, 60)).join(" | ")})`);
 
