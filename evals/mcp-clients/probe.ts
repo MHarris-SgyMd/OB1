@@ -22,7 +22,8 @@
 //   /control/down/N        a restart behind a proxy (SMD-4347): the streams ended, the sessions forgotten and the tool set
 //                          changed, then every MCP request answered 502 for N seconds, as the stack's proxy answers
 //                          while the server behind it is away
-//   /control/refuse/N      a restart of the whole stack: the same, with the port closed for N seconds
+//   /control/refuse/N      a restart of the whole stack: the same, with the port closed for N seconds. Anything
+//                          may take the port meanwhile: the probe then stops when it comes to open it again
 //   /control/busy/N        the server back before the REST core behind it: the same, each MCP request answered as the
 //                          brain's edge answers a busy registry (HTTP 200, JSON-RPC -32003, Retry-After 2)
 //   /control/fault/N       the same, each answered 500, as the brain's route answers when its key check throws
@@ -94,7 +95,7 @@ const away = (id: unknown): Response =>
     : new Response("Bad Gateway", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
 
 const log = (line: Record<string, unknown>): void => {
-  // Each line names its probe's port: two probes started without LOG write one file.
+  // Each line the probe writes names its port: two probes started without LOG write one file.
   const full = { at: new Date().toISOString(), port: PORT, ...line };
   appendFileSync(LOG, `${JSON.stringify(full)}\n`);
   console.log(JSON.stringify(full));
@@ -307,9 +308,9 @@ async function control(url: URL): Promise<Response> {
       setTimeout(() => log({ event: "serving-again" }), seconds * 1000);
       // After this answer has left: every connection dropped, and the port open again at once to answer 502. Between
       // the two calls the port is closed, and a connection made then is refused. With a stand-in for this listener,
-      // a test client that connected the moment its stream dropped had a connection refused in 11 to 342 of 3,000
-      // swaps, by the machine's load (macOS, Bun 1.4.3). Opening the next listener first needs a port two
-      // listeners share, which lets a second probe in beside the first: tried, and taken back (SMD-4493).
+      // a test client that connected the moment its stream dropped was refused in 10 to 221 of 3,000 swaps, by
+      // the machine's load (macOS, Bun 1.4.3). Opening the next listener first needs a port two listeners
+      // share, which lets a second probe in beside the first: tried, and taken back (SMD-4493).
       setTimeout(() => {
         void listener.stop(true).then(() => old.close()).catch(() => undefined);
         listener = listen();
