@@ -643,7 +643,7 @@ const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db
  * guard would refuse a hand apply ahead of 151.
  */
 const APPLY_149 = "Apply db/migrations/149_thought_validity.sql.";
-const APPLY_149_PARTS = "Apply db/migrations/149_thought_validity.sql, then db/migrations/153_stale_parts.sql — 153 last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.";
+const APPLY_149_PARTS = "Apply db/migrations/149_thought_validity.sql, then db/migrations/154_stale_parts.sql — 154 last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event

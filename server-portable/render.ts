@@ -43,6 +43,7 @@ import type { ValidityFound, ValidityRecord, ValidityThought } from "./validity.
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type CapSet, type CapSetCode, type HolderRelease, type HolderReleaseCode, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
+import { subjectKeyValid } from "./subject.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
@@ -108,7 +109,7 @@ function guard(v: unknown, key = ""): unknown {
   // A priority item's key (SMD-3664): a uuid, which carries no sentence; a ticket's key is a token already.
   if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
   // A work thread's key (SMD-3306 PR 7a-2a): a ticket's, a pull request's or a version's shape; a phrase's is nulled.
-  if (typeof v === "string" && key === "key" && SHAPED_KEY.test(v)) return v;
+  if (typeof v === "string" && key === "key" && shapedKey(v)) return v;
   // An embedding's id (SMD-4212's little gap): the server's own setting, `<model>@<dim>`, held to no space, so no sentence.
   if (typeof v === "string" && (key === "embeddingId" || key === "measuredOn")) return EMBEDDING_ID.test(v) ? v : null;
   if (typeof v === "string" && key === "identitySha256") return SHA256.test(v) ? v : null;
@@ -1094,13 +1095,17 @@ export function renderRelations(o: Outcome<RelationsResult>): Reply {
       : unknownRefusal(r), safeRelations);
 }
 
-/** A subject key a structured value may carry: a ticket's, a pull request's or a version's, each a shape with no sentence in it — a phrase key, the judge model's words, rides the text alone. */
-const SHAPED_KEY = /^(?:ticket:[A-Z][A-Z0-9]*-[0-9]+|pr:[0-9]{1,9}|version:v[0-9]+(?:\.[0-9]+){1,3})$/;
+/** A subject key a structured value may carry: a ticket's, a pull request's or a version's, bare or scoped to its repository (153, SMD-3887), each a shape with no sentence in it — a phrase key, the judge model's words, rides the text alone. */
+const SHAPED_KEY = /^(?:ticket:[A-Z][A-Z0-9]*-[0-9]+|pr:(?:[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9._-]{1,100}#)?[0-9]{1,9}|version:(?:[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?\/[a-z0-9._-]{1,100}@)?v[0-9]+(?:\.[0-9]+){1,3})$/;
+/** A shaped key that is also a key 153's subject_key_valid admits (subject.ts mirrors it): a repository of `.` or `..`, or a key past 207 characters, is none (review pass 3). */
+function shapedKey(key: string): boolean {
+  return SHAPED_KEY.test(key) && subjectKeyValid(key);
+}
 /** thread (SMD-3306 PR 7a-2a): per thread its key (a shaped one), size, place, page bounds and cursor, each member's id, time, place, superseding thought and ticket, and its linked threads. */
 const safeThread: Safe<ThreadResult> = (v) => ({
   id: v.id,
   threads: v.threads.map((t) => ({
-    key: SHAPED_KEY.test(t.key) ? t.key : null, total: t.total, place: t.place, earlier: t.earlier, cursor: t.cursor,
+    key: shapedKey(t.key) ? t.key : null, total: t.total, place: t.place, earlier: t.earlier, cursor: t.cursor,
     members: t.members.map((m) => ({ id: m.id, created_at: m.created_at, place: m.place, supersededBy: m.supersededBy, ticket: m.ticket ? { issue: m.ticket.issue, statusType: m.ticket.statusType } : null })),
     linked: t.linked.map((l) => ({ key: l.key, relation: l.relation, total: l.total })), linkedMore: t.linkedMore,
   })),
@@ -1114,7 +1119,7 @@ const membersWord = (n: number) => `${n} thought${n === 1 ? "" : "s"}`;
  * (review pass 1: a key cut to 120 with an ellipsis could not be given back, so a long phrase's thread could not be
  * paged).
  */
-const threadKeyText = (key: string) => SHAPED_KEY.test(key) ? key : JSON.stringify(key);
+const threadKeyText = (key: string) => shapedKey(key) ? key : JSON.stringify(key);
 /** A thread's linked threads as one line, or nothing. */
 const linkedLine = (t: ThreadShown) => t.linked.length
   ? `Linked threads (no thread runs across a link): ${t.linked.map((l) => `${l.key} ${LINKED_WORDS[l.relation]} (${membersWord(l.total)})`).join("; ")}${t.linkedMore ? "; and more the board holds" : ""}.`
@@ -1155,7 +1160,7 @@ export function renderThread(o: Outcome<ThreadResult>): Reply {
   }, (r) => r.code === "REFUSED_THREAD_INPUT"
     ? r.problem === "key_or_id" ? "Refused: give exactly one of `key` (a subject key, such as ticket:SMD-3306) or `id` (a thought's id)."
       : r.problem === "after_needs_key" ? "Refused: `after` continues one thread — give it with that thread's `key`, as the page that ended with it said."
-        : `Refused: ${JSON.stringify(oneLine(snipText(r.value ?? "", 80)))} is no subject key — give ticket:<ID> (or the ticket alone, such as SMD-3306), pr:<number>, version:v<n>.<n> or phrase:<lower-case words>. A ticket alone whose team a text never means as a ticket (PR-12, UTF-8, ES-5) is read only with ticket: before it (ticket:ES-5), as a ticket filed under such a team is keyed; a pull request is pr:12, and a word such as UTF-8 a phrase, phrase:utf-8.`
+        : `Refused: ${JSON.stringify(oneLine(snipText(r.value ?? "", 80)))} is no subject key — give ticket:<ID> (or the ticket alone, such as SMD-3306), pr:<number> or pr:<owner>/<repo>#<number>, version:v<n>.<n> or version:<owner>/<repo>@v<n>.<n>, or phrase:<lower-case words>. A ticket alone whose team a text never means as a ticket (PR-12, UTF-8, ES-5) is read only with ticket: before it (ticket:ES-5), as a ticket filed under such a team is keyed; a pull request is pr:12, and a word such as UTF-8 a phrase, phrase:utf-8.`
     : r.code === "REFUSED_CURSOR" ? "Refused: `after` is not a thread cursor — pass the `cursor` a thread's page ended with, as it was given, with that thread's key."
       : r.code === "NOT_FOUND" ? `Refused: no thought with id ${JSON.stringify(oneLine(snipText(r.id, 100)))}.`
         : unknownRefusal(r), safeThread);
