@@ -9749,6 +9749,13 @@ if (want("10h")) {
         await sql.unsafe(`GRANT SELECT ON thought_work_claims TO ${SROLE}`);
         assert(noClaimSelect.code === 2 && /This role cannot claim from the subject pool: it needs SELECT, INSERT and UPDATE on thought_work_claims/.test(noClaimSelect.stderr) && ownCalls === asked,
           `…and without SELECT on the claims, refused too, before any question (exit ${noClaimSelect.code})`);
+        // …or without SELECT on 153's subject-key repository, which the door reads for a bare pr: or version: key
+        // (SMD-3887 review pass 2: the check passed the role, and its first write was refused).
+        await sql.unsafe(`REVOKE SELECT ON subject_repo_settings FROM ${SROLE}`);
+        const noRepoRead = await sweep({}, sEnv, sUrl);
+        await sql.unsafe(`GRANT SELECT ON subject_repo_settings TO ${SROLE}`);
+        assert(noRepoRead.code === 2 && noRepoRead.stderr.includes(`record_thought_subjects needs ${DOOR_GRANTS}`) && DOOR_GRANTS.includes("SELECT on subject_repo_settings") && ownCalls === asked,
+          `…and without SELECT on the subject-key repository, refused before any question, naming it (exit ${noRepoRead.code}: ${noRepoRead.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         await sql.unsafe(`REVOKE SELECT ON ob1_config FROM ${SROLE}`);
         const noConfigRead = await sweep({ dryRun: true }, sEnv, sUrl);
         // …and a run, not dry, heard as the tables' refusal (PR 6b-1's review pass 2, mutant: heard as usage, it lived).
@@ -19597,8 +19604,9 @@ if (want("16")) {
     // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
     // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 134's validator, which
     // carries 120's with the deliverable kind (SMD-1715), and the settled parts' file, whose lineage writer carries
-    // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) });
+    // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row),
+    // and the subject-repo file, whose key rule replaces 111's with a key scoped to its repository (SMD-3887).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) || /^\d{3}_subject_repo_scope\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an
@@ -35047,7 +35055,7 @@ if (want("47")) {
     ];
     assert(usage.every((u) => u.code === 2)
         && /^--status reads and writes nothing: it takes no --dry-run, --key or --batch$/m.test(usage[0].err) && /^--batch goes with a run over every key/m.test(usage[1].err)
-        && /^--key is a subject key — ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
+        && /^--key is a subject key — ticket:<ID>, pr:<number> or pr:<owner>\/<repo>#<number>, version:<v1\.2\.3> or version:<owner>\/<repo>@<v1\.2\.3>, or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
         && /^--batch\b.*\b200\b/m.test(usage[4].err),
       `usage refused before any connection, 2: --status beside a write, --key beside --batch, a key no subject can hold, a batch of none, a batch over 200 (${usage.map((u) => u.err.split("\n")[0].slice(0, 60)).join(" | ")})`);
 

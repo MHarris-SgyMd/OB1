@@ -138,6 +138,18 @@ Pending files in the same ordered transaction, because a ledger hole (a row
 deleted or misspelt by hand) would otherwise have an earlier-numbered file apply
 *after* the re-run, over the later definitions it had just restored. Every file
 is idempotent, so the run restores the latest definition of everything. One
+kind of statement is left out of the re-run, because run again it would refuse
+the brain's own rows: a rule a later file loosened (SMD-3149). That is a file's
+`ADD CONSTRAINT … CHECK`, with its `VALIDATE`, where a later file defines the
+constraint again (064's, 084's and 111's lists of lineage kinds; 059's search
+arms), and a file's `CREATE UNIQUE INDEX` where a later file drops the index
+(111's one standing subject a thought). A `COMMENT` on such a constraint or
+index is left out with it. The file that decides the rule last makes it, in
+the same transaction, and the run says so beside each file it left a statement
+out of, as `--dry-run` does. Only a statement of the file's own in exactly one
+of those shapes is left out; one inside a `DO` block guards itself. Before it
+commits the run looks for every constraint it left an `ADD` out for, and
+fails, rolled back, if one is not there. One
 transaction, so a failure part-way — a lock not granted within 10 s included —
 rolls back and the schema is as it was. `--dry-run` says what would re-run and
 judges the pgvector floor as the run does.
@@ -331,7 +343,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and fifty-two (152) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and fifty-three (153) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -372,7 +384,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298, 151 SMD-4446, 152 SMD-4540).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298, 151 SMD-4446, 152 SMD-4540, 153 SMD-3887).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -874,7 +886,8 @@ from upstream's `schemas/wiki-pages` (`pages`, not `wiki_pages`), whose
 directory retires with this file: a brain that applied it by hand keeps its
 tables untouched. The new `pages` grant group is what a role needs beside
 `capture` (the grants table). Additive; no arity moves; no seed row; a
-re-apply is idempotent (it re-validates the kind CHECK and moves no row).
+re-apply is idempotent (it re-validates the kind CHECK and moves no row; under
+`--reapply` the CHECK is left to the file that defines it last, §5).
 test-schema [59], test-live [32], test-upgrade [20p];
 `server-portable/test-preflight.ts` drives the census, the remedy and the
 repair arms.
@@ -1950,8 +1963,7 @@ restart board-sync), a demoted Duplicate says `↓ Ranked ×0.25 — duplicate`,
 the stated-status label prints its word, Duplicate. A Duplicate whose original
 is still open reads finished, as a cancel does. Refuses by name without 058 or
 071; a re-apply is a no-op. An older tree's `--reapply` over a 105 brain puts
-058's six back: run this tree's `--reapply` after it (which fails at 064 on a
-brain holding a judged relation until SMD-3149). test-schema [94] (the sets, a
+058's six back: run this tree's `--reapply` after it. test-schema [94] (the sets, a
 Duplicate settled and its blocker cleared, both under 058's sets as before, the
 mirror rebuilt), test-upgrade [20aw] (a session's cached plan reaching the new
 sets among it), test-live [41] (the poster's refusals without 058's set and
@@ -2511,6 +2523,73 @@ the core's capture, gain their items, and how a capture whose items were not pro
 (the registry away) gains them. No thought's row is written. A capture through the
 server proposes its own items as it lands.
 
+Migration 153 has a `pr:` or `version:` subject key name its repository, on a
+brain whose operator names one (SMD-3887 PR 3a, row 13 of
+`docs/claim-validity.md`). `subject_key_valid` admits `pr:<owner>/<repo>#<n>`
+and `version:<owner>/<repo>@v<n>.<n>[…]` beside 111's shapes, the owner and the
+repository lowercase as GitHub names them. It reads no table, so a key's shape
+never depends on the setting, and both shapes stay valid.
+
+The setting is the operator's, in `subject_repo_settings`, 140's shape: one
+standing row at most, history after, written and ended by an operator key by
+its agent id, through `set_subject_repo` alone: its guard refuses a raw write,
+which would stand a repository with no key mapped.
+- **`set_subject_repo(repo, actor, remap_previous)`** sets it, an operator's
+  alone. Any other key answers `NOT_OPERATOR`, and a value
+  `ob1_subject_repo_refusal` names answers `BAD_REPO`. The value is trimmed and
+  lowercased, and `NULL` clears it, leaving scoped keys as they are. With
+  `remap_previous`, a change of repository also moves the keys scoped to the
+  one it replaces, so a mistaken setting can be corrected (with no repository
+  named, it answers `REMAP_NEEDS_REPO`); without it they stay, since after a
+  real move they name the old repository truly. Setting the repository that
+  stands writes no setting, but maps any bare key a raw write left under it.
+- **Setting a repository maps the standing keys** in the same transaction:
+  every standing unscoped `pr:` or `version:` subject is closed and its scoped
+  twin written with the same `by` and judge key. The closed facet's lineage row
+  is copied to the twin, its recipe noting `scoped_from` and `repo`, with any
+  rebuild asked of it (`stale_since`, `stale_reason`).
+- **A moved text is mapped too.** It is not refused, as
+  `record_thought_subjects` would refuse it. A thought already holding the
+  scoped key has the bare one closed alone.
+- **The thread triggers re-link both keys at the commit,** so each thread
+  keeps its members under the scoped key.
+- **A key too long once scoped stays bare,** counted `unscopable`; the reply
+  takes the same shape whether anything changed or not.
+- **One mapping moves at most 2,000 distinct keys**
+  (`ob1_subject_repo_map_max()`). It holds two thread locks a key to its
+  commit, and taking every one first, in key order, keeps it from deadlocking
+  with `db/threads.ts`. A brain past the cap answers `TOO_MANY_KEYS` and
+  nothing is set; mapping in batches is SMD-4559. The cap bounds keys, not a
+  key's members: 130's trigger re-links a thread once per member moved, so a
+  key held by 1,000 thoughts took 4.7 s to map (2026-11-24); re-linking each
+  key once is SMD-4564.
+- **The writer scopes too.** 153 carries 130's `record_thought_subjects` with
+  one change: once a repository is set, a bare `pr:` or `version:` key it is
+  handed is written scoped, so a write after the setting cannot undo the
+  mapping. A bare key the thought already holds scoped, to any repository,
+  keeps that facet, so a thread doesn't split a member at a time after the
+  repository changes or is cleared. The writer takes the advisory lock
+  `ob1:subject-repo` shared and the setter takes it exclusive, so a write and a
+  mapping never interleave. A set with no bare key takes the lock too, since
+  it closes whatever stands, but reads no setting. 153 carries 130's
+  `close_thought_subjects` with the same lock.
+
+`ob1_subject_repo()` reads the setting and raises on a stored value the
+refusal names. `subject_repo_setting()` gives brain_info the setting without
+raising. `ob1_subject_scoped_key(key, repo)` scopes a bare key.
+
+Nothing changes until an operator sets a repository. The sweep's own reading
+of the setting and of a pull request's URL, a bare key's thread read and the
+operation that sets it over REST and MCP come in PR 3b.
+153 carries `SELECT` on the setting to every role reading or writing
+`thought_facets`, and `INSERT, UPDATE` to one writing `thought_sources` too,
+the structure group's mark: a deliverables writer never sets it. It is refused
+by name without 016, 046, 061, 111, 113, 115, 120 or 130's index, and a
+re-apply is a no-op.
+`subjectKeyValid` in `server-portable/subject.ts` mirrors the key shapes, so
+the thread read takes a scoped key; resolving a bare one to the setting is 3b's.
+Covered by test-schema [138] and test-upgrade [20cp].
+
 Migration 150 has `rebuild_derived` hand a stale tags row to the re-tag pool
 (SMD-2298 PR 2). 063's metadata arm marked the row and counted it unqueued: the
 tags had no pool. `db/retag.ts` records its key in `ob1_config.retag_key` on its
@@ -2882,9 +2961,9 @@ thread by its rows, not as 0.5% of the table. A thought in several threads
 counts in each of `threads.ts --status`'s and `brain_info`'s thought counts, a
 place in each thread. Nothing finds a set yet: the rules and the judge's
 question that do are PR 7a-3b. Needs 111, 113 and 120; a re-apply is a no-op. A
-re-apply of 111 makes its index again until 130 runs, and fails once a thought
-holds a set (so does `--reapply`, which already fails at 064 on any brain
-holding a subject, SMD-3149). test-schema [116], test-upgrade [20bt], test-live
+re-apply of 111 by hand makes its index again until 130 runs, and fails once a
+thought holds a set; `--reapply` leaves 111's index out (§5, SMD-3149).
+test-schema [116], test-upgrade [20bt], test-live
 [47] and [48], test-rest-sql [16].
 
 Migration 129 gives the agenda an order (SMD-4192). `priority`, the default, is
@@ -3164,6 +3243,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_chunks` (007) | `SELECT, INSERT, DELETE` |
 | | `thought_audit` (008) | `SELECT, INSERT` — since 055 `ob1_append_thought_event` reads the row it inserts (`INSERT … RETURNING`), and since 060 the audit trigger's check and the projector read the event; the row lacked `SELECT` from 055 to 058 (SMD-2116) |
 | | `thought_facets` (042) | `SELECT, UPDATE` — the delete guard reads the citations that name a thought and, detaching, writes them, on every delete |
+| | `subject_repo_settings` (153) | `SELECT` — the operator's subject-key repository (SMD-3887): `record_thought_subjects`, run as the caller, reads it to scope a bare `pr:` or `version:` key it writes, and the thread read will resolve a bare key by it (SMD-3887 PR 3b). 153 carries it to every role reading or writing `thought_facets` |
 | | `ob1_agents` (046) | `SELECT` — the audit trigger reads the key's kind on every write that carries an actor (SMD-1730) |
 | | `ob1_embedding_snapshot` (060) | `SELECT, INSERT, UPDATE` — the snapshot trigger upserts the row's vector under its key on every write of a vector, a label or a key (SMD-2116). `ob1_project_thought_event` and `ob1_refresh_thought_vector` keep PUBLIC's EXECUTE, as the SECURITY INVOKER writers that call them require; the audit trigger holds what either may do, and a replay is the owner's |
 | | `derivations` (061) | `SELECT, INSERT, UPDATE, DELETE` — the vector lineage trigger upserts the vector's row (and deletes it when the vector is cleared) on every write; the write functions upsert the windows' and the tags' rows and delete a replaced set's; `record_thought_entities` and `record_supersession_proposal` write theirs as the caller too, so the workers' role reads the same row (SMD-1731) |
@@ -3195,6 +3275,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `extraction_progress` (093) | `SELECT, INSERT, UPDATE, DELETE` — a long thought's answered windows, kept across a claim that does not finish: read at each claim, upserted per window and per hard stop by 093's functions, deleted at a succeeded release (SMD-2694). Without it the worker keeps no window across a stop and says so once; nothing else is refused |
 | **structure** — a structured pass (`sync-linear.ts`, an ingest adapter's structure step), additionally: the source row and its links (SMD-2216); `graph-centrality.ts --startable` and `--decay-blocked` read the source rows too, through 058's `node_state()` | `thought_sources` (053) | `SELECT, INSERT, UPDATE, DELETE` — `record_thought_source` upserts the row, and on a take deletes the old holder's |
 | | `thought_facets` (053) | `INSERT` — `record_source_links` adds `link` facets, and since 084 `consolidate.ts`'s `record_thought_relation` adds `relation` facets (a consolidation role holds this group for them; without it the pass stores no relations and says so, SMD-1873), and since 111 `record_thought_subject` adds `subject` facets (SMD-3306). Postgres grants INSERT per table, so this group writes any facet kind — links, citations, relations and subjects alike; capture's `SELECT, UPDATE` cover the reads and the closing |
+| | `subject_repo_settings` (153) | `SELECT, INSERT, UPDATE` — the operator's subject-key repository (SMD-3887): a subject writer reads it to scope its keys (`record_thought_subjects` since 153, the sweep itself in SMD-3887 PR 3b), and `set_subject_repo`, which runs as the caller, writes it and maps the standing keys, a trigger holding the write to an operator key by its agent id. 153 carries these to every role writing both `thought_facets` and `thought_sources`, this group's mark |
 | | `board_findings_posted` (087) | `SELECT, INSERT` — board-sync's findings step (`board-findings.ts`, SMD-2681) reads it for the daily cap and to post nothing twice, and inserts a row per ticket pair and word after Linear answers |
 | | `supersession_proposals` (029) | `SELECT` — the proposal queue the findings step posts from (the server group holds it too, but with it UPDATE on `ob1_agent_keys`) |
 | **querylog** — the opt-in query log (`OB1_QUERY_LOG=on`, off by default, SMD-1295); the server writes it only when enabled, and only inserts | `query_log` (034) | `INSERT` |
@@ -3220,6 +3301,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | **deliverables** — deliverables (134, SMD-1715): a role whose clients record and verify deliverables through `record_deliverable` and `verify_deliverable`, or read them through `deliverable_history` (SECURITY INVOKER; PUBLIC's EXECUTE). A thought's existence, its KEY SHARE locks and its author (`thought_audit`) are the **capture** group's `SELECT` and `UPDATE`. Soft: a role without it gets a permission error (42501) naming the table on the calls, and nothing else | `deliverable_events` (134; append-only — UPDATE, DELETE and TRUNCATE refused by trigger, for the owner too; its trigger draws `seq` by `nextval`, so the sequence row below) | `SELECT, INSERT` |
 | | sequence `deliverable_events_seq_seq` (134; the trigger draws each event's `seq` itself, under the deliverable's lock, by `nextval`, which the identity's own draw does not need) | `USAGE` |
 | | `thought_facets` (042; the `deliverable` facet, the events' projection, written and replaced — INSERT only the **structure** group grants otherwise; Postgres grants it per table, so the group writes any facet kind, as structure does) | `SELECT, INSERT, UPDATE` |
+| | `subject_repo_settings` (153; the operator's subject-key repository, SMD-3887 — 153 carries `SELECT` to every role reading or writing thought_facets, this group's among them, so a role provisioned from the list holds what one carried at the upgrade does; its writes are the **structure** group's alone) | `SELECT` |
 | **community** — the schemas under `schemas/`, applied by hand beside the migrations (SMD-1796). Upstream's files granted these to Supabase's `service_role` and enabled RLS with a policy for it; neither exists off Supabase, so the files grant nothing now and this group does — the privileges upstream gave its service role, plus what Supabase's default privileges hid: `USAGE` on a `BIGSERIAL` column's sequence, and `EXECUTE` on a function `REVOKE`d `FROM PUBLIC`. Issued for whichever files you have applied; the rest are skipped and named | `thought_audit` (schemas/thought-audit — 008's table; upstream's `SELECT, INSERT`, kept) | `SELECT, INSERT` |
 | | view `thought_provenance` (schemas/thought-audit, `author-session-id.sql` — a view over `thoughts`, which needs its own `SELECT`) | `SELECT` |
 | | `openbrain_agents`, `agent_memory_keys` (schemas/per-agent-identity) | `SELECT, INSERT, UPDATE, DELETE` |
@@ -7181,6 +7263,66 @@ with no row under the key, and one that kept no pools, are each passed over and
 counted. Samples taken before SMD-4382 kept the pending and claimed rows alone,
 under every `extract:` key, and are read as before:
 `extraction rows pending or claimed`.
+
+### claim-report.ts
+
+How long work claims run, from claim to release (SMD-4540 PR 2): each claim's
+ending read from its release, its hours, and since migration 152 how many of its
+renewals landed, so SMD-4541 can decide whether a claim should state when its
+work will be done. It reads `list_claims`' answers with `include_ended` (any
+client holding a read key, no database credentials) or `work_claims` itself.
+
+- **`--from`:** walk `list_claims` to its end, `include_ended: true`, each page's
+  `cursor` as the next call's `after`, and save the pages as one JSON array.
+  A page is REST's `GET /v1/claims` body, or an MCP tool result as a client
+  saves it (its `structuredContent`, else its text; a JSON-RPC answer's
+  `result`), or a list of claims. A last page that says `truncated` is refused,
+  the rest of the brain missing; pages holding fewer entries than the first
+  page counted are warned of; a read of live claims alone says `include_ended`
+  was likely left off; entries with no `renewals` at all (`list_work_claims`'
+  own rows) are warned of as uncounted.
+- **`--sizes`:** `gh pr list --state merged --limit 500 --json
+  number,additions,deletions > sizes.json`, as it prints it, or an object of
+  `{ additions, deletions }` by PR number. Raise `--limit` once the oldest PR a
+  claim names falls outside it: the "size unknown" count shows it.
+- **`--now`:** give a saved dump the time it was read, an ISO time with its
+  zone (`2026-11-23T19:00:00Z`; one without is refused): unset, the clock reads a
+  claim live then whose lease has since ended as lapsed. A claim made after it
+  is left out, a release after it unread. A row keeps only its last lease and
+  count, so a claim renewed after `--now` reads with them.
+- **`--url`:** needs SELECT on `work_claims`' columns (the `claims` group's, by
+  `bun migrate.ts --grant <role> --groups claims`); a role without it is told
+  so. Before migration 152 every claim reads uncounted.
+
+```bash
+bun claim-report.ts --from claims.json [--sizes sizes.json] [--now 2026-11-23T19:00:00Z] [--json]
+bun claim-report.ts --url "$DATABASE_URL" [--sizes sizes.json]
+bun claim-report.ts --self-check
+```
+
+- **Endings:** merged (its holder released it saying "merged", in a clause, to
+  the next `.`, `;`, `:` or `,`, that doesn't first deny it with "not", "never",
+  "without", "unless", "until", "yet", "be" or "n't"; a merge of something else,
+  "merged main into the branch", reads as one too), closed by board-sync (by the
+  server's own `closedBySync`), taken over, force-released (another key's
+  release, an operator's after a merge included), released (other: a split into
+  pieces, a drop, a test), and lapsed, never released (timed to its lease's
+  end). Live claims are left out.
+- **Merged claims** are grouped by client (the label's first word before `@`,
+  else the key's name), by shape (a whole ticket or one piece) and, with
+  `--sizes`, by the merged PRs' changed lines. A merged claim's PRs are its
+  reason's first sentence's `OB1 PR N`, with any list after one (`OB1 PR 705,
+  PR 710 and PR 719`), their sizes summed; else its last `PR N`. Other wordings
+  (`OB1 PR 705, 710 and 719`, `OB1 PR 832/847`) read the first PR alone.
+- **What it cannot see** it says under the table, and `--json` carries as
+  `notSeen`: a claim runs to its release, at its merge, so its hours hold the
+  waits for review and for the word to merge, not work alone; a claim made
+  late, just before its merge, reads short; a PR that closed two claims is
+  counted under each; a renewal count says how often, not when, and each client
+  renews at its own pace, so counts compare within one client; a claim made
+  before 152 is uncounted; a claim taken over hides the work before its lapse; a
+  claim board-sync closed is timed to that pass, not its merge, and left out of
+  the merged tables.
 
 ### bench-querylog.ts
 

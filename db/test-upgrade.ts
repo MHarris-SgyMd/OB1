@@ -27,12 +27,13 @@
  */
 
 import { SQL } from "bun";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_COMMENT_SQL, TABLE_COMMENT_SQL, TID_PROBE, applyMigrations, createAssert, dropSchema, ledgerStrangers, ledgerNames, loadChunkRows, migrationFiles, migratorEnv, plantLedger, plantLegacyRow, requireDatabaseUrl, resetSchema, runMigrator, runScript, seededRandom, updatedAtTriggerState } from "./test-support.ts";
-import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, ROLE_GRANT_GROUPS, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey } from "./config.mjs";
-import { sweepSubjects } from "./subject-sweep.ts";
+import { ACCEPTED_CAVEAT_PREFIX, ACCEPTED_CLAIM_SQL, LOCK_TIMEOUT_S, ROLE_GRANT_GROUPS, UPDATE_THOUGHT_SIGNATURE, UPDATE_THOUGHT_SIGNATURE_9, UPDATE_THOUGHT_SIGNATURE_10, grantPresenceSql, grantStatements, grantedObjects, quoteIdent, reembedKey, supersededStatements } from "./config.mjs";
+import { sameKeys, sweepSubjects } from "./subject-sweep.ts";
 
 /**
  * 032's update_thought, by its own signature — the form a brain holds from 032
@@ -803,11 +804,15 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // it, refusing by name without 114's ob1_stamp_proposal_reviewer ([20cn]);
   // 152 counts a work claim's renewals in a column on work_claims (115's
   // renew_work_claim and ob1_work_claim_json and 140's claim_work carried with
-  // the count), refusing by name without 115 or 140 ([20co]) —
+  // the count), refusing by name without 115 or 140 ([20co]);
+  // 153 redefines 111's subject_key_valid on its own signature and 130's
+  // record_thought_subjects and close_thought_subjects, and adds the
+  // operator's subject-key repository setting and its setter, refusing by
+  // name without 016, 046, 061, 111, 113, 115, 120 or 130's index ([20cp]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 123, `030 is among the last one hundred and twenty-three migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 124, `030 is among the last one hundred and twenty-four migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7658,6 +7663,119 @@ console.log("\n[20co] Migration 152: onto a populated brain at the file before i
   await sql.close();
 }
 
+console.log("\n[20cp] Migration 153: onto a populated brain at the file before it — refused without each function it needs and 130's index, by name, nothing made; then applied: the bare pr: and version: subjects and their thread as they were, nothing mapped until an operator names a repository; a key scoped to its repository admitted; the setting's grants carried from thought_facets' (a reader SELECT, a writer of facets and sources SELECT, INSERT and UPDATE, a writer of facets alone SELECT); an operator's setting maps the standing keys, the thread kept under the scoped key; a re-apply with a setting standing a no-op (SMD-3887)");
+{
+  const the153 = MIGRATIONS.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the153.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the153 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const K = "subject:upgrade-153@p1";
+    const thought = async (content: string, mins: number) =>
+      String((await sql`INSERT INTO thoughts (content, content_fingerprint, created_at) VALUES (${content}, content_fingerprint_of(${content}), '2027-07-01T00:00:00Z'::timestamptz + make_interval(mins => ${mins}::int)) RETURNING id`)[0].id);
+    const subjects = async (id: string, keys: string[]) =>
+      // An array literal: Bun's client sends a JS array as no Postgres array here (these keys hold no comma or quote).
+      sql`SELECT record_thought_subjects(${id}::uuid, ${`{${keys.join(",")}}`}::text[], 'model', ${K}, NULL::uuid, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${id}::uuid), '{"deterministic": false}'::jsonb)`;
+    const a = await thought("upgrade 153: PR 12 opened", 1), b = await thought("upgrade 153: PR 12 reviewed", 2), c = await thought("upgrade 153: v1.4 cut", 3);
+    await subjects(a, ["pr:12"]);
+    await subjects(b, ["pr:12"]);
+    await subjects(c, ["version:v1.4"]);
+    const READER = "ob1_upgrade_153_reader", WRITER = "ob1_upgrade_153_writer", FACETS = "ob1_upgrade_153_facets", NONE = "ob1_upgrade_153_none";
+    await sql.unsafe(`CREATE ROLE ${READER} NOLOGIN; CREATE ROLE ${WRITER} NOLOGIN; CREATE ROLE ${NONE} NOLOGIN; CREATE ROLE ${FACETS} NOLOGIN;
+                      GRANT SELECT ON thought_facets TO ${READER}; GRANT SELECT, INSERT ON thought_facets TO ${WRITER}; GRANT INSERT ON thought_sources TO ${WRITER};
+                      GRANT SELECT, INSERT, UPDATE ON thought_facets TO ${FACETS}`);
+    const keys = async () => ((await sql`SELECT payload->>'key' AS k FROM thought_facets WHERE kind = 'subject' AND valid_until IS NULL ORDER BY 1`) as unknown as { k: string }[]).map((r) => r.k).join(",");
+    const edges = async (key: string) => ((await sql`SELECT count(*)::int AS n FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = ${key}`)[0] as { n: number }).n;
+    const made = async () => (await sql`SELECT to_regclass('subject_repo_settings') IS NOT NULL AS m`)[0].m as boolean;
+    const keysBefore = await keys(), edgesBefore = await edges("pr:12");
+
+    // Without any one thing it needs, the file is refused by name and makes nothing.
+    const apply153 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 }).then(() => "applied", (e: Error) => e.message);
+    const needs: [string, string, string][] = [
+      ["content_fingerprint_of", "text", "016 (content_fingerprint_of)"],
+      ["ob1_registry_kind", "uuid, text", "046 (ob1_registry_kind)"],
+      ["ob1_actor_agent_id", "", "061 (ob1_actor_agent_id)"],
+      ["subject_key_valid", "text", "111 (subject_key_valid)"],
+      ["ob1_record_derivation", "text, uuid, uuid[], text[], text, jsonb, uuid", "111 (ob1_record_derivation)"],
+      ["ob1_filed_ticket", "jsonb", "113 (ob1_filed_ticket)"],
+      ["ob1_work_claim_actor", "jsonb, text", "115 (ob1_work_claim_actor)"],
+      ["ob1_thread_relink_subject", "", "120 (ob1_thread_relink_subject)"],
+    ];
+    const unrefused: string[] = [];
+    for (const [name, args, says] of needs) {
+      await sql.unsafe(`ALTER FUNCTION ${name}(${args}) RENAME TO ${name}_away`);
+      const got = await apply153();
+      await sql.unsafe(`ALTER FUNCTION ${name}_away(${args}) RENAME TO ${name}`).catch((e: Error) => unrefused.push(`${name} could not be put back: ${e.message.slice(0, 60)}`));
+      if (!got.startsWith(`migration ${NUM} needs ${says}; this schema lacks it`) || (await made())) unrefused.push(`${name}: ${got.slice(0, 80)}`);
+    }
+    await sql.unsafe(`ALTER INDEX thought_facets_subject_key_uniq RENAME TO thought_facets_subject_key_uniq_away`);
+    const noIndex = await apply153();
+    await sql.unsafe(`ALTER INDEX thought_facets_subject_key_uniq_away RENAME TO thought_facets_subject_key_uniq`);
+    if (!noIndex.startsWith(`migration ${NUM} needs 130 (thought_facets_subject_key_uniq`) || (await made())) unrefused.push(`the index: ${noIndex.slice(0, 80)}`);
+    assert(unrefused.length === 0 && !(await made()) && (await keys()) === keysBefore,
+      `without any one of the eight functions or 130's index it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the index tried`})`);
+
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 });
+    const scopedOk = (await sql`SELECT subject_key_valid('pr:mharris-sgymd/ob1#12') AS a, subject_key_valid('version:o/r@v1.4') AS b, subject_key_valid('pr:12') AS c`)[0] as { a: boolean; b: boolean; c: boolean };
+    assert((await made()) && (await keys()) === keysBefore && keysBefore === "pr:12,pr:12,version:v1.4" && (await edges("pr:12")) === edgesBefore && edgesBefore === 1
+           && scopedOk.a && scopedOk.b && scopedOk.c && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === null,
+      `applied: the table made, the bare keys and their thread as they were, nothing mapped, no repository; a key scoped to its repository admitted beside the bare one (${await keys()}; ${edgesBefore} edge)`);
+
+    // The setting's grants, carried from thought_facets'.
+    const may = async (role: string) => ((await sql`SELECT p, has_table_privilege(${role}, 'subject_repo_settings', p) AS y FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) AS p`) as unknown as { p: string; y: boolean }[]).filter((r) => r.y).map((r) => r.p).join();
+    const grants = async () => `${await may(READER)} | ${await may(WRITER)} | ${await may(FACETS)} | ${await may(NONE)}`;
+    assert((await grants()) === "SELECT | SELECT,INSERT,UPDATE | SELECT | ",
+      `a reader of thought_facets reads the setting, a writer of facets and sources (the structure group's) also inserts and updates it, a writer of facets alone (the deliverables group's) reads it, a role with neither gains nothing (${await grants()})`);
+
+    // An operator names the repository: the standing keys mapped, the thread kept under the scoped key.
+    await sql`SELECT set_agent_kind('upgrade-153-op', 'operator')`;
+    const op = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'upgrade-153-op'`)[0].id);
+    // Through text: Bun's client sends a string cast straight to jsonb as a jsonb string, not the object.
+    const set = (await sql`SELECT set_subject_repo('o/r', (${JSON.stringify({ name: "upgrade-153-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; mapped: number; keys: number };
+    assert(set.ok === true && set.mapped === 3 && set.keys === 2 && (await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await edges("pr:12")) === 0 && (await edges("pr:o/r#12")) === 1,
+      `an operator's setting maps the three standing keys to two scoped ones, and the thread's edge closes under the bare key and stands under the scoped one (${JSON.stringify(set)}; ${await keys()})`);
+
+    // The sweep reads a found bare key as the scoped key standing from it, as the door writes it (review pass 5): the
+    // set found again is the set kept, not a new key.
+    assert(sameKeys(["pr:12"], ["pr:o/r#12"]) && sameKeys(["version:v1.4", "ticket:SMD-1"], ["ticket:SMD-1", "version:o/r@v1.4"]) && !sameKeys(["pr:13"], ["pr:o/r#12"])
+           && !sameKeys(["pr:12", "pr:13"], ["pr:o/r#12"]) && sameKeys(null, []) && !sameKeys(["pr:o2/y#12"], ["pr:o/r#12"]),
+      "sameKeys reads a found bare key as the scoped one standing from it, and no other key so");
+
+    // The settings guard reads the setter's frame schema-qualified too (review pass 4): in a fresh session whose path
+    // shows another function of its name first, PL/pgSQL compiles public.set_subject_repo, called by its schema, under
+    // a qualified name. A session that compiled it before keeps the name it compiled, so the call needs its own.
+    await sql.unsafe(`CREATE SCHEMA ob1_shadow_153; CREATE FUNCTION ob1_shadow_153.set_subject_repo(p_repo text, p_actor jsonb, p_remap_previous boolean) RETURNS jsonb LANGUAGE sql AS $$ SELECT '{}'::jsonb $$`);
+    const fresh = new SQL({ url: URL_, max: 1 });
+    let shadowed: string[] = [];
+    try {
+      await fresh.unsafe(`SET search_path = ob1_shadow_153, public`);
+      for (const repo of ["o/q", "o/r"]) {
+        const r = (await fresh`SELECT public.set_subject_repo(${repo}, (${JSON.stringify({ name: "upgrade-153-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; changed: boolean };
+        shadowed.push(`${r.ok}:${r.changed}`);
+      }
+    } catch (e) {
+      shadowed = [`threw: ${(e as Error).message.slice(0, 120)}`];
+    } finally {
+      await fresh.close();
+      await sql.unsafe(`DROP FUNCTION ob1_shadow_153.set_subject_repo(text, jsonb, boolean); DROP SCHEMA ob1_shadow_153`);
+    }
+    assert(shadowed.join(",") === "true:true,true:true" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r",
+      `the setter, called by its schema in a fresh session where its name is another's on the path, writes its setting past the guard (${shadowed.join(", ")})`);
+
+    // A re-apply with a setting standing is a no-op.
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the153 });
+    assert((await keys()) === "pr:o/r#12,pr:o/r#12,version:o/r@v1.4" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r" && (await grants()) === "SELECT | SELECT,INSERT,UPDATE | SELECT | ",
+      `a re-apply with a setting standing is a no-op: the keys, the repository and the grants as they were (${await keys()}; ${await grants()})`);
+
+    for (const role of [READER, WRITER, FACETS, NONE]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+  } catch (e) {
+    assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
+  } finally {
+    await sql.close();
+  }
+}
+
 console.log("\n[21] test-support's schema reset leaves nothing of Daemonic Brain's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");
 {
   // The reset drops a hand-kept list, and a name a migration added without a
@@ -8036,6 +8154,139 @@ console.log("\n[23] The migrator builds in public whatever the session's search_
     await admin.unsafe("DROP SCHEMA IF EXISTS tu_ahead CASCADE; DROP SCHEMA IF EXISTS tu_brain CASCADE; DROP SCHEMA IF EXISTS tu_rails CASCADE");
     await admin.close();
   }
+  // Leave the database clean and migrated, as the blocks before this one do.
+  await dropSchema(URL_);
+  await applyMigrations(URL_, OPTS);
+}
+
+console.log("\n[24] --reapply on a brain holding rows a later migration's rule admits — a judged relation, an own subject, a settled part, a literal search and a set of two subjects: an earlier file's narrower CHECK or unique index is left to the file that decides it last, said beside its line; every row stands, both CHECKs stand validated as they were and 111's index stays dropped (SMD-3149)");
+{
+  // The schema is whole here ([23] leaves it migrated). 064, 084 and 111 each add the lineage kind CHECK with the
+  // kinds they knew, and 059 the search arms it knew; 111 makes the index that held one standing subject a
+  // thought, which 130 drops. Run again as written, each refuses the rows below.
+  const sql = new SQL({ url: URL_, max: 1 });
+  try {
+    const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+    const fp = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+    const O = await thought("reapply 24: the importer ships on Friday");
+    const N = await thought("reapply 24: the importer shipped on Thursday");
+    await sql`SELECT ob1_record_derivation('relation', gen_random_uuid(), ARRAY[${O}::uuid, ${N}::uuid], ARRAY['x', 'y'], 'consolidate:stub@p24', '{"deterministic": false}'::jsonb)`;
+    await sql`SELECT ob1_record_derivation('subject', gen_random_uuid(), ARRAY[${O}::uuid], ARRAY['x'], 'subject:stub@p24', '{"deterministic": true}'::jsonb)`;
+    await sql`SELECT record_settled_part(${O}::uuid, ${N}::uuid, 'older', 'the importer ships on Friday', 'the importer shipped on Thursday', 'updates', 'the later note reports it done', 'consolidate:stub@p24', ${await fp(O)}, ${await fp(N)}, '{"deterministic": false}'::jsonb)`;
+    await sql`INSERT INTO query_log (kind, tool, arm, query) VALUES ('search', 'search', 'literal', 'reapply 24: a literal search')`;
+    const S = await thought("reapply 24: a session on two tickets");
+    await sql`SELECT record_thought_subjects(${S}::uuid, ARRAY['ticket:XYZ-1', 'ticket:XYZ-2']::text[], 'model', 'subject:stub@p24set', NULL::uuid, ${await fp(S)}::text, NULL::jsonb)`;
+    const rows = async () => JSON.stringify((await sql`
+      SELECT (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'relation') AS relation,
+             (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'subject' AND produced_by = 'subject:stub@p24') AS subject,
+             (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'part') AS part,
+             (SELECT count(*)::int FROM query_log WHERE arm = 'literal') AS literal,
+             (SELECT count(*)::int FROM thought_facets WHERE thought_id = ${S}::uuid AND kind = 'subject' AND valid_until IS NULL) AS "setOf"`)[0]);
+    const subjectIndexes = async () => ((await sql`SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname LIKE 'thought_facets_subject_%uniq' ORDER BY 1`) as { indexname: string }[]).map((r) => r.indexname).join(", ");
+    const checks = async () => JSON.stringify(await sql`
+      SELECT conname, convalidated, pg_get_constraintdef(oid) AS def FROM pg_constraint
+       WHERE conname IN ('derivations_artifact_kind_check', 'query_log_arm_check') ORDER BY conname`);
+    const rowsBefore = await rows(), checksBefore = await checks();
+    const indexesBefore = await subjectIndexes();
+    assert(rowsBefore === '{"relation":1,"subject":1,"part":1,"literal":1,"setOf":2}', `the brain holds one row of each later kind and a set of two subjects before the re-run (${rowsBefore})`);
+
+    const run = await migrate("--reapply");
+    // Applied or re-applied: test-support's applyMigrations, which built this schema, records nothing in the ledger.
+    const ran = run.out.split("\n").filter((l) => /^ {2}✓ {2}\d{3}_\S+\.sql {2}(?:re-)?applied$/.test(l)).length;
+    assert(run.code === 0 && ran === MIGRATIONS.length, `--reapply exits 0 over them, every migration run again (${ran} of ${MIGRATIONS.length}) ${shown(run)}`);
+    const kindLines = run.out.split("\n").filter((l) => /^ {2}· {2}derivations_artifact_kind_check is left to \d{3}_\S+\.sql, which decides it last: this file's ADD and VALIDATE did not run$/.test(l));
+    const armLines = run.out.split("\n").filter((l) => /^ {2}· {2}query_log_arm_check is left to \d{3}_\S+\.sql, which decides it last: this file's ADD did not run$/.test(l));
+    const indexLines = run.out.split("\n").filter((l) => /^ {2}· {2}thought_facets_subject_active_uniq is left to \d{3}_\S+\.sql, which decides it last: this file's CREATE UNIQUE INDEX did not run$/.test(l));
+    assert(kindLines.length >= 3 && armLines.length >= 1 && indexLines.length === 1,
+           `the run says which files' narrower rules it left to the file that decides each last: ${kindLines.length} of the lineage kinds (064, 084 and 111 at least), ${armLines.length} of the search arms (059 at least), ${indexLines.length} of the one-subject index (111's)`);
+    const rowsAfter = await rows();
+    assert(rowsAfter === rowsBefore, `every row stands after it (${rowsAfter})`);
+    const indexesAfter = await subjectIndexes();
+    assert(indexesAfter === indexesBefore && indexesAfter === "thought_facets_subject_key_uniq", `111's one-subject index stays dropped and 130's stands (${indexesAfter})`);
+    const checksAfter = await checks();
+    assert(checksAfter === checksBefore && (JSON.parse(checksAfter) as { convalidated: boolean }[]).every((c) => c.convalidated) && /'part'/.test(checksAfter) && /'literal'/.test(checksAfter),
+           `both CHECKs stand validated with every kind and arm, as before the run${checksAfter === checksBefore ? "" : `: ${checksAfter}`}`);
+
+    // --dry-run says the same of each file, as what would not run.
+    const dry = await migrate("--reapply", "--dry-run");
+    const dryLines = dry.out.split("\n").filter((l) => /^ {2}· {2}\w+ is left to \d{3}_\S+\.sql, which decides it last: this file's .+ would not run$/.test(l));
+    const liveLines = run.out.split("\n").filter((l) => /^ {2}· {2}\w+ is left to /.test(l));
+    assert(dry.code === 0 && dryLines.length === liveLines.length && dryLines.join("\n") === liveLines.join("\n").replace(/did not run$/gm, "would not run"),
+           `--reapply --dry-run names the same ${liveLines.length} statements as what would not run ${shown(dry)}`);
+
+    // A constraint left out for a later file that then does not add it: the reader cannot see a guard that does
+    // not fire, so the migrator looks before it commits. The tree's files copied, one more after them.
+    const copy = mkdtempSync(join(tmpdir(), "ob1-upgrade-migrations-"));
+    try {
+      cpSync(join(HERE, "migrations"), copy, { recursive: true });
+      writeFileSync(join(copy, "999_guarded_arm.sql"),
+        "DO $g$\nBEGIN\n  IF false THEN\n    ALTER TABLE query_log ADD CONSTRAINT query_log_arm_check CHECK (arm IS NULL);\n  END IF;\nEND\n$g$;\n");
+      const short = await runMigrator(URL_, { ...MIGRATOR_ENV, OB1_TEST_MIGRATIONS_DIR: copy }, "--reapply");
+      const ledger999 = (await sql`SELECT count(*)::int AS c FROM schema_migrations WHERE name LIKE '999%'`)[0].c as number;
+      assert(short.code === 1 && /--reapply {2}FAILED: the re-run would end without query_log_arm_check on query_log \(left to 999_guarded_arm\.sql\)/.test(short.out) && /it rolled back/.test(short.out)
+               && /Nothing here is yours to fix/.test(short.out) && !/Fix the cause and run --reapply again/.test(short.out)
+               && (await checks()) === checksBefore && ledger999 === 0,
+             `a re-run that would end without a constraint it left out fails, naming it and the file it was left to, says it is not the operator's to fix, and rolls back: both CHECKs as they were, the file not recorded (exit ${short.code}, ${ledger999} recorded)`);
+    } finally {
+      rmSync(copy, { recursive: true, force: true });
+    }
+  } finally {
+    await sql.close();
+  }
+
+  // What is struck, read narrowly: a statement of the file's own that adds or validates a CHECK a later file defines
+  // again, or makes a unique index a later file's own statement drops.
+  const A = "ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (kind IN ('a', 'b;c')) NOT VALID;";
+  const V = "ALTER TABLE t VALIDATE CONSTRAINT t_kind_check;";
+  const LATER = "ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (kind IN ('a', 'b;c', 'd'));\n";
+  const IX = "CREATE UNIQUE INDEX IF NOT EXISTS t_one_uniq\n  ON t (kind)\n  WHERE kind <> 'x;y';";
+  const struck = (first: string, second = LATER) => {
+    const got = supersededStatements([{ name: "001_a.sql", sql: first }, { name: "002_b.sql", sql: second }]);
+    return { first: got.get("001_a.sql") ?? null, second: got.get("002_b.sql") ?? null };
+  };
+  const plain = struck(`CREATE TABLE IF NOT EXISTS t (kind text);\n-- the list\n${A}\n${V}\nSELECT 1;\n`);
+  assert(plain.first !== null && plain.second === null && plain.first.left.map((l) => `${l.action} ${l.table}.${l.name} by ${l.by}`).join("; ") === "ADD t.t_kind_check by 002_b.sql; VALIDATE t.t_kind_check by 002_b.sql"
+           && plain.first.sql === `CREATE TABLE IF NOT EXISTS t (kind text);\n-- the list\n${" ".repeat(A.length)}\n${" ".repeat(V.length)}\nSELECT 1;\n`,
+         "an earlier file's ADD and VALIDATE of a CHECK a later file defines are blanked in place, a `;` in a literal not ending the statement, every other line as it was; the last definer is whole");
+  const untouched: [string, string, string?][] = [
+    ["the one file that defines it", `${A}\n${V}\n`, "SELECT 1;\n"],
+    ["a later file that names it only in a comment", `${A}\n`, `-- ${LATER}SELECT 1;\n`],
+    ["a later file that names it only in a string literal", `${A}\n`, "COMMENT ON TABLE t IS 'to widen it: ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (…)';\n"],
+    ["a later file that adds a constraint of that name to another table", `${A}\n`, "ALTER TABLE u ADD CONSTRAINT t_kind_check CHECK (kind <> '');\n"],
+    ["an ADD inside a DO block, which guards itself", `DO $x$\nBEGIN\n  ${A}\nEND\n$x$;\n`],
+    ["an ALTER that does more than add the CHECK", "ALTER TABLE t ADD COLUMN IF NOT EXISTS kind text, ADD CONSTRAINT t_kind_check CHECK (kind IN ('a'));\n"],
+    ["two actions after the CHECK", "ALTER TABLE t ADD CONSTRAINT t_kind_check CHECK (kind IN ('a')), ADD CONSTRAINT t_other CHECK (kind <> '');\n"],
+    ["a constraint that is not a CHECK", "ALTER TABLE t ADD CONSTRAINT t_kind_check FOREIGN KEY (kind) REFERENCES k (kind);\n"],
+    ["a unique index no later file drops", `${IX}\n`, "SELECT 1;\n"],
+    ["a unique index a later file drops only inside a block, which guards itself", `${IX}\n`, "DO $x$\nBEGIN\n  DROP INDEX t_one_uniq;\nEND\n$x$;\n"],
+    ["an index that is not unique", "CREATE INDEX IF NOT EXISTS t_one_uniq ON t (kind);\n", "DROP INDEX IF EXISTS t_one_uniq;\n"],
+  ];
+  const droppedLater = struck(`${IX}\nSELECT 1;\n`, "CREATE UNIQUE INDEX IF NOT EXISTS t_two_uniq ON t (kind, other);\nDROP INDEX IF EXISTS t_one_uniq;\n");
+  assert(droppedLater.first !== null && droppedLater.second === null && droppedLater.first.left.map((l) => `${l.action} ${l.table}.${l.name} by ${l.by}`).join("; ") === "CREATE UNIQUE INDEX t.t_one_uniq by 002_b.sql"
+           && droppedLater.first.sql === `${IX.replace(/[^\n]/g, " ")}\nSELECT 1;\n`,
+         "an earlier file's unique index a later file's own statement drops is blanked in place, across its lines; the later file is whole");
+  const wronglyStruck = untouched.filter(([, first, second]) => struck(first, second).first !== null).map(([what]) => what);
+  assert(wronglyStruck.length === 0, `nothing else is struck: ${untouched.map(([what]) => what).join("; ")}${wronglyStruck.length ? ` — struck: ${wronglyStruck.join("; ")}` : ""}`);
+  const guardedLater = struck(`${A}\n`, `DO $x$\nBEGIN\n  IF true THEN\n    ${LATER.trim()}\n  END IF;\nEND\n$x$;\n`);
+  assert(guardedLater.first !== null && guardedLater.first.left.length === 1, "a later file that adds the CHECK inside a block still defines it last: the earlier file's ADD is left to it");
+
+  // A comment on a struck rule goes with it, in its file and in any before the file that decides the rule last.
+  const CC = "COMMENT ON CONSTRAINT t_kind_check ON t IS 'the kinds; a list';";
+  const CI = "COMMENT ON INDEX t_one_uniq IS 'one a kind';";
+  const three = supersededStatements([
+    { name: "001_a.sql", sql: `${CC}\n${A}\n${CC}\n${IX}\n${CI}\n` },
+    { name: "002_b.sql", sql: `${CC}\n${CI}\nSELECT 1;\n` },
+    { name: "003_c.sql", sql: `${LATER}${CC}\nDROP INDEX IF EXISTS t_one_uniq;\n` },
+    { name: "004_d.sql", sql: `${CC}\n` },
+  ]);
+  const leftOf = (name: string) => (three.get(name)?.left ?? []).map((l) => `${l.action} ${l.table}.${l.name} by ${l.by}`).join("; ");
+  assert(leftOf("001_a.sql") === "COMMENT t.t_kind_check by 003_c.sql; ADD t.t_kind_check by 003_c.sql; COMMENT t.t_kind_check by 003_c.sql; CREATE UNIQUE INDEX t.t_one_uniq by 003_c.sql; COMMENT t.t_one_uniq by 003_c.sql"
+           && leftOf("002_b.sql") === "COMMENT t.t_kind_check by 003_c.sql; COMMENT t.t_one_uniq by 003_c.sql" && !three.has("003_c.sql") && !three.has("004_d.sql")
+           && three.get("002_b.sql")!.sql === `${" ".repeat(CC.length)}\n${" ".repeat(CI.length)}\nSELECT 1;\n`,
+         `a COMMENT on a struck constraint or index is left out with it, in its file and in one before the file that decides it last, and stands in that file and after (${leftOf("001_a.sql")} | ${leftOf("002_b.sql")})`);
+  const lone = struck(`${A}\n${CC}\n${IX}\n${CI}\n`, "SELECT 1;\n");
+  assert(lone.first === null, "a COMMENT on a constraint or index nothing later redefines or drops stands");
+
   // Leave the database clean and migrated, as the blocks before this one do.
   await dropSchema(URL_);
   await applyMigrations(URL_, OPTS);
