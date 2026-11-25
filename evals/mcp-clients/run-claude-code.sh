@@ -1,7 +1,8 @@
 #!/bin/bash
 # One headless Claude Code session against a running probe, then the probe's log of it:
 #
-#   ./run-claude-code.sh <mcp|legacy|session> <toggle|toggle-quiet|expire|drop|down/N|refuse/N|busy/N|fault/N|cut/N> [seconds to wait, default 8]
+#   ./run-claude-code.sh <mcp|legacy|session> <toggle|toggle-quiet|expire|drop|down/N|refuse/N|busy/N|fault/N|cut/N|end/WAY|revoked/WAY/N|unknown/WAY/N|nolisten/WAY/N> [seconds to wait, default 8]
+#   WAY is how the probe ends each listen stream while it goes on serving: clean, reset or frame (probe.ts).
 #
 # The session calls a tool, calls the control step itself, waits, says whether probe_extra is available and calls it.
 # It is connected throughout, so the log shows what the step made the client do. Read the result from the log, not
@@ -12,7 +13,7 @@
 set -u
 cd "$(dirname "$0")" || exit 1
 path=${1:?path: mcp, legacy or session}
-step=${2:?step: toggle, toggle-quiet, expire, drop, or down/N, refuse/N, busy/N, fault/N, cut/N for N seconds}
+step=${2:?step: toggle, toggle-quiet, expire, drop, down/N, refuse/N, busy/N, fault/N or cut/N for N seconds, or end/WAY, revoked/WAY/N, unknown/WAY/N or nolisten/WAY/N with WAY clean, reset or frame}
 wait=${3:-8}
 base=${BASE:-http://127.0.0.1:8765}
 log=${LOG:-probe.jsonl}

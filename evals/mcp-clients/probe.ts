@@ -1,6 +1,6 @@
 // A scratch MCP server (SMD-4344): it records which revision a client offers and what makes it list tools again.
 // docs/mcp-client-refresh.md holds what was measured with it. Not the brain's server, and it has no auth: it binds
-// to loopback, serves two dummy tools and holds nothing.
+// to loopback, serves two dummy tools and stores nothing but its log.
 //
 //   bun install && bun probe.ts        serve on 127.0.0.1:$PORT (default 8765), log to $LOG (default ./probe.jsonl)
 //   bun selfcheck.ts                   prove it with the SDK's own client
@@ -22,25 +22,48 @@
 //   /control/down/N        a restart behind a proxy (SMD-4347): the streams ended, the sessions forgotten and the tool set
 //                          changed, then every MCP request answered 502 for N seconds, as the stack's proxy answers
 //                          while the server behind it is away
-//   /control/refuse/N      a restart of the whole stack: the same, with the port closed for N seconds
+//   /control/refuse/N      a restart of the whole stack: the same, with the port closed for N seconds. Anything
+//                          may take the port meanwhile: the probe then stops when it comes to open it again
 //   /control/busy/N        the server back before the REST core behind it: the same, each MCP request answered as the
 //                          brain's edge answers a busy registry (HTTP 200, JSON-RPC -32003, Retry-After 2)
 //   /control/fault/N       the same, each answered 500, as the brain's route answers when its key check throws
 //   /control/cut/N         a server that dies: every connection dropped where it stands, a listen stream with no closing
-//                          frame, then 502 for N seconds. The other controls end each stream as the SDK's close() does
+//                          frame, then 502 for N seconds. The other four of these five end each stream as the SDK's
+//                          close() does. The port is closed for an instant as the connections are dropped: a
+//                          connection made in that instant is refused, where a proxy would answer 502
+//
+//   The server ending a stream of its own accord, and going on serving (SMD-4493): the SDK's handler ends its streams
+//   only all at once, so the probe holds each listen stream by what can end it alone. WAY is one of:
+//     clean   the stream's request aborted on the server's side: the body ends whole, with no closing frame
+//     reset   the stream's body errored: the connection is reset
+//     frame   a closing frame written by hand, as the SDK writes its own, and then the body's end
+//   /control/end/WAY           every open listen stream ended that way, and the tool set changed, unannounced
+//   /control/revoked/WAY/N     the same, and for N seconds every MCP request answered as the brain's edge answers a
+//                              revoked caller that presents a key (HTTP 200, JSON-RPC -32001; a notification 202)
+//   /control/unknown/WAY/N     the same, in the words for a key the brain does not know
+//   /control/nolisten/WAY/N    the same, but for N seconds a listen alone is refused, as the brain refuses one at a
+//                              bound (HTTP 200, JSON-RPC -32603), every other request served
+//   What these three copy of the brain is the status and the body of a single request, of a listen and of a
+//   notification. Nothing else: not its headers, not what it answers a batch, a GET or a body that is no JSON, and
+//   not the 401 with a challenge that it gives a caller with no key or a refused token. Of `revoked`, `unknown`,
+//   `down`, `busy`, `fault` and `cut`, one begun while another runs replaces it, its time with it; `nolisten` and
+//   `refuse` each run beside any. The `serving-again` line is each control's own timer, so with two at once it can
+//   be wrong.
+//   `reset` makes Bun print an error for each stream it ends, and the probe serves on.
 //
 //   LISTEN=off bun probe.ts   declare tools.listChanged false, as the brain's server does today: a client told so
 //                             is offered no stream
 //   /control/expire        forget every 2025-era session, so its next request is answered 404
 //   /control/ttl?ms=N      the ttlMs answered on tools/list (2026-07-28 only)
-//   /control/state         what the probe holds
+//   /control/state         what the probe holds, and where its log is
 import { appendFileSync } from "node:fs";
-import { createMcpHandler, isLegacyRequest, McpServer, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
+import { resolve } from "node:path";
+import { createMcpHandler, isLegacyRequest, McpServer, SERVER_INFO_META_KEY, SUBSCRIPTION_ID_META_KEY, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 
 const PORT = Number(process.env.PORT ?? 8765);
 // Loopback only, and not a setting: the probe has no auth.
 const HOST = "127.0.0.1";
-const LOG = process.env.LOG ?? `${import.meta.dir}/probe.jsonl`;
+const LOG = resolve(process.env.LOG ?? `${import.meta.dir}/probe.jsonl`);
 
 let extra = false;
 let ttlMs = Number(process.env.TTL_MS ?? 0);
@@ -49,17 +72,32 @@ let requests = 0;
 const sessions = new Map<string, { server: McpServer; transport: WebStandardStreamableHTTPServerTransport }>();
 /** Until when the MCP paths answer as something that is not serving, and how; 0 while serving. */
 let downUntil = 0;
-let downAs: "down" | "busy" | "fault" = "down";
+let downAs: "down" | "busy" | "fault" | "revoked" | "unknown" = "down";
+/** Until when a listen alone is refused, every other request served; 0 while none is. */
+let noListenUntil = 0;
+/** Who the probe says it is: to the SDK, and in a closing frame written by hand. */
+const INFO = { name: "client-probe", version: "0.0.1" };
+// The brain's own words (server-portable/mcp-edge.ts REVOKED_MESSAGE and UNAUTHORIZED_MESSAGE; mcp-server/app.ts
+// listenLimitResponse), copied: the probe imports nothing of the brain's.
+const REFUSALS = {
+  revoked: "Unauthorized: this access key has been revoked. Its history is retained; request a new key.",
+  unknown: "Unauthorized: missing or invalid authentication.",
+  nolisten: "Subscription limit reached: this caller holds as many listen streams as one caller may",
+};
 /** Whether the 2026-07-28 server says it sends list-changed notifications; `LISTEN=off` says it does not, as the brain's does today. */
 const LISTEN = process.env.LISTEN !== "off";
 /** What a client is answered while the probe is away, by the control that sent it away. */
 const away = (id: unknown): Response =>
-  downAs === "busy" ? Response.json({ jsonrpc: "2.0", error: { code: -32003, message: "Busy: the key could not be checked just now. Retry shortly." }, id: id ?? null }, { status: 200, headers: { "retry-after": "2" } })
+  // A refused caller, as the brain's edge answers one that presents a key: a request 200 with the error, a
+  // notification 202 with no body.
+  downAs === "revoked" || downAs === "unknown" ? (id === undefined ? new Response(null, { status: 202 }) : Response.json({ jsonrpc: "2.0", error: { code: -32001, message: REFUSALS[downAs] }, id }, { status: 200 }))
+    : downAs === "busy" ? Response.json({ jsonrpc: "2.0", error: { code: -32003, message: "Busy: the key could not be checked just now. Retry shortly." }, id: id ?? null }, { status: 200, headers: { "retry-after": "2" } })
     : downAs === "fault" ? new Response("Internal Server Error", { status: 500, headers: { "content-type": "text/plain; charset=UTF-8" } })
     : new Response("Bad Gateway", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
 
 const log = (line: Record<string, unknown>): void => {
-  const full = { at: new Date().toISOString(), ...line };
+  // Each line the probe writes names its port: two probes started without LOG write one file.
+  const full = { at: new Date().toISOString(), port: PORT, ...line };
   appendFileSync(LOG, `${JSON.stringify(full)}\n`);
   console.log(JSON.stringify(full));
 };
@@ -77,7 +115,7 @@ const dropExtra = (server: McpServer): void => {
 
 /** A server for one request or one session, holding the tool set as it stands now. */
 function build(): McpServer {
-  const server = new McpServer({ name: "client-probe", version: "0.0.1" }, { cacheHints: { "tools/list": { ttlMs, cacheScope: "private" } }, ...(LISTEN ? {} : { capabilities: { tools: { listChanged: false } } }) });
+  const server = new McpServer(INFO, { cacheHints: { "tools/list": { ttlMs, cacheScope: "private" } }, ...(LISTEN ? {} : { capabilities: { tools: { listChanged: false } } }) });
   server.registerTool("probe_time", { description: "Says the probe's time and which tool set it serves.", inputSchema: {} }, async () => ({
     content: [{ type: "text" as const, text: `time ${new Date().toISOString()} · tool set ${extra ? "B (probe_time, probe_extra)" : "A (probe_time)"}` }],
   }));
@@ -87,6 +125,57 @@ function build(): McpServer {
 
 const handler = () => createMcpHandler(() => build(), { onerror: (err) => log({ event: "handler-error", message: err.message }) });
 let modern = handler();
+
+/** A listen stream the probe holds: its request's id, what aborts its request, and the stream the client reads. */
+type Held = { id: unknown; abort: AbortController; out: TransformStreamDefaultController<Uint8Array> };
+const held = new Set<Held>();
+
+/**
+ * A listen, answered by the SDK and held so that it can be ended alone (SMD-4493). The SDK is given a request of the
+ * probe's own, since it ends a stream with no frame when that request's signal aborts; and its answer is read through
+ * a stream the probe can write to, error or end.
+ */
+async function holdListen(req: Request, text: string, id: unknown): Promise<Response> {
+  const abort = new AbortController();
+  const res = await modern.fetch(new Request(req.url, { method: "POST", headers: req.headers, body: text, signal: abort.signal }));
+  if (!res.body || !(res.headers.get("content-type") ?? "").startsWith("text/event-stream")) return res;
+  let entry: Held | undefined;
+  const gone = (): void => void (entry && held.delete(entry));
+  const through = new TransformStream<Uint8Array, Uint8Array>({
+    start(controller) {
+      entry = { id, abort, out: controller };
+      held.add(entry);
+    },
+    // The stream's own end (the SDK's close, a listen that honours nothing), and its client's leaving.
+    flush: gone,
+    cancel: gone,
+  } as Transformer<Uint8Array, Uint8Array>);
+  return new Response(res.body.pipeThrough(through), { status: res.status, statusText: res.statusText, headers: res.headers });
+}
+
+/** Ends every held listen stream one way, the probe going on serving, and says how many. */
+function endHeld(way: "clean" | "reset" | "frame"): number {
+  const all = [...held];
+  held.clear();
+  for (const h of all) {
+    try {
+      if (way === "frame") {
+        // The SDK's own closing frame, as its listen router writes one, by hand.
+        const frame = { jsonrpc: "2.0", id: h.id, result: { resultType: "complete", _meta: { [SUBSCRIPTION_ID_META_KEY]: h.id, [SERVER_INFO_META_KEY]: INFO } } };
+        h.out.enqueue(new TextEncoder().encode(`event: message\ndata: ${JSON.stringify(frame)}\n\n`));
+        h.out.terminate();
+      } else if (way === "reset") {
+        h.out.error(new Error("the probe reset this stream"));
+      }
+    } catch (err) {
+      log({ event: "end-error", way, message: (err as Error).message });
+    }
+    // For `clean` this is the whole of it: the SDK closes its stream with no frame of its own, and the client reads
+    // the body's end. For the other two it ends the SDK's side too, which the stream's own end would do without it.
+    h.abort.abort();
+  }
+  return all.length;
+}
 
 /** The brain's wiring today: a 2025-era transport built per request, no session, POST only. */
 async function stateless(req: Request): Promise<Response> {
@@ -141,12 +230,12 @@ async function record(req: Request, path: string): Promise<void> {
 async function sessionful(req: Request): Promise<Response> {
   const sid = req.headers.get("mcp-session-id");
   if (sid) {
-    const held = sessions.get(sid);
-    if (!held) {
+    const open = sessions.get(sid);
+    if (!open) {
       log({ event: "session-unknown", sid });
       return Response.json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null }, { status: 404 });
     }
-    return held.transport.handleRequest(req);
+    return open.transport.handleRequest(req);
   }
   if (req.method !== "POST") return new Response("Method not allowed.", { status: 405, headers: { Allow: "POST" } });
   const server = build();
@@ -218,7 +307,11 @@ async function control(url: URL): Promise<Response> {
       downAs = "down";
       downUntil = Date.now() + seconds * 1000;
       setTimeout(() => log({ event: "serving-again" }), seconds * 1000);
-      // After this answer has left: every connection dropped, and the port open again at once to answer 502.
+      // After this answer has left: every connection dropped, and the port open again at once to answer 502. Between
+      // the two calls the port is closed, and a connection made then is refused. With a stand-in for this listener,
+      // a test client that connected the moment its stream dropped was refused in 10 to 221 of 3,000 swaps, by
+      // the machine's load (macOS, Bun 1.4.3). Opening the next listener first needs a port two listeners
+      // share, which lets a second probe in beside the first: tried, and taken back (SMD-4493).
       setTimeout(() => {
         void listener.stop(true).then(() => old.close()).catch(() => undefined);
         listener = listen();
@@ -237,13 +330,29 @@ async function control(url: URL): Promise<Response> {
         }, seconds * 1000);
       }, 100);
     }
+  } else if (/^end\/(clean|reset|frame)$/.test(what) || /^(revoked|unknown|nolisten)\/(clean|reset|frame)\/\d+$/.test(what)) {
+    // The server ends its streams of its own accord and stays up (SMD-4493). The tool set changes, unannounced, so a
+    // client that lists again shows it. A refusal begins before the streams end: a client that asks again at once
+    // meets it.
+    const [how, way, n] = what.split("/") as ["end" | "revoked" | "unknown" | "nolisten", "clean" | "reset" | "frame", string | undefined];
+    const seconds = how === "end" ? 0 : Number(n);
+    if (how !== "end" && (seconds < 1 || seconds > 600)) return new Response("1 to 600 seconds", { status: 400 });
+    extra = !extra;
+    if (how === "nolisten") noListenUntil = Date.now() + seconds * 1000;
+    else if (how !== "end") {
+      downAs = how;
+      downUntil = Date.now() + seconds * 1000;
+    }
+    const streams = endHeld(way);
+    log({ event: how, way, streams, seconds, toolSet: extra ? "B" : "A" });
+    if (how !== "end") setTimeout(() => log({ event: "serving-again" }), seconds * 1000);
   } else if (what === "ttl") {
     ttlMs = Number(url.searchParams.get("ms") ?? 0);
     log({ event: "ttl", ttlMs });
   } else if (what !== "state") {
     return new Response("unknown control", { status: 404 });
   }
-  return Response.json({ toolSet: extra ? "B" : "A", ttlMs, sessions: sessions.size, requests, down: Date.now() < downUntil, listen: LISTEN });
+  return Response.json({ toolSet: extra ? "B" : "A", ttlMs, sessions: sessions.size, requests, down: Date.now() < downUntil, noListen: Date.now() < noListenUntil, listen: LISTEN, held: held.size, log: LOG });
 }
 
 const listen = () => Bun.serve({
@@ -259,13 +368,27 @@ const listen = () => Bun.serve({
     }
     requests++;
     await record(req, url.pathname);
+    // What a POST carries, read once: its id, and whether it asks for a listen stream.
+    const text = req.method === "POST" ? await req.clone().text() : "";
+    const asked = ((): { id: unknown; listen: boolean } => {
+      try {
+        const m = JSON.parse(text) as { id?: unknown; method?: string } | null;
+        return { id: m?.id, listen: m?.method === "subscriptions/listen" && m?.id !== undefined };
+      } catch {
+        return { id: undefined, listen: false };
+      }
+    })();
     if (Date.now() < downUntil) {
-      const id = req.method === "POST" ? await req.clone().json().then((m: { id?: unknown }) => m?.id, () => undefined) : undefined;
-      const res = away(id);
+      const res = away(asked.id);
       log({ event: "response", path: url.pathname, http: req.method, status: res.status, type: res.headers.get("content-type"), sid: null, away: downAs });
       return res;
     }
-    const res = url.pathname === "/mcp" ? await modern.fetch(req) : url.pathname === "/legacy" ? await stateless(req) : await sessionful(req);
+    if (url.pathname === "/mcp" && asked.listen && Date.now() < noListenUntil) {
+      const res = Response.json({ jsonrpc: "2.0", id: asked.id, error: { code: -32603, message: REFUSALS.nolisten } }, { status: 200 });
+      log({ event: "response", path: url.pathname, http: req.method, status: res.status, type: res.headers.get("content-type"), sid: null, refused: "listen" });
+      return res;
+    }
+    const res = url.pathname === "/mcp" ? (asked.listen ? await holdListen(req, text, asked.id) : await modern.fetch(req)) : url.pathname === "/legacy" ? await stateless(req) : await sessionful(req);
     log({ event: "response", path: url.pathname, http: req.method, status: res.status, type: res.headers.get("content-type"), sid: res.headers.get("mcp-session-id") });
     return res;
   },
