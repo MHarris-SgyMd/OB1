@@ -8281,7 +8281,7 @@ if (want("10")) {
   const mendDatedNow = Number((await sql`SELECT count(*)::int AS c FROM thought_work_claims WHERE work_type = ${KEY_B} AND enqueued_at >= ${mendFrom}
                                           AND thought_id = ANY(${sql.array([back.read, back.failed, back.lapsed], "TEXT")}::uuid[])`)[0].c);
   assert(lapsedUnderA === "pending" && mendDatedNow === 2
-      && statusMend.stdout.includes("2 finished row(s) are of thoughts another extraction key read since: the next run returns them to the pool")
+      && statusMend.stdout.includes("2 finished row(s) are of thoughts another extraction key's pool read since: the next run returns them to the pool")
       && mend.code === 1 && mend.stdout.includes(`2 finished row(s) returned to the pool, behind what is pending: another extraction key's pool read their thoughts after ${KEY_B} did`) && !/--switch-key:/.test(mend.stdout)
       && mendCalls === 3 && (await readings()) === `1 Aurora under ${KEY}, 3 Borealis under ${KEY_B}, 1 Gold under ${KEY_BIG}` && (await readingOf(back.lapsed)) === "Aurora" && (await readingOf(back.kept)) === "Gold" && (await rowsUnder(KEY_B)) === "2 failed, 4 succeeded"
       && calls === callsBeforeMend + 3 && !/returned to the pool/.test(mendAgain.stdout),
