@@ -88,7 +88,8 @@ const REFUSALS = {
 const LISTEN = process.env.LISTEN !== "off";
 /** What a client is answered while the probe is away, by the control that sent it away. */
 const away = (id: unknown): Response =>
-  // A refused caller, as the brain's edge answers one that presents a key: a request 200 with the error, a notification 202 with no body.
+  // A refused caller, as the brain's edge answers one that presents a key: a request 200 with the error, a
+  // notification 202 with no body.
   downAs === "revoked" || downAs === "unknown" ? (id === undefined ? new Response(null, { status: 202 }) : Response.json({ jsonrpc: "2.0", error: { code: -32001, message: REFUSALS[downAs] }, id }, { status: 200 }))
     : downAs === "busy" ? Response.json({ jsonrpc: "2.0", error: { code: -32003, message: "Busy: the key could not be checked just now. Retry shortly." }, id: id ?? null }, { status: 200, headers: { "retry-after": "2" } })
     : downAs === "fault" ? new Response("Internal Server Error", { status: 500, headers: { "content-type": "text/plain; charset=UTF-8" } })
@@ -331,7 +332,8 @@ async function control(url: URL): Promise<Response> {
     }
   } else if (/^end\/(clean|reset|frame)$/.test(what) || /^(revoked|unknown|nolisten)\/(clean|reset|frame)\/\d+$/.test(what)) {
     // The server ends its streams of its own accord and stays up (SMD-4493). The tool set changes, unannounced, so a
-    // client that lists again shows it. A refusal begins before the streams end: a client that asks again at once meets it.
+    // client that lists again shows it. A refusal begins before the streams end: a client that asks again at once
+    // meets it.
     const [how, way, n] = what.split("/") as ["end" | "revoked" | "unknown" | "nolisten", "clean" | "reset" | "frame", string | undefined];
     const seconds = how === "end" ? 0 : Number(n);
     if (how !== "end" && (seconds < 1 || seconds > 600)) return new Response("1 to 600 seconds", { status: 400 });

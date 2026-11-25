@@ -2055,11 +2055,11 @@ streams open, or left open. Restarting `mcp` ends every stream, and is no lever
 to pull twice. What a client does when its stream ends is its own: Claude Code
 asks again 6, 8 and 12 seconds on and then stops asking (measured, SMD-4347),
 its documentation says five reopens in an hour make it wait about six hours,
-and no other client has been measured. Measured of that, against a probe
-(SMD-4493): with its stream ended every 15 seconds, and in another session
-every 20, it opened a stream again five times, and after the sixth end made
-no attempt in the 75 and the 90 seconds watched. The six hours were not
-watched.
+and no other client has been measured. Of what the documentation says,
+measured against a probe (SMD-4493): with its stream ended every 15 seconds,
+and in another session every 20, Claude Code opened a stream again five
+times, and after the sixth end made no attempt in the 75 and the 90 seconds
+watched. The six hours were not watched.
 
 On a server that holds listen streams, a stream's end writes a line of its own
 (SMD-4459), where the request lines go:

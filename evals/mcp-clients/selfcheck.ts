@@ -140,7 +140,7 @@ await client.close();
     const r = await fetch(`${base}/mcp`, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2026-07-28", "mcp-method": "subscriptions/listen" },
-      body: JSON.stringify({ jsonrpc: "2.0", id, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { name: "probe-selfcheck", version: "0" }, "io.modelcontextprotocol/clientCapabilities": {} } } }),
+      body: JSON.stringify({ jsonrpc: "2.0", id, method: "subscriptions/listen", params: { notifications: { toolsListChanged: true }, _meta: META } }),
     });
     const reader = r.body!.getReader();
     const decoder = new TextDecoder();
@@ -180,7 +180,10 @@ await client.close();
   const LISTEN_AGAIN = modern("subscriptions/listen", "listen:1", { notifications: { toolsListChanged: true } });
   const bare: Asked = { headers: plain, body: { jsonrpc: "2.0", id: 7, method: "tools/list" } };
   const post = (path: string, what: Asked): Promise<Response> => fetch(base + path, { method: "POST", headers: what.headers, body: JSON.stringify(what.body) });
-  /** A request answered with a result, and no tool's error in it. Its status alone says nothing: every refusal the probe gives is a 200 too. */
+  /**
+   * A request answered with a result, and no tool's error in it. Its status alone says nothing: every refusal the
+   * probe gives is a 200 too.
+   */
   const served = async (path = "/mcp", what: Asked = bare): Promise<boolean> => {
     const r = await post(path, what);
     const text = await r.text();
@@ -189,7 +192,10 @@ await client.close();
   };
   /** A value's JSON with each object's members in one order, so that two bodies are compared whole, in whatever order theirs came. */
   const canon = (value: unknown): string => JSON.stringify(value, (_key, x: unknown) => (x && typeof x === "object" && !Array.isArray(x) ? Object.fromEntries(Object.entries(x).sort(([a], [b]) => (a < b ? -1 : 1))) : x));
-  /** What a request is answered: its status, a Retry-After where it carries one, and its body whole, or its content type where the body is no JSON. */
+  /**
+   * What a request is answered: its status, a Retry-After where it carries one, and its body whole, or its content
+   * type where the body is no JSON.
+   */
   const answered = async (path: string, what: Asked): Promise<string> => {
     const r = await post(path, what);
     const type = (r.headers.get("content-type") ?? "none").split(";")[0];
@@ -242,8 +248,8 @@ await client.close();
   };
   /**
    * Everything asked under a caller's refusal, together, so that the clock is not spent: a bare tools/list at the
-   * three paths, a bare tools/call at /legacy and /session, a server/discover, a tools/list, a tools/call and a listen in the client's shape, and a
-   * notification at the three paths. Says what was answered wrongly, or nothing.
+   * three paths, a bare tools/call at /legacy and /session, a server/discover, a tools/list, a tools/call and a
+   * listen in the client's shape, and a notification at the three paths. Says what was answered wrongly, or nothing.
    */
   const underRefusal = async (how: "revoked" | "unknown"): Promise<string> => {
     const asks = [bare, DISCOVER, LIST, CALL, LISTEN_AGAIN];
@@ -394,9 +400,8 @@ await client.close();
         row((await set()) !== before, `${name}: the probe says its tool set changed`);
       }
       await Bun.sleep(Math.max(0, 1500 - (Date.now() - began)));
-      const [during, callDuring, bareDuring] = await Promise.all([answered("/mcp", LISTEN_AGAIN), how === "nolisten" ? served("/mcp", CALL).then(String) : answered("/mcp", CALL), how === "nolisten" ? served().then(String) : answered("/mcp", bare)]);
+      const late = await Promise.all([answered("/mcp", LISTEN_AGAIN), how === "nolisten" ? served("/mcp", CALL).then(String) : answered("/mcp", CALL), how === "nolisten" ? served().then(String) : answered("/mcp", bare)]);
       const wants = [refused(LISTEN_AGAIN, how === "nolisten" ? -32603 : -32001, WORDS[how]), how === "nolisten" ? "true" : refused(CALL, -32001, WORDS[how]), how === "nolisten" ? "true" : refused(bare, -32001, WORDS[how])];
-      const late = [during, callDuring, bareDuring];
       const off = late.findIndex((said, i) => said !== wants[i]);
       row(off === -1, `${name}: 1.5 s in a listen is still refused, whole, and a tools/call and a bare tools/list still ${how === "nolisten" ? "served" : "refused"} (${["the listen", "the call", "the bare list"][Math.max(off, 0)]}: ${late[Math.max(off, 0)].slice(0, 80)})`);
       await Bun.sleep(Math.max(0, 2300 - (Date.now() - began)));
@@ -491,7 +496,7 @@ await client.close();
         await control("end/clean");
         await stream.read();
       }
-      row(untouched && (await listens()), `${where}: a refusal asked for 0 seconds or for 601, either caller's or a listen's, is answered 400, and nothing is changed, ended or refused (${statuses.join(", ")}; ${holds} held)`);
+      row(untouched && (await listens()), `${stream ? "one stream held" : where}: a refusal asked for 0 seconds or for 601, either caller's or a listen's, is answered 400, and nothing is changed, ended or refused (${statuses.join(", ")}; ${holds} held)`);
     }
   }
   // An outage lasts what it was asked to, in either mode: still away most of the way through, serving after.
