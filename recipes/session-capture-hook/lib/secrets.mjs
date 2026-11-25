@@ -142,8 +142,9 @@ export const SECRET_PATTERNS = [
   // `SHA256=<hex>`, `--sha256 <hex>`, `sha256: <hex>`,
   // and `sha256sum`'s own output shape, `<hex>  file` — two spaces then the name (fifth review pass:
   // an actionlint pin line refused a session; sixth: a lookbehind on the WORD sha256sum excused any
-  // hex later on that line, a key included). The gap is spaces or tabs, never a line break (SMD-4546:
-  // `\s{2}` read a blank line as the gap, and a bare key on its own line before one went out).
+  // hex later on that line, a key included). The gap is whitespace on its line, never a line break (SMD-4546:
+  // `\s{2}` read a blank line as the gap, and a bare key on its own line before one went out); a non-breaking or
+  // other Unicode space is a gap still, as db/sensitivity.ts reads it after its fold (review pass 3).
   // A work claim's token (migration 115, SMD-3598): `wc_` and 64 lowercase hex digits, which proves a claim to any
   // agent under the key that holds it. The 64-hex rule never sees it — its lookbehind refuses a run after `_` — and
   // the entropy rule skips hex (SMD-3615). Read on the raw text, a URL's included. An underscore beside it does not
@@ -153,7 +154,7 @@ export const SECRET_PATTERNS = [
   // hex as no token): the run of 64 or more is the token, blanked whole. A name ending in `wc` right before `_` and a
   // digest is unlikely, and a shorter run is still no token.
   ["work-claim token", /wc\\?_[0-9a-f]{64,}/i], // `wc\_` as markdown escapes it (SMD-3602)
-  ["64-hex token (a raw key, or a digest out of its context)", /(?<![0-9a-f])(?<!:(?:read|write|capture|forward):)(?<!sha-?256\s*[:=]\s*)(?<!--sha-?256\s+)(?<![A-Za-z0-9_-])(?:0x)?[0-9a-f]{64}(?![0-9a-f])(?!(?<=(?:^|\n)[ \t]*(?:0x)?[0-9a-f]{64})[ \t]{2}\S)/i],
+  ["64-hex token (a raw key, or a digest out of its context)", /(?<![0-9a-f])(?<!:(?:read|write|capture|forward):)(?<!sha-?256\s*[:=]\s*)(?<!--sha-?256\s+)(?<![A-Za-z0-9_-])(?:0x)?[0-9a-f]{64}(?![0-9a-f])(?!(?<=(?:^|\n)[ \t]*(?:0x)?[0-9a-f]{64})[^\S\r\n\u2028\u2029\v\f]{2}\S)/i],
 ];
 
 /** The patterns that read the URL-blanked text: shapes, not prefixes. */
