@@ -24385,21 +24385,32 @@ console.log("\n[139] Migration 154: a settled part that is no longer a judgement
 
     // Three of 151's catalog comments named no removal (review pass 1): the table's, the status column's and
     // rebuild_derived's, which said of a decided part that nothing settles a part yet. Each names the settle since
-    // this file, once: the apply above was this section's second, after an earlier section's re-apply of 151 had
-    // written 151's own back, and it appended to none a second time.
-    const [cm] = (await q(`SELECT obj_description('settled_parts'::regclass, 'pg_class') AS t,
-                                  col_description('settled_parts'::regclass, (SELECT attnum::int FROM pg_attribute WHERE attrelid = 'settled_parts'::regclass AND attname = 'status')) AS s,
-                                  obj_description('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)'::regprocedure, 'pg_proc') AS r`)) as { t: string | null; s: string | null; r: string | null }[];
+    // this file, once. The row reads each comment whole against 151's own (review pass 4: it had read a comment's
+    // first clause and its appended sentence alone, so a file that kept both and cut 151's text between them
+    // passed): 151 applied again writes its own three back, this file after it appends its sentence to two of
+    // them and replaces the clause in the third, and a further apply appends to none a second time.
+    type Comments = { t: string | null; s: string | null; r: string | null };
+    const comments = async () => (await q(`SELECT obj_description('settled_parts'::regclass, 'pg_class') AS t,
+                                                  col_description('settled_parts'::regclass, (SELECT attnum::int FROM pg_attribute WHERE attrelid = 'settled_parts'::regclass AND attname = 'status')) AS s,
+                                                  obj_description('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)'::regprocedure, 'pg_proc') AS r`) as Comments[])[0];
     const namesSettle = (c: string | null) => (c ?? "").split("settle_stale_part").length - 1;
+    const partsFile = files.find((f) => f.endsWith("_settled_parts.sql")) ?? "no _settled_parts.sql";
+    await reapply(partsFile.slice(0, 4));
+    const own = await comments();
     await reapply(file.slice(0, 4));
-    const [cmAgain] = (await q(`SELECT obj_description('settled_parts'::regclass, 'pg_class') AS t,
-                                       col_description('settled_parts'::regclass, (SELECT attnum::int FROM pg_attribute WHERE attrelid = 'settled_parts'::regclass AND attname = 'status')) AS s,
-                                       obj_description('rebuild_derived(uuid, text, boolean, text[], boolean, boolean)'::regprocedure, 'pg_proc') AS r`)) as { t: string | null; s: string | null; r: string | null }[];
-    assert(namesSettle(cm.t) === 1 && namesSettle(cm.s) === 1 && namesSettle(cm.r) === 1 && JSON.stringify(cmAgain) === JSON.stringify(cm)
-        && (cm.t ?? "").startsWith("One row per settled part:") && (cm.t ?? "").endsWith(`An undecided part that is no longer a judgement of its texts, and that the pass does not record again when it judges the pair again or whose pair nothing will judge again, is removed with its lineage row (settle_stale_part, migration ${NUM}).`)
-        && (cm.s ?? "").startsWith("pending: the part awaits a reviewer.") && (cm.s ?? "").endsWith(`An undecided row that is no longer a judgement of its texts is removed where the pass judges the pair again and does not record it again, or where nothing will judge the pair again (settle_stale_part, migration ${NUM}).`)
-        && !(cm.r ?? "").includes("nothing settles a part yet") && (cm.r ?? "").includes(`a rejection included: the pass removes a part it settles and rejects none (settle_stale_part, migration ${NUM}), so a rejection is a person's)`),
-      `151's comments on the parts' table, its status column and rebuild_derived name the pass's removal since ${NUM}, each once, the rest of each as 151 wrote it, and a further apply changes none (${namesSettle(cm.t)}, ${namesSettle(cm.s)} and ${namesSettle(cm.r)} time(s); the same after: ${JSON.stringify(cmAgain) === JSON.stringify(cm)})`);
+    const cm = await comments();
+    await reapply(file.slice(0, 4));
+    const cmAgain = await comments();
+    const TABLE_SENTENCE = ` An undecided part that is no longer a judgement of its texts, and that the pass does not record again when it judges the pair again or whose pair nothing will judge again, is removed with its lineage row (settle_stale_part, migration ${NUM}).`;
+    const STATUS_SENTENCE = ` An undecided row that is no longer a judgement of its texts is removed where the pass judges the pair again and does not record it again, or where nothing will judge the pair again (settle_stale_part, migration ${NUM}).`;
+    const NOTHING_YET = "nothing settles a part yet";
+    const REMOVES = `the pass removes a part it settles and rejects none (settle_stale_part, migration ${NUM}), so a rejection is a person's`;
+    const ownWhole = own.t !== null && own.s !== null && own.r !== null && own.t.length > 200 && own.s.length > 200 && own.r.length > 200;
+    assert(ownWhole && namesSettle(own.t) + namesSettle(own.s) + namesSettle(own.r) === 0 && (own.r ?? "").split(NOTHING_YET).length === 2,
+      `151 applied again writes its own three comments back, none naming the settle and rebuild_derived's saying once that nothing settles a part yet (${(own.t ?? "").length}, ${(own.s ?? "").length} and ${(own.r ?? "").length} characters; the settle named ${namesSettle(own.t) + namesSettle(own.s) + namesSettle(own.r)} time(s))`);
+    assert(cm.t === own.t + TABLE_SENTENCE && cm.s === own.s + STATUS_SENTENCE && cm.r === (own.r ?? "").replace(NOTHING_YET, REMOVES)
+        && namesSettle(cm.t) === 1 && namesSettle(cm.s) === 1 && namesSettle(cm.r) === 1 && JSON.stringify(cmAgain) === JSON.stringify(cm),
+      `151's comments on the parts' table, its status column and rebuild_derived name the pass's removal since ${NUM}, each once: the table's and the column's are 151's whole with one sentence after, rebuild_derived's is 151's whole with the one clause replaced, and a further apply changes none (the table's ${cm.t === own.t + TABLE_SENTENCE}, the column's ${cm.s === own.s + STATUS_SENTENCE}, rebuild_derived's ${cm.r === (own.r ?? "").replace(NOTHING_YET, REMOVES)}; ${namesSettle(cm.t)}, ${namesSettle(cm.s)} and ${namesSettle(cm.r)} time(s); the same after: ${JSON.stringify(cmAgain) === JSON.stringify(cm)})`);
   } catch (e) {
     // A throw is a failed row, not the suite's end: the cleanup below runs, and so does whatever follows this section.
     assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
