@@ -9853,6 +9853,13 @@ if (want("10h")) {
         await sql.unsafe(`GRANT SELECT ON thought_work_claims TO ${SROLE}`);
         assert(noClaimSelect.code === 2 && /This role cannot claim from the subject pool: it needs SELECT, INSERT and UPDATE on thought_work_claims/.test(noClaimSelect.stderr) && ownCalls === asked,
           `…and without SELECT on the claims, refused too, before any question (exit ${noClaimSelect.code})`);
+        // …or without SELECT on 153's subject-key repository, which the door reads for a bare pr: or version: key
+        // (SMD-3887 review pass 2: the check passed the role, and its first write was refused).
+        await sql.unsafe(`REVOKE SELECT ON subject_repo_settings FROM ${SROLE}`);
+        const noRepoRead = await sweep({}, sEnv, sUrl);
+        await sql.unsafe(`GRANT SELECT ON subject_repo_settings TO ${SROLE}`);
+        assert(noRepoRead.code === 2 && noRepoRead.stderr.includes(`record_thought_subjects needs ${DOOR_GRANTS}`) && DOOR_GRANTS.includes("SELECT on subject_repo_settings") && ownCalls === asked,
+          `…and without SELECT on the subject-key repository, refused before any question, naming it (exit ${noRepoRead.code}: ${noRepoRead.stderr.trim().split("\n").slice(-1)[0]?.slice(0, 120)})`);
         await sql.unsafe(`REVOKE SELECT ON ob1_config FROM ${SROLE}`);
         const noConfigRead = await sweep({ dryRun: true }, sEnv, sUrl);
         // …and a run, not dry, heard as the tables' refusal (PR 6b-1's review pass 2, mutant: heard as usage, it lived).
@@ -19701,8 +19708,9 @@ if (want("16")) {
     // was refused its every subject; PR 7a-1: [47]'s threads were written with 111's validator, origin judged), and
     // 130's doors, trigger function and index, which those re-applies undo (PR 7a-3a), and 134's validator, which
     // carries 120's with the deliverable kind (SMD-1715), and the settled parts' file, whose lineage writer carries
-    // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row).
-    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) });
+    // 111's with the part kind (SMD-4446: [31], after this section in the rest shard, was refused its part's lineage row),
+    // and the subject-repo file, whose key rule replaces 111's with a key scoped to its repository (SMD-3887).
+    await applyMigrations(URL_!, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f.startsWith("111_") || f.startsWith("113_") || /^\d{3}_thread_edges\.sql$/.test(f) || /^\d{3}_subject_sets\.sql$/.test(f) || /^\d{3}_deliverables\.sql$/.test(f) || /^\d{3}_settled_parts\.sql$/.test(f) || /^\d{3}_subject_repo_scope\.sql$/.test(f) });
 
     // Review pass 4 (walkthrough): a thought this key judged before 084 was
     // applied is counted, with the statement that re-pools exactly those; an
@@ -24626,10 +24634,19 @@ if (want("29")) {
     let raceId = "";
     /** A thought whose text a session moves and rebuilds while its call is out (SMD-2298 PR 2, review pass 1). */
     let rebuiltId = "";
+    /** A thought whose answer waits on the test (PR 4a-1 review pass 1): seen, then answered once `writeHeld` resolves. */
+    let heldMarker = "";
+    let heldSeen: () => void = () => {};
+    let writeHeld: Promise<void> = Promise.resolve();
     let rebuiltDone = false;
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
       const body = await req.text();
       bodies.push(body);
+      if (heldMarker && body.includes(heldMarker)) {
+        heldMarker = "";
+        heldSeen();
+        await writeHeld;
+      }
       if (!rebuiltDone && rebuiltId && body.includes("[29] rebuilt")) {
         rebuiltDone = true;
         const edited = "[29] rebuilt, its text moved while the call was out";
@@ -24931,6 +24948,95 @@ if (want("29")) {
       SPECIAL.delete("[29] P401");
       assert(refusedRun.code === 2 && /The provider refused the request itself/.test(refusedRun.err) && p401?.status === "pending",
         `a 401 stops the run, exit 2, nothing marked failed, the thought pending (${refusedRun.code}: ${p401?.status})`);
+
+      // SMD-2298 PR 4a-1: the options a caller like the sleep scheduler passes. abortInHand aborts the tags call in
+      // hand: the thought goes to the back of the queue, nothing written, and the run re-tags it after; onStart hears
+      // the start; banner and summary false keep their lines out; session settings reach the run's own connections.
+      const AB = await tagged("[29] AB, its call aborted in hand");
+      await move(AB, "[29] AB, its call aborted in hand, moved");
+      SPECIAL.set("[29] AB", "slow");
+      let abortInHand: InHandAbort | null = null;
+      const starts: StartResult[] = [];
+      const abRun = retag({ pausesMs: [10], onPass: (_stop, abort) => { abortInHand = abort; }, onStart: (r) => starts.push(r), banner: false, summary: false, session: { application_name: "retag-29-session" } });
+      for (let i = 0; i < 200 && !bodies.some((b) => b.includes("[29] AB")); i++) await Bun.sleep(25);
+      // The abort at once, while the slow answer is out; the session's connections read after it, still open
+      // (review pass 2: the read before it could outlast the stub's window on a loaded box).
+      const abortedN = abortInHand ? (abortInHand as InHandAbort)() : -1;
+      const sessions = Number(((await sql`SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'retag-29-session'`) as { n: number }[])[0].n);
+      SPECIAL.delete("[29] AB");
+      const abDone = await abRun;
+      const abClaim = (await claims()).find((c) => c.id === AB);
+      assert(abortedN === 1 && bodies.filter((b) => b.includes("[29] AB")).length === 2 && settled(await tagsRow(AB)) && abClaim?.status === "succeeded"
+          && abDone.code !== 2 && starts.length === 1 && starts[0].ok === true && sessions > 0
+          && !/job: {4}/.test(abDone.out) && !/OB1_WORKER_KEY is not set/.test(abDone.out + abDone.err) && !/re-tagged \(/.test(abDone.out),
+        `abortInHand aborts the call in hand: the thought set back, re-tagged after from its text, settled; onStart heard once, through; banner and summary left out; the session's settings on its connections (${abortedN} aborted; ${sessions} session(s); ${JSON.stringify(starts)})`);
+      // The admit gate: nothing pooled or sent while it is shut; opened, the run goes on.
+      const G = await tagged("[29] G, behind the admit gate");
+      await move(G, "[29] G, behind the admit gate, moved");
+      let openGate: () => void = () => {};
+      const shut = new Promise<void>((r) => { openGate = r; });
+      let admitAsks = 0;
+      const admit: Admit = (signal) => new Promise<void>((resolve, reject) => {
+        admitAsks++;
+        void shut.then(resolve);
+        signal.addEventListener("abort", () => reject(new Error("stopped at the gate")), { once: true });
+      });
+      const gRun = retag({ pausesMs: [10], admit });
+      // The first ask is the pool's: until it is answered nothing is pooled (review pass 1: a fixed sleep proved less).
+      for (let i = 0; i < 200 && admitAsks < 1; i++) await Bun.sleep(25);
+      await Bun.sleep(200);
+      const asksShut = admitAsks;
+      const gPooledShut = (await claims()).some((c) => c.id === G);
+      const gSentShut = bodies.some((b) => b.includes("[29] G"));
+      openGate();
+      const gDone = await gRun;
+      assert(!gPooledShut && !gSentShut && asksShut === 1 && admitAsks === 3 && gDone.code !== 2 && settled(await tagsRow(G)) && (await claims()).find((c) => c.id === G)?.status === "succeeded",
+        `the admit gate shut: nothing pooled or sent; opened, the run pools and re-tags, the gate asked before the pool and each claim (${gPooledShut}/${gSentShut}; ${admitAsks} ask(s); ${line(gDone.out, "re-tagged (")})`);
+      // abortInHand counts only a call that is out (review pass 1): a worker writing — its update_thought held behind
+      // a row lock the test takes as the answer goes back — has no call to abort, and the thought is written, not set
+      // back.
+      const W = await tagged("[29] W, written while abortInHand is asked");
+      await move(W, "[29] W, written while abortInHand is asked, moved");
+      let releaseAnswer: () => void = () => {};
+      writeHeld = new Promise<void>((r) => { releaseAnswer = r; });
+      const seen = new Promise<void>((r) => { heldSeen = r; });
+      heldMarker = "[29] W";
+      let wAbort: InHandAbort | null = null;
+      const wRun = retag({ pausesMs: [10], onPass: (_stop, abort) => { wAbort = abort; } });
+      await seen;
+      const locker = new SQL({ url: URL_!, max: 1 });
+      await locker.unsafe("BEGIN");
+      await locker.unsafe("SELECT 1 FROM thoughts WHERE id = $1::uuid FOR UPDATE", [W]);
+      releaseAnswer();
+      await Bun.sleep(300);
+      const midWrite = wAbort ? (wAbort as InHandAbort)() : -1;
+      await locker.unsafe("COMMIT");
+      await locker.close();
+      const wDone = await wRun;
+      assert(midWrite === 0 && wDone.code !== 2 && settled(await tagsRow(W)) && (await claims()).find((c) => c.id === W)?.status === "succeeded",
+        `abortInHand asked while the worker writes — no call out — aborts and counts nothing, and the thought is written (${midWrite}; ${line(wDone.out, "re-tagged (")})`);
+      // A worker waiting at a shut admit gate is woken when the run stops of its own accord (review pass 1): two
+      // workers, the gate shut after the pool's ask and one claim's; the worker through meets a 401, the run's fatal
+      // refusal, and the run returns, not waiting for the gate.
+      const X = await plant("[29] X401, the key refused while another waits at the gate", { topics: ["t"], type: "idea" });
+      SPECIAL.set("[29] X401", 401);
+      let xAsks = 0;
+      const xGate: Admit = (signal) => new Promise<void>((resolve, reject) => {
+        if (++xAsks <= 2) { resolve(); return; }
+        signal.addEventListener("abort", () => reject(new Error("stopped at the gate")), { once: true });
+      });
+      const xRun = retag({ workers: 2, pausesMs: [10], admit: xGate });
+      const xDone = await Promise.race([xRun, Bun.sleep(15_000).then(() => null)]);
+      SPECIAL.delete("[29] X401");
+      assert(xDone !== null && xDone.code === 2 && /The provider refused the request itself/.test(xDone.err) && xAsks >= 3 && (await claims()).find((c) => c.id === X)?.status === "pending",
+        `a worker at a shut admit gate is woken by the run's own stop — another worker's fatal 401 — and the run returns 2, the thought pending (${xDone === null ? "it hung" : xDone.code}; ${xAsks} ask(s))`);
+      // onStart hears a refusal by its kind: the key's, and the input's.
+      const keyStarts: StartResult[] = [];
+      const usageStarts: StartResult[] = [];
+      const keyRefused = await retag({ onStart: (r) => keyStarts.push(r) }, { ...base, OB1_METADATA_MODEL: "stub-meta-other" });
+      const usageRefused = await retag({ workers: 0, onStart: (r) => usageStarts.push(r) });
+      assert(keyRefused.code === 2 && JSON.stringify(keyStarts) === '[{"ok":false,"refused":"key"}]' && usageRefused.code === 2 && JSON.stringify(usageStarts) === '[{"ok":false,"refused":"usage"}]',
+        `onStart hears a refusal by its kind: the key's, the input's (${JSON.stringify(keyStarts)} ${JSON.stringify(usageStarts)})`);
 
       // --switch-key (PR 3b): the key is the tags' target recipe, and every tags row made under another is behind it.
       // A dry run under another model counts them (every row: none is under the new key yet); the switch, cut short
@@ -34932,7 +35038,7 @@ if (want("47")) {
     ];
     assert(usage.every((u) => u.code === 2)
         && /^--status reads and writes nothing: it takes no --dry-run, --key or --batch$/m.test(usage[0].err) && /^--batch goes with a run over every key/m.test(usage[1].err)
-        && /^--key is a subject key — ticket:<ID>, pr:<number>, version:<v1\.2\.3> or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
+        && /^--key is a subject key — ticket:<ID>, pr:<number> or pr:<owner>\/<repo>#<number>, version:<v1\.2\.3> or version:<owner>\/<repo>@<v1\.2\.3>, or phrase:<lower-case words> — got "SMD-9472"$/m.test(usage[2].err) && /^--batch\b/m.test(usage[3].err)
         && /^--batch\b.*\b200\b/m.test(usage[4].err),
       `usage refused before any connection, 2: --status beside a write, --key beside --batch, a key no subject can hold, a batch of none, a batch over 200 (${usage.map((u) => u.err.split("\n")[0].slice(0, 60)).join(" | ")})`);
 

@@ -941,8 +941,9 @@ console.log("\n[4] The secret scan catches every shape it names and leaves the s
     assert(f.some((x) => x.reason === name), `caught: ${name}`);
   }
   assert(SECRET_PATTERNS.every(([name]) => probes.some((p) => p[0] === name)), "every named pattern has a probe above");
-  // …and a near miss is not a claim token (SMD-3615): 63 digits, a longer run, or `wc_` inside a word.
-  for (const near of ["wc_" + "a".repeat(63), "wc_" + "a".repeat(65), "xwc_" + "a".repeat(64), "9wc_" + "a".repeat(64)]) {
+  // …and a near miss is not a claim token (SMD-3615): 63 digits. `wc_` glued to a word's letters or digits, and a run
+  // longer than 64, are one since SMD-4544 (below), where SMD-3615 had read them as a word's and as no token.
+  for (const near of ["wc_" + "a".repeat(63)]) {
     assert(!scanForSecrets(`the summary says ${near} and goes on`).some((x) => x.reason === "work-claim token"), `not a work-claim token: ${near.slice(0, 8)}… (${near.length - 3} after the prefix)`);
   }
   const highEntropy = "kQ7vX2pL9mN4rT8wZ1yB6cF3hJ5gD0sA";
@@ -1392,6 +1393,79 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   assert(shapePrep.code === 0 && shapePayload && shapeDry.code === 0 && shapeLeft.length === 0,
     `…and none of the four passwords is in the payload written or the dry run's output (SMD-4542) (${shapePrep.code} ${shapeDry.code} ${JSON.stringify(shapeLeft)})`);
   if (shapePrep.payloadPath) unlinkSync(shapePrep.payloadPath);
+
+  // SMD-4543: the outcome keeps its lines in the summary, so a quoted password a soft wrap cut is blanked whole, read
+  // on the outcome's soft-wrapped view, where it was blanked as written and its second line sent. A blank line still
+  // ends a value, a sha256sum line is read at its line's start as before, and a key block is still a block.
+  const wrapped = [
+    ['Set it with password = "correct horse\nbattery staple 42" and restart.', ["horse", "battery staple 42"]],
+    ['Use password: "Kp7m Wq2z\nR9x 4tUv" there.', ["Kp7m Wq2z", "R9x 4tUv"]],
+    ['the db_password: "Tr0ub4dor 3x\r\nZq8 lmn" for now', ["Tr0ub4dor", "Zq8 lmn"]],
+  ].map(([text, parts]) => {
+    const ep = segment([{ t: "prompt", text: "set the db password" }, { t: "outcome", text }]).episodes[0];
+    const c = cleanEpisode(ep, "redact");
+    return { sent: parts.every((p) => !c.text.includes(p)) && /\[redacted:password assignment\]" (?:and|there|for)/.test(c.text), gate: gateFindings(c, c.text).length, refused: gateFindings(cleanEpisode(ep, "refuse"), renderSummary(ep)).length > 0 };
+  });
+  const paragraph = "Set password = 'Kp7mWq2zR9 here\n\nThe next paragraph's own 'quote' stays.";
+  const paraSent = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: paragraph }]).episodes[0], "redact").text;
+  // …and a blank line ends even a token-like quoted value the quoted branch would read across it, as main read it.
+  const paraToken = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: 'password: "ab12 cd34\n\nef56 gh78" ok' }]).episodes[0], "redact").text;
+  const digestLine = `Checksums:\n${"a1b2c3d4".repeat(8)}  release.tar.gz`;
+  const digestSent = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: digestLine }]).episodes[0], "redact").text;
+  const wrapBlock = redactSecrets(`-----BEGIN PRIVATE KEY-----\n${SEEDLESS}\n${SEEDED}\n${SEEDLESS} and prose`, { softWrap: true }).blocks.length;
+  // A finding both passes see is one finding, and without `every` each rule still answers once (the refusal message).
+  const both = scanForSecrets('password = "Kp7mWq2zR9"\nthe next line', { softWrap: true }).length, firstEach = scanForSecrets("password = Kp7mWq2zR9 and passwd=Zx8vBn3mQw\nmore", { softWrap: true }).length;
+  assert(wrapped.every((w) => w.sent && w.gate === 0 && w.refused) && paraSent.includes("The next paragraph's own 'quote' stays.") && !paraSent.includes("Kp7mWq2zR9") && paraToken.includes("ef56 gh78")
+    && digestSent.includes("a1b2c3d4".repeat(8)) && wrapBlock === 1 && both === 1 && firstEach === 1,
+    `a quoted password a soft wrap cut in the outcome is blanked whole and the gate passes it under redact, refused under refuse; a blank line still ends a value, a sha256sum line keeps its digest, a key block is still a block, and a finding both readings see is one (SMD-4543) (${JSON.stringify([wrapped, wrapBlock, both, firstEach])})`);
+  // Review pass 1 (secrets adversary): on the soft-wrapped view a value's closing quote is its own — one wrap away, no
+  // other quote first, no word character after it — so an unclosed or mismatched quote keeps the prose after it, as
+  // main kept it; a wrapped value merged with a one-line key token is counted, not dropped as a block; and without
+  // `every` each entropy token still answers, as before.
+  const ownQuote = [
+    ["Set password: 'Kp7mWq2z9 for the test user\nand don't commit it.\nNext steps follow.", "and don't commit it."],
+    ['The .env line `PGPASSWORD="Kp7mWq2z9` was missing its closing quote,\nso compose read the rest as the value.\nI added the quote and the "db" service starts.', "so compose read the rest as the value."],
+    ['- password: “Kp7mWq2z9" (mixed quotes)\n- the “db” service restarted', "- the “db” service restarted"],
+    ['password: "Kp7mWq2z9 for now\nthen the next step\nand a third line" ok', "then the next step"],
+    // Review pass 2: the quoted branch, whose value ends at its own close, is held to the same close.
+    ["PGPASSWORD='Kp7mWq2z9\nI'll rotate it tomorrow.", "\nI'll rotate it tomorrow."],
+    ["password: `Kp7mWq2z9\n- 1\n- 2\nOK, I'm done", "\n- 1\n- 2\nOK, I'm done"],
+    ['password: "Kp7m Wq2z 9x\nA1 B2\nC3 D4\nok" done', "A1 B2\nC3 D4"],
+  ].map(([text, kept]) => cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text }]).episodes[0], "redact").text.includes(kept));
+  const merged = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text: 'secret_key = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ1\nQyNTUxOQAAACBkZ2VtYWlsLWtleS1mb3ItdGVzdGluZy1v2"' }]).episodes[0], "redact");
+  const twoTokens = `one ${SEEDED} and two ${SEEDED.split("").reverse().join("")}\nhere`;
+  const tokens = [scanForSecrets(twoTokens), scanForSecrets(twoTokens, { softWrap: true })].map((fs) => fs.filter((f) => f.reason === "high-entropy token").length);
+  assert(ownQuote.every(Boolean) && merged.redactions.some((r) => r.in === "the outcome") && /\[redacted:/.test(merged.text) && tokens.every((n) => n === 2),
+    `an unclosed or mismatched quote keeps the prose after it; a wrapped value merged with a key token is counted; each entropy token answers (SMD-4543 review passes 1 and 2) (${JSON.stringify([ownQuote, merged.redactions, tokens])})`);
+  // …and the model's excerpt reads soft-wrapped too: a short-first-word password a wrap cut withholds it.
+  const wrapExc = assistantExcerpt({ assistant: ["an earlier note.", 'Use password: "Kp7m Wq2z\nR9x 4tUv" there.'] });
+  const plainExc = assistantExcerpt({ assistant: ["an earlier note.", "Wrapped prose: the deploy\nfinished in 4 minutes."] });
+  assert(wrapExc.withheld && /password assignment/.test(wrapExc.withheld) && !wrapExc.text && plainExc.text?.includes("finished in 4 minutes"),
+    `the model's excerpt withholds a quoted password a soft wrap cut, and sends wrapped prose (SMD-4543) (${JSON.stringify([wrapExc, plainExc])})`);
+  // …and end to end: prepare and --dry-run on such an outcome leave none of it in the payload or the output.
+  writeFileSync(join(TMP, "pw-wrap.jsonl"), [user("set the db password", { origin: { kind: "human" } }), assistant([{ type: "text", text: 'Set it with password = "correct horse\nbattery staple 42" and restart.' }])].join("\n"));
+  const wrapPrep = prepare({ ...base, session_id: "s-pw-wrap", transcript_path: join(TMP, "pw-wrap.jsonl") });
+  const wrapPayload = wrapPrep.payloadPath ? readFileSync(wrapPrep.payloadPath, "utf8") : "";
+  const wrapDry = await spawnScript(["--dry-run", join(TMP, "pw-wrap.jsonl")]);
+  const wrapLeft = ["horse", "battery staple"].filter((x) => wrapPayload.includes(x) || wrapDry.out.includes(x) || wrapDry.err.includes(x));
+  assert(wrapPrep.code === 0 && wrapPayload && wrapDry.code === 0 && wrapLeft.length === 0,
+    `…and neither the payload written nor the dry run's output holds the wrapped password (SMD-4543) (${wrapPrep.code} ${wrapDry.code} ${JSON.stringify(wrapLeft)})`);
+  if (wrapPrep.payloadPath) unlinkSync(wrapPrep.payloadPath);
+
+  // SMD-4544: a work-claim token glued to a letter or digit before it is found — after `x`, after a URL-encoded `=`
+  // (`%3D`), after a digit, in upper case — blanked in a prompt and in the outcome, and the model's excerpt withheld
+  // for it; where no rule took it, it went to the brain and the model whole.
+  const claimHex = "3f".repeat(16) + "a1b2c3d4".repeat(4);
+  // Review pass 1: and a hex character glued after it, where a guard read the longer run as no token.
+  const glued = [`see xwc_${claimHex} there`, `?q=1%3Dwc_${claimHex}&x=2`, `id 9wc_${claimHex} ok`, `XWC_${claimHex.toUpperCase()} now`,
+    `claim wc_${claimHex}expires tomorrow`, `wc_${claimHex}Done`, `xwc_${claimHex}2026`].map((text) => {
+    const inPrompt = cleanEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0], "redact");
+    const inOutcome = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text }]).episodes[0], "redact");
+    const exc = assistantExcerpt({ assistant: [text] });
+    return { prompt: !inPrompt.text.toLowerCase().includes(claimHex) && /\[redacted:work-claim token/.test(inPrompt.text), outcome: !inOutcome.text.toLowerCase().includes(claimHex) && /\[redacted:work-claim token/.test(inOutcome.text), gate: gateFindings(inPrompt, inPrompt.text).length + gateFindings(inOutcome, inOutcome.text).length, withheld: /work-claim token/.test(exc.withheld ?? "") };
+  });
+  assert(glued.every((g) => g.prompt && g.outcome && g.gate === 0 && g.withheld),
+    `a work-claim token glued to a letter or digit before it, or a hex character after it, is blanked in a prompt and the outcome, and withholds the model's excerpt (SMD-4544) (${JSON.stringify(glued)})`);
 }
 
 // ── [6] Posting ──────────────────────────────────────────────────────────────

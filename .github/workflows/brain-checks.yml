@@ -4253,10 +4253,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # portable-server's step after its checkout has why (SMD-2435).
+      # portable-server's step after its checkout has why (SMD-2435). With
+      # --watch: this job runs containers, and one handed a path of the
+      # checkout reads it through a read-only bind mount, where no access
+      # time moves. The watch is told of each open of a tracked folder, or of
+      # a file in one by its name there (PR 3c-1).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
-        run: bash .github/ci/reads.sh mark
+        run: bash .github/ci/reads.sh mark --watch
 
       # Bun on the runner, for this checkout's scripts run there: deploy/instance.ts's
       # check, deploy/edge/edge.ts, auth/provision.ts, and the registered client's
@@ -5102,10 +5106,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # portable-server's step after its checkout has why (SMD-2435).
+      # portable-server's step after its checkout has why (SMD-2435). With
+      # --watch: this job runs containers, and one handed a path of the
+      # checkout reads it through a read-only bind mount, where no access
+      # time moves. The watch is told of each open of a tracked folder, or of
+      # a file in one by its name there (PR 3c-1).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
-        run: bash .github/ci/reads.sh mark
+        run: bash .github/ci/reads.sh mark --watch
 
       # Bun on the runner, for auth/provision.ts, which
       # .github/ci/auth-settings.sh runs.
@@ -5499,10 +5507,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # portable-server's step after its checkout has why (SMD-2435).
+      # portable-server's step after its checkout has why (SMD-2435). With
+      # --watch: this job runs containers, and one handed a path of the
+      # checkout reads it through a read-only bind mount, where no access
+      # time moves. The watch is told of each open of a tracked folder, or of
+      # a file in one by its name there (PR 3c-1).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
-        run: bash .github/ci/reads.sh mark
+        run: bash .github/ci/reads.sh mark --watch
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
