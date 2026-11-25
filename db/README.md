@@ -3911,7 +3911,7 @@ bun extract-entities.ts --url … --retry-partial         # rows extracted in pa
 bun extract-entities.ts --url … --retry-left-out        # …only those with windows left out as malformed — after a change of model, kept to this pool with --job (below)
 OB1_METADATA_MODEL=<larger> bun extract-entities.ts --url … --job <the recorded key> --retry-left-out --limit N   # a larger model over those N rows, the key and trigger left as they are (--status prints it)
 #   --workers N (2; at most 2147483647: a connection each and a spare, Bun's pool max of 2^31)  --batch N (1; at most 2147483647, claim_thoughts' int)  --ttl SECONDS (900)  --heartbeat SECONDS (60, or a third of the lease; at least 1, and the lease must cover two)  --timeout SECONDS (300, per model call — per window of a long thought; at most 9007199254740, a call signal's range)
-bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key
+bun extract-entities.ts --url … --switch-key           # required when the model or prompt version differs from the recorded key; a key the brain used before has the rows it cannot vouch for returned to the pool: failed, lapsed, read by another key since, or with no lineage row at the thought's text (SMD-2607). Any run returns the finished rows another extraction key read since
 #   exits 0 clean (partial rows included) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 3 the model likely at fault (SMD-2266, ahead of 1) · 130 a signal (a second, at once); --follow stopped by one signal exits 0
 bun extract-entities.ts --url … --subjects              # each thought in the subject pool its own subject (113: new and edited thoughts, and at a rule's, the question's or the reasoning's change every one with no current subject): the rules, then the judge model for the rest (SMD-3306)
 bun extract-entities.ts --url … --subjects rules        # …the rules alone, asking no model, from a pool of their own
@@ -6844,8 +6844,13 @@ under the recorded key since migration 150 (PR 2). Preflight's `retag pass`
 row counts each `retag:` key's pool by the unfinished-pass rule, and the
 backlog by the worker's own predicate (`db/config.mjs`'s `RETAG_DUE_SQL`, PR
 3a), and says where this server tags captures under another key than the
-recorded one (PR 3b). Not yet: a sleep pass and `--follow` (PR 4). test-live
-[29] drives it against a stub chat endpoint.
+recorded one (PR 3b). Its engine takes what a caller like the sleep scheduler
+passes (PR 4a-1): an `onPass` that also hands over the abort of each worker's
+tags call in hand (the thought set back to the queue, nothing written), the
+admit gate before the pool and each claim, session settings for its own
+connections, `banner` and `summary` false, and `onStart`, told the start went
+through or a refusal by its kind. Not yet: `--follow` (PR 4a-2) and the sleep
+pass (PR 4b). test-live [29] drives it against a stub chat endpoint.
 
 ## Extensions
 
