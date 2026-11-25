@@ -193,10 +193,11 @@
  * with no lineage row of this key at the thought's fingerprint. A finished
  * row its lineage vouches for stays, so a trial of another model over a few
  * thoughts does not send the corpus again. And every run returns, at its
- * first pass and behind what is pending, the finished rows another key read
- * since — that key's finished row is the later one, or the thought's
- * entities carry its lineage: a brain whose key was moved back with nothing
- * returned is mended by its next run.
+ * first pass and behind what is pending, the finished rows another key's
+ * pool read since — that key's finished row for the thought is the later
+ * one: a brain whose key was moved back with nothing returned is mended by
+ * its next run. A reading another model wrote outside the pools stands
+ * until a switch (SMD-4579).
  * --dry-run and --status count what a run would return.
  *
  * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
@@ -847,26 +848,28 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
   }
 
   /**
-   * A finished row of this job (`c`) whose thought another extraction key
-   * read after it (SMD-2607), by either of two signs. That key's finished row
-   * for the thought is the later one. Or the thought's entities carry that
-   * key's lineage row: record_thought_entities replaces every extracted row
-   * of a thought and keeps a lineage row only for a key whose rows stand, so
-   * one of another key says its reading is what the graph holds — the sign
-   * left when the thought was edited under that key and its row there went
-   * back to pending (review pass 2). Every run returns these to the pool at
-   * its first pass, so a brain whose key was moved back with nothing returned
-   * (a switch before this rule, or the record set by hand) is mended by its
-   * next run. A row read again finishes last and leaves this key's lineage
-   * alone, so it is not returned twice.
+   * A finished row of this job (`c`) whose thought another extraction key's
+   * POOL read after it (SMD-2607): that key's finished claim row for the
+   * thought is the later one. Every run returns these to the pool at its
+   * first pass, so a brain whose key was moved back with nothing returned (a
+   * switch before this rule, or the record set by hand) is mended by its
+   * next run. A row read again finishes last, so it is not returned twice.
+   *
+   * The claim row is the only sign (SMD-4579). The other key's lineage on the
+   * thought's entities was a second one, and it is true as well of a thought
+   * another model was run over on purpose, with no pool: both dogfood brains
+   * held 22 the 27B had read once, the long-document gold's corpus, which an
+   * unattended run would have read again under the recorded key. A reading
+   * written outside the pools is the operator's, and stands until a
+   * --switch-key asks for the brain under this key (unvouched, below). What
+   * that gives up: a thought the other key's pool read and that was then
+   * edited, its row there pending again, on a brain moved back before
+   * SMD-2607 — returned by no run, and by any switch made since.
    */
-  const readSince = () => sql`c.status = 'succeeded' AND (EXISTS (
+  const readSince = () => sql`c.status = 'succeeded' AND EXISTS (
     SELECT 1 FROM thought_work_claims o
      WHERE o.thought_id = c.thought_id AND o.work_type <> c.work_type AND starts_with(o.work_type, 'extract:')
-       AND o.status = 'succeeded' AND o.finished_at > c.finished_at)
-    OR EXISTS (
-    SELECT 1 FROM derivations l
-     WHERE l.artifact_kind = 'entities' AND l.artifact_id = c.thought_id AND l.produced_by <> c.work_type AND starts_with(l.produced_by, 'extract:')))`;
+       AND o.status = 'succeeded' AND o.finished_at > c.finished_at)`;
   /**
    * The rows a switch to this key returns as it records it (SMD-2607), the
    * ones it cannot show are this key's reading of the text their thought
@@ -875,9 +878,11 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * read since; and the finished ones with no lineage row of this key at the
    * thought's fingerprint. 016's trigger pools an edit under the recorded key
    * alone, so a thought edited while another key was recorded kept its row
-   * here, and a reading that named nothing left no lineage row to compare. A
-   * finished row its lineage vouches for is left: a trial of another model
-   * over a few thoughts does not send the rest again.
+   * here, and a reading that named nothing left no lineage row to compare;
+   * nor has a thought whose entities another key wrote outside its pool one
+   * of this key's, so a switch returns it too (SMD-4579). A finished row its
+   * lineage vouches for is left: a trial of another model over a few
+   * thoughts does not send the rest again.
    */
   const unvouched = () => sql`c.status = 'failed' OR (c.status = 'claimed' AND c.ttl_expires_at < now()) OR (${readSince()})
     OR (c.status = 'succeeded' AND NOT EXISTS (
@@ -2082,7 +2087,7 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // read since (readSince, above). None on a brain that has kept one key,
     // and none after a switch made here, which returned them.
     const reread = firstPass ? await returnRows(sql, readSince(), true) : 0;
-    if (reread > 0) out(`  ${reread} finished row(s) returned to the pool, behind what is pending: another extraction key read their thoughts after ${JOB} did, so their entities are not its reading (SMD-2607)`);
+    if (reread > 0) out(`  ${reread} finished row(s) returned to the pool, behind what is pending: another extraction key's pool read their thoughts after ${JOB} did, so their entities are not its reading (SMD-2607)`);
     const pooledNow = firstPass ? Number((await sql`SELECT enqueue_thoughts(${JOB}) AS added`)[0].added) : 0;
     // enqueue_thoughts analyses only when it added rows; a return moves as many into the pending index (migration 015, "Cost of a claim").
     if (reread > 0 && pooledNow === 0) await sql`ANALYZE thought_work_claims`;
