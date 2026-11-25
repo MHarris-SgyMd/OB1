@@ -28,7 +28,8 @@
 //   /control/fault/N       the same, each answered 500, as the brain's route answers when its key check throws
 //   /control/cut/N         a server that dies: every connection dropped where it stands, a listen stream with no closing
 //                          frame, then 502 for N seconds. The other four of these five end each stream as the SDK's
-//                          close() does
+//                          close() does. The port is closed for an instant as the connections are dropped: a
+//                          connection made in that instant is refused, where a proxy would answer 502
 //
 //   The server ending a stream of its own accord, and going on serving (SMD-4493): the SDK's handler ends its streams
 //   only all at once, so the probe holds each listen stream by what can end it alone. WAY is one of:
@@ -54,15 +55,14 @@
 //   /control/expire        forget every 2025-era session, so its next request is answered 404
 //   /control/ttl?ms=N      the ttlMs answered on tools/list (2026-07-28 only)
 //   /control/state         what the probe holds, and where its log is
-//
-//   One probe to a port: a second started on a port that answers stops at once.
 import { appendFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { createMcpHandler, isLegacyRequest, McpServer, SERVER_INFO_META_KEY, SUBSCRIPTION_ID_META_KEY, WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/server";
 
 const PORT = Number(process.env.PORT ?? 8765);
 // Loopback only, and not a setting: the probe has no auth.
 const HOST = "127.0.0.1";
-const LOG = process.env.LOG ?? `${import.meta.dir}/probe.jsonl`;
+const LOG = resolve(process.env.LOG ?? `${import.meta.dir}/probe.jsonl`);
 
 let extra = false;
 let ttlMs = Number(process.env.TTL_MS ?? 0);
@@ -94,7 +94,8 @@ const away = (id: unknown): Response =>
     : new Response("Bad Gateway", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
 
 const log = (line: Record<string, unknown>): void => {
-  const full = { at: new Date().toISOString(), ...line };
+  // Each line names its probe's port: two probes started without LOG write one file.
+  const full = { at: new Date().toISOString(), port: PORT, ...line };
   appendFileSync(LOG, `${JSON.stringify(full)}\n`);
   console.log(JSON.stringify(full));
 };
@@ -304,13 +305,14 @@ async function control(url: URL): Promise<Response> {
       downAs = "down";
       downUntil = Date.now() + seconds * 1000;
       setTimeout(() => log({ event: "serving-again" }), seconds * 1000);
-      // After this answer has left: every connection dropped, the port answering 502 throughout. The new listener
-      // is opened beside the old before the old is stopped, so that a client that connects the instant its stream
-      // drops is never refused: stopped first, the port refused 11 of 3,000 such connections (macOS, Bun 1.4.3).
+      // After this answer has left: every connection dropped, and the port open again at once to answer 502. Between
+      // the two calls the port is closed, and a connection made then is refused. With a stand-in for this listener,
+      // a test client that connected the moment its stream dropped had a connection refused in 11 to 342 of 3,000
+      // swaps, by the machine's load (macOS, Bun 1.4.3). Opening the next listener first needs a port two
+      // listeners share, which lets a second probe in beside the first: tried, and taken back (SMD-4493).
       setTimeout(() => {
-        const dying = listener;
+        void listener.stop(true).then(() => old.close()).catch(() => undefined);
         listener = listen();
-        void dying.stop(true).then(() => old.close()).catch(() => undefined);
       }, 100);
     } else if (how !== "refuse") {
       downAs = how as typeof downAs;
@@ -353,8 +355,6 @@ async function control(url: URL): Promise<Response> {
 const listen = () => Bun.serve({
   port: PORT,
   hostname: HOST,
-  // Two listeners of this probe hold the port for an instant at a `cut`, the new one taking what connects.
-  reusePort: true,
   idleTimeout: 255,
   async fetch(req) {
     const url = new URL(req.url);
@@ -390,10 +390,5 @@ const listen = () => Bun.serve({
     return res;
   },
 });
-// A port shared between listeners would let a second probe in beside the first, to take its requests: refused here.
-if (await fetch(`http://${HOST}:${PORT}/control/state`).then((r) => (void r.body?.cancel(), true), () => false)) {
-  console.error(`port ${PORT} already answers: stop what holds it, or set PORT`);
-  process.exit(1);
-}
 let listener = listen();
 log({ event: "listening", host: HOST, port: PORT, ttlMs });

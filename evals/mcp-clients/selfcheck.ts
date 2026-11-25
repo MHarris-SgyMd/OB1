@@ -5,11 +5,14 @@
 // with ttlMs 0.
 //
 // What the rows for SMD-4493's controls (end, revoked, unknown, nolisten) do not hold: how long a refusal lasts
-// closer than about half a second, or for an N but 1 and 2; a refusal's headers, but that it carries no Retry-After;
-// and three things no reader of the probe can tell from the right ones: the tool set changed three times for once,
-// a frame sent in two writes, and something put on a stream in the instant before it is reset. The words are the
-// probe's copy of the brain's, copied here again. The rows that wait on a clock have half a second of room: a
-// machine starved of its processor fails them, as it fails the rows for an outage's length.
+// closer than about 0.4 s, or for an N but 1 and 2; a refusal's headers, but that it carries no Retry-After; two
+// controls at once, but one caller's refusal begun under another's; with no stream held, a refusal after a WAY but
+// the one each is run with; and three things no reader of the probe can tell from the right ones: the tool set
+// changed three times for once, a frame sent in two writes, and something put on a stream in the instant before
+// it is reset. The words are the probe's copy of the brain's, copied here again. The last rows read the probe's
+// log, at the path its state gives: a log this check cannot read fails them. The rows that wait on a clock have a
+// quarter of a second of room or more: a machine starved of its processor fails them, as it fails the rows for an
+// outage's length.
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
 const base = process.env.BASE ?? "http://127.0.0.1:8765";
@@ -50,16 +53,6 @@ const listening = ((await (await fetch(`${base}/control/state`)).json()) as { li
 const A = "probe_time";
 const B = "probe_extra,probe_time";
 row(listening === (process.env.LISTEN !== "off"), `the probe is in the mode this check was asked for (LISTEN ${process.env.LISTEN === "off" ? "off" : "on"}; the probe says listen ${listening})`);
-// One probe to a port: its listener shares the port with its successor at a `cut`, which would let another probe in.
-{
-  const second = Bun.spawn([process.execPath, `${import.meta.dir}/probe.ts`], { env: { ...process.env, PORT: new URL(base).port, LOG: "/dev/null" }, stdout: "ignore", stderr: "ignore" });
-  const code = await Promise.race([second.exited, Bun.sleep(3000).then(() => "still running" as const)]);
-  if (code === "still running") {
-    second.kill();
-    await second.exited;
-  }
-  row(code === 1, `a second probe started on the port stops at once, and leaves it to the first (${code === "still running" ? code : `exit ${code}`})`);
-}
 
 // The 2025-era paths, in the client's default mode. /mcp and /legacy have no stream, so no notification can arrive;
 // the client lists on every call, so it sees the change anyway. /session has a stream.
@@ -186,6 +179,7 @@ await client.close();
   const served = async (path = "/mcp", what: Asked = bare): Promise<boolean> => {
     const r = await post(path, what);
     const text = await r.text();
+    tally(text);
     return r.status === 200 && text.includes('"result"') && !text.includes('"error"') && !text.includes('"isError":true');
   };
   /** A value's JSON with each object's members in one order, so that two bodies are compared whole, in whatever order theirs came. */
@@ -200,7 +194,15 @@ await client.close();
       void r.body?.cancel();
       return `${status} ${type}`;
     }
-    return `${status} ${canon(await r.json().catch(() => null))}`;
+    const text = await r.text();
+    tally(text);
+    let body: unknown = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      // No JSON: compared as null.
+    }
+    return `${status} ${canon(body)}`;
   };
   /** What the probe is to answer a request it refuses: the refusal whole, the request's own id in it and no member more. */
   const refused = (what: Asked, code: number, message: string): string => `200 ${canon({ jsonrpc: "2.0", error: { code, message }, id: what.body.id })}`;
@@ -217,6 +219,40 @@ await client.close();
     revoked: "Unauthorized: this access key has been revoked. Its history is retained; request a new key.",
     unknown: "Unauthorized: missing or invalid authentication.",
     nolisten: "Subscription limit reached: this caller holds as many listen streams as one caller may",
+  };
+  /** How many answers this check has met in each refusal's words, a notification's 202 with them: what the log is held to. */
+  const seen = { revoked: 0, unknown: 0, listen: 0 };
+  function tally(text: string): void {
+    if (text.includes(WORDS.revoked)) seen.revoked++;
+    else if (text.includes(WORDS.unknown)) seen.unknown++;
+    else if (text.includes(WORDS.nolisten)) seen.listen++;
+  }
+  /** What a notification is answered under a caller's refusal: its status, a Retry-After if it has one, and its body. */
+  const note = async (path: string, how: "revoked" | "unknown"): Promise<string> => {
+    const r = await fetch(base + path, { method: "POST", headers: plain, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+    const text = await r.text();
+    if (r.status === 202) seen[how]++;
+    else tally(text);
+    return `${r.status}${r.headers.get("retry-after") === null ? "" : " retry-after"} ${JSON.stringify(text)}`;
+  };
+  /**
+   * Everything asked under a caller's refusal, together, so that the clock is not spent: a bare tools/list at the
+   * three paths, a server/discover, a tools/list, a tools/call and a listen in the client's shape, and a
+   * notification at the three paths. Says what was answered wrongly, or nothing.
+   */
+  const underRefusal = async (how: "revoked" | "unknown"): Promise<string> => {
+    const asks = [bare, DISCOVER, LIST, CALL, LISTEN_AGAIN];
+    const paths = ["/mcp", "/legacy", "/session"];
+    const [legacy, session, ...rest] = await Promise.all([answered("/legacy", bare), answered("/session", bare), ...paths.map((at) => note(at, how)), ...asks.map((what) => answered("/mcp", what))]);
+    const notes = rest.slice(0, 3);
+    const answers = rest.slice(3);
+    const want = refused(bare, -32001, WORDS[how]);
+    const wrong = answers.findIndex((said, i) => said !== refused(asks[i], -32001, WORDS[how]));
+    if (wrong !== -1) return `at /mcp: ${answers[wrong]}`;
+    if (legacy !== want) return `at /legacy: ${legacy}`;
+    if (session !== want) return `at /session: ${session}`;
+    const bad = notes.findIndex((said) => said !== '202 ""');
+    return bad === -1 ? "" : `a notification at ${paths[bad]}: ${notes[bad]}`;
   };
   /** What /session answers a bare tools/list that names no session, while the probe serves: an error of the transport's own. */
   const atSession = await answered("/session", bare);
@@ -245,7 +281,15 @@ await client.close();
     await control("cut/1");
     const cut = await abrupt.read();
     row(cut.includes("notifications/subscriptions/acknowledged") && !cut.includes('"resultType":"complete"') && !cut.endsWith("[still open]"), `cut/1: a held stream is dropped with no result frame (${cut.slice(-40).replace(/\n/g, " ")})`);
-    row((await mcp()) === 502, "cut/1: the port answers 502 at once after the drop");
+    // The probe closes its port for an instant as it drops its connections, and a connection made then is refused:
+    // the port is asked until it answers, for a quarter of a second.
+    let refusals = 0;
+    let first = await mcp();
+    for (const until = Date.now() + 250; first === 0 && Date.now() < until; first = await mcp()) {
+      refusals++;
+      await Bun.sleep(5);
+    }
+    row(first === 502, `cut/1: the port answers 502 within a quarter of a second of the drop (${first}, after ${refusals} refused)`);
     await Bun.sleep(1200);
     row((await mcp()) !== 502 && (await set()) === "A", "down/1 and cut/1: serving again, back on tool set A");
     // The other three controls end a held stream as `down` does, before they answer as they do.
@@ -321,7 +365,6 @@ await client.close();
     // Each refusal after each way, the five pairs the gate ran among the nine. A refusal lasts about what it was
     // asked to: still there 1.5 s into two seconds, gone 0.3 s after. What is asked under it goes together, so that
     // the clock is not spent.
-    const note = (path: string): Promise<Response> => fetch(base + path, { method: "POST", headers: plain, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
     for (const how of ["revoked", "unknown", "nolisten"] as const) for (const [way, ends] of [["clean", "[ended]"], ["reset", "[dropped]"], ["frame", "[ended]"]] as const) {
       const name = `${how}/${way}/2`;
       const stream = await held("listen:0");
@@ -337,13 +380,8 @@ await client.close();
         row(listen === refused(LISTEN_AGAIN, -32603, WORDS.nolisten) && told.noListen === true, `${name}: a listen is refused as at a bound, the refusal whole and its id the listen's, and the probe's state said so (${listen}; state ${told.noListen})`);
         row((await set()) !== before && (await agrees()), `${name}: the tool set changed, in what the probe lists too`);
       } else {
-        const asks = [bare, DISCOVER, LIST, CALL, LISTEN_AGAIN];
-        const [legacy, session, noted, notedLegacy, ...answers] = await Promise.all([answered("/legacy", bare), answered("/session", bare), note("/mcp"), note("/legacy"), ...asks.map((what) => answered("/mcp", what))]);
-        const want = refused(bare, -32001, WORDS[how]);
-        const wrong = answers.findIndex((said, i) => said !== refused(asks[i], -32001, WORDS[how]));
-        row(wrong === -1 && legacy === want && session === want, `${name}: each request is refused whole, 200 with -32001, its own id, no Retry-After, and the words copied from the brain's: a bare tools/list at /mcp, at /legacy and at /session, and a server/discover, a tools/list, a tools/call and a listen in the client's shape (${wrong !== -1 ? answers[wrong] : legacy !== want ? `/legacy: ${legacy}` : session !== want ? `/session: ${session}` : legacy})`);
-        const bodies = (await noted.text()) + (await notedLegacy.text());
-        row(noted.status === 202 && notedLegacy.status === 202 && bodies === "", `${name}: a notification is answered 202 with no body, at /mcp and at /legacy (${noted.status}, ${notedLegacy.status})`);
+        const wrong = await underRefusal(how);
+        row(wrong === "", `${name}: each request is refused whole, 200 with -32001, its own id, no Retry-After, and the words copied from the brain's: a bare tools/list at /mcp, at /legacy and at /session, and a server/discover, a tools/list, a tools/call and a listen in the client's shape; and a notification is answered 202 with no body at each of the three (${wrong || "each as it should be"})`);
         row((await set()) !== before, `${name}: the probe says its tool set changed`);
       }
       await Bun.sleep(Math.max(0, 1500 - (Date.now() - began)));
@@ -382,16 +420,18 @@ await client.close();
       await control(`end/${way}`);
       row((await set()) !== was && (await agrees()) && (await served()) && (await served("/mcp", CALL)) && (await listens()), `${where}, end/${way}: the tool set changes, in what is listed too, and the probe serves on: each request with its result, and a listen ${answer}`);
     }
-    for (const how of ["revoked", "unknown"] as const) {
+    for (const [how, way] of [["revoked", "reset"], ["unknown", "frame"]] as const) {
+      const name = `${where}, ${how}/${way}/1`;
       const was = await set();
-      await control(`${how}/clean/1`);
+      await control(`${how}/${way}/1`);
       const began = Date.now();
-      const asks = [bare, DISCOVER, LIST, CALL, LISTEN_AGAIN];
-      const answers = await Promise.all(asks.map((what) => answered("/mcp", what)));
-      const wrong = answers.findIndex((said, i) => said !== refused(asks[i], -32001, WORDS[how]));
-      row(wrong === -1 && (await set()) !== was, `${where}, ${how}/clean/1: each request is refused whole, a listen among them, and the tool set changed (${answers[Math.max(wrong, 0)]})`);
+      const wrong = await underRefusal(how);
+      row(wrong === "" && (await set()) !== was, `${name}: each request is refused whole, at the three paths, a listen and a notification among them, and the tool set changed (${wrong || "each as it should be"})`);
+      await Bun.sleep(Math.max(0, 600 - (Date.now() - began)));
+      const mid = await answered("/mcp", LIST);
+      row(mid === refused(LIST, -32001, WORDS[how]), `${name}: 0.6 s in a request is still refused (${mid})`);
       await Bun.sleep(Math.max(0, 1250 - (Date.now() - began)));
-      row((await served()) && (await served("/mcp", CALL)) && (await set()) !== was && (await agrees()) && (await listens()), `${where}, ${how}/clean/1: serving again after its second: each request with its result, the tool set still the changed one, and a listen ${answer}`);
+      row((await served()) && (await served("/mcp", CALL)) && (await set()) !== was && (await agrees()) && (await listens()), `${name}: serving again after its second: each request with its result, the tool set still the changed one, and a listen ${answer}`);
     }
     {
       const was = await set();
@@ -399,25 +439,41 @@ await client.close();
       const began = Date.now();
       const [listen, call] = await Promise.all([answered("/mcp", LISTEN_AGAIN), served("/mcp", CALL)]);
       row(listen === refused(LISTEN_AGAIN, -32603, WORDS.nolisten) && call && (await set()) !== was, `${where}, nolisten/clean/1: a listen is refused as at a bound, a tools/call served, and the tool set changed (${listen}; the call ${call})`);
+      await Bun.sleep(Math.max(0, 600 - (Date.now() - began)));
+      const mid = await answered("/mcp", LISTEN_AGAIN);
+      row(mid === refused(LISTEN_AGAIN, -32603, WORDS.nolisten), `${where}, nolisten/clean/1: 0.6 s in a listen is still refused (${mid})`);
       await Bun.sleep(Math.max(0, 1250 - (Date.now() - began)));
       row(await listens(), `${where}, nolisten/clean/1: after its second a listen is ${answer} again`);
     }
-    // A refusal begun while another runs replaces it, its time with it.
+    // A caller's refusal begun while another's runs replaces it, its time with it: the second is the longer here.
     {
-      await control("revoked/clean/2");
-      await control("unknown/clean/1");
+      await control("revoked/clean/1");
+      await control("unknown/clean/2");
       const began = Date.now();
+      const want = refused(LIST, -32001, WORDS.unknown);
       const under = await answered("/mcp", LIST);
-      await Bun.sleep(Math.max(0, 1250 - (Date.now() - began)));
-      row(under === refused(LIST, -32001, WORDS.unknown) && (await served("/mcp", LIST)), `${where}, unknown/clean/1 begun under revoked/clean/2: the second refusal replaces the first, in its words and its time (${under})`);
+      await Bun.sleep(Math.max(0, 1500 - (Date.now() - began)));
+      const late = await answered("/mcp", LIST);
+      await Bun.sleep(Math.max(0, 2300 - (Date.now() - began)));
+      row(under === want && late === want && (await served("/mcp", LIST)), `${where}, unknown/clean/2 begun under revoked/clean/1: the second refusal replaces the first, in its words and for its own time, still there 1.5 s in and gone after its two seconds (${under !== want ? under : late})`);
     }
-    // The seconds a refusal may be given: outside them nothing is done.
+    // The seconds a refusal may be given: outside them nothing is done, to a stream held or to anything else.
     {
+      const stream = listening ? await held("listen:0") : undefined;
       const was = await set();
-      const [low, high] = [await fetch(`${base}/control/revoked/clean/0`), await fetch(`${base}/control/nolisten/clean/601`)];
-      void low.body?.cancel();
-      void high.body?.cancel();
-      row(low.status === 400 && high.status === 400 && (await set()) === was && (await served()) && (await listens()), `${where}: a refusal asked for 0 seconds or for 601 is answered 400, and nothing is changed or refused (${low.status}, ${high.status})`);
+      const statuses: number[] = [];
+      for (const what of ["revoked/clean/0", "revoked/clean/601", "nolisten/clean/0", "nolisten/clean/601"]) {
+        const r = await fetch(`${base}/control/${what}`);
+        void r.body?.cancel();
+        statuses.push(r.status);
+      }
+      const holds = (await state()).held;
+      const untouched = statuses.every((status) => status === 400) && (await set()) === was && holds === (stream ? 1 : 0) && (await served());
+      if (stream) {
+        await control("end/clean");
+        await stream.read();
+      }
+      row(untouched && (await listens()), `${where}: a refusal asked for 0 seconds or for 601, a caller's or a listen's, is answered 400, and nothing is changed, ended or refused (${statuses.join(", ")}; ${holds} held)`);
     }
   }
   // An outage lasts what it was asked to, in either mode: still away most of the way through, serving after.
@@ -430,10 +486,12 @@ await client.close();
     const after = await said();
     row(!after.startsWith(away), `${how}/2: serving again after its two seconds (${after})`);
   }
-  // The probe's log is the record of a measurement: what this check's own requests and controls left in it.
+  // The probe's log is the record of a measurement: what this check's own requests and controls left in it, on the
+  // lines of this probe's port. Each answer the check met as a refusal is marked as that refusal's, and no other
+  // answer is; and each control with a time has its serving-again, written as that time ends.
   {
     const path = ((await (await fetch(`${base}/control/state`)).json()) as { log?: string }).log;
-    type Line = { at?: string; event?: string; away?: string; refused?: string };
+    type Line = { at?: string; port?: number; event?: string; away?: string; refused?: string; seconds?: number };
     const text = path ? await Bun.file(path).text().catch(() => "") : "";
     const lines = text.split("\n").flatMap((line): Line[] => {
       try {
@@ -441,12 +499,20 @@ await client.close();
       } catch {
         return [];
       }
-    }).filter((line) => (line.at ?? "") >= startedAt);
+    }).filter((line) => line.port === Number(new URL(base).port) && (line.at ?? "") >= startedAt);
     const answers = lines.filter((line) => line.event === "response");
-    const n = { revoked: answers.filter((line) => line.away === "revoked").length, unknown: answers.filter((line) => line.away === "unknown").length, listen: answers.filter((line) => line.refused === "listen").length, plain: answers.filter((line) => !line.away && !line.refused).length };
-    row(n.revoked > 0 && n.unknown > 0 && n.listen > 0 && n.plain > 0, `the log says of each answer whether it was a refusal, and whose: away revoked ${n.revoked}, away unknown ${n.unknown}, a listen refused ${n.listen}, neither ${n.plain} (${path ?? "the probe names no log"})`);
-    const again = lines.filter((line) => line.event === "serving-again").length;
-    row(again === timed, `the log has one serving-again for each control with a time (${again} for ${timed})`);
+    const n = { revoked: answers.filter((line) => line.away === "revoked").length, unknown: answers.filter((line) => line.away === "unknown").length, listen: answers.filter((line) => line.refused === "listen").length };
+    // The counts differ between the two callers' refusals, or marks swapped between them would pass.
+    row(n.revoked === seen.revoked && n.unknown === seen.unknown && n.listen === seen.listen && seen.revoked > 0 && seen.unknown > 0 && seen.listen > 0 && seen.revoked !== seen.unknown,
+      `the log marks each answer this check met as a refusal, and no other: away revoked ${n.revoked} for ${seen.revoked} met, away unknown ${n.unknown} for ${seen.unknown}, a listen refused ${n.listen} for ${seen.listen} (${path ?? "the probe names no log"})`);
+    const due = lines.filter((line) => typeof line.seconds === "number" && line.seconds > 0).map((line) => Date.parse(line.at ?? "") + (line.seconds ?? 0) * 1000);
+    const again = lines.filter((line) => line.event === "serving-again").map((line) => Date.parse(line.at ?? ""));
+    const none = due.filter((when) => {
+      const i = again.findIndex((at) => at >= when - 50 && at <= when + 600);
+      if (i !== -1) again.splice(i, 1);
+      return i === -1;
+    });
+    row(due.length === timed && none.length === 0 && again.length === 0, `the log has one serving-again for each control with a time, written as that time ends (${due.length} such controls in the log for ${timed} sent; ${none.length} with none in time; ${again.length} beside)`);
   }
   // However many changes of the tool set that was, the check ends on A.
   if ((await set()) !== "A") await control("toggle-quiet");
