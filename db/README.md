@@ -6407,7 +6407,7 @@ once for a model gone missing or a call no probe answers): "working,
 consolidate waiting for the provider mid-pass", a warning naming the
 provider, where it read "its passes running" and "its log says which". The
 provider answering clears it, and so does a period's end. A follower's own row
-(`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`) carries the word with its
+(`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`, `heartbeat:retag:…`) carries the word with its
 own name while it waits, and the `workers` and `consolidate pass` rows say
 it. A follower's start wait stays unsaid: its row does not exist until its
 first pass begins. Since SMD-4254 the sleep's row carries, beside
@@ -6764,8 +6764,9 @@ bun retag.ts --url … --dry-run          # what a run would do; writes nothing
 bun retag.ts --url … --limit 25         # a trial
 bun retag.ts --url … --retry-failed     # failed rows back into the pool first
 bun retag.ts --url … --switch-key       # a model or prompt version other than ob1_config.retag_key's
+bun retag.ts --url … --follow [SECONDS] # then poll every SECONDS (15 bare), pooling again at each, until a signal
 #   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (OB1_LLM_TIMEOUT's)   --job <retag:model@pN>
-#   exits 0 clean · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal
+#   exits 0 clean (a follower stopped by a signal too) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal
 ```
 
 The tags' re-run path (SMD-2298), the last of the lineage kinds to get one. The
@@ -8126,7 +8127,7 @@ too — so each long-running worker stamps a **heartbeat** after every pass,
 whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --trigger`,
 a pass at its start and at each of the coordinator's triggers (SMD-3476),
 and the `--follow` of `extract-entities.ts`, `consolidate.ts` and
-`reembed.ts` (SMD-2679) — and
+`reembed.ts` (SMD-2679), and of `retag.ts` (SMD-2298) — and
 `sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
 asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
 stamps nothing, so it leaves no row to go stale, and neither does a dry run or
@@ -8134,7 +8135,7 @@ an audit.
 
 One `ob1_config` row per worker and job — `heartbeat:board-sync`,
 `heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3`,
-`heartbeat:reembed:qwen3-embedding:4b@1024` — whose
+`heartbeat:reembed:qwen3-embedding:4b@1024`, `heartbeat:retag:qwen2.5:7b@p1` — whose
 value names the `job` (a claim worker's, as given — the restart works that
 pool), `every_s` (the worker's interval, at least a minute), whether a pass is
 `running`, the last pass's `outcome`, whether the worker has `ended`, and, for

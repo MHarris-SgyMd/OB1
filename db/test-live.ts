@@ -67,7 +67,7 @@ import { decideKey, DECIDE_PROMPT, DECIDE_VERSION, LINK_ANSWER, PARTS_HEAD, PART
 import { ENTITY_EXTRACTION_PROMPT, ENTITY_PROMPT_VERSION, extractionKey } from "../server-portable/entities.ts";
 import { CHUNK_ESTIMATOR, chunkRecipe, metadataRecipe, promptHash, subjectRecipe } from "../server-portable/lineage.ts";
 import { METADATA_PROMPT_VERSION, metadataRefused, tagsOverExisting } from "../server-portable/metadata.ts";
-import { run as runRetag, type RetagOptions } from "./retag.ts";
+import { run as runRetag, SHAPE_NOTE, type RetagOptions } from "./retag.ts";
 import { parseRetagKey, RETAG_RECIPE_KEY_SQL, retagKey } from "./config.mjs";
 import { reachabilityReport, readHnswGraph, reachableFromEntry, type HnswElement, type HnswGraph } from "./hnsw-graph.ts";
 import { corpusIngested, docOf, docsOf, INGEST_ACTOR, ingestActor, recordId, recordStructure, runName, stampTier, upsertRecord, type Doc } from "./ingest-records.ts";
@@ -24539,11 +24539,14 @@ if (want("29")) {
     let downAll = false;
     /** The model not served, for every call, the probe's included (a 404 in Ollama's words). */
     let missingAll = false;
+    /** Every call refused 400, the shape note's included: the request's shape (PR 4a-2 review pass 1). */
+    let shapeAll = false;
     const stub = Bun.serve({ port: 0, hostname: "127.0.0.1", async fetch(req) {
       const body = await req.text();
       bodies.push(body);
       if (downAll) return new Response("stub: the provider is down", { status: 503 });
       if (missingAll) return Response.json({ error: { message: 'model "stub-meta" not found, try pulling it first' } }, { status: 404 });
+      if (shapeAll) return new Response("stub: the request's shape is refused", { status: 400 });
       if (heldMarker && body.includes(heldMarker)) {
         heldMarker = "";
         heldSeen();
@@ -24894,6 +24897,20 @@ if (want("29")) {
       const gDone = await gRun;
       assert(!gPooledShut && !gSentShut && asksShut === 1 && admitAsks === 3 && gDone.code !== 2 && settled(await tagsRow(G)) && (await claims()).find((c) => c.id === G)?.status === "succeeded",
         `the admit gate shut: nothing pooled or sent; opened, the run pools and re-tags, the gate asked before the pool and each claim (${gPooledShut}/${gSentShut}; ${admitAsks} ask(s); ${line(gDone.out, "re-tagged (")})`);
+      // A one-shot run stopped as it waits at the gate ends as it did before the gate joined its pass (PR 4a-2 review
+      // pass 1): the stop's line, 130, no summary.
+      const sAc = new AbortController();
+      let sAsks = 0;
+      const sAdmit: Admit = (signal) => new Promise<void>((_, reject) => {
+        sAsks++;
+        signal.addEventListener("abort", () => reject(new Error("stopped at the gate")), { once: true });
+      });
+      const sRun = retag({ pausesMs: [10], admit: sAdmit, signal: sAc.signal });
+      for (let i = 0; i < 200 && sAsks < 1; i++) await Bun.sleep(25);
+      sAc.abort();
+      const sDone = await Promise.race([sRun, Bun.sleep(15_000).then(() => null)]);
+      assert(sDone !== null && sDone.code === 130 && sDone.err.includes("stopped before the pass began") && !/re-tagged \(/.test(sDone.out),
+        `a one-shot run stopped at the admit gate: the stop's line, 130, no summary (${sDone === null ? "it hung" : `${sDone.code}; ${line(sDone.out, "re-tagged (")}`})`);
       // abortInHand counts only a call that is out (review pass 1): a worker writing — its update_thought held behind
       // a row lock the test takes as the answer goes back — has no call to abort, and the thought is written, not set
       // back.
@@ -24955,10 +24972,25 @@ if (want("29")) {
         }
         return false;
       };
+      // Every follower here raced (review pass 1): started with a signal of the test's, one still following after 15 s
+      // is stopped by it, and one that does not stop within 10 s more is left — the case fails either way, and the
+      // suite goes on rather than hang.
+      type Ran = { code: number; out: string; err: string };
+      const follow = (opts: Omit<RetagOptions, "writer" | "url" | "signal">, env = base) => {
+        const ac = new AbortController();
+        return { stop: () => ac.abort(), run: retag({ ...opts, signal: ac.signal }, env) };
+      };
+      const race = async (f: { stop: () => void; run: Promise<Ran> }, ms = 15_000): Promise<Ran> => {
+        const done = await Promise.race([f.run, Bun.sleep(ms).then(() => null)]);
+        if (done !== null) return done;
+        f.stop();
+        const late = await Promise.race([f.run, Bun.sleep(10_000).then(() => null)]);
+        return { code: -1, out: late?.out ?? "", err: `still following after ${ms / 1000} s${late === null ? ", and 10 s after its stop" : ""}` };
+      };
       const F1 = await tagged("[29] F1, the follower's first pass");
       await move(F1, "[29] F1, the follower's first pass, moved");
       let fStop: PassStop | null = null;
-      const fRun = retag({ follow: 1, pausesMs: [10], onPass: (stop) => { fStop = stop; } });
+      const fRun = follow({ follow: 1, pausesMs: [10], onPass: (stop) => { fStop = stop; } });
       const f1ok = await settledSoon(F1);
       const F2 = await tagged("[29] F2, moved and rebuilt while the follower polls");
       await move(F2, "[29] F2, moved and rebuilt while the follower polls, moved");
@@ -24969,7 +25001,7 @@ if (want("29")) {
       const f2ok = await settledSoon(F2) && await settledSoon(F2R);
       const beatRunning = await beat();
       if (fStop) (fStop as PassStop)();
-      const fDone = await fRun;
+      const fDone = await race(fRun);
       const beatStopped = await beat();
       assert(f1ok && f2ok && fDone.code === 0 && beatRunning !== undefined && beatRunning.ended !== true && beatStopped?.ended === true && beatStopped.outcome === "stopped",
         `--follow re-tags the backlog, then a thought moved and rebuilt between polls and one moved raw (the pool at every pass); its heartbeat stamped while it runs, ended "stopped" at the stop, exit 0 (${f1ok}/${f2ok}; ${fDone.code}; ${JSON.stringify(beatStopped)})`);
@@ -24979,7 +25011,7 @@ if (want("29")) {
       // once its row is stamped, the provider goes down and a thought falls behind.
       await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
       let oStop: PassStop | null = null;
-      const oRun = retag({ follow: 1, pausesMs: [10], onPass: (stop) => { oStop = stop; } });
+      const oRun = follow({ follow: 1, pausesMs: [10], onPass: (stop) => { oStop = stop; } });
       for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
       downAll = true;
       const F3 = await tagged("[29] F3, re-tagged once the provider is back");
@@ -24992,29 +25024,20 @@ if (want("29")) {
       downAll = false;
       const f3ok = await settledSoon(F3, 300);
       if (oStop) (oStop as PassStop)();
-      const oDone = await oRun;
+      const oDone = await race(oRun);
       assert(JSON.stringify(waitSeen) === '["retag"]' && f3ok && oDone.code === 0 && /is not answering/.test(oDone.err) && /answers again/.test(oDone.out),
         `the provider down mid-follow: the follower waits it out on its heartbeat, probing, and re-tags once it answers (${JSON.stringify(waitSeen)}; ${f3ok}; ${oDone.code})`);
       // The model missing: at start, a follower refuses before it writes (kind "model"); mid-follow, it waits the model
       // out as an outage, probing, and re-tags once it is served — where a one-shot run's rules would stop. Both raced:
       // a follower that did neither would follow for ever.
-      const race = async (run: Promise<{ code: number; out: string; err: string }>, stop: () => PassStop | null) => {
-        const done = await Promise.race([run, Bun.sleep(15_000).then(() => null)]);
-        if (done !== null) return done;
-        stop()?.();
-        await run;
-        return { code: -1, out: "", err: "still following after 15 s" };
-      };
       missingAll = true;
       const missingStarts: StartResult[] = [];
-      let mStop: PassStop | null = null;
-      const missingAtStart = await race(retag({ follow: 1, pausesMs: [10], onStart: (r) => missingStarts.push(r), onPass: (stop) => { mStop = stop; } }), () => mStop);
+      const missingAtStart = await race(follow({ follow: 1, pausesMs: [10], onStart: (r) => missingStarts.push(r) }));
       missingAll = false;
       assert(missingAtStart.code === 2 && JSON.stringify(missingStarts) === '[{"ok":false,"refused":"model"}]' && /does not serve stub-meta at start/.test(missingAtStart.err),
         `the model missing at start: the follower refuses before it writes, kind model (${missingAtStart.code}; ${JSON.stringify(missingStarts)})`);
       await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
-      let m2Stop: PassStop | null = null;
-      const m2Run = retag({ follow: 1, pausesMs: [10], onPass: (stop) => { m2Stop = stop; } });
+      const m2Run = follow({ follow: 1, pausesMs: [10] });
       for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
       missingAll = true;
       const F5 = await tagged("[29] F5, re-tagged once the model is served");
@@ -25026,27 +25049,78 @@ if (want("29")) {
       }
       missingAll = false;
       const f5ok = await settledSoon(F5, 300);
-      if (m2Stop) (m2Stop as PassStop)();
-      const m2Done = await race(m2Run, () => null);
+      m2Run.stop();
+      const m2Done = await race(m2Run);
       assert(JSON.stringify(missingWait) === '["retag"]' && f5ok && m2Done.code === 0,
         `the model missing mid-follow: waited out as an outage on the heartbeat, probing, and the thought re-tagged once it is served (${JSON.stringify(missingWait)}; ${f5ok}; ${m2Done.code})`);
+      // A 402 mid-follow (OpenRouter's "can only afford": the account's): the follower stops, exit 2, its row ended
+      // refused "provider", the thought back in the pool unfailed — not asked of the probe, which one token affords,
+      // failing every thought row by row (review pass 1).
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      const p402 = follow({ follow: 1, pausesMs: [10] });
+      for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      SPECIAL.set("[29] F6", 402);
+      const F6 = await tagged("[29] F6, its call answered 402");
+      await move(F6, "[29] F6, its call answered 402, moved");
+      const p402Done = await race(p402);
+      SPECIAL.delete("[29] F6");
+      const f6Status = (await claims()).find((c) => c.id === F6)?.status;
+      const p402Beat = await beat();
+      assert(p402Done.code === 2 && f6Status === "pending" && p402Beat?.ended === true && p402Beat.refused === "provider",
+        `a 402 mid-follow is the account's: the follower stops, exit 2, its row refused "provider", the thought pending, not failed (${p402Done.code}; ${f6Status}; ${JSON.stringify(p402Beat)})`);
+      // Three 400s in a row mid-follow, the thoughts' own (their length): the follower tags SHAPE_NOTE in the request's
+      // shape, it is answered, so the three are failed and the follower carries on — a thought after them re-tagged —
+      // where it stopped, its row refused "provider" and held until an operator acted (review pass 1).
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      const p400 = follow({ follow: 1, pausesMs: [10], workers: 1 });
+      for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      SPECIAL.set("[29] F7 long", 400);
+      const F7: string[] = [];
+      for (const k of [1, 2, 3]) {
+        const id = await tagged(`[29] F7 long ${k}`);
+        await move(id, `[29] F7 long ${k}, moved`);
+        F7.push(id);
+      }
+      let f7Failed = false;
+      for (let i = 0; i < 200 && !f7Failed; i++) {
+        await Bun.sleep(50);
+        const cs = await claims();
+        f7Failed = F7.every((id) => cs.find((c) => c.id === id)?.status === "failed");
+      }
+      const F8 = await tagged("[29] F8, after three refused in a row");
+      await move(F8, "[29] F8, after three refused in a row, moved");
+      const f8ok = await settledSoon(F8);
+      p400.stop();
+      const p400Done = await race(p400);
+      SPECIAL.delete("[29] F7 long");
+      const noteAsked = bodies.some((b) => b.includes(SHAPE_NOTE));
+      assert(f7Failed && f8ok && noteAsked && p400Done.code === 0,
+        `three 400s in a row mid-follow, the shape note answered: the three failed, the follower carries on — a thought after them re-tagged — and stops 0 (${f7Failed}; ${f8ok}; ${noteAsked}; ${p400Done.code})`);
+      // …and where the note is refused too, the shape is the request's: the follower stops, exit 2, its row refused
+      // "provider" — the streak's reading, kept.
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      const pShape = follow({ follow: 1, pausesMs: [10], workers: 1 });
+      for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      shapeAll = true;
+      for (const k of [1, 2, 3]) {
+        const id = await tagged(`[29] F9 shape ${k}`);
+        await move(id, `[29] F9 shape ${k}, moved`);
+      }
+      const pShapeDone = await race(pShape);
+      shapeAll = false;
+      const shapeBeat = await beat();
+      assert(pShapeDone.code === 2 && /the request's shape/.test(pShapeDone.err) && shapeBeat?.ended === true && shapeBeat.refused === "provider",
+        `…the note refused too: the request's shape, the follower stops, exit 2, its row refused "provider" (${pShapeDone.code}; ${JSON.stringify(shapeBeat)})`);
       // check: the follower's start alone — through, nothing pooled.
       const F4 = await tagged("[29] F4, behind its tags at the check");
       await move(F4, "[29] F4, behind its tags at the check, moved");
       const checkStarts: StartResult[] = [];
-      // Raced: a check that ran the pass would follow for ever, and hang the suite rather than fail it.
-      let checkStop: PassStop | null = null;
-      const checkRun = retag({ follow: 1, check: true, onStart: (r) => checkStarts.push(r), onPass: (stop) => { checkStop = stop; } });
-      const checkedOrNot = await Promise.race([checkRun, Bun.sleep(15_000).then(() => null)]);
-      if (checkedOrNot === null && checkStop) {
-        (checkStop as PassStop)();
-        await checkRun;
-      }
-      const checked = checkedOrNot ?? { code: -1, out: "", err: "the check ran the pass: still following after 15 s" };
+      // Raced: a check that ran the pass would follow for ever.
+      const checked = await race(follow({ follow: 1, check: true, onStart: (r) => checkStarts.push(r) }));
       const checkedPooled = (await claims()).some((c) => c.id === F4);
       // A follower's start refusal ends its own row with the kind (SMD-3214): the key's, under another model's key.
       const otherKey = retagKey("stub-meta-follow", METADATA_PROMPT_VERSION);
-      const refusedFollow = await retag({ follow: 1 }, { ...base, OB1_METADATA_MODEL: "stub-meta-follow" });
+      const refusedFollow = await race(follow({ follow: 1 }, { ...base, OB1_METADATA_MODEL: "stub-meta-follow" }));
       const refusedBeat = await beat(stampKey("retag", otherKey));
       const checkNoFollow = await retag({ check: true });
       assert(checked.code === 0 && JSON.stringify(checkStarts) === '[{"ok":true,"provider":"up"}]' && !checkedPooled
@@ -27076,7 +27150,9 @@ if (want("37b")) {
     assert(followerKey("sleep", {}) === "heartbeat:sleep" && followerKey("board-sync", {}) === "heartbeat:board-sync" && EXTRACT_KEY === `heartbeat:${extractionKey(resolveEmbedConfig({}).metadataModel)}`
         && followerKey("extract", { OB1_METADATA_MODEL: "m:1b" }) === `heartbeat:${extractionKey("m:1b")}` && /^heartbeat:consolidate:/.test(followerKey("consolidate", {}) ?? "")
         // A re-embed follower's, under the model's own key (SMD-2679), not consolidate's.
-        && followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" }) === "heartbeat:reembed:e:4b@768",
+        && followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" }) === "heartbeat:reembed:e:4b@768"
+        // A re-tag follower's, under the re-tag key its configuration makes (SMD-2298 PR 4a-2 review pass 1: no case read it).
+        && followerKey("retag", { OB1_METADATA_MODEL: "t:2b" }) === `heartbeat:${retagKey("t:2b", METADATA_PROMPT_VERSION)}`,
       `the row a supervisor ends is the one its follower stamps (${EXTRACT_KEY}; reembed ${followerKey("reembed", { OB1_EMBEDDING_MODEL: "e:4b", OB1_EMBEDDING_DIM: "768" })})`);
 
     // endRow: the follower's last word since its start kept — the scheduler's

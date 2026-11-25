@@ -2438,10 +2438,12 @@ else {
    * behind their tags under retag:<metadata model>@p<prompt version>, records
    * that key in ob1_config.retag_key, and rebuild_derived feeds it (150). The
    * re-embed and consolidate rows' rule; "not yet in the pool" is the worker's
-   * own backlog, db/config.mjs's RETAG_BACKLOG_SQL. No follower or sleep pass
-   * runs it yet (PR 4): a live lease is a run going, and pending rows wait for
-   * a run, one that stopped or a rebuild's requeue; an earlier key's pool is
-   * no worker's. With nothing unfinished, a backlog waiting is said.
+   * own backlog, db/config.mjs's RETAG_BACKLOG_SQL. A live lease, or a
+   * follower's fresh heartbeat for the key (PR 4a-2), is a run going; no sleep
+   * pass runs it yet (PR 4b), so otherwise pending rows wait for a run, one
+   * that stopped or a rebuild's requeue; an earlier key's pool is no worker's.
+   * With nothing unfinished, a backlog waiting is said, with the follower that
+   * takes it where one is stamped.
    */
   const TAG_MODEL = "tag-model";
   const RENV = { ...SQL_ENV, OB1_METADATA_MODEL: TAG_MODEL };
@@ -2476,24 +2478,39 @@ else {
          `…under the key's own model where the server's knob names another, since a run under that one is refused (${fix(rtOther.out, "retag pass").trim()})`);
   // A follower of the key (SMD-2298 PR 4a-2): its fresh heartbeat reads running between its polls, ok, with no remedy;
   // ended, the row's restart, not a one-shot run beside where it would be a second worker.
-  const rtBeat = (extra: Record<string, unknown>) =>
-    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${RT}`}, ${JSON.stringify({ v: 1, job: RT, every_s: 60, running: false, outcome: "ok", ...extra })}, now() - interval '10 seconds')
+  const rtBeat = (extra: Record<string, unknown>, age = "10 seconds") =>
+    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${RT}`}, ${JSON.stringify({ v: 1, job: RT, every_s: 60, running: false, outcome: "ok", ...extra })}, now() - ${age}::interval)
            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
   await rtBeat({});
   const rtFollowed = await run(RENV);
   await rtBeat({ ended: true, outcome: "stopped" });
   const rtFollowerGone = await run(RENV);
+  // Mid-pass, waiting the provider out (review pass 1: no cell read it); stale, three intervals unstamped, as gone.
+  await rtBeat({ running: true, outcome: "failed", waitingMidPass: ["retag"] });
+  const rtFollowerWaits = await run(RENV);
+  await rtBeat({}, "10 minutes");
+  const rtFollowerStale = await run(RENV);
   await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${RT}`}`;
   assert(new RegExp(`^\\s*✓\\s+retag pass\\s+${rx(RT)}: .* — a follower is running this key \\(stamped 1\\d s ago\\): 1 pending between its polls\\s*$`, "m").test(rtFollowed.out)
       && !/Finish it/.test(fix(rtFollowed.out, "retag pass"))
       && /^\s*→ Its follower is not running: start it again as the workers row says; it finishes the pass\.\s*$/.test(fix(rtFollowerGone.out, "retag pass")),
          `a follower's fresh heartbeat for the key reads running between its polls, no remedy; ended, its restart, not a second worker (PR 4a-2; ${row(rtFollowed.out, "retag pass")} | ${fix(rtFollowerGone.out, "retag pass").trim()})`);
+  assert(new RegExp(`^\\s*✓\\s+retag pass\\s+${rx(RT)}: .* — a follower is running this key \\(stamped 1\\d s ago, waiting for the provider mid-pass\\): 1 pending\\s*$`, "m").test(rtFollowerWaits.out)
+      && /^\s*→ Its follower is not running: start it again as the workers row says; it finishes the pass\.\s*$/.test(fix(rtFollowerStale.out, "retag pass")),
+         `…mid-pass and waiting for the provider, said so, not "between its polls"; stale, as gone, its restart (review pass 1; ${row(rtFollowerWaits.out, "retag pass")} | ${fix(rtFollowerStale.out, "retag pass").trim()})`);
   // A live lease: a run going, ok, no remedy; expired: a worker that died, the reclaim before the finish.
   await claims`SELECT claim_thoughts(${RT}, 'preflight-live', 1)`;
   const rtLive = await run(RENV);
   assert(new RegExp(`^\\s*✓\\s+retag pass\\s+${rx(RT)}: 3 thoughts pooled or behind their tags — 1 succeeded, 0 failed, 1 in flight, 0 pending, 1 not yet in the pool — a pass under this key is running: 1 in flight \\(leases live until \\d\\d:\\d\\d UTC\\), 0 pending\\s*$`, "m").test(rtLive.out)
       && !/Finish it/.test(fix(rtLive.out, "retag pass")) && (rtLive.out.match(/^\s*[✓✗!·]\s+retag pass\s/gm) ?? []).length === 1,
          `a live lease reads running, ok, one row, no remedy (${row(rtLive.out, "retag pass")})`);
+  // The follower that held it gone (its row ended, the lease still live): not running, the restart and the release.
+  await rtBeat({ ended: true, outcome: "stopped" });
+  const rtGoneLive = await run(RENV);
+  await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${RT}`}`;
+  assert(new RegExp(`^\\s*!\\s+retag pass\\s+${rx(RT)}: .* — its follower is not running \\(the workers row says so\\), and 1 claim\\(s\\) it held keep live leases until \\S+ UTC\\s*$`, "m").test(rtGoneLive.out)
+      && /^\s*→ Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool \(work_type \S+, include_live/.test(fix(rtGoneLive.out, "retag pass")),
+         `a follower gone with a live lease left warns: not running, its restart and the lease's release (review pass 1: no cell reached it; ${row(rtGoneLive.out, "retag pass")} | ${fix(rtGoneLive.out, "retag pass").trim()})`);
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${RT} AND status = 'claimed'`;
   const rtDied = await run(RENV);
   assert(/!\s+retag pass\s+\S+: .* — a worker died holding 1 of the claim\(s\) in flight, their leases expired\s*$/m.test(rtDied.out)
@@ -2584,6 +2601,16 @@ else {
          `…and with nothing else behind, the first run's rows alone are said, not a bare "none unfinished" (review pass 1; ${row(rtOnlyFirst.out, "retag pass")})`);
   assert(/^\s*✓\s+retag pass\s+none unfinished; 4 thought\(s\) behind their tags wait for a run — cd db && bun retag\.ts --url \$DATABASE_URL re-tags them\s*$/m.test(rtDone.out),
          `a finished pool with thoughts behind their tags again is ok, the backlog said without "none has run here" — the row under another model's recipe among them now a key is recorded (PR 3b; ${row(rtDone.out, "retag pass")})`);
+  // A follower of the key between its polls takes that backlog at its next one; stopped, its restart does — not a
+  // one-shot run beside it (review pass 1: the line named the run whatever the follower did).
+  await rtBeat({});
+  const rtDoneFollowed = await run(RENV);
+  await rtBeat({ ended: true, outcome: "stopped" });
+  const rtDoneGone = await run(RENV);
+  await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${RT}`}`;
+  assert(/^\s*✓\s+retag pass\s+none unfinished; 4 thought\(s\) behind their tags wait for a run — the follower running this key \(stamped 1\d s ago\) pools them at its next poll\s*$/m.test(rtDoneFollowed.out)
+      && /^\s*✓\s+retag pass\s+none unfinished; 4 thought\(s\) behind their tags wait for a run — its follower is not running: start it again as the workers row says, and it re-tags them\s*$/m.test(rtDoneGone.out),
+         `…with a follower of the key, the backlog is its next poll's; stopped, its restart's, no run beside it (review pass 1; ${row(rtDoneFollowed.out, "retag pass")} | ${row(rtDoneGone.out, "retag pass")})`);
   await claims.unsafe(`SELECT enqueue_thoughts('${RT_OLD}', ARRAY['${ids[1]}']::uuid[])`);
   const rtDoneBeside = await run(RENV);
   await claims`DELETE FROM thought_work_claims WHERE work_type = ${RT_OLD}`;
@@ -4932,6 +4959,16 @@ else {
     const embedModelFix = fix((await run(SQL_ENV)).out, "workers");
     assert(/reembed:stub-embed@1024 ended 3\d s ago on its start's refusal \(model\): pull the embedding model its log names \(OB1_EMBEDDING_MODEL\)/.test(embedModelFix) && !/OB1_JUDGE_MODEL/.test(embedModelFix),
       `…and on model, the embedding model's remedy, not the chat models' (${embedModelFix})`);
+    // A re-tag follower's own row (SMD-2298 PR 4a-2 review pass 1): its key and its model are retag.ts's, not the
+    // extraction key's, which the remedy named.
+    await beat("heartbeat:retag:tag-model@p1", v({ job: "retag:tag-model@p1", every_s: 60, outcome: "failed", ended: true, refused: "key" }), 30);
+    const retagKeyFix = fix((await run(SQL_ENV)).out, "workers");
+    await beat("heartbeat:retag:tag-model@p1", v({ job: "retag:tag-model@p1", every_s: 60, outcome: "failed", ended: true, refused: "model" }), 30);
+    const retagModelFix = fix((await run(SQL_ENV)).out, "workers");
+    await claims`DELETE FROM ob1_config WHERE key LIKE 'heartbeat:retag:%'`;
+    assert(/retag:tag-model@p1 ended 3\d s ago on its start's refusal \(key\): the re-tag key is retag\.ts's to switch: cd db && bun retag\.ts --url \$DATABASE_URL --switch-key .*Then start it again — cd db && bun retag\.ts --url \$DATABASE_URL --follow/.test(retagKeyFix) && !/extract-entities/.test(retagKeyFix)
+        && /retag:tag-model@p1 ended 3\d s ago on its start's refusal \(model\): pull the model its log names \(OB1_METADATA_MODEL\)/.test(retagModelFix) && !/OB1_JUDGE_MODEL/.test(retagModelFix),
+      `a re-tag follower ended on its key's or its model's refusal names retag.ts's remedies, not the extraction key's (${retagKeyFix} | ${retagModelFix})`);
     // Its own row waiting mid-pass for the provider (SMD-2679 PR 4a-2b): said as the provider's, not a pass running.
     await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", running: true, waitingMidPass: ["reembed"] }), 5);
     const reembedWaitFix = fix((await run(SQL_ENV)).out, "workers");

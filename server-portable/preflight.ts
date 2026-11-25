@@ -5349,8 +5349,13 @@ if (configFailed) {
               // With no key recorded the count is a first run's, this server's key the target (backlogOf), and the rows
               // behind it by their recipe alone are named (PR 3b review passes 1 and 2).
               const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? ` (none has run here: ob1_config.retag_key is unset${Number(b.recipe) > 0 ? `; a first run records ${serverKey}, ${b.recipe} of them behind it by their tags' recipe alone` : ""})` : ""}`;
+              // A follower of the key takes the backlog at its next poll; one stopped, at its restart — not a one-shot run
+              // beside it, a second worker (review pass 1: the line named the run whatever the follower did).
+              const beat = facts.workers?.heartbeats.find((h) => h.worker === "retag" && h.job === key);
               if (behind === 0) add("retag pass", "ok", "none unfinished");
               else if ("words" in how) add("retag pass", "ok", `${words} — ${how.words}`);
+              else if (beat && freshBeat(beat)) add("retag pass", "ok", `${words} — the follower running this key (stamped ${ago(beat.ageS)} ago) pools them at its next poll`);
+              else if (beat) add("retag pass", "ok", `${words} — its follower is not running: start it again as the workers row says, and it re-tags them`);
               else add("retag pass", "ok", `${words} — cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL re-tags them`);
             }
             // The server's captures against the target (PR 3b): a capture's tags carry this server's key, and a row under

@@ -174,6 +174,12 @@ const REFUSED_MARK = String(metadataRefused().metadata_extraction_failed);
 const THOUGHT_STATUSES: ReadonlySet<string> = new Set(["400", "413", "422"]);
 /** A 400 or 422 to this many thoughts in a row, none answered between, is the request's shape, not theirs (review pass 2). */
 const SHAPE_STREAK = 3;
+/**
+ * The note a follower tags, in the request's own shape, when SHAPE_STREAK is reached (review pass 1): an answer of tags
+ * says the shape is taken, so the streak was the thoughts' (their length, a filter) and the follower carries on, where a
+ * stop would hold it down until an operator acted. Exported for test-live [29], which looks for it among the calls.
+ */
+export const SHAPE_NOTE = "A short note to tag: the request's shape, checked after three thoughts in a row were refused.";
 /** The tag keys whose value is a list: cleared to [], not null, so a reader's jsonb_array_length or _elements meets a list (review pass 2). */
 const LIST_TAGS: ReadonlySet<string> = new Set(["people", "action_items", "dates_mentioned", "topics"]);
 
@@ -221,7 +227,7 @@ export interface RetagOptions {
   admit?: Admit;
   /** Postgres settings the run's own client opens every connection with (connect.ts's `session`): the sleep scheduler's per-pass budget (SMD-2679). Refused beside `sql`, a caller's client, which it would not reach. */
   session?: SessionSettings;
-  /** False leaves out the start's banner — the job, model and egress lines and the agent line or the no-key warning — for a pass a scheduler drives, which says them once (SMD-2752). */
+  /** False leaves out the start's banner — the job, model and egress lines, the agent line or the no-key warning, and the workers line — for a pass a scheduler drives, which says them once (SMD-2752). */
   banner?: boolean;
   /**
    * False leaves out the end-of-run summary — the counts, the failed rows and the still-leased and still-pending
@@ -638,6 +644,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   /** 400s and 422s to thoughts in a row, none answered between; at SHAPE_STREAK the run stops (configError). */
   let shapeStreak = 0;
   let shapeStopped = false;
+  /** A follower's shape check in flight, which every worker reaching the streak meanwhile awaits (review pass 1). */
+  let shapeCheck: Promise<boolean> | null = null;
+  /** A one-shot run stopped at the admit gate before its pass: it ends as it did before the gate joined the pass. */
+  let gateStopped = false;
   const activeWorkers = new Set<string>();
   const taken = new Set<string>();
   const claiming = { n: 0 };
@@ -670,6 +680,17 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     lastReport.at = now;
     lastReport.line = line;
     out(line);
+  }
+
+  /**
+   * The shape check (SHAPE_NOTE): true where the note is answered with tags. Anything else — the same refusal, an
+   * outage, a stop, the egress gate — keeps the streak's reading, the request's shape (review pass 1).
+   */
+  async function shapeTaken(): Promise<boolean> {
+    calls++;
+    const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata: {}, content: SHAPE_NOTE };
+    const answer = await extractMetadata(SHAPE_NOTE, subject, cfg, halt.signal).catch(() => null);
+    return answer !== null && typeof answer.metadata_extraction_failed !== "string" && metadataRecipe(cfg, answer) !== null;
   }
 
   /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read; a call aborted in hand, as AbortedInHand. */
@@ -712,6 +733,14 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       // A 400, 413 or 422 is this thought's (its length, a filter); any other status the claim workers' rule reads.
       if (status && !THOUGHT_STATUSES.has(status[1])) throw new ProviderError(`the tags' call answered ${status[1]}`, "http", Number(status[1]));
       if (status && status[1] !== "413" && ++shapeStreak >= SHAPE_STREAK && !configError) {
+        // A follower asks the shape first (SHAPE_NOTE): three long thoughts in a row are no reason to hold it down. A
+        // one-shot run stops, as before: the operator re-runs it (review pass 1).
+        if (FOLLOW && await (shapeCheck ??= shapeTaken().finally(() => { shapeCheck = null; }))) {
+          shapeStreak = 0;
+          return { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
+        }
+        // A stop that came while the note was out is the stop's, not the provider's.
+        if (configError || (FOLLOW && stopping)) return { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
         configError = `the provider answered ${status[1]} to ${SHAPE_STREAK} thoughts in a row, none answered between — the request's shape, not the thoughts' (often a field the server refuses: reasoning_effort, which OB1_METADATA_REASONING sets, or response_format)`;
         shapeStopped = true;
         stopping = true;
@@ -776,6 +805,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       // outage; an outage at once (the model missing); the probe's to decide; the thought's; or the request's. A
       // one-shot run keeps classifyError's rules: paused for, the thought's, or the request's.
       read: (e) => {
+        // A 402 is the account's: fatal, as classifyError reads it. fault() reads one so only by the provider's words
+        // ("can only afford"), which the marker extractMetadata answers with does not carry — it would ask the probe,
+        // which one token affords, and fail every thought row by row (review pass 1).
+        if (e instanceof ProviderError && e.kind === "http" && e.status === 402) return { act: "fatal", suspect: true };
         if (FOLLOW) return fault(e);
         // A 408 is the provider's moment, as providerDown reads it, not the request's (classifyError's 4xx): paused
         // for, like a 429 (review pass 1: it stopped the run, exit 2).
@@ -973,7 +1006,15 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     await unreturned.returnAll();
     // The admit gate before the pool's writes, as the other claim workers' passes take it (SMD-3379 PR 1b): a stop
     // while it waits ends the run with nothing pooled (SMD-2298 PR 4a-1).
-    if (ADMIT && !(await admitted(ADMIT, gate))) return SUMMARY ? counts() : before0;
+    if (ADMIT && !(await admitted(ADMIT, gate))) {
+      // A one-shot run's stop here ends it with nothing pooled, as before the gate joined the pass: the stop's line, 130,
+      // no summary (review pass 1). A follower's ends its loop, and its summary is read as at any stop.
+      if (!FOLLOW) {
+        gateStopped = true;
+        return before0;
+      }
+      return SUMMARY ? counts() : before0;
+    }
     // The pool, every pass, beside rebuild_derived's requeue (150): the backlog not pooled, and a re-tagged one due again.
     const [{ added }] = (await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(${backlogIds()})) AS added`) as { added: number }[];
   // requeue_thought_work's reset, guarded: the UPDATE checks `succeeded` again on the row it locks (READ COMMITTED's
@@ -1044,6 +1085,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   });
 
   let passed = await followed();
+  if (gateStopped) {
+    err(STOPPED_EARLY);
+    return 130;
+  }
   if (FOLLOW) {
     await stamper?.stamp(passOutcome);
     while (!stopping && !limitReached()) {
@@ -1073,7 +1118,17 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
     return configError ? 2 : hardStopped ? 130 : 0;
   }
-  const after = await counts();
+  // A follower stopped as it slept between polls holds the last pass's counts, not a database that still answers: one
+  // gone meanwhile reads as a stop while it waited (review pass 1: the read threw, exit 1 with a stack).
+  const after = await counts().catch((e: unknown) => {
+    if (FOLLOW && databaseUnavailable(e)) return null;
+    throw e;
+  });
+  if (after === null) {
+    if (SUMMARY) err(`\n  stopped while the database was not answering: the pool's counts are not read — --status reads them once it answers`);
+    if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
+    return configError ? 2 : hardStopped ? 130 : 0;
+  }
   if (SUMMARY) printCounts(after, "after");
   if (after.failed > 0 && SUMMARY) {
     err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
