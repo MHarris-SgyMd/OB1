@@ -2537,7 +2537,14 @@ PR's GitHub link with the same number, 56 of them under other repositories;
   marked 154. A key's target is its link's repository first, else the
   setting's, in the mapping, a remap and the writer alike. A key its link
   scopes already does not move. The cap counts the keys moved and their
-  targets, two thread locks apiece.
+  targets, two thread locks apiece, and a refusal names both. Each facet's
+  target is read once, from its text at the count, so an edit during the
+  mapping cannot send a key to a target whose lock was not taken first.
+- **A brain mapped under 153 alone** keeps a key its link names under the
+  setting's repository: setting the same repository again moves only bare
+  keys. Two remaps repair it: a remap to a placeholder repository moves every
+  key the setting scoped, a linked one to its link's repository, and a remap
+  back moves the rest home.
 - **With no repository set, a link changes nothing,** as row 13 says.
 
 The `thread` read resolves a bare `pr:` or `version:` key to the setting's

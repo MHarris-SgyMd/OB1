@@ -100,7 +100,10 @@ export function scopedKey(key: string, repo: string): string {
  * The standing key a found key is written as, as 153's door writes it: the key itself when it stands, or for a bare
  * pr: or version: key the standing key scoped from it (the setting's repository's, when one is given, else the first
  * by key); undefined when none stands. The sweep counts a set kept or a key new by it (review pass 5: it compared a
- * bare key with the scoped one standing, and counted every pass over a mapped brain a new key).
+ * bare key with the scoped one standing, and counted every pass over a mapped brain a new key). It reads no text, so
+ * it does not follow 154's GitHub links: where a thought's link names another repository than the scoped key it
+ * holds, the door replaces the key and these counts call it kept (a tally's limit, not the write's; SMD-3887 PR 3b-1
+ * review pass 1).
  */
 export function heldAs(found: string, standing: readonly string[], repo: string | null = null): string | undefined {
   if (standing.includes(found)) return found;

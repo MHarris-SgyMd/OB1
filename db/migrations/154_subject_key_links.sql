@@ -146,8 +146,8 @@ DECLARE
   v_moved   boolean;
   v_from    text;
   v_remapped integer := 0;
-  v_text    text;
   v_targets text[] := '{}';
+  v_map     jsonb := '{}';
 BEGIN
   SELECT * INTO v_who FROM ob1_work_claim_actor(p_actor, 'set_subject_repo');
   -- The operator's kind by its agent id alone: a name lends no kind (SMD-2608).
@@ -191,21 +191,27 @@ BEGIN
     -- 154 (SMD-3887 PR 3b-1): each key's target is the one a GitHub link in its thought's text names
     -- (ob1_subject_linked_key), else the setting's; the keys moved and their targets are both counted and locked, as
     -- a link can send one bare key to several repositories. A key whose target is itself (scoped by its link to the
-    -- repository a remap moves from) does not move.
-    SELECT COALESCE(array_agg(DISTINCT m.k ORDER BY m.k), '{}'), COALESCE(array_agg(DISTINCT m.t ORDER BY m.t), '{}') INTO v_bare, v_targets
-      FROM (SELECT f2.payload->>'key' AS k,
-                   COALESCE(ob1_subject_linked_key(t2.content, ob1_subject_unscoped_key(f2.payload->>'key')),
-                            ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_repo)) AS t
-              FROM thought_facets f2 JOIN thoughts t2 ON t2.id = f2.thought_id
-             WHERE f2.kind = 'subject' AND f2.valid_until IS NULL
-               AND ((f2.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR f2.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
-                              OR (v_from IS NOT NULL AND ob1_subject_unscoped_key(f2.payload->>'key') <> f2.payload->>'key'
-                                  AND ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_from) = f2.payload->>'key'))) AS m
-     WHERE subject_key_valid(m.t) AND m.t <> m.k;
+    -- repository a remap moves from) does not move. Each facet's target is read here once, from its thought's text
+    -- now, and the mapping below takes it from v_map rather than read the text again: an edit committed between the
+    -- two would otherwise move a key to a target whose thread lock was never taken first (review pass 1).
+    SELECT COALESCE(jsonb_object_agg(f2.id::text,
+                      COALESCE(ob1_subject_linked_key(t2.content, ob1_subject_unscoped_key(f2.payload->>'key')),
+                               ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_repo))), '{}') INTO v_map
+      FROM thought_facets f2 JOIN thoughts t2 ON t2.id = f2.thought_id
+     WHERE f2.kind = 'subject' AND f2.valid_until IS NULL
+       AND ((f2.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR f2.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
+              OR (v_from IS NOT NULL AND ob1_subject_unscoped_key(f2.payload->>'key') <> f2.payload->>'key'
+                  AND ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_from) = f2.payload->>'key'));
+    -- A facet's key is never edited (111's validator), so its key read again here is the one counted.
+    SELECT COALESCE(array_agg(DISTINCT f3.payload->>'key' ORDER BY f3.payload->>'key'), '{}'), COALESCE(array_agg(DISTINCT e.value ORDER BY e.value), '{}')
+      INTO v_bare, v_targets
+      FROM jsonb_each_text(v_map) AS e JOIN thought_facets f3 ON f3.id = e.key::uuid
+     WHERE subject_key_valid(e.value) AND e.value <> f3.payload->>'key';
     IF cardinality(v_bare) + cardinality(v_targets) > 2 * ob1_subject_repo_map_max() THEN
-      RETURN jsonb_build_object('ok', false, 'error', 'TOO_MANY_KEYS', 'keys', cardinality(v_bare), 'max', ob1_subject_repo_map_max(),
-        'message', format('setting %s would map %s distinct unscoped pr: and version: keys in one transaction, past the %s one mapping takes (its thread locks are held to the commit); nothing is set',
-                          v_repo, cardinality(v_bare), ob1_subject_repo_map_max()));
+      -- 154: the keys and their targets, two thread locks apiece, as the check counts them (review pass 1).
+      RETURN jsonb_build_object('ok', false, 'error', 'TOO_MANY_KEYS', 'keys', cardinality(v_bare), 'targets', cardinality(v_targets), 'max', ob1_subject_repo_map_max(),
+        'message', format('setting %s would move %s distinct pr: and version: keys to %s targets in one transaction, %s thread locks held to the commit, past the %s (two for each of %s keys) one mapping takes; nothing is set',
+                          v_repo, cardinality(v_bare), cardinality(v_targets), cardinality(v_bare) + cardinality(v_targets), 2 * ob1_subject_repo_map_max(), ob1_subject_repo_map_max()));
     END IF;
   END IF;
   IF v_same AND cardinality(v_bare) = 0 THEN
@@ -242,7 +248,7 @@ BEGIN
                   AND ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_from) = f2.payload->>'key'))
        ORDER BY f2.thought_id
     LOOP
-      SELECT COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)), t.content INTO v_fp, v_text  -- 154: its text, for its links
+      SELECT COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)) INTO v_fp
         FROM thoughts t WHERE t.id = v_thought FOR KEY SHARE;
       IF NOT FOUND THEN
         CONTINUE;
@@ -258,10 +264,11 @@ BEGIN
          ORDER BY s.payload->>'key', s.id
            FOR UPDATE
       LOOP
-        -- 154: the repository a GitHub link in the text names for the number, else the setting's; a key its link
-        -- scopes already stays where it is.
-        v_key := COALESCE(ob1_subject_linked_key(v_text, ob1_subject_unscoped_key(f.key)), ob1_subject_scoped_key(ob1_subject_unscoped_key(f.key), v_repo));
-        IF v_key = f.key THEN
+        -- 154: the target the count read (v_map): the repository a GitHub link in the text named for the number,
+        -- else the setting's. A key its link scopes already stays where it is, and a facet the count did not see (a
+        -- raw write since) is left for the next setting.
+        v_key := v_map->>f.id::text;
+        IF v_key IS NULL OR v_key = f.key THEN
           CONTINUE;
         END IF;
         IF NOT subject_key_valid(v_key) THEN

@@ -3673,6 +3673,25 @@ else {
              && /!  subject repository\s+the stored repository "Bad" is refused \(a repository is lowercase.*: no bare pr: or version: key can be written/.test(repoRefused.out)
              && (await claims`SELECT ob1_subject_repo() AS r`)[0].r === null,
              `…and the subject repository row: none set, ok; the role unable to read it, a warning; set, ok; set without 154, a warning; a stored value the refusal names, a warning; the test's setting cleared after (${[missingBoth, repoUnread, repoSet, repoNoLinks, repoRefused].map((r) => repoLine(r.out)).join(" | ").slice(0, 600)})`);
+      // …and the schema half there (review pass 1): the table without its reader, a failure; 154 recorded without its link
+      // rule, a failure whether or not a repository is set (a ledger planted as the validity rows above plant one).
+      let repoNoFn: { out: string }, repoNo154: { out: string };
+      await claims.unsafe("ALTER FUNCTION subject_repo_setting() RENAME TO subject_repo_setting_away_pf");
+      try { repoNoFn = await run({ ...SQL_ENV, DATABASE_URL: LIVE }); } finally { await claims.unsafe("ALTER FUNCTION subject_repo_setting_away_pf() RENAME TO subject_repo_setting"); }
+      const plantedLedger154 = (await claims`SELECT to_regclass('schema_migrations') IS NULL AS absent`)[0].absent as boolean;
+      if (plantedLedger154) await claims.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+      const added154 = (await claims.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('154_subject_key_links.sql', 'test') ON CONFLICT DO NOTHING RETURNING name`)).length > 0;
+      await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key(text, text) RENAME TO ob1_subject_linked_key_away_pf");
+      try {
+        repoNo154 = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
+      } finally {
+        await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key_away_pf(text, text) RENAME TO ob1_subject_linked_key");
+        if (plantedLedger154) await claims.unsafe(`DROP TABLE schema_migrations`);
+        else if (added154) await claims.unsafe(`DELETE FROM schema_migrations WHERE name = '154_subject_key_links.sql' AND sha256 = 'test'`);
+      }
+      assert(/✗  subject repository\s+migration 153's subject_repo_setting\(\) missing beside its table/.test(repoNoFn.out)
+             && /✗  subject repository\s+migration 154's ob1_subject_linked_key\(text, text\) missing though the ledger records 154/.test(repoNo154.out),
+             `…and the table without its reader, and 154 recorded without its link rule, each a failure (${repoLine(repoNoFn.out).slice(0, 120)} | ${repoLine(repoNo154.out).slice(0, 120)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });

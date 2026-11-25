@@ -37,9 +37,9 @@ const noLeadingZeros = (n: string) => n.replace(/^0+(?=[0-9])/, "");
  * a ticket alone (`SMD-3306`) is read so only when its prefix is a ticket's (isTicket), as a word such as `PR-12` or
  * `UTF-8` is no ticket a text names (review pass 1); `pr:` and `version:v` are read in any case (review pass 3), their
  * numbers without leading zeros (`pr:012` is `pr:12`, `version:v01.2` `version:v1.2`), and a repository they are scoped
- * to lowercased (`pr:O/R#012` is `pr:o/r#12`, 153's shape: SMD-3887; a bare key is read as written, not resolved to the
- * brain's repository — 3b's). Any other key is taken as written, trimmed. Null for what is no subject key (153's
- * subject_key_valid, mirrored by subjectKeyValid).
+ * to lowercased (`pr:O/R#012` is `pr:o/r#12`, 153's shape: SMD-3887). A bare key is returned bare: thread() resolves
+ * it to the operator's repository, where one is set (SMD-3887 PR 3b-1). Any other key is taken as written, trimmed.
+ * Null for what is no subject key (153's subject_key_valid, mirrored by subjectKeyValid).
  */
 export function threadKey(raw: string): string | null {
   const k = raw.trim();

@@ -23902,7 +23902,7 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const capped = await setRepo("o/r", OP);
     const keysCapped = `${await keysOf(t1)};${await keysOf(t3)};${await keysOf(t5)}`;
     await restoreShipped("ob1_subject_repo_map_max");
-    assert(capped.ok === false && capped.error === "TOO_MANY_KEYS" && capped.keys === 3 && capped.max === 2 && /would map 3 distinct unscoped pr: and version: keys/.test(String(capped.message))
+    assert(capped.ok === false && capped.error === "TOO_MANY_KEYS" && capped.keys === 3 && capped.max === 2 && /would move 3 distinct pr: and version: keys to 3 targets in one transaction, 6 thread locks held to the commit, past the 4 \(two for each of 2 keys\)/.test(String(capped.message)) && capped.targets === 3
            && (await repoNow()) === null && keysCapped === "pr:12;ticket:SMD-91370,version:v1.2;pr:7,pr:o/r#7"
            && (await one<{ m: number }>(`SELECT ob1_subject_repo_map_max() AS m`)).m === 2000,
       `past the cap the setting answers TOO_MANY_KEYS, naming the keys and the cap, and nothing is set or mapped; the shipped cap is 2,000 (${JSON.stringify(capped).slice(0, 160)})`);
@@ -24203,7 +24203,7 @@ console.log("\n[139] Migration 154: a pr: subject key takes the repository its G
     await db.exec(`CREATE OR REPLACE FUNCTION ob1_subject_repo_map_max() RETURNS integer LANGUAGE sql IMMUTABLE AS $$ SELECT 4 $$`);
     const capped = await setRepo("o/r");
     await restoreShipped("ob1_subject_repo_map_max");
-    assert(capped.ok === false && capped.error === "TOO_MANY_KEYS" && (await keysOf(p1)) === "pr:31" && (await one<{ m: number }>(`SELECT ob1_subject_repo_map_max() AS m`)).m === 2000,
+    assert(capped.ok === false && capped.error === "TOO_MANY_KEYS" && capped.keys === 4 && capped.targets === 6 && (await keysOf(p1)) === "pr:31" && (await one<{ m: number }>(`SELECT ob1_subject_repo_map_max() AS m`)).m === 2000,
       `the cap counts the targets too: four keys with six targets are past a cap of four (eight locks), nothing set (${JSON.stringify(capped).slice(0, 120)})`);
 
     // Setting a repository maps each bare key by its link first, else to the setting's.
@@ -24229,6 +24229,19 @@ console.log("\n[139] Migration 154: a pr: subject key takes the repository its G
     assert(remapped.ok === true && remapped.remapped === 3 && remapped.mapped === 3 && (await keysOf(b)) === "pr:o/s#12" && (await keysOf(f)) === "pr:o/s#12" && (await keysOf(d)) === "pr:o/s#5"
            && (await keysOf(c)) === "pr:o/r#7" && (await keysOf(a)) === "pr:siggymd/client#12" && (await keysOf(p1)) === "pr:x/a#31",
       `a remap moves the keys the setting scoped and leaves those their links scope (${JSON.stringify(remapped).slice(0, 140)})`);
+
+    // A key 153's mapping alone put under the setting's repository, though its link names another (planted raw, as
+    // 153 wrote it): setting the same repository again leaves it, and two remaps, to a placeholder and back, repair it
+    // while every other key comes home (review pass 1).
+    const w = await thought("w", "github.com/k/l/pull/41 landed");
+    await db.query(`INSERT INTO thought_facets (thought_id, kind, payload) VALUES ($1::uuid, 'subject', jsonb_build_object('key', 'pr:o/s#41', 'by', 'model', 'judge_key', $2::text))`, [w, K]);
+    const sameAgain = await setRepo("o/s");
+    const keyBefore = await keysOf(w);
+    const away = await setRepo("tmp/x", true);
+    const home = await setRepo("o/s", true);
+    assert(sameAgain.changed === false && sameAgain.mapped === 0 && keyBefore === "pr:o/s#41" && away.ok === true && home.ok === true
+           && (await keysOf(w)) === "pr:k/l#41" && (await keysOf(b)) === "pr:o/s#12" && (await keysOf(d)) === "pr:o/s#5" && (await keysOf(c)) === "pr:o/r#7",
+      `a key 153 alone mapped under the setting despite its link stays on a re-set, and two remaps move it to its link's repository and the rest home (${keyBefore} → ${await keysOf(w)}; ${await keysOf(b)})`);
 
     // A re-apply is a no-op.
     const census = async () => (await one<{ s: number }>(`SELECT count(*)::int AS s FROM thought_facets f JOIN thoughts t ON t.id = f.thought_id WHERE t.content LIKE '[139]%' AND f.kind = 'subject' AND f.valid_until IS NULL`)).s;

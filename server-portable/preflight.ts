@@ -3445,6 +3445,14 @@ if (configFailed) {
                 ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 154_subject_key_links.sql."));
           } else if (!sr.has_t) {
             add("subject repository", "skip", "not checked — subject_repo_settings does not exist (migration 153 not applied); pr: and version: keys stay unscoped");
+          } else if (!sr.has_fn) {
+            // The table without its reader (a partial re-apply): brain_info's row and a bare key's thread read fault (review pass 1).
+            add("subject repository", "fail", "migration 153's subject_repo_setting() missing beside its table: brain_info's row and a thread read by a bare pr: or version: key fault",
+                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 154_subject_key_links.sql."));
+          } else if (!sr.has_links && ledger.has("154")) {
+            // Recorded and not there: 154's setter and writer call it, so they fault whether or not a repository is set (review pass 1).
+            add("subject repository", "fail", "migration 154's ob1_subject_linked_key(text, text) missing though the ledger records 154; set_subject_repo, and every write of a bare pr: key once a repository is set, fault",
+                ledgerRemedy("154", "Apply db/migrations/154_subject_key_links.sql."));
           } else if (!sr.can_read) {
             add("subject repository", "warn", "the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key and a thread read by one fault",
                 "Grant the capture group (SMD-3887): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture (db/README.md, Grants for a capturing role).");
