@@ -35,7 +35,7 @@ import { GIT_SAFE, NOT_JSON, SAFE_REQUEST, TIME_LIMITS, gitEnv, jsonOf, type Fet
 import type { GitHubClient } from "./publish.ts";
 import { shownText } from "./guard.ts";
 
-/** The App's private key, beside the runner's other secrets. Not in dry-run.ts's KEY_FILES: it is several lines, and only the publish reads it. */
+/** The App's private key, beside the runner's other secrets. Not in dry-run.ts's KEY_FILES: it is several lines, and only the publish and `setup.ts check-github-app` read it. */
 export const APP_KEY_FILE = "github-app.pem";
 /** A private key as GitHub hands it out (PKCS#1) or as openssl converts it (PKCS#8): the armour, then base64 lines. */
 export const PEM_SHAPE = /^-----BEGIN (RSA )?PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]{1,80}\n)+-----END (RSA )?PRIVATE KEY-----$/;
@@ -58,7 +58,7 @@ const API = "https://api.github.com";
 /** The App, as the runner's config names it: its id, its installation on this repo, and the repo (owner/name). */
 export type App = { appId: string; installationId: string; repo: string };
 
-/** Base64url of a string or bytes, as a JWT's parts are written. */
+/** Base64url of bytes, as a JWT's parts are written. */
 const b64url = (b: Buffer): string => b.toString("base64").replace(/=+$/, "").replace(/\+/g, "-").replace(/\//g, "_");
 
 /**
@@ -225,7 +225,8 @@ export type TokenResult = { ok: true; token: string } | { ok: false; detail: str
 
 /**
  * An installation token for this repo alone, with `contents: write` and `pull_requests: write` alone. A token that
- * comes back with any other permission, any write beyond those two, or another repository, is refused unused.
+ * comes back with any other permission, any write beyond those two, without one of them, or for another repository,
+ * is refused unused.
  */
 export async function installationToken(fetchImpl: Fetch, app: App, pem: string, nowMs: number): Promise<TokenResult> {
   let jwt: string;
@@ -344,7 +345,6 @@ export function pushOutcome(out: GitOut, branch: string): { ok: true } | { ok: f
   if (out.code === 0 && (flag === "*" || flag === " " || flag === "=")) return { ok: true };
   if (flag === "!") {
     const why = said(line?.split("\t")[2] ?? "rejected", 160);
-    // GitHub's own refusal (a ruleset, a workflow file, a hook) is final; its passing errors and a remote failure are retried.
     const passing = /^\[remote failure\]/.test(why) || /internal server error|timed? ?out|try again|temporarily|unavailable/i.test(why);
     const local = /^\[rejected\]/.test(why);
     return { ok: false, final: !passing, detail: `${local ? "the push was rejected" : passing ? "the push failed" : "GitHub refused the push"} of ${branch}: ${why}` };
@@ -423,9 +423,9 @@ export function appClient(d: AppClientDeps): GitHubClient {
       try {
         const cmd = pushCommand({ bareRepo: d.bareRepo, remote, branch, commit, token: t.token, home: d.home });
         const raw = await d.git(cmd.argv, cmd.env);
-        // Scrubbed before anything cuts it short: a stateless token runs to about 520 characters, and a cut one no longer matches itself.
+        // Scrubbed before pushOutcome cuts anything short: a stateless token runs to about 520 characters, and a cut
+        // one no longer matches itself.
         const out = { code: raw.code, stdout: scrubToken(raw.stdout, t.token), stderr: scrubToken(raw.stderr, t.token) };
-        // out was scrubbed above, before pushOutcome cut anything.
         return pushOutcome(out, branch);
       } catch (e) {
         return { ok: false, detail: `git push threw: ${errSaid(e, t.token)}` };

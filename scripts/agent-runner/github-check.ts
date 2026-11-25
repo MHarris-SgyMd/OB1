@@ -11,7 +11,11 @@
  *     moved on the remote refused as final, never forced; a branch outside `agent/smd-<n>-<slug>` refused unpushed;
  *   - the draft PR: an open PR the App already opened from the branch is the answer (no second PR); a 422 whose PR
  *     turns up is the PR; no commits between, a bad base, or someone else's PR from the branch is final; any other
- *     422 and any other failure is retried, its words scrubbed of the token.
+ *     422 and any other failure is retried, its words scrubbed of the token;
+ *   - the bare repository: a config key past the allowlist, in any scope git reads, refused before a token is minted;
+ *     replace refs and grafts off (gitEnv); no hook of the repository's run at the runner's fetch (LOCAL_GIT);
+ *   - installationRepos, read with a metadata token for the whole installation, and checkGithubApp end to end on a
+ *     stand-in GitHub and a fake gh.
  *
  *   bun scripts/agent-runner/github-check.ts --self-check
  */
@@ -152,7 +156,7 @@ export async function selfCheck(): Promise<number> {
     const r401 = await installationToken(stubFetch(() => json({ message: "A JSON web token could not be decoded", documentation_url: "x" }, 401)).fetch, APP, PEM, NOW);
     ok(!r401.ok && r401.detail === "GitHub answered 401 (minting an installation token): A JSON web token could not be decoded", "a 401 says the status and GitHub's message");
     const html = await installationToken(stubFetch(() => new Response("<html>secret-ish</html>", { status: 502 })).fetch, APP, PEM, NOW);
-    ok(!html.ok && html.detail === "GitHub answered 502 (minting an installation token)" , "a body that isn't JSON is not quoted");
+    ok(!html.ok && html.detail === "GitHub answered 502 (minting an installation token)", "a body that isn't JSON is not quoted");
     const notJson = await installationToken(stubFetch(() => new Response("nope", { status: 201 })).fetch, APP, PEM, NOW);
     ok(!notJson.ok && notJson.detail.includes("isn't a JSON object"), "a 201 that isn't JSON is refused");
     const thrown = await installationToken(async () => { throw new Error("getaddrinfo ENOTFOUND api.github.com"); }, APP, PEM, NOW);
@@ -163,11 +167,10 @@ export async function selfCheck(): Promise<number> {
 
   await section("hostile answers: values whose String() throws, a token with a line end, GitHub's words with escapes", async () => {
     const hostile = { toString: () => { throw new Error("No default value"); } };
-    // Past the parser, so the hostile value reaches the code's own reads as itself (JSON would turn it into {}).
+    // These answers skip the parser, so each hostile value reaches the code's own reads as itself (JSON would turn it into {}).
     const f = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : ({ status: 201, json: async () => ({ token: TOKEN, permissions: { ...TOKEN_PERMISSIONS, metadata: "read" }, repositories: [hostile] }) } as unknown as Response)));
     const a = await installationToken(f.fetch, APP, PEM, NOW);
     ok(!a.ok && revoked(f.sent).join() === TOKEN, "a repositories entry whose String() throws is refused and the token revoked, not thrown");
-    // An object whose String() throws can't come from JSON; feed it past the parser to reach the code's own reads.
     const g = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : ({ status: 201, json: async () => ({ token: TOKEN, permissions: { ...TOKEN_PERMISSIONS, admin: hostile }, repositories: [{ full_name: "MHarris-SgyMd/OB1" }] }) } as unknown as Response)));
     let threw = false;
     let b: Awaited<ReturnType<typeof installationToken>> | null = null;
@@ -607,20 +610,18 @@ export async function selfCheck(): Promise<number> {
     const savedPath = process.env.PATH;
     try {
       const rulesets = join(import.meta.dir, "../../.github/rulesets");
-      const ghScript = (ok: boolean) => `#!/bin/sh\n${ok ? `case "$*" in\n  *rulesets\\?*) printf '1\\n2\\n3\\n' ;;\n  *rulesets/1*) cat '${rulesets}/main.json' ;;\n  *rulesets/2*) cat '${rulesets}/main-merge.json' ;;\n  *rulesets/3*) cat '${rulesets}/tags.json' ;;\nesac\n` : "echo 'HTTP 401: Bad credentials' >&2\nexit 1\n"}`;
-      const bin = (name: string, ok: boolean): string => {
+      const ghScript = (works: boolean) => `#!/bin/sh\n${works ? `case "$*" in\n  *rulesets\\?*) printf '1\\n2\\n3\\n' ;;\n  *rulesets/1*) cat '${rulesets}/main.json' ;;\n  *rulesets/2*) cat '${rulesets}/main-merge.json' ;;\n  *rulesets/3*) cat '${rulesets}/tags.json' ;;\nesac\n` : "echo 'HTTP 401: Bad credentials' >&2\nexit 1\n"}`;
+      /** A directory holding a fake `gh` that runs `script`. */
+      const bin = (name: string, script: string): string => {
         const d = join(dir, name);
         mkdirSync(d);
-        writeFileSync(join(d, "gh"), ghScript(ok));
+        writeFileSync(join(d, "gh"), script);
         chmodSync(join(d, "gh"), 0o755);
         return d;
       };
-      const goodBin = bin("good", true);
-      const halfBin = join(dir, "half");
-      mkdirSync(halfBin);
-      writeFileSync(join(halfBin, "gh"), `#!/bin/sh\ncase "$*" in\n  *rulesets\\?*) printf 'junk\\n1\\n\\n2\\n3\\n' ;;\n  *rulesets/1*) echo 'HTTP 500' >&2; exit 1 ;;\n  *rulesets/2*) cat '${rulesets}/main-merge.json' ;;\n  *rulesets/3*) cat '${rulesets}/tags.json' ;;\nesac\n`);
-      chmodSync(join(halfBin, "gh"), 0o755);
-      const badBin = bin("bad", false);
+      const goodBin = bin("good", ghScript(true));
+      const halfBin = bin("half", `#!/bin/sh\ncase "$*" in\n  *rulesets\\?*) printf 'junk\\n1\\n\\n2\\n3\\n' ;;\n  *rulesets/1*) echo 'HTTP 500' >&2; exit 1 ;;\n  *rulesets/2*) cat '${rulesets}/main-merge.json' ;;\n  *rulesets/3*) cat '${rulesets}/tags.json' ;;\nesac\n`);
+      const badBin = bin("bad", ghScript(false));
       const emptyBin = join(dir, "none");
       mkdirSync(emptyBin);
       const cfg = { team: "SMD", initiative: "I", maintainerLinearId: "x", repo: "MHarris-SgyMd/OB1", mainCheckout: "/x", restUrl: null, githubAppId: "123456", githubAppInstallationId: "7890", githubAppSlug: "ob1-agent-runner" };

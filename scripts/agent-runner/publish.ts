@@ -2,9 +2,10 @@
  * publish.ts — the publish step (SMD-4087 cut 3a; docs/agent-runner.md, "A run, step by step" steps 8-9 and "What the
  * runner publishes"). On a run that passed the gate, the runner publishes as its GitHub App: it confirms the claim with
  * a day-lease renewal (it must renew clean — no `ticketClosed`, no lapse another claim took over), pushes the one
- * branch from its bare repository to this repo under the runner's prefix (`agent/`), opens a draft PR with a body it builds, comments the PR link
- * on the ticket, and only then sets the claim's lease to a week. The maintainer reviews and merges; the runner never
- * merges, and a ruleset locking `main` to repository admins keeps the App from it (.github/rulesets/main-merge.json).
+ * branch from its bare repository to this repo under the runner's prefix (`agent/`), opens a draft PR with a body it
+ * builds, comments the PR link on the ticket, and only then sets the claim's lease to a week. The maintainer reviews
+ * and merges; the runner never merges, and a ruleset locking `main` to repository admins keeps the App from it
+ * (.github/rulesets/main-merge.json).
  *
  * Two pieces, both pure of I/O but for injected dependencies, so the self-check (publish-check.ts) drives them offline:
  *
@@ -308,11 +309,12 @@ export function renewVerdict(reply: ClaimReply): RenewVerdict {
 
 /**
  * Publish a passed run as the runner's App (docs steps 8-9): confirm the claim with a day-lease renewal (clean), push
- * the branch to this repo, open the draft PR, record its number, set the lease to a week now the PR is open, and comment the
- * PR link on the ticket. Never throws — a throwing precheck or renewal, a push or PR failure, and a failed comment each
- * come back as a result (owed to retry, or handed to a person), never a rejection, so a tick can't crash with the claim
- * orphaned. The pre-publish re-checks (the ticket read and "nobody's work") are the injected `precheck`; the real GitHub
- * client and the wiring that turns a non-published result into a hand-back are cut 3b.
+ * the branch to this repo, open the draft PR, record its number, set the lease to a week now the PR is open, and
+ * comment the PR link on the ticket. Never throws — a throwing precheck or renewal, a push or PR failure, and a failed
+ * comment each come back as a result (owed to retry, or handed to a person), never a rejection, so a tick can't crash
+ * with the claim orphaned. The pre-publish re-checks (the ticket read and "nobody's work") are the injected
+ * `precheck`; the real GitHub client is github.ts (cut 3b-1), and the wiring that turns a non-published result into a
+ * hand-back is cut 3b-2.
  */
 export async function publish(input: PublishInput, deps: PublishDeps): Promise<PublishResult> {
   const at = (): string => (deps.now ? deps.now() : new Date()).toISOString();
@@ -342,8 +344,9 @@ export async function publish(input: PublishInput, deps: PublishDeps): Promise<P
   }
 
   // Step 9 — push the branch to this repo. The GitHub client does a real git push and REST call in cut 3b, so guard
-  // a throw (a dropped connection) as well as a returned failure: either leaves the publish owed to retry, the claim
-  // still held at the day lease the step-8 renewal confirmed (`leaseRenewed` true) — never a thrown rejection.
+  // a throw (a dropped connection) as well as a returned failure: either leaves the publish owed to retry (a failure
+  // marked `final` goes to a person instead), the claim still held at the day lease the step-8 renewal confirmed
+  // (`leaseRenewed` true) — never a thrown rejection.
   let push: { ok: true } | { ok: false; detail: string; final?: boolean };
   try {
     push = await deps.github.pushBranch({ branch: input.branch, commit: input.commit });

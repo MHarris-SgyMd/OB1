@@ -191,11 +191,9 @@ export function parseConfig(text: string, home: string): Config | { error: strin
   }
   if (!LINEAR_USER_ID.test(String(out.maintainerLinearId))) return { error: "maintainerLinearId must be a Linear user id, a UUID: the README beside this script says how to find yours" };
   if (typeof out.mainCheckout === "string" && out.mainCheckout.startsWith("~/")) out.mainCheckout = join(home, out.mainCheckout.slice(2));
-  for (const key of ["repo"] as const) {
-    const v = out[key];
-    if (typeof v !== "string") continue;
-    const parts = v.split("/");
-    if (parts.length !== 2 || parts.some((p) => !/^[A-Za-z0-9_.-]+$/.test(p) || p === "." || p === "..")) return { error: `${key} must be owner/name` };
+  if (typeof out.repo === "string") {
+    const parts = out.repo.split("/");
+    if (parts.length !== 2 || parts.some((p) => !/^[A-Za-z0-9_.-]+$/.test(p) || p === "." || p === "..")) return { error: "repo must be owner/name" };
   }
   const app = [out.githubAppId, out.githubAppInstallationId, out.githubAppSlug];
   if (app.some((v) => v !== null) && app.some((v) => v === null)) return { error: "githubAppId, githubAppInstallationId and githubAppSlug come together: give all three, or none" };

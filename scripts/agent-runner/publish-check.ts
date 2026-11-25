@@ -7,9 +7,10 @@
  *     that itself holds a fence can't break out; a section the scanner flags is withheld, not shown; a claim token in
  *     the text is masked; and a body that would pass GitHub's cap drops the model sections whole, never mid-fence.
  *   - `renewVerdict` / `publish`: the step-8 renewal maps every reply to publish / owed / hand-to-a-person; the sequence
- *     confirms the claim (day lease), pushes, opens the draft PR with the right head/base/body, records its number, sets
- *     the week lease, and comments — and each failure (a throwing precheck or GitHub client, a renew that can't land, a
- *     push or PR failure, a failing week renewal, a failed comment) comes back as the right result, never thrown.
+ *     confirms the claim (day lease), pushes the gated commit, opens the draft PR from the pushed branch, records its
+ *     number, sets the week lease, and comments — and each failure (a throwing precheck or GitHub client, a renew that
+ *     can't land, a push or PR failure, a failing week renewal, a failed comment) comes back as the right result, never
+ *     thrown. A push or PR refusal the client calls final hands the ticket to a person, with nothing owed.
  *
  *   bun scripts/agent-runner/publish-check.ts --self-check
  */
@@ -103,7 +104,7 @@ function stubGql(commentSuccess = true, seq: string[] = []): { gql: Gql; calls: 
   return { gql, calls };
 }
 
-/** A GitHub client stub that records its arguments, so the test asserts publish passes the right head/base/body/branch. */
+/** A GitHub client stub that records its arguments, so the test asserts publish passes the right branch/commit/head/base/body. */
 type PushArg = { branch: string; commit: string };
 type PrArg = { title: string; head: string; base: string; body: string };
 function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string; final?: boolean } = {}, seq: string[] = []): { client: GitHubClient; pushes: PushArg[]; prs: PrArg[] } {

@@ -1,12 +1,12 @@
 /**
  * setup.ts — place and check the runner's identities (SMD-4089): the agent-kind brain key, the Linear key, the
  * Anthropic API key, the GitHub App's private key, and an optional GitHub read token for the dry run's lookups, each in
- * its own 0600 file under the runner's directory. Creating the accounts
- * and minting the keys is the maintainer's, on the brain host (CLAUDE.md, "Keys"); this tool only writes a minted
- * secret into the right file, by the key's own shape, without ever printing it, and verifies it through the runner's own
- * owner-only read (dry-run.ts) — so a value it accepts is one the runner will read. Rotation is the same two steps:
- * install the new value, then verify. The secret is read from the clipboard (pbpaste) or, with --stdin, from stdin; it
- * never passes on the command line, and no command here echoes it.
+ * its own 0600 file under the runner's directory. Creating the accounts and minting the keys is the maintainer's, on
+ * the brain host (CLAUDE.md, "Keys"); this tool only writes a minted secret into the right file, by the key's own
+ * shape, without ever printing it, and verifies it through the runner's own owner-only read (dry-run.ts) — so a value
+ * it accepts is one the runner will read. Rotation is the same two steps: install the new value, then verify. The
+ * secret is read from the clipboard (pbpaste) or, with --stdin, from stdin; it never passes on the command line, and
+ * no command here echoes it.
  *
  *   bun scripts/agent-runner/setup.ts dirs                       # make the directory (0700), idempotent
  *   bun scripts/agent-runner/setup.ts install linear            # copy the key to the clipboard first; this reads it
@@ -48,9 +48,8 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { KEY_FILES, KEY_SHAPES, noRedirect, parseConfig, privateDirProblem, readKey, readOwnedFile, RUNNER_DIR } from "./dry-run.ts";
-import type { Config, Fetch } from "./facts.ts";
-import { APP_KEY_FILE, APP_PERMISSIONS, PEM_SHAPE, appJwt, installationRepos, installationToken, rawText, revokeToken, said, type App } from "./github.ts";
-import { NOT_JSON, SAFE_REQUEST, jsonOf } from "./facts.ts";
+import { NOT_JSON, SAFE_REQUEST, TIME_LIMITS, jsonOf, type Config, type Fetch } from "./facts.ts";
+import { APP_KEY_FILE, APP_PERMISSIONS, PEM_SHAPE, appJwt, installationRepos, installationToken, revokeToken, said, type App } from "./github.ts";
 import { fixtureGit } from "./fixture-git.ts";
 import type { GitRun } from "./gate.ts";
 import { CLAUDE_DIR, INSTALL_DIR, claudeVersion, copyClaude, hostNow, makeInstall, stampReport } from "./install.ts";
@@ -219,7 +218,6 @@ export type AppFacts = {
   why?: { app?: string; installation?: string; repos?: string; rulesets?: string };
 };
 
-
 /**
  * The refs a fence must cover, by the ruleset patterns that cover the whole of them. Read as a fixed list, not by
  * translating GitHub's fnmatch (its `**`, its leading-dot rule and its unsupported `[^...]` differ from any regex this
@@ -286,7 +284,10 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
   if (facts.installation === null) say(false, `the installation couldn't be read (GET /app/installations/<id>)${because("installation")}: a 404 means githubAppInstallationId is wrong`);
   else say(facts.installation.repository_selection === "selected", `the App is installed on selected repositories (it says ${said(JSON.stringify(facts.installation.repository_selection ?? null), 40)})`);
   if (facts.repos === null) say(false, `the installation's repositories couldn't be read with an installation token${because("repos")}`);
-  else say(facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase(), `the installation reaches ${facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase() ? `${cfg.repo} alone` : `${facts.repos.slice(0, 10).map((r) => said(r, 100)).join(", ") || "nothing"}${facts.repos.length > 10 ? ` and ${facts.repos.length - 10} more` : ""}, not ${cfg.repo} alone`}`);
+  else {
+    const alone = facts.repos.length === 1 && facts.repos[0].toLowerCase() === cfg.repo.toLowerCase();
+    say(alone, `the installation reaches ${alone ? `${cfg.repo} alone` : `${facts.repos.slice(0, 10).map((r) => said(r, 100)).join(", ") || "nothing"}${facts.repos.length > 10 ? ` and ${facts.repos.length - 10} more` : ""}, not ${cfg.repo} alone`}`);
+  }
 
   if (facts.rulesets === null) {
     say(false, `the repo's rulesets couldn't be read with gh${because("rulesets")}`);
@@ -311,8 +312,8 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
     patterns(r, "include").some((p) => (COVERS[fence] as readonly string[]).includes(p)) && !patterns(r, "exclude").some((p) => excludeMayReach(p, fence));
   /**
    * Whether each rule in `types` holds over the whole fence from some active ruleset of `target` that covers it and
-   * that the App can't bypass — rules stack across rulesets, as GitHub applies them. "unseen" when the only rulesets
-   * that would hold a rule hide their bypass lists from the reader.
+   * that the App can't bypass. "unseen" when the only rulesets that would hold a rule hide their bypass lists from the
+   * reader.
    */
   const fenced = (target: string, fence: keyof typeof COVERS, types: string[]): "yes" | "no" | "unseen" => {
     let unseen = false;
@@ -352,22 +353,22 @@ export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch)
   // A GET that says why it failed: GitHub's status, or the transport's words, never a bare null.
   const get = async (path: string, bearer: string): Promise<{ ok: true; body: unknown } | { ok: false; why: string }> => {
     try {
-      const res = await fetchImpl(`https://api.github.com${path}`, { ...SAFE_REQUEST, headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "agent-runner-setup", Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(20_000) });
+      const res = await fetchImpl(`https://api.github.com${path}`, { ...SAFE_REQUEST, headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "agent-runner-setup", Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(TIME_LIMITS.request) });
       if (!res.ok) return { ok: false, why: `GitHub answered ${res.status}` };
       const body = await jsonOf(res);
       return body === NOT_JSON ? { ok: false, why: "GitHub answered with something that isn't JSON" } : { ok: true, body };
     } catch (e) {
-      return { ok: false, why: `the request failed: ${said(rawText((e as Error)?.message ?? e), 120)}` };
+      return { ok: false, why: `the request failed: ${said((e as Error)?.message ?? e, 120)}` };
     }
   };
   let jwt: string | null = null;
   try {
     jwt = appJwt(app.appId, pem, Date.now());
   } catch {
-    jwt = null;
+    // Left null: the App and its installation are then said unread, the key unable to sign.
   }
-  const facts: AppFacts = { app: null, installation: null, repos: null, rulesets: null, why: {} };
-  const why = facts.why as Record<string, string>;
+  const why: NonNullable<AppFacts["why"]> = {};
+  const facts: AppFacts = { app: null, installation: null, repos: null, rulesets: null, why };
   if (!jwt) why.app = why.installation = "the App's key couldn't sign a JWT";
   else {
     const a = await get("/app", jwt);
@@ -412,8 +413,9 @@ export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch)
     if (read.length === ids.length) facts.rulesets = read;
   }
   const judged = appFindings(facts, { repo: cfg.repo, githubAppId: cfg.githubAppId, githubAppSlug: cfg.githubAppSlug });
-  // Last, the publish's own token, minted as a run mints it, then revoked; a revoke that didn't land is said (it expires within the hour).
   const lines = [...judged.lines];
+  // Last, the publish's own token, minted as a run mints it, then revoked; a revoke that didn't land is said (it
+  // expires within the hour).
   const minted = await installationToken(fetchImpl, app, pem, Date.now());
   let revokedAll = reach.ok ? reach.revoked : true;
   if (minted.ok) revokedAll = (await revokeToken(fetchImpl, minted.token)) && revokedAll;
@@ -677,7 +679,7 @@ export function selfCheck(): number {
       ok(!noConfig.ok && noConfig.lines[0].startsWith("✗"), "with no config it says so and makes nothing");
     });
 
-    section("the App's key: installed as GitHub's download carries it, and refused when it can't sign", () => {
+    section("the App's key: installed as GitHub's download carries it, refused when it can't sign, and written whole or not at all", () => {
       const dir = join(root, "app-key");
       const crlf = APP_PEM.trim().replace(/\n/g, "  \r\n");
       installValue(dir, "github-app", `\uFEFF${crlf}\r\n`);
@@ -920,8 +922,9 @@ if (import.meta.main) {
     for (const which of WHICHES) {
       const r = verifyOne(RUNNER_DIR, which);
       const mark = r.ok ? "✓" : r.detail === "missing" ? "·" : "✗";
-      console.log(`${mark} ${spec(which).file}: ${r.detail}${OPTIONAL.includes(which) && r.detail === "missing" ? " (optional)" : ""}`);
-      if (!r.ok && !(OPTIONAL.includes(which) && r.detail === "missing")) failed++;
+      const optionalMissing = OPTIONAL.includes(which) && r.detail === "missing";
+      console.log(`${mark} ${spec(which).file}: ${r.detail}${optionalMissing ? " (optional)" : ""}`);
+      if (!r.ok && !optionalMissing) failed++;
     }
     // The probe stamp's binary and install, as they are now: what a run from this checkout would be refused for (SMD-4491).
     const report = stampReport(STATE_DIR, installDir(), await hostNow());
@@ -935,9 +938,9 @@ if (import.meta.main) {
     const source = rest[0];
     if (!source || rest.length !== 1) fail("usage: claude <path to a Claude Code binary>");
     try {
-      const said = spawnSync(source as string, ["--version"], { encoding: "utf8", timeout: 20_000 });
-      const version = claudeVersion(said.stdout ?? "");
-      if (said.status !== 0 || version === null) throw new Error(`${source} --version did not answer a version (x.y.z)`);
+      const answered = spawnSync(source as string, ["--version"], { encoding: "utf8", timeout: 20_000 });
+      const version = claudeVersion(answered.stdout ?? "");
+      if (answered.status !== 0 || version === null) throw new Error(`${source} --version did not answer a version (x.y.z)`);
       const copy = copyClaude(STATE_DIR, source as string, version);
       console.log(`✓ ${copy.copied ? "copied to" : "already at"} ${copy.path} (0500), Claude Code ${copy.version}`);
       console.log(`  --claude ${copy.path} --sha256 ${copy.sha256} --version ${copy.version}`);
@@ -960,14 +963,16 @@ if (import.meta.main) {
   if (cmd === "check-github-app") {
     if (rest.length) fail("usage: check-github-app");
     try {
-      const text = readOwnedFile(join(RUNNER_DIR, "config.json"), false);
-      if (text === null) fail(`no config at ${join(RUNNER_DIR, "config.json")}`);
+      const configPath = join(RUNNER_DIR, "config.json");
+      const keyPath = join(RUNNER_DIR, APP_KEY_FILE);
+      const text = readOwnedFile(configPath, false);
+      if (text === null) fail(`no config at ${configPath}`);
       const cfg = parseConfig(text as string, homedir());
       if ("error" in cfg) fail(`the config: ${cfg.error}`);
-      const pem = readOwnedFile(join(RUNNER_DIR, APP_KEY_FILE), true);
-      if (pem === null) fail(`no App key at ${join(RUNNER_DIR, APP_KEY_FILE)} (setup.ts install github-app)`);
-      if (!PEM_SHAPE.test((pem as string).trim())) fail(`${join(RUNNER_DIR, APP_KEY_FILE)} isn't a PEM private key as install writes one: install it again (setup.ts install github-app)`);
-      const g = await checkGithubApp(cfg as Config, (pem as string).trim(), noRedirect(fetch) as unknown as Fetch);
+      const pem = readOwnedFile(keyPath, true);
+      if (pem === null) fail(`no App key at ${keyPath} (setup.ts install github-app)`);
+      if (!PEM_SHAPE.test((pem as string).trim())) fail(`${keyPath} isn't a PEM private key as install writes one: install it again (setup.ts install github-app)`);
+      const g = await checkGithubApp(cfg as Config, (pem as string).trim(), noRedirect(fetch));
       for (const line of g.lines) console.log(line);
       process.exit(g.ok ? 0 : 1);
     } catch (e) {

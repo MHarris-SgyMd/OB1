@@ -18,8 +18,9 @@
  *
  * It reuses dry-run.ts's loaders (the config, the keys, the hermetic fetch, the Linear client) and facts.ts's hermetic
  * git, so the one thing new here is the glue: the ticket's full fields from Linear, the bare repository, and (in the
- * execute layer) the real RunDeps and LiveDeps. Publishing is wired in cut 3b-2 (github.ts is the App's client), so a
- * run commits as a placeholder bot and never publishes; its branch stays in the bare repository for the maintainer.
+ * execute layer) the real RunDeps and LiveDeps. Publishing is cut 3b-2's to wire (github.ts is the App's client); until
+ * then a run commits as a placeholder bot and never publishes, and its branch stays in the bare repository for the
+ * maintainer.
  */
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -55,10 +56,10 @@ export const BARE_REPO = join(STATE_DIR, "repo.git");
  * the review checkout's clone — run.ts), no hook files and no fsmonitor command (a hook planted in the bare repository
  * would run, as the runner's user, at its fetches and imports — SMD-4087 cut 3b-1 review pass 5). Config-based hooks
  * (git 2.54's `hook.<name>.*`) aren't turned off by `core.hooksPath`: `ensureBareRepo` refuses a bare repository whose
- * config holds any key outside github.ts's allowlist before it fetches, so none can be there (review pass 6). Every repo the runner's own git touches is local — the main checkout, its own
- * bare repo, the per-run clone — never a remote, so the file transport stays at git's default. facts.ts's GIT_SAFE
- * (https only, no redirect) is for git's talk with GitHub (the dry run's `ls-remote`, github.ts's push), and would
- * wrongly refuse a local clone.
+ * config holds any key outside github.ts's allowlist before it fetches, so none can be there (review pass 6). Every
+ * repo the runner's own git touches is local — the main checkout, its own bare repo, the per-run clone — never a
+ * remote, so the file transport stays at git's default. facts.ts's GIT_SAFE (https only, no redirect) is for git's
+ * talk with GitHub (the dry run's `ls-remote`, github.ts's push), and would wrongly refuse a local clone.
  */
 export const LOCAL_GIT = ["-c", "credential.helper=", "-c", "gc.auto=0", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] as const;
 
@@ -73,8 +74,9 @@ export function gitRunner(home: string): GitRun {
 
 /**
  * Provision the runner's bare repository and read the base the run builds on. First run: a bare clone of the
- * maintainer's main checkout (a local path, no network). Every run: fetch `main` from it, so the base is the checkout's
- * current `origin/main`. Returns the base commit, or a problem.
+ * maintainer's main checkout (a local path, no network). Every run: refuse a bare repository whose config holds a key
+ * outside github.ts's allowlist, then fetch `main` from the checkout, so the base is its current `origin/main`. Returns
+ * the base commit, or a problem.
  */
 export function ensureBareRepo(git: GitRun, bareRepo: string, mainCheckout: string): { ok: true; base: string } | { ok: false; problem: string } {
   if (!existsSync(join(bareRepo, "HEAD"))) {

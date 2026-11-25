@@ -322,16 +322,17 @@ CI by name. A push straight to `main` is refused, green checks or not: GitHub
 answers with one `remote: -` line per rule it applied.
 
 **Two more rulesets fence the agent runner's GitHub App (SMD-4087 decision 13).**
-`.github/rulesets/main-merge.json` restricts updating `main` to the Repository
-admin role, which is exempt from it, so the App can't merge whatever approvals
-it holds; `.github/rulesets/tags.json` restricts creating, moving and deleting
-`v*` tags the same way, so the App can't start `release.yml`. They stack with
-`main.json`, which still binds every merge, the maintainer's included, to its
-one required check. Each is applied once with `gh api -X POST
-repos/MHarris-SgyMd/OB1/rulesets --input <file>` (the runner's README, "The
-GitHub App", has the steps and the fallback if a plain merge is refused);
-check 20 reads `main.json` alone, and `scripts/agent-runner/setup.ts
-check-github-app` reads the live rulesets and checks that the two fence the App.
+`.github/rulesets/main-merge.json` restricts updating and deleting `main` to
+the Repository admin role, which is exempt from it, so the App can't merge
+whatever approvals it holds; `.github/rulesets/tags.json` restricts creating,
+moving and deleting `v*` tags the same way, so the App can't start
+`release.yml`. They stack with `main.json`, which still binds every merge, the
+maintainer's included, to its one required check. Each is applied once with
+`gh api -X POST repos/MHarris-SgyMd/OB1/rulesets --input <file>` (the runner's
+README, "The GitHub App", has the steps and the fallback if a plain merge is
+refused). Check 20 reads `main.json` alone, and
+`scripts/agent-runner/setup.ts check-github-app` reads the live rulesets and
+checks that the two fence the App.
 
 Renaming the aggregate job changes the one context the ruleset requires, so the
 file and the ruleset move together: apply the new `main.json` with the command
