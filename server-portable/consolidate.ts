@@ -167,6 +167,17 @@ export type Judgement = {
    * cap, each cut short. The pass writes it to the dump and to no row; absent when there was none.
    */
   unread?: string[];
+  /**
+   * Decide version 6 (SMD-4446 PR 2b-2): the statements the writer's answer quotes in items that make no row, each
+   * with the thought it was said to be in, null where the item gave no side. An item whose quotes fail the check
+   * or are not read back (the statement in its thought's own characters where it was read back, as typed where
+   * not), one of the wrong shape, one past the cap. The pass asks the store which settled part waiting on the
+   * pair such an item names again (consolidate-decide.ts's PartAside), and keeps that part. `asideMore`: items
+   * of the wrong shape or past the cap that quote a statement and are not among them, the list being bounded.
+   * In no recipe and no row; absent when there was none.
+   */
+  aside?: { holder: "older" | "newer" | null; statement: string }[];
+  asideMore?: number;
 };
 
 /**

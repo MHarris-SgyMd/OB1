@@ -326,14 +326,25 @@ export const UNREAD_MAX = 600;
 /**
  * The writer's parts answer. `falls` names the thought it says falls whole, null for neither. `dropped` counts the
  * items of its list that were not a part of the asked shape (no side, a quote or the reason missing, a word outside
- * the eight), and `over` the items that came once PARTS_MAX parts had been read, whatever their shape. `unnamed`
- * counts the dropped items that quote no statement (an empty object, a bare string, an item whose `stale` is empty):
- * such an item names no statement, so it cannot be one named again in a form the pass does not read. `malformed`:
+ * the eight), and `over` the items that came once PARTS_MAX parts had been read, whatever their shape. `aside`:
+ * the statement each dropped or over item quotes, with the thought it was said to be in (null where the item gave no
+ * side), up to PARTS_MAX of them, and `asideMore` how many more there were. An item that quotes no statement (an
+ * empty object, a bare string, an item whose `stale` is empty) is in neither: it names none. `malformed`:
  * the answer was not the JSON asked for. `unread`: what was not read as a part, for the dump, which carries every
  * answer kept or not: the answer itself when it is malformed, else each item dropped or over, as JSON on one line,
  * each cut to UNREAD_MAX and at most PARTS_MAX of them.
  */
-export type PartsAnswer = { parts: NamedPart[]; dropped: number; unnamed: number; over: number; falls: "older" | "newer" | null; malformed: boolean; unread: string[] };
+export type PartsAnswer = { parts: NamedPart[]; dropped: number; over: number; aside: PartAside[]; asideMore: number; falls: "older" | "newer" | null; malformed: boolean; unread: string[] };
+
+/**
+ * A statement the writer's answer quotes in an item that makes no row (decide version 6, SMD-4446 PR 2b-2), and the
+ * thought the item says holds it, null where it gave no side. The pass tests each settled part that waits on the
+ * pair against these (review pass 4): one whose statement such an item names again is kept, since the writer still
+ * names it and the pass cannot record what it said, and a removal is for good; one that no item names is removed.
+ * The rule was two counts of the whole answer, so an item that quoted nothing, or another statement, kept every
+ * waiting part of the pair, while a statement named again with a quote that failed lost its part.
+ */
+export type PartAside = { holder: "older" | "newer" | null; statement: string };
 
 /**
  * The parts answer, read as SMD-3340 read it: lenient about wrapping (jsonObject), strict about the keys and the
@@ -350,7 +361,7 @@ export function parseParts(raw: string): PartsAnswer {
     try { said = typeof v === "string" ? v : JSON.stringify(v) ?? String(v); } catch { said = "an item that could not be printed"; }
     return cutByCodePoint(wellFormed(oneLine(said)), UNREAD_MAX);
   };
-  const bad: PartsAnswer = { parts: [], dropped: 0, unnamed: 0, over: 0, falls: null, malformed: true, unread: [kept(raw)] };
+  const bad: PartsAnswer = { parts: [], dropped: 0, over: 0, aside: [], asideMore: 0, falls: null, malformed: true, unread: [kept(raw)] };
   const o = jsonObject(raw);
   if (!o || Array.isArray(o) || !Array.isArray(o.parts)) return bad;
   const yn = (v: unknown) => { const s = typeof v === "string" ? v.trim().toLowerCase() : ""; return s === "yes" ? true : s === "no" ? false : null; };
@@ -358,7 +369,8 @@ export function parseParts(raw: string): PartsAnswer {
   if (a === null || b === null || (a && b)) return bad;
   const parts: NamedPart[] = [];
   const unread: string[] = [];
-  let dropped = 0, unnamed = 0, over = 0;
+  const aside: PartAside[] = [];
+  let dropped = 0, over = 0, asideMore = 0;
   for (const item of o.parts as unknown[]) {
     // Once PARTS_MAX parts are read, every further item is over the cap, whatever its shape.
     const full = parts.length >= PARTS_MAX;
@@ -374,16 +386,18 @@ export function parseParts(raw: string): PartsAnswer {
     const whole = (v: unknown) => typeof v !== "string" || [...oneLine(v)].length <= REASON_MAX;
     if (full || holder === null || !(PART_WORDS as readonly string[]).includes(word) || !stale || !shown_by || !reason || !whole(p?.stale) || !whole(p?.shown_by)) {
       if (full) over++;
-      else {
-        dropped++;
-        if (!stale) unnamed++;
+      else dropped++;
+      // The statement it quotes, for the pass's test of each part that waits (PartAside): none where it quotes none.
+      if (stale) {
+        if (aside.length < PARTS_MAX) aside.push({ holder, statement: stale });
+        else asideMore++;
       }
       if (unread.length < PARTS_MAX) unread.push(kept(item));
       continue;
     }
     parts.push({ holder, stale, shown_by, word: word as PartWord, reason });
   }
-  return { parts, dropped, unnamed, over, falls: a ? "older" : b ? "newer" : null, malformed: false, unread };
+  return { parts, dropped, over, aside, asideMore, falls: a ? "older" : b ? "newer" : null, malformed: false, unread };
 }
 
 /**
@@ -627,8 +641,6 @@ export type DecideNote = {
     against?: true;
     parts?: PartNote[];
     dropped?: number;
-    /** Those of `dropped` that quote no statement, so name none (parseParts): absent when there is none. */
-    unnamed?: number;
     /** The items that came once PARTS_MAX parts had been read: absent when none did. */
     over?: number;
   };
@@ -715,7 +727,12 @@ export function partsJudgement(p: Record<Verdict, number>, answer: PartsAnswer, 
   const standing = checked.filter(partStands);
   const parts = partsToRecord(checked);
   // What the answer held that was not read as a part, for the dump and for a scorer: not for a recipe.
-  const unread = answer.unread.length ? { unread: answer.unread } : {};
+  // And the statements it quotes in items that make no row (PartAside), for the pass's test of each part that
+  // waits on the pair: a read item that does not stand, by its statement as read back in the thought's own
+  // characters or, where it was not, as typed; then the dropped and over items'. Not a repeat: the part it repeats
+  // stands, and names the statement by a row.
+  const named = [...checked.filter((c) => !partStands(c) && !c.repeated).map((c): PartAside => ({ holder: c.holder, statement: c.statement ?? c.stale })), ...answer.aside];
+  const unread = { ...(answer.unread.length ? { unread: answer.unread } : {}), ...(named.length ? { aside: named } : {}), ...(answer.asideMore ? { asideMore: answer.asideMore } : {}) };
   const whole = wholeOf(answer, checked);
   const shows = whole?.shows;
   if (answer.falls && shows) {
@@ -755,7 +772,6 @@ export function partsNote(model: string, answer: PartsAnswer, checked: CheckedPa
       own: { statement: c.statement !== null, shown_by: c.shown !== null }, ...(c.repeated ? { repeated: true as const } : {}),
     })),
     dropped: answer.dropped,
-    ...(answer.unnamed ? { unnamed: answer.unnamed } : {}),
     ...(answer.over ? { over: answer.over } : {}),
   };
 }

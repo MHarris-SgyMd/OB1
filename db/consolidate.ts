@@ -167,41 +167,44 @@
  * own such parts as it is judged. A pair that holds one is judged though --k
  * leaves it out. A statement the judgement records again takes the part's
  * place (record_settled_part). One it does not record again is removed
- * (154's settle_stale_part): one it names no more, and one it names again in
- * a form that is no part of these texts, its quotes failing the check or not
- * read back. So is one on a pair that is not judged again: the candidate rule
- * no longer admits it, or a person's decision on a proposal closes it. Such
- * a part is removed before the thought's first pair is asked (review pass
- * 4), since nothing of the calls bears on it; unless its pair also holds a
- * stale proposal, when it is removed after the thought's pairs are judged,
- * just before that proposal is settled, so none is settled at a text the
- * store has just said is gone. None is removed where the judgement is not
- * recorded, or where its answer was not read or not read whole (an item past
- * the twelve read, or one that was no part and quotes a statement; an item
- * that quotes none names none), and nothing more of the pair's judgement is
- * recorded then: the pair's stale proposal stays stale, and the pair is
- * asked again. A removal that finds a text moved since the pass read it
- * (EDITED_SINCE) is a part's write that finds so: nothing more of the pair
- * is recorded, and the thought is put back within the bound, to be judged at
- * the texts as they stand. One a side of which has no vector waits. One
- * whose pair holds a proposal that itself waits for a rebuild is left for
- * that rebuild (partHeldSql, read from the proposal's lineage row, as a
- * rebuild reads it). A removal the store refuses, an answer not read whole
- * and a text found moved past the bound fail the claim, the pair's
- * judgement unrecorded or its stale proposal left stale, so no run pools the
- * thought again for a part it does not settle and the retry finds the pair
- * open. --status places the parts that wait: in decide mode a failed claim
- * is read under this pass's key, as preflight reads it; in judge mode, and
- * by db/rebuild.ts --status, which knows no key, under any decide-mode key,
- * the keys named (partsStanding). The sleep scheduler counts the thoughts
- * the pool step would pool among consolidation's work (db/sleep.ts).
+ * (154's settle_stale_part): one the answer names in no item. One whose
+ * statement the answer names again in an item that makes no row is kept
+ * (review pass 4: a test of each part, by the statement as the store reads
+ * it): an item whose quotes fail the check or are not read back, one that
+ * is no part by its shape, one past the twelve read. The writer still
+ * names the statement, the pass cannot record what it said, and a removal
+ * is for good. A part of a pair that is not judged again is removed too:
+ * the candidate rule no longer admits the pair, or a person's decision on a
+ * proposal closes it. That removal is made before the thought's first pair
+ * is asked (review pass 4), since nothing of the calls bears on it. None is
+ * removed where the judgement is not recorded, or where its answer was not
+ * read, and nothing more of the pair's judgement is recorded where a part is
+ * kept: the pair's stale proposal stays stale, and the pair is asked again.
+ * A removal that finds a text moved since the pass read it (EDITED_SINCE)
+ * is a part's write that finds so: nothing more of the pair is recorded,
+ * and the thought is put back within the bound, to be judged at the texts
+ * as they stand. One a side of which has no vector waits. One whose pair
+ * holds a proposal that itself waits for a rebuild is left for that rebuild
+ * (partHeldSql, read from the proposal's lineage row, as a rebuild reads
+ * it). A removal the store refuses, a statement named again in an item that
+ * makes no row, an answer not read and a text found moved past the bound
+ * fail the claim, the pair's judgement unrecorded or its stale proposal
+ * left stale, so no run pools the thought again for a part it does not
+ * settle and the retry finds the pair open. --status places the parts that
+ * wait: in decide mode a failed claim is read under this pass's key, as
+ * preflight reads it; in judge mode, and by db/rebuild.ts --status, which
+ * knows no key, under any decide-mode key, the keys named (partsStanding).
+ * The sleep scheduler counts the thoughts the pool step would pool among
+ * consolidation's work (db/sleep.ts).
  *
- * A judge-mode pass names no part and removes none: of all this it prints
- * the --status line alone. It is not for a brain that holds parts: a pair it
- * closes with a proposal of its own is one a decide-mode pass no longer
- * judges, and that pass then removes the pair's waiting part with no
- * judgement of it (review pass 4). The commands the tools print for a
- * decide-mode key carry its decider and writer for that reason.
+ * A judge-mode pass names no part and removes none. A pair that holds a
+ * part that waits is a decide-mode pass's to judge, and a judge-mode pass
+ * leaves it: it does not ask its judge about the pair, and does not settle
+ * the pair's stale proposal (review pass 4: it judged the pair and closed it
+ * with a proposal of its own, and the decide-mode pass then removed the
+ * part with no judgement of it). Its summary counts the pairs it left, and
+ * its --status line places the parts. The commands the tools print for a
+ * decide-mode key carry its decider and writer.
  *
  * ── Identity ────────────────────────────────────────────────────────────────
  * As extract-entities.ts: OB1_WORKER_KEY holds a raw access key whose hash is
@@ -1721,6 +1724,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // were still to write when one did.
     writerParts: 0, wholeSaid: 0, wholeAgainst: 0, partsNamed: 0, partsDropped: 0, partsOver: 0, partsRepeated: 0, partsQuotesFailed: 0, partsNotOwn: 0,
     partsRecorded: 0, partsReplaced: 0, partsStood: 0, partsStoodRejected: 0, partsGone: 0, partsMoved: 0, partsRefused: 0, partsThrew: 0,
+    // Judge mode (review pass 4): the candidate pairs left to a decide-mode pass, each holding a settled part that waits.
+    leftToDecide: 0,
     // 067: the stale rows this run met — replaced in place (proposed again),
     // settled after a judgement that proposes nothing, settled because the
     // pair no longer meets the candidate rule, left waiting for a vector, or
@@ -1743,9 +1748,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    *   (review pass 4: it kept an earlier poll's outcome, or none);
    *   `pending`: a judgement of the texts as they stand by then;
    *   `refused`: the store refused the settle, or answered what this pass does not know;
-   *   `unread`: its pair's answer was not read, or not read whole. The last two fail the thought's claim.
+   *   `unread`: its pair's answer was not read, or holds more items that quote a statement than the pass keeps;
+   *   `aside`: its statement is named again in an item of the answer that makes no row. The last three fail the
+   *   thought's claim.
    */
-  type PartEnd = "removed" | "removedOut" | "named" | "wait" | "held" | "decided" | "gone" | "moved" | "pending" | "refused" | "unread";
+  type PartEnd = "removed" | "removedOut" | "named" | "wait" | "held" | "decided" | "gone" | "moved" | "pending" | "refused" | "unread" | "aside";
   const partEnds = new Map<string, PartEnd>();
   /**
    * Decide version 6 (SMD-4446): how many put-backs running a thought is given before its claim fails instead. A
@@ -1758,6 +1765,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * worker among them: the worker's whole handling of a claimed thought runs inside its `attempt`, below.
    */
   const partPutBacks = new PutBacks(PART_PUT_BACKS);
+  /**
+   * Judge mode (review pass 4): whether this run reads the settled parts, asked once. Where the store stands (151)
+   * and the role may read it, a thought in hand reads its parts that wait, to leave their pairs to a decide-mode
+   * pass (processRow). A brain from before 151, or a role without SELECT there, reads none and judges as before. A
+   * read that throws is the worker's to classify, and is asked again by the next thought.
+   */
+  let judgeParts: boolean | null = null;
+  const judgeReadsParts = async (): Promise<boolean> => {
+    if (judgeParts === null) judgeParts = (await partsStore()).reads;
+    return judgeParts;
+  };
   /**
    * The thought in hand as it stands before one of its pairs is asked (decide version 6, review pass 4): as the pass
    * read it; its text moved since; or not ours, the thought gone or its claim no longer this worker's, which the
@@ -1974,6 +1992,18 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
        ORDER BY s.older_id, s.id`) as WaitingPart[] : [];
     const waitingByOlder = new Map<string, WaitingPart[]>();
     for (const wp of waitingParts) waitingByOlder.set(wp.older_id, [...(waitingByOlder.get(wp.older_id) ?? []), wp]);
+    // Judge mode (review pass 4): the older thoughts of this thought's pairs that hold a part that waits. Such a pair
+    // is a decide-mode pass's to judge: that pass asks for its parts, and records the statement again or removes the
+    // part. A judge-mode pass judged the pair, asked for no part, and closed it with a proposal of its own, or
+    // settled its stale one; the decide-mode pass then found the pair closed and removed the part with no judgement
+    // of it (run: "1 removed by the pass (1 on a pair that is not judged again)" where a decide run alone records the
+    // statement again). So the pair is left: not among the candidates, and its stale proposal not settled. Read
+    // where the store stands and this role may read it (judgeReadsParts): the parts and their thoughts, nothing else.
+    const decideOnly = new Set<string>(jev || !(await judgeReadsParts()) ? [] : ((await sql`
+      SELECT DISTINCT s.older_id FROM settled_parts s JOIN thoughts o ON o.id = s.older_id JOIN thoughts me ON me.id = s.newer_id
+       WHERE s.newer_id = ${row.id}::uuid
+         AND (s.status = 'stale' OR (s.status = 'pending'
+              AND (s.older_fingerprint <> content_fingerprint_of(o.content) OR s.newer_fingerprint <> content_fingerprint_of(me.content))))`) as { older_id: string }[]).map((r) => r.older_id));
     let candidates = (await sql`SELECT older_id, similarity, shared_entities FROM consolidation_candidates(${row.id}::uuid, ${K}::int, ${MIN_SIM}::float)`) as Candidate[];
     const leftOut = [...new Set([...stale.map((s) => s.older_id), ...waitingByOlder.keys()])].filter((id) => !candidates.some((c) => c.older_id === id));
     if (leftOut.length) {
@@ -1981,6 +2011,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         SELECT older_id, similarity, shared_entities FROM consolidation_candidates(${row.id}::uuid, 2147483647, ${MIN_SIM}::float)
         WHERE older_id = ANY(${sql.array(leftOut, "TEXT")}::uuid[])`) as Candidate[];
       candidates = candidates.concat(more);
+    }
+    if (decideOnly.size > 0) {
+      const all = candidates.length;
+      candidates = candidates.filter((c) => !decideOnly.has(c.older_id));
+      totals.leftToDecide += all - candidates.length;
     }
     if (candidates.length === 0) {
       totals.noCandidates++;
@@ -2053,8 +2088,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
      * Returns the attempt's outcome where it ends here, null to go on.
      *
      * The removal is the one write here that compares the texts. Where one has moved since this attempt read it, the
-     * thought's own since its row was read with a batch's or kept across a provider's pause, or either while the
-     * thought's pairs were judged, it answers EDITED_SINCE, and the thought is put back within the bound, as where
+     * thought's own since its row was read with a batch's or kept across a provider's pause, it answers
+     * EDITED_SINCE, and the thought is put back within the bound, as where
      * a part's write finds a text moved, to be judged at the texts as they stand, where the candidate rule is read
      * again too. Past the bound the part is kept and the claim fails saying so, the reason first. Then, as in the
      * pair loop: where it is the thought's own text the attempt ends, every other write of it being at a text known
@@ -2113,13 +2148,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // again, and at the third find failed its claim (run: 15, 30 and 45 model calls for no such edit, one, and one at
     // every attempt). Here a text found moved puts the thought back before a call is paid for, and one that moves
     // during the calls is an edit after the removal, as one made after the run is.
-    // Not a pair that also holds a stale proposal. Its part is removed in the last loops, just before that proposal
-    // is settled (review pass 3): the settle compares no text, and the removal beside it keeps it from being made
-    // at a text the store has just said is gone. A pair whose older thought is deleted during the calls is reached
-    // by no candidate either, and is the last loops' too.
+    // A pair that holds a stale proposal too: its part goes here, and the proposal is settled in the last loop, as
+    // 067 has it, at the texts as this attempt read them. So the removal still comes before that settle (review
+    // pass 3: after it, a text found moved by the removal left the part beside a rejection at a text that was
+    // gone), and a part kept here keeps the proposal stale (keptOut). An edit of such a pair's text during the
+    // calls leaves the proposal settled at the text as it was read, as it does on a pair that holds no part.
+    // A pair whose older thought is deleted during the calls is reached by no candidate either: the last loop's.
     for (const wp of waitingParts) {
       if (hardStopped) return { outcome: "abandoned" };
-      if (byId.has(wp.older_id) || staleByOlder.has(wp.older_id)) continue;
+      if (byId.has(wp.older_id)) continue;
       const ended = await removeOut(wp, true);
       if (ended !== null) return ended;
     }
@@ -2431,40 +2468,58 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       // PR 2b-2: the pair's parts that waited and that this judgement did not record again are removed, at the
       // fingerprints of the texts it was made of. By id, not by statement: each write's answer names the row it made,
       // met or replaced, and the pass's fold of a statement and the store's differ. A pair the writer was not asked
-      // on names no part, so its waiting parts go too. So does the part of a statement the writer names again in a
-      // form that is no part of these texts: an item read whole, whose quotes fail the check or are not read back,
-      // makes no row by the pass's own rule, and is as good as not named (review pass 3 named this: the lines said
-      // "named no more" of it; whether such a part should be kept instead is put to the maintainer).
+      // on names no part, so its waiting parts go too.
       //
-      // Not where the judgement is not recorded (above): the part waits for the judgement to come. And not where
-      // the answer was not read, or not read whole. Not read (review pass 1): the writer's answer, or the link
-      // step's, which caps the pair with no part asked for. Not read whole (review pass 3): an item of the list
-      // that was no part, or one past the twelve an answer is read to, of which the pass cannot say what it names.
-      // An item that quotes no statement, an empty object or a bare word, names none and holds no part back (review
-      // pass 4: one filler item kept every waiting part of the pair and failed the claim at each retry).
-      // The parts' question was put and not answered in full, an answer that names the statement again may be among
-      // the unread, and a removal is for good. The part waits on, and the claim fails saying so, as for a removal
-      // the store refuses: a claim that succeeded would have every later run ask the pair again. With a part kept
-      // so, nothing more of the pair's judgement is recorded either (review pass 2), as where a text moved: its
-      // stale proposal settled there closed the pair to the candidate rule, so the retry the failed claim asks for
-      // was never offered the pair, and the part was left beside a rejection of the pass's own (run: kept at the
-      // retry as held for a rebuild, which reopened nothing). So too where the store refuses a removal (review pass
-      // 4: the one kept part whose pair was still closed). The parts of that answer that were read stand as
-      // written.
+      // Not where the judgement is not recorded (above): the part waits for the judgement to come. Not where the
+      // answer was not read (review pass 1): the writer's, or the link step's, which caps the pair with no part
+      // asked for. And not a part whose statement the answer names again in an item that makes no row (review
+      // pass 4): one whose quotes fail the check or are not read back, one that is no part by its shape, one past
+      // the twelve read. The writer still names the statement, the pass cannot record what it said of it, and a
+      // removal is for good. Which part such an item names is the store's to say, by the statement as it reads one
+      // (151's identity: 016's fold of case and white space): one read for the pair, of the parts' ids and the
+      // statements quoted. (Pass 3 had two rules for this one event. An item read whole whose quotes failed was "as
+      // good as not named", and its part was removed. An item that was no part, or past the twelve, kept EVERY
+      // waiting part of the pair, whatever it quoted: one that quoted nothing, or another statement, among them.)
+      // Where the answer holds more such items than the pass keeps the statements of, it cannot say what they
+      // name, and every part not named again is kept.
+      // A part kept so waits on, and the claim fails saying so, as for a removal the store refuses: a claim that
+      // succeeded would have every later run ask the pair again. Nothing more of the pair's judgement is recorded
+      // either (review pass 2), as where a text moved: its stale proposal settled there closed the pair to the
+      // candidate rule, so the retry the failed claim asks for was never offered the pair, and the part was left
+      // beside a rejection of the pass's own (run: kept at the retry as held for a rebuild, which reopened
+      // nothing). So too where the store refuses a removal (review pass 4: the one kept part whose pair was still
+      // closed). The parts of that answer that were read stand as written.
       if (!judgedAway) {
         const notRead = writer?.falls === "unparsed" || link?.link === "unparsed";
-        const inPart = (writer?.dropped ?? 0) - (writer?.unnamed ?? 0) + (writer?.over ?? 0);
         const waiting = waitingByOlder.get(c.older_id) ?? [];
+        const unmet = waiting.filter((wp) => !partRowsMet.has(wp.id));
+        const aside = j.aside ?? [];
+        /** The parts not recorded again whose statement the answer names in an item that makes no row. */
+        const namedAside = new Set<string>();
+        if (!notRead && unmet.length > 0 && aside.length > 0) {
+          // The statements are the brain's text, sent as one JSON parameter and compared in the store; a NUL, which
+          // jsonb takes in no string, is no part of a statement.
+          const quoted = JSON.stringify(aside.map((a) => ({ holder: a.holder, statement: a.statement.replaceAll("\u0000", "") })));
+          const rows = (await sql`
+            SELECT s.id FROM settled_parts s
+             WHERE s.id = ANY(${sql.array(unmet.map((wp) => wp.id), "TEXT")}::uuid[])
+               AND EXISTS (SELECT 1 FROM jsonb_to_recordset((${quoted}::text)::jsonb) AS q(holder text, statement text)
+                            WHERE (q.holder IS NULL OR q.holder = s.holder)
+                              AND content_fingerprint_of(q.statement) = content_fingerprint_of(s.statement))`) as { id: string }[];
+          for (const r of rows) namedAside.add(r.id);
+        }
+        const more = j.asideMore ?? 0;
         for (const wp of waiting) {
           dealt.add(wp.id);
           if (partRowsMet.has(wp.id)) {
             partEnds.set(wp.id, "named");
             continue;
           }
-          if (notRead || inPart > 0) {
-            partEnds.set(wp.id, "unread");
+          if (notRead || namedAside.has(wp.id) || more > 0) {
+            partEnds.set(wp.id, namedAside.has(wp.id) ? "aside" : "unread");
             unsettled.push(notRead ? `the answer for its pair with ${c.older_id} could not be read, and the part is kept`
-              : `the answer for its pair with ${c.older_id} was not read whole (${inPart} item(s) of it quoted a statement and were no part, or came after the ${PARTS_MAX} read), and the part is kept`);
+              : namedAside.has(wp.id) ? `the answer for its pair with ${c.older_id} names its statement again in an item that is not recorded (a quote that fails the check or is not read back, an item that is no part, or one after the ${PARTS_MAX} read), and the part is kept`
+              : `the answer for its pair with ${c.older_id} was not read whole (${more} more item(s) of it quote a statement than the pass keeps), and the part is kept`);
             judgedAway = true;
             continue;
           }
@@ -2692,18 +2747,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         }
       }
     }
-    // Decide version 6 (SMD-4446 PR 2b-2): the waiting parts no candidate reached and that were not removed before
-    // the first pair was asked (above): those of a pair that also holds a stale proposal, and those of a pair whose
-    // older thought was deleted while the thought's pairs were judged. Each as removeOut has it.
+    // Decide version 6 (SMD-4446 PR 2b-2): the waiting parts no candidate reached and that the loop before the
+    // first pair did not come to: those of a pair whose older thought was deleted while the thought's pairs were
+    // judged. Each as removeOut has it.
     // A pair that was reached keeps its waiting parts where its judgement was not recorded: `problems` or
     // `unsettled` holds it, or a text moved.
-    //
-    // Before the stale proposals of the same pairs (review pass 3: after them). 067's settle of a proposal compares
-    // no text, and the removal does: settled first, a pair's stale proposal was rejected at a text that the removal
-    // then said was gone, its lineage row there too. The part read as held for a rebuild that nothing runs, beside
-    // a rejection of the pass's own, and no run pooled the thought (run). So a pair whose part is kept here, for a
-    // text that moved or a removal the store refused, keeps its stale proposal as it is (keptOut), for the
-    // judgement after the put-back or the retry the failed claim asks for.
     for (const wp of waitingParts) {
       if (hardStopped) return { outcome: "abandoned" };
       if (reachedOlders.has(wp.older_id) || dealt.has(wp.id)) continue;
@@ -2718,11 +2766,13 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // out, was refused by the egress gate or drew a malformed answer is in
     // `problems` above and was reached: its row stays stale, the thought is
     // recorded failed, and --retry-failed revisits it. None is settled
-    // on a pair whose waiting part was kept (above, keptOut): it stays
-    // stale with the part, for the same retry.
+    // on a pair whose waiting part was kept (keptOut): it stays stale
+    // with the part, for the same retry. And none, in judge mode, on a
+    // pair that holds a part that waits (decideOnly): the pair is a
+    // decide-mode pass's.
     for (const s of stale) {
       if (hardStopped) return { outcome: "abandoned" };
-      if (reachedOlders.has(s.older_id) || keptOut.has(s.older_id)) continue;
+      if (reachedOlders.has(s.older_id) || keptOut.has(s.older_id) || decideOnly.has(s.older_id)) continue;
       // (Both sides' vectors as the stale read saw them, one statement — not
       // the newer's from the claim-time batch read; third review pass.)
       if (s.newer_vectorless || s.older_vectorless) { staleMet.wait.add(s.id); continue; }
@@ -3269,7 +3319,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   // again is among the parts recorded, in place of an earlier judgement (above).
   {
     const ended = (end: PartEnd): number => [...partEnds.values()].filter((e) => e === end).length;
-    const m = { removed: ended("removed"), removedOut: ended("removedOut"), wait: ended("wait"), held: ended("held"), decided: ended("decided"), gone: ended("gone"), moved: ended("moved"), pending: ended("pending"), refused: ended("refused"), unread: ended("unread") };
+    const m = { removed: ended("removed"), removedOut: ended("removedOut"), wait: ended("wait"), held: ended("held"), decided: ended("decided"), gone: ended("gone"), moved: ended("moved"), pending: ended("pending"), refused: ended("refused"), unread: ended("unread"), aside: ended("aside") };
     if (Object.values(m).some((count) => count > 0)) {
       out(
         `  parts whose text moved: ` + [
@@ -3283,10 +3333,15 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
           m.moved ? `${m.moved} left where a text moved again under the pass, their thought put back to be judged at the texts as they stand or, past the bound on put-backs, its claim failed saying so` : "",
           m.pending ? `${m.pending} kept, a judgement of the texts as they stand by then` : "",
           m.refused ? `${m.refused} the store would not remove (each said on its thought's claim, which failed)` : "",
+          m.aside ? `${m.aside} kept, their statement named again in an item of the answer that is not recorded (each said on its thought's claim, which failed)` : "",
           m.unread ? `${m.unread} kept, their pair's answer unread or not read whole (each said on its thought's claim, which failed)` : "",
         ].filter(Boolean).join("; ") + (FOLLOW ? " — each part once, by its last outcome across the polls" : "")
       );
     }
+  }
+  // Judge mode (review pass 4): the pairs it left to a decide-mode pass.
+  if (totals.leftToDecide > 0) {
+    out(`  left for a decide-mode run: ${totals.leftToDecide} pair(s), each holding a settled part that waits — a judge-mode pass asks for no part, so it does not judge such a pair or settle its stale proposal (bun db/consolidate.ts with OB1_CONSOLIDATE_DECIDER set judges it)`);
   }
   if (after === null) {
     // A follower stopped while it waited for the database: the counts

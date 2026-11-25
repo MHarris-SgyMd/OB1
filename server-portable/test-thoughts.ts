@@ -2190,14 +2190,19 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   const shapes = parseParts(ans([part, { ...part, in: "C" }, { ...part, word: "outdates" }, { ...part, stale: "" }, { ...part, shown_by: 7 }, { ...part, reason: "  " }, "a string", null, [part]]));
   assert(shapes.parts.length === 1 && shapes.dropped === 8 && !shapes.malformed,
     `an item with no side, a word outside the eight, a quote or the reason missing, or no object at all is dropped and counted, and the rest stand (${shapes.parts.length} kept, ${shapes.dropped} dropped)`);
-  // Review pass 4: of the dropped items, those that quote no statement are counted apart. Such an item names none,
-  // so it cannot be a statement named again in a form the pass does not read, and the pass holds no waiting part
-  // back for it (one filler item kept every waiting part of its pair and failed the claim at each retry).
+  // Review pass 4: the statement each dropped or over item quotes is kept, with the thought the item says holds it,
+  // for the pass's test of each part that waits (PartAside): is its statement named again in an item that makes no
+  // row? An item that quotes no statement names none, and is not among them (one filler item kept every waiting part
+  // of its pair and failed the claim at each retry, while the rule was a count of the answer's items).
   const fillers = parseParts(ans([{}, "none", null, { in: "A", stale: "", shown_by: "", word: "", reason: "" }, { in: "A", stale: "   ", shown_by: part.shown_by, word: "implements", reason: "r" }, { ...part, word: "fixes" }, { ...part, in: "C" }]));
   const pastTheCap = parseParts(ans([...Array.from({ length: 12 }, (_, i) => ({ ...part, stale: `statement ${i}` })), {}, { ...part, stale: "a thirteenth" }]));
-  assert(shapes.unnamed === 4 && fillers.parts.length === 0 && fillers.dropped === 7 && fillers.unnamed === 5 && one.unnamed === 0 && parseParts("not json").unnamed === 0
-      && pastTheCap.parts.length === 12 && pastTheCap.over === 2 && pastTheCap.dropped === 0 && pastTheCap.unnamed === 0,
-    `…and of the dropped, those that quote no statement are counted apart: an empty object, a bare word, a null, an item whose statement is empty or blank; not one that quotes a statement under a word outside the eight or with no side, and not one past the twelve read, whatever it holds (${fillers.unnamed} of ${fillers.dropped} dropped; ${shapes.unnamed} of ${shapes.dropped}; past the cap ${pastTheCap.unnamed} of ${pastTheCap.over})`);
+  const manyAside = parseParts(ans([...Array.from({ length: 12 }, (_, i) => ({ ...part, stale: `statement ${i}` })), ...Array.from({ length: 14 }, (_, i) => ({ ...part, stale: `past the cap ${i}` }))]));
+  assert(fillers.parts.length === 0 && fillers.dropped === 7 && JSON.stringify(fillers.aside) === JSON.stringify([{ holder: "older", statement: part.stale }, { holder: null, statement: part.stale }]) && fillers.asideMore === 0
+      && JSON.stringify(shapes.aside.map((a) => a.holder)) === '[null,"older","older","older"]' && shapes.aside.every((a) => a.statement === part.stale)
+      && one.aside.length === 0 && one.asideMore === 0 && parseParts("not json").aside.length === 0
+      && pastTheCap.parts.length === 12 && pastTheCap.over === 2 && JSON.stringify(pastTheCap.aside) === '[{"holder":"older","statement":"a thirteenth"}]'
+      && manyAside.over === 14 && manyAside.aside.length === PARTS_MAX && manyAside.aside[11].statement === "past the cap 11" && manyAside.asideMore === 2,
+    `…and the statement each item that makes no part quotes is kept beside the thought it names, null where the item names no side: of a dropped item and of one past the twelve read, twelve of them at most and the rest counted; an empty object, a bare word, a null and an item whose statement is empty or blank quote none (${JSON.stringify(fillers.aside)}; ${shapes.aside.length} of ${shapes.dropped} dropped; past the cap ${JSON.stringify(pastTheCap.aside)}; ${manyAside.aside.length} kept and ${manyAside.asideMore} more)`);
   assert(parseParts(ans([part], "yes")).falls === "older" && parseParts(ans([part], "no", " YES ")).falls === "newer" && parseParts(ans([])).falls === null && parseParts(ans([])).parts.length === 0 && !parseParts(ans([])).malformed,
     "the thought it says falls whole: A the older, B the newer, or neither; an empty list is an answer");
   const unread = ["not json", "{}", "[]", ans("none"), ans([part], "yes", "yes"), ans([part], true, false), ans([part], "maybe"), JSON.stringify({ parts: [part], a_falls: "no" })].map((raw) => parseParts(raw));
@@ -2478,6 +2483,19 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
       && wholes[3]?.held === "against" && wholes[4] === null,
     `what a whole the writer said comes to: the part that shows it, no part in it, a part against it, and nothing where it said none (${wholes.map((w) => (w === null ? "none" : w.held ?? "shown")).join()})`);
   const noneNamed = partsJudgement(pp, parseParts(ans([])), []), failed = parseParts(ans([{ ...A1, stale: "never written there" }])), noneStand = partsJudgement(pp, failed, checkParts(failed, mdOlder, mdNewer));
+  // Review pass 4: the statements the answer quotes in items that make no row, on the judgement (`aside`), for the
+  // pass's test of each part that waits. A read item that does not stand, by its statement in the thought's own
+  // characters where it was read back and as typed where it was not; then the dropped items'. Not a part that
+  // stands, nor a repeat of one, and nothing where every item stands.
+  const asideAnswer = parseParts(ans([A1, { ...B1, shown_by: "never written there" }, { ...A1, shown_by: "never written there" }, { ...A2, stale: "never written there" }, { ...A1, word: "fixes" }, { stale: A2.stale, shown_by: A2.shown_by, word: "updates", reason: "no side" }, {}, A1]));
+  const A1own = ownWords(A1.stale, mdOlder);
+  const asideJ = partsJudgement(pp, asideAnswer, checkParts(asideAnswer, mdOlder, mdNewer));
+  const asideMany = parseParts(ans([...Array.from({ length: 12 }, () => A1), ...Array.from({ length: 13 }, (_, i) => ({ ...A2, stale: `past the cap ${i}` }))]));
+  assert(A1own !== null && A1own !== A1.stale
+      && JSON.stringify(asideJ.aside) === JSON.stringify([{ holder: "newer", statement: "the review passed" }, { holder: "older", statement: A1own }, { holder: "older", statement: "never written there" }, { holder: "older", statement: A1.stale }, { holder: null, statement: A2.stale }])
+      && asideJ.asideMore === undefined && asideJ.parts?.length === 1 && noneNamed.aside === undefined && noneNamed.asideMore === undefined && partsJudgement(pp, named, chk).aside?.length === 1
+      && partsJudgement(pp, asideMany, checkParts(asideMany, mdOlder, mdNewer)).asideMore === 1 && partsJudgement(pp, asideMany, checkParts(asideMany, mdOlder, mdNewer)).aside?.length === PARTS_MAX,
+    `the judgement carries the statements its answer quotes in items that make no row: a read item whose showing words fail, by its statement as the thought writes it; one whose statement is not the thought's, as typed; a dropped item's, with no thought where it names no side; no part that stands, no repeat of one, and how many more there were than are kept (${JSON.stringify(asideJ.aside)})`);
   const garbled = partsJudgement(pp, parseParts("nope"), []);
   assert(noneNamed.verdict === "related" && noneNamed.parts === undefined && noneNamed.reason === "the writer named no settled part" && noneStand.parts === undefined && noneStand.reason === "the writer's quotes did not check out"
       && garbled.verdict === "related" && !garbled.malformed && garbled.reason === "the writer's answer was not JSON of the expected shape",
