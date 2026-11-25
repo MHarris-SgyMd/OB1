@@ -94,7 +94,11 @@ export function tagsOverExisting(answer: Record<string, unknown>): Record<string
   return { ...Object.fromEntries(TAG_KEYS.filter((k) => !(k in answer)).map((k) => [k, null])), ...answer };
 }
 
-export async function extractMetadata(text: string, subject: EgressSubject, cfg: EmbedConfig): Promise<Record<string, unknown>> {
+/**
+ * The tags' call. `signal`, a caller's (db/retag.ts's call in hand, SMD-2298 PR 4a-1): aborted, the call is, and its
+ * error is thrown, never read as tags — it is no ProviderError, which the catch below reads.
+ */
+export async function extractMetadata(text: string, subject: EgressSubject, cfg: EmbedConfig, signal?: AbortSignal): Promise<Record<string, unknown>> {
   // The original swallowed every failure into the fallback below: an auth error,
   // a rate limit, or a 500 from OpenRouter all produced a thought tagged
   // "uncategorized" and a success message to the user, with no way to tell a
@@ -131,7 +135,7 @@ export async function extractMetadata(text: string, subject: EgressSubject, cfg:
         { role: "system", content: METADATA_PROMPT },
         { role: "user", content: text },
       ],
-    }, subject);
+    }, subject, signal);
   } catch (e) {
     if (e instanceof ProviderError) {
       console.error(`extractMetadata: ${e.message}`);
