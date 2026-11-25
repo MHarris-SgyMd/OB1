@@ -121,8 +121,11 @@
  * `succeeded` when it is locked: review pass 1); a failed one waits for
  * --retry-failed, and a claimed one is its holder's. Preflight's
  * `retag pass` row counts the pool and the backlog by the same predicate,
- * db/config.mjs's RETAG_DUE_SQL (PR 3a). Not here (SMD-2298 PR 4): a sleep
- * pass and --follow on the shared follower. recipes/thought-enrichment's
+ * db/config.mjs's RETAG_DUE_SQL (PR 3a). The engine takes what a caller like
+ * the sleep scheduler passes (PR 4a-1, RetagOptions): the abort of a call in
+ * hand, the admit gate, session settings, the banner and summary left out, the
+ * start told. Not here (SMD-2298 PR 4a-2, PR 4b): --follow on the shared
+ * follower, and the sleep pass. recipes/thought-enrichment's
  * enrich-thoughts.mjs, which wrote its own tag set through the SQL shim, is
  * retired for this (decided 2026-11-15: "not a second re-tag path"; SMD-3318
  * PR 3b): its summary, importance and confidence fields are not the core's.
@@ -141,12 +144,12 @@ import { localKnob, mayLeaveBox, ROW_UNITS, type EgressSubject } from "../server
 import { extractMetadata, metadataRefused, METADATA_PROMPT_VERSION, TAG_KEYS } from "../server-portable/metadata.ts";
 import { metadataRecipe } from "../server-portable/lineage.ts";
 import { actorPayload } from "../server-portable/store.ts";
-import { asPass } from "../server-portable/model-call.ts";
-import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, probeChat, ProviderOutage, regateMessage, Unreturned, workerIdentity } from "./worker-bootstrap.ts";
-import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, stopOnSignals, STOPPED_EARLY, type PassStop } from "./lease.ts";
+import { asPass, withCallWaits } from "../server-portable/model-call.ts";
+import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, probeChat, ProviderOutage, regateMessage, Unreturned, workerIdentity, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { AbortedInHand, admitted, callWaitsFor, DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, inHandCalls, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, stopOnSignals, STOPPED_EARLY, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
-import { claimWorker, recordFailedAndStop, releaseFinished, thoughtFault, type FaultHost, type ReleaseHost } from "./claim-loop.ts";
-import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
+import { claimWorker, recordFailedAndStop, releaseFinished, setBackAborted, thoughtFault, type FaultHost, type ReleaseHost } from "./claim-loop.ts";
+import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
 import { parseRetagKey, RETAG_BACKLOG_AS_KEY_SQL, RETAG_BACKLOG_SQL, RETAG_DUE_SQL, RETAG_TAGS_ROW_SQL, retagKey } from "./config.mjs";
 
 /** Every argument accounted for (db/cli.ts): an unknown flag, or one given twice, is refused before anything is read (SMD-2015). */
@@ -179,7 +182,8 @@ const LIST_TAGS: ReadonlySet<string> = new Set(["people", "action_items", "dates
  * for the model, the endpoints, the egress policy and the worker key:
  * process.env when absent. `signal` is a first stop (the thought in hand
  * finishes, the rest go back to the pool); `onPass` is handed the pass's stop
- * as the pass begins, where the CLI installs its signal handlers.
+ * and its InHandAbort as the pass begins, where the CLI installs its signal
+ * handlers.
  */
 export interface RetagOptions {
   url?: string;
@@ -198,7 +202,30 @@ export interface RetagOptions {
   switchKey?: boolean;
   writer?: Writer;
   signal?: AbortSignal;
-  onPass?: (stop: PassStop) => void;
+  /**
+   * Called once as the pass begins, with its stop (db/lease.ts's PassStop) and its InHandAbort (SMD-2298 PR 4a-1): the
+   * caller aborts each worker's tags call in hand, and the thought goes to the back of the queue (setBackAborted),
+   * the worker going on with its next claim — the sleep scheduler's, while a live call wants the model server.
+   */
+  onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
+  /**
+   * The admit gate (db/lease.ts's Admit, SMD-3379 PR 1b), as the other claim workers take it: awaited before the
+   * pool step and before each claim. A worker waiting holds no claim; a stop while it waits ends it there. Unused by
+   * --status and --dry-run.
+   */
+  admit?: Admit;
+  /** Postgres settings the run's own client opens every connection with (connect.ts's `session`): the sleep scheduler's per-pass budget (SMD-2679). Refused beside `sql`, a caller's client, which it would not reach. */
+  session?: SessionSettings;
+  /** False leaves out the start's banner — the job, model and egress lines and the agent line or the no-key warning — for a pass a scheduler drives, which says them once (SMD-2752). */
+  banner?: boolean;
+  /**
+   * False leaves out the end-of-run summary — the counts, the failed rows and the still-leased and still-pending
+   * lines — for a pass a scheduler drives (SMD-2752). A stop on the request itself still lists the failed rows its
+   * line points at (review pass 1).
+   */
+  summary?: boolean;
+  /** How the start went (worker-bootstrap.ts's StartResult), called once: a refusal by its kind, or through (SMD-2752). */
+  onStart?: (r: StartResult) => void;
   /** The pauses before a failing provider is an outage (TRANSIENT_PAUSES_MS): a suite's own, to run them without the wall clock. */
   pausesMs?: readonly number[];
 }
@@ -233,47 +260,47 @@ export async function run(opts: RetagOptions): Promise<number> {
 
 async function runPass(opts: RetagOptions): Promise<number> {
   const { err } = opts.writer ?? consoleWriter;
+  /** A refusal of the run's input: said, reported to `onStart` as usage (SMD-2752), 2. */
+  const usage = (line: string): number => {
+    err(line);
+    opts.onStart?.({ ok: false, refused: "usage" });
+    return 2;
+  };
   const blank = blankProblem(FLAGS, { job: opts.job });
   if (blank !== null) {
-    err(`${blank}\n${flagList(FLAGS, HINTS)}`);
-    return 2;
+    return usage(`${blank}\n${flagList(FLAGS, HINTS)}`);
   }
   const noUrl = opts.url == null || opts.url.trim() === "";
   const urlProblem = noUrl ? (opts.sql == null ? NO_DATABASE_URL : null) : databaseUrlProblem(opts.url as string);
   if (urlProblem !== null) {
-    err(urlProblem);
-    return 2;
+    return usage(urlProblem);
   }
   const settled = numbers(opts);
   if (typeof settled === "string") {
-    err(settled);
-    return 2;
+    return usage(settled);
   }
   if (opts.job != null && parseRetagKey(opts.job) === null) {
-    err(`retag.ts: --job names a re-tag pool, retag:<metadata model>@p<prompt version>; this one is of another shape (nothing of it is printed).\n${flagList(FLAGS, HINTS)}`);
-    return 2;
+    return usage(`retag.ts: --job names a re-tag pool, retag:<metadata model>@p<prompt version>; this one is of another shape (nothing of it is printed).\n${flagList(FLAGS, HINTS)}`);
   }
   if (opts.sql != null) {
     const handle = opts.sql as { release?: unknown; savepoint?: unknown };
     if (typeof handle.release === "function" || typeof handle.savepoint === "function") {
-      err("retag.ts needs a pool, not a reserved connection or a transaction's handle. Pass the client itself, or a URL.");
-      return 2;
+      return usage("retag.ts needs a pool, not a reserved connection or a transaction's handle. Pass the client itself, or a URL.");
     }
     const max = Number((opts.sql as { options?: { max?: number } }).options?.max ?? 10);
     if (max < settled.workers + 1) {
-      err(`retag.ts needs a client of at least ${settled.workers + 1} connections for ${settled.workers} worker(s): one each and a spare the heartbeat beats through (db/lease.ts).`);
-      return 2;
+      return usage(`retag.ts needs a client of at least ${settled.workers + 1} connections for ${settled.workers} worker(s): one each and a spare the heartbeat beats through (db/lease.ts).`);
     }
     if (noUrl && (opts.env ?? process.env).OB1_WORKER_KEY && !opts.status && !opts.dryRun) {
-      err("retag.ts resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
-      return 2;
+      return usage("retag.ts resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
     }
   }
+  if (opts.session != null && opts.sql != null) return usage("retag.ts: session settings reach the run's own client only: pass url without sql beside them.");
   if (opts.signal?.aborted && !opts.status && !opts.dryRun) {
     err(STOPPED_EARLY);
     return 130;
   }
-  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1 });
+  const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1, ...(opts.session ? { session: opts.session } : {}) });
   const detach = new AbortController();
   try {
     return await retagWith(sql, opts, settled, detach.signal);
@@ -299,7 +326,9 @@ type Outcome =
   /** Edited meanwhile, and the claim no longer this worker's (its lease lapsed and another run holds it): left to that run. */
   | { outcome: "lostClaim" }
   /** In hand at the hard stop: nothing written, no longer this worker's. */
-  | { outcome: "abandoned" };
+  | { outcome: "abandoned" }
+  /** Its call aborted by the pass's caller (abortInHand), or by the first stop as it waited for a slot (abortWaiting): to the back of the queue, nothing written (setBackAborted); `gone`, not this worker's to set back. */
+  | { outcome: "setBack"; gone?: "deleted" | "lost" };
 
 type Counts = { pending: number; claimed: number; succeeded: number; failed: number };
 type Backlog = { missing: number; marked: number; stale: number; recipe: number; fallback: number; unpooled: number; due: number };
@@ -317,6 +346,17 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     return true;
   };
 
+  /** The start's banner, which a pass a scheduler drives leaves to its own start (SMD-2752). */
+  const say: Writer["out"] = opts.banner === false ? () => {} : out;
+  /** The end-of-run summary, which a pass a scheduler drives leaves out (SMD-2752). */
+  const SUMMARY = opts.summary !== false;
+  const ADMIT = opts.admit;
+  /** A start refusal: said, reported to `onStart` as which it is (SMD-2752), 2. */
+  const refuse = (kind: StartRefusal, line: string): number => {
+    err(line);
+    opts.onStart?.({ ok: false, refused: kind });
+    return 2;
+  };
   const resolved = resolveEmbedConfig(env as EmbedEnv);
   // --timeout bounds each call as OB1_LLM_TIMEOUT does the capture's (embed.ts's providerCall reads timeoutMs).
   const cfg = settled.timeout === null ? resolved : { ...resolved, timeoutMs: settled.timeout * 1000 };
@@ -325,19 +365,15 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   // The key is the tags' target recipe (PR 3b): a writing run under a key whose model or prompt version is not the one
   // its tags carry would leave every row it wrote behind the key it records, and the next run would re-tag them again.
   if (JOB !== writes && !READ_ONLY) {
-    err(`retag.ts: --job ${JOB} names a recipe this run does not write: its tags carry ${writes}'s (OB1_METADATA_MODEL and this tree's prompt version ${METADATA_PROMPT_VERSION}), so every row it wrote would stay behind ${JOB}. Run under the model and prompt version it names instead — OB1_METADATA_MODEL for the model, the tree whose tag prompt is that version — and leave --job out.`);
-    return 2;
+    return refuse("usage", `retag.ts: --job ${JOB} names a recipe this run does not write: its tags carry ${writes}'s (OB1_METADATA_MODEL and this tree's prompt version ${METADATA_PROMPT_VERSION}), so every row it wrote would stay behind ${JOB}. Run under the model and prompt version it names instead — OB1_METADATA_MODEL for the model, the tree whose tag prompt is that version — and leave --job out.`);
   }
-  out(`  job:    ${JOB}`);
-  out(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}, ${cfg.timeoutMs / 1000} s per call, prompt version ${METADATA_PROMPT_VERSION}`);
-  out(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
+  say(`  job:    ${JOB}`);
+  say(`  model:  ${cfg.metadataModel} via ${cfg.chat.base}, temperature ${cfg.metadataTemperature}, ${cfg.timeoutMs / 1000} s per call, prompt version ${METADATA_PROMPT_VERSION}`);
+  say(`  egress: ${egressDescription(cfg.chat, cfg.egress, localKnob(cfg, "chat"))}`);
   {
     // A policy that refuses whatever the thought (SMD-1903): stop before claiming, not one failed row at a time.
     const blanket = blanketGate({ endpoint: cfg.chat, policy: cfg.egress, units: env.OB1_WORKER_KEY ? undefined : ROW_UNITS, verb: "re-tagged", localKnobKey: localKnob(cfg, "chat") });
-    if (blanket && !READ_ONLY) {
-      err(`\n  ${blanket}`);
-      return 2;
-    }
+    if (blanket && !READ_ONLY) return refuse("egress", `\n  ${blanket}`);
   }
 
   // ── The database's side ─────────────────────────────────────────────────────
@@ -349,8 +385,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
            COALESCE((SELECT p.prosrc LIKE '%ob1:tags-row-settled-by-its-recipe%' FROM pg_proc p
                       WHERE p.oid = to_regprocedure('update_thought(uuid, text, jsonb, vector, jsonb, timestamptz, jsonb, text, jsonb, jsonb, jsonb)')), false) AS settles`) as { claims: boolean; marks: boolean; settles: boolean }[];
   if (!schema.claims || !schema.marks || !schema.settles) {
-    err(`\n  ${!schema.claims ? "The lease table (migration 015) is missing" : !schema.marks ? "The lineage table's mark (migration 063) is missing" : "update_thought is older than migration 148: a re-tag that came out the same would leave its row marked"}. Apply the migrations first:\n    cd db && bun migrate.ts --url …`);
-    return 2;
+    return refuse("tables", `\n  ${!schema.claims ? "The lease table (migration 015) is missing" : !schema.marks ? "The lineage table's mark (migration 063) is missing" : "update_thought is older than migration 148: a re-tag that came out the same would leave its row marked"}. Apply the migrations first:\n    cd db && bun migrate.ts --url …`);
   }
 
   // ── Identity ────────────────────────────────────────────────────────────────
@@ -359,24 +394,20 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   let actorName: string | undefined;
   if (!READ_ONLY) {
     if (stoppedEarly()) return 130;
+    // The agent line and the no-key warning are the banner's; a lookup that could not resolve is warned of whatever
+    // the banner (SMD-2752, as consolidate's; PR 4a-1 review pass 1).
     const id = await workerIdentity(opts.url ?? "", env, {
-      noKeyWarning: "  ⚠  OB1_WORKER_KEY is not set: the re-tags carry the actor `retag` and no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
-      write: out,
+      noKeyWarning: opts.banner === false ? "" : "  ⚠  OB1_WORKER_KEY is not set: the re-tags carry the actor `retag` and no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
+      write: say,
       warn: (l) => { if (l) err(l); },
     });
-    if (!id.ok) {
-      err(id.message);
-      return 2;
-    }
+    if (!id.ok) return refuse("identity", id.message);
     agentId = id.identity.agentId;
     actorName = id.identity.keyName;
     // A key that was set but did not resolve is no actor: the gate credited one, so it is asked again without.
     if (env.OB1_WORKER_KEY && actorName === undefined) {
       const again = egressRefusal(cfg.chat, cfg.egress, ROW_UNITS);
-      if (again) {
-        err(`\n  ${regateMessage("re-tagged", again)}`);
-        return 2;
-      }
+      if (again) return refuse("lookup", `\n  ${regateMessage("re-tagged", again)}`);
     }
   }
   const actor = actorPayload({ name: actorName ?? "retag", via: "db/retag.ts", session: JOB, ...(agentId ? { agentId } : {}) });
@@ -434,11 +465,10 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   if (recordedKey && recordedKey !== JOB) {
     out(`  ob1_config.${RETAG_CONFIG_KEY} is ${recordedKey}; this run uses ${JOB} — a different model or prompt version; recording it finds ${asWords}`);
     if (opts.switchKey !== true && !READ_ONLY) {
-      err(`\n  Refusing to re-tag under a key other than the one ob1_config records without --switch-key.\n` +
+      return refuse("key", `\n  Refusing to re-tag under a key other than the one ob1_config records without --switch-key.\n` +
         `  The thoughts this run touches would carry ${JOB}'s tags beside others' ${recordedKey}'s. If that is the intent,\n` +
         `  pass --switch-key: it records ${JOB} and re-tags what it finds behind it (${asWords});\n` +
         `  if OB1_METADATA_MODEL is simply set differently in this shell, fix it instead.`);
-      return 2;
     }
   } else if (!recordedKey) {
     out(`  ob1_config.${RETAG_CONFIG_KEY} is not set: ${READ_ONLY ? "a run sets it" : "this run sets it"}, and finds ${asWords}`);
@@ -490,6 +520,12 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
   if (stoppedEarly()) return 130;
+  // The admit gate before the pool's writes, as the other claim workers' passes take it (SMD-3379 PR 1b): a stop while
+  // it waits ends the run with nothing pooled (SMD-2298 PR 4a-1).
+  if (ADMIT && !(await admitted(ADMIT, opts.signal ?? new AbortController().signal))) {
+    err(STOPPED_EARLY);
+    return 130;
+  }
   // The pool, every run, beside rebuild_derived's requeue (150): the backlog not pooled, and a re-tagged one due again.
   const [{ added }] = (await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(${backlogIds()})) AS added`) as { added: number }[];
   // requeue_thought_work's reset, guarded: the UPDATE checks `succeeded` again on the row it locks (READ COMMITTED's
@@ -509,7 +545,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   let hardStopped = false;
   let hardRelease: Promise<unknown> | null = null;
   const onStop = new AbortController();
-  /** Wakes a worker pausing on the provider: the first stop, or the provider's refusal. */
+  /** Wakes a worker pausing on the provider, or waiting at the admit gate: the run stopping (the first stop, the provider's refusal, the shape streak, a throw). */
   const halt = new AbortController();
   let retagged = 0, changedTags = 0, current = 0, failed = 0, refused = 0, changedMeanwhile = 0, vanished = 0, lost = 0, beats = 0, calls = 0;
   let configError = null as string | null;
@@ -522,8 +558,13 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   const limitReached = (): boolean => LIMIT > 0 && taken.size + claiming.n >= LIMIT;
   const outage = new ProviderOutage(undefined, undefined, true);
   const unreturned = new Unreturned((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`);
-  /** No call is aborted from outside here: extractMetadata takes no signal, and a run has no admit gate. */
-  const inCall = { get: () => undefined, end: () => {} };
+  /** Each worker's tags call for the thought it holds, behind abortInHand (db/lease.ts's inHandCalls, SMD-3379 PR 1b-2; SMD-2298 PR 4a-1). */
+  const inCall = inHandCalls(() => detach.aborted || stopping);
+  // At the first stop a call waiting for a slot goes back to the pool rather than the stop waiting out others' calls
+  // (SMD-3379 PR 2b-1).
+  onStop.signal.addEventListener("abort", () => inCall.abortWaiting(), { once: true });
+  /** The hard stop's abort for the calls in hand: nothing written, the thought abandoned. */
+  const onHardStop = new AbortController();
   const errAside = (line: string): void => {
     try {
       err(line);
@@ -545,7 +586,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     out(line);
   }
 
-  /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read. */
+  /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read; a call aborted in hand, as AbortedInHand. */
   async function retagRow(row: Row, workerId: string): Promise<Outcome> {
     if (!row.due) return { outcome: "current" };
     // update_thought merges no patch into SQL NULL (NULL || patch) and grows a non-object into an array (review pass 1):
@@ -558,7 +599,22 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     const gate = mayLeaveBox(subject, cfg.chat, cfg.egress);
     if (!gate.allowed) return { outcome: "failed", refused: true, error: `the egress policy refused it: ${gate.reason}; --retry-failed revisits it` };
     calls++;
-    const answer = await extractMetadata(row.content, subject, cfg);
+    // The call in hand is the model call alone: begun here and ended as it returns, so abortInHand counts and aborts no
+    // worker that is writing, probing or recording a failure — those it could not set back (review pass 1). Nothing
+    // awaits between the answer and the finally, so no abort lands in between.
+    const call = inCall.begin(workerId);
+    let answer: Record<string, unknown>;
+    try {
+      answer = await extractMetadata(row.content, subject, cfg, AbortSignal.any([onHardStop.signal, call.abort.signal]));
+    } catch (e) {
+      // The hard stop aborted it: abandoned, not failed. The pass's caller did (abortInHand), or the first stop as it
+      // waited for a slot (abortWaiting): the worker sets it back.
+      if (hardStopped) return { outcome: "abandoned" };
+      if (call.aborted) throw new AbortedInHand();
+      throw e;
+    } finally {
+      inCall.end(workerId);
+    }
     const mark = answer.metadata_extraction_failed;
     if (typeof mark === "string") {
       // What a capture would have recorded, read back as what it was (metadata.ts's markers).
@@ -649,8 +705,11 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       count: { providerStop: () => {}, failed: () => { failed++; }, lost: () => { lost++; }, vanished: () => { vanished++; } },
     };
     await claimWorker<Row>({
-      sql, job: JOB, prefix: "retag", n, ttlS: TTL, heartbeatS: HEARTBEAT, batch: BATCH, limit: LIMIT, follow: false, admit: undefined,
-      gate: () => onStop.signal, err, errAside, outage, taken, claiming, limitReached, activeWorkers, unreturned, inCall,
+      sql, job: JOB, prefix: "retag", n, ttlS: TTL, heartbeatS: HEARTBEAT, batch: BATCH, limit: LIMIT, follow: false, admit: ADMIT,
+      // A worker waiting at the admit gate is woken by the run stopping for a reason of its own — another worker's
+      // fatal refusal, the shape streak, a throw — which abort halt beside setting stopping, not onStop (review pass 1:
+      // it waited for the gate to open, and the run with it).
+      gate: () => AbortSignal.any([onStop.signal, halt.signal]), err, errAside, outage, taken, claiming, limitReached, activeWorkers, unreturned, inCall,
       stopping: () => stopping, hardStopped: () => hardStopped, isolated: () => false, pollNow: () => {},
       count: { lost: () => { lost++; }, vanished: () => { vanished++; }, beats: (k) => { beats += k; } },
       readRows: async (ids) => (await sql`
@@ -666,9 +725,19 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
           const streak = { suspect: false };
           for (let attempt = 0; outcome === null; attempt++) {
             try {
-              outcome = await retagRow(row, workerId);
+              // A wait for a slot on the model-call seam is no call to abort (SMD-3379 PR 2a, review pass 3).
+              outcome = await withCallWaits(callWaitsFor(() => inCall.get(workerId)), () => retagRow(row, workerId));
             } catch (e) {
               if (hardStopped) return "stop";
+              // The pass's caller aborted the call in hand (or the first stop its wait for a slot): the thought to the
+              // back of the queue, nothing written, and the worker goes on with its next claim; a set-back the database
+              // refuses leaves the claim for the finally's release (SMD-3379 PR 1b-2's rule; SMD-2298 PR 4a-1).
+              if (e instanceof AbortedInHand) {
+                const back = await setBackAborted(faults, { id: b.thought_id, workerId, hb }, "tags call");
+                if (back === "stop") return "stop";
+                outcome = { outcome: "setBack", ...back };
+                continue;
+              }
               const turn = await thoughtFault(faults, { id: b.thought_id, workerId, attempt, streak, backFirst }, e);
               if (turn.then === "stop") return "stop";
               if (turn.then === "failed") {
@@ -684,6 +753,12 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
           }
         }
         if (outcome.outcome === "abandoned") return "stop";
+        // Set back by its call's abort; one deleted or no longer this worker's meanwhile is counted so (review pass 1).
+        if (outcome.outcome === "setBack") {
+          if (outcome.gone === "deleted") vanished++;
+          else if (outcome.gone === "lost") lost++;
+          return "next";
+        }
         hb.held.delete(b.thought_id);
         if (outcome.outcome === "vanished") {
           vanished++;
@@ -736,6 +811,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     if (stopping) {
       if (hardRelease) return hardRelease;
       hardStopped = true;
+      onHardStop.abort();
       onStop.abort();
       halt.abort();
       hardRelease = Promise.all([...activeWorkers].map((w) => sql`SELECT release_claims_for_worker(${JOB}, ${w})`.catch(() => null)));
@@ -757,7 +833,8 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   };
   if (stoppedEarly()) return 130;
   opts.signal?.addEventListener("abort", abort, { once: true, signal: detach });
-  opts.onPass?.(stop);
+  opts.onPass?.(stop, inCall.abortInHand);
+  opts.onStart?.({ ok: true, provider: "up" });
 
   if (total > 0) {
     out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s${LIMIT ? `, stopping after ${LIMIT}` : ""}\n`);
@@ -773,22 +850,29 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   await unreturned.returnAtEnd(TTL, { err });
 
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-  out(`\n  ${retagged} re-tagged (${changedTags} with the tags changed, ${retagged - changedTags} the same — the row settled), ${current} already current, ` +
+  // The summary's lines, which a pass a scheduler drives leaves out; its counts are read all the same, for the code.
+  const tell: Writer["out"] = SUMMARY ? out : () => {};
+  const tellErr: Writer["err"] = SUMMARY ? err : () => {};
+  tell(`\n  ${retagged} re-tagged (${changedTags} with the tags changed, ${retagged - changedTags} the same — the row settled), ${current} already current, ` +
     `${failed} failed${refused ? ` (${refused} refused by the egress policy, nothing sent)` : ""}, ${changedMeanwhile} changed while re-tagged and re-queued, ${vanished} deleted mid-pass` +
     `${lost ? `, ${lost} no longer this worker's when checked` : ""}, in ${elapsed}s (${calls} model call(s), ${beats} heartbeat(s))`);
   const after = await counts();
-  printCounts(after, "after");
-  if (after.failed > 0) {
+  if (SUMMARY) printCounts(after, "after");
+  if (after.failed > 0 && SUMMARY) {
     err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
     await printFailures();
   }
   if (after.claimed > 0 && !stopping) {
-    err(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s of the holder's last heartbeat.`);
+    tellErr(`\n  ${after.claimed} row(s) are still leased — by another process running this job, or left by a worker that failed. They return to the pool within ${TTL} s of the holder's last heartbeat.`);
   }
   if (after.pending > 0 && !stopping && !limitReached()) {
-    err(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
+    tellErr(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
   }
   if (configError) {
+    if (!SUMMARY && after.failed > before.failed) {
+      err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}):`);
+      await printFailures();
+    }
     err(`\n  The provider refused the request itself: ${configError.slice(0, 400)}\n` +
       "  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider. " +
       (shapeStopped ? "The thoughts it answered so are failed (listed above): once it is fixed, re-run with --retry-failed."
