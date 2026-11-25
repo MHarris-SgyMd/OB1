@@ -153,8 +153,9 @@
  * applies nothing. --status and --list stale say where each stale row stands
  * against THIS pass's pool (in it, waiting for a vector, failed in this pass
  * — --retry-failed, waiting for the next run — a claim under another judge's
- * key named beside it); db/rebuild.ts --status reads the same rows keyless
- * and names the keys.
+ * key named beside it — or, in judge mode, waiting for a decide-mode run,
+ * its pair holding a settled part that waits, below); db/rebuild.ts --status
+ * reads the same rows keyless and names the keys.
  *
  * ── Parts whose text has moved (decide mode) ────────────────────────────────
  * A settled part (decide version 6, SMD-4446) is a judgement of two texts. An
@@ -202,9 +203,13 @@
  * leaves it: it does not ask its judge about the pair, and does not settle
  * the pair's stale proposal (review pass 4: it judged the pair and closed it
  * with a proposal of its own, and the decide-mode pass then removed the
- * part with no judgement of it). Its summary counts the pairs it left, and
- * its --status line places the parts. The commands the tools print for a
- * decide-mode key carry its decider and writer.
+ * part with no judgement of it). Nor does its pool step pool the thought
+ * again for that stale proposal (review pass 5: it did, at every run, and
+ * asked the thought's other pairs again each time); its dry run and its
+ * tickets line count none for it, and --status and --list stale say the
+ * proposal waits for a decide-mode run. Its summary counts the pairs it
+ * left, and its --status line places the parts. The commands the tools
+ * print for a decide-mode key carry its decider and writer.
  *
  * ── Identity ────────────────────────────────────────────────────────────────
  * As extract-entities.ts: OB1_WORKER_KEY holds a raw access key whose hash is
@@ -233,7 +238,7 @@ import { appendFileSync } from "node:fs";
 import { ProviderError, resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { installBackgroundSlots } from "../server-portable/slots.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
-import { consolidatePassKey, decidePair, movedWords, partAnswer, partHeldSql, partJudged, PARTS_MAX, PARTS_STORE_SQL, PARTS_UNREAD, partsClaimsFor, partsStanding, partsToPoolSql, partWriteError, partWriteFault, PutBacks, refusedWords, repooled, settleAnswer, settleRefusal, unsettledWords, type DecideNote, type PartsStanding } from "../server-portable/consolidate-decide.ts";
+import { consolidatePassKey, decidePair, movedWords, pairPartWaitsSql, partAnswer, partHeldSql, partJudged, PARTS_MAX, PARTS_STORE_SQL, PARTS_UNREAD, partsClaimsFor, partsStanding, partsToPoolSql, partWaitsSql, partWriteError, partWriteFault, PutBacks, refusedWords, repooled, settleAnswer, settleRefusal, unsettledWords, type DecideNote, type PartsStanding } from "../server-portable/consolidate-decide.ts";
 import { DecisionRefused, resolveDecideTier, type DecideTier, type JevConfig, type JevEnv } from "../server-portable/jev.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, ProbeRefused, probeRefusal, probeTier, ProviderDown, ProviderOutage, JUDGE_REQUEST_FIELDS, regateMessage, requestShapeRefused, SUSPECT_WINDOW, throughOutage, timedOut, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import {
@@ -924,8 +929,43 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    */
   const passActor = () => actorPayload({ name: actorName, via: "consolidate", session: JOB, agentId: agentId ?? undefined });
 
-  /** 067: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). */
-  const readStaleStandings = async () => staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], JOB);
+  /**
+   * Judge mode (review pass 4): whether this run reads the settled parts, asked once. Where the store stands (151)
+   * and the role may read it, a judge-mode pass reads the parts that wait, to leave their pairs to a decide-mode
+   * pass (leavesParts). A brain from before 151, or a role without SELECT there, reads none and judges as before. A
+   * read that throws is its caller's: the worker's to classify, asked again by the next thought.
+   */
+  let judgeParts: boolean | null = null;
+  const judgeReadsParts = async (): Promise<boolean> => {
+    if (judgeParts === null) judgeParts = (await partsStore()).reads;
+    return judgeParts;
+  };
+  /**
+   * Whether this pass leaves a pair that holds a settled part that waits to a decide-mode pass: a judge-mode pass
+   * that reads the parts. The mode is read off the decider's knob, as the pass key is (consolidatePassKey), and not
+   * off the tier, which a review (--list) never resolves. One answer for every place the pass meets such a pair
+   * (review pass 5: the thought in hand left the pair, and the pool step took the thought up again for the pair's
+   * stale proposal at every run): the candidates and the stale settle (processRow), the stale proposals' re-pool
+   * with its dry run and tickets line (staleRepoolSql), and where --status and --list stale place such a proposal
+   * (readStaleStandings).
+   */
+  const leavesParts = async (): Promise<boolean> => !cfg.decider && (await judgeReadsParts());
+
+  /**
+   * 067: the stale rows' standings against the pools under THIS key, as --status prints them (server-portable/consolidate.ts
+   * holds the one read, the rank and the words; db/rebuild.ts reads the same, keyless). A row on a pair this pass
+   * leaves is marked so (leavesParts): it waits for a decide-mode run, whatever claim its thought holds here.
+   */
+  const readStaleStandings = async () => {
+    const rows = (await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[];
+    if (rows.length > 0 && (await leavesParts())) {
+      const left = new Set(((await sql.unsafe(`
+        SELECT p.id::text AS id FROM supersession_proposals p JOIN thoughts o ON o.id = p.older_id JOIN thoughts n ON n.id = p.newer_id
+         WHERE p.status = 'stale' AND ${pairPartWaitsSql("p", "o", "n")}`)) as { id: string }[]).map((r) => r.id));
+      for (const r of rows) if (left.has(r.id)) r.left = true;
+    }
+    return staleStandings(rows, JOB);
+  };
   /** 070: --status's clause for the unreviewed rows standing on a lineage pair — the listing named, or the file it needs first (its own SQL reads on a brain at 068); the listing is 110's since SMD-3249 (109's, 070's before). */
   const lineageClause = (n: number, has110: boolean): string =>
     `${n} unreviewed standing on a lineage pair (${has110 ? "--list lineage shows them" : "apply migration 110 first — cd db && bun migrate.ts --url <url> — then --list lineage shows them"}; the reviewer rejects each — the pass never replaces a pending one)`;
@@ -1393,20 +1433,32 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * pool rule itself would add (no claim row under this key at all) is left to
    * `enqueue_thoughts`, so --dry-run's count and the run agree (first review
    * pass, run-it: the dry run counted such a thought twice).
+   *
+   * Not, in judge mode, the thought of a stale proposal on a pair this pass
+   * leaves (leavesParts; SMD-4446 PR 2b-2, review pass 5). The thought in hand
+   * leaves that pair and its proposal, its claim succeeds, and this read took
+   * it up again at the next pass and at every one after: its other pairs
+   * asked again each time, the pair left once more (run: the next run pooled
+   * the same 3 thoughts again and judged them, as its dry run said it would).
+   * A decide-mode pass settles such a proposal or fails the thought's claim,
+   * so its read needs no such term. A function, so no reader takes the text
+   * without it.
    */
-  const STALE_REPOOL_SQL = `SELECT DISTINCT p.newer_id AS id
+  const staleRepoolSql = async (): Promise<string> => `SELECT DISTINCT p.newer_id AS id
       FROM supersession_proposals p
       JOIN thoughts t ON t.id = p.newer_id AND t.embedding IS NOT NULL
       JOIN thoughts o ON o.id = p.older_id AND o.embedding IS NOT NULL
       LEFT JOIN thought_work_claims c ON c.thought_id = p.newer_id AND c.work_type = $1
      WHERE p.status = 'stale' AND (c.thought_id IS NULL OR c.status = 'succeeded')
-       AND p.newer_id NOT IN (SELECT consolidation_pool($1))`;
+       AND p.newer_id NOT IN (SELECT consolidation_pool($1))${(await leavesParts()) ? `
+       AND NOT ${pairPartWaitsSql("p", "o", "t")}` : ""}`;
   async function staleToRepool(): Promise<number> {
-    return Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM (${STALE_REPOOL_SQL}) s`, [JOB])) as { n: number }[])[0].n);
+    return Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM (${await staleRepoolSql()}) s`, [JOB])) as { n: number }[])[0].n);
   }
   async function repoolStale(): Promise<number> {
+    const stale = await staleRepoolSql();
     // Tried again where a thought was deleted under it or the server broke a deadlock (repooled, review pass 1).
-    return repooled(async () => Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM (SELECT requeue_thought_work($1, s.id) FROM (${STALE_REPOOL_SQL}) s) r`, [JOB])) as { n: number }[])[0].n));
+    return repooled(async () => Number(((await sql.unsafe(`SELECT count(*)::int AS n FROM (SELECT requeue_thought_work($1, s.id) FROM (${stale}) s) r`, [JOB])) as { n: number }[])[0].n));
   }
 
   /** Whether this brain has the parts' store (151), and this role may read it: --status and --dry-run run where neither holds. */
@@ -1422,7 +1474,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   async function partsToRepool(): Promise<number> {
     return Number(((await sql.unsafe(`
       SELECT count(*)::int AS n FROM (${partsToPoolSql()}) w
-       WHERE w.id NOT IN (SELECT consolidation_pool($1)) AND w.id NOT IN (SELECT p.id FROM (${STALE_REPOOL_SQL}) p)`, [JOB])) as { n: number }[])[0].n);
+       WHERE w.id NOT IN (SELECT consolidation_pool($1)) AND w.id NOT IN (SELECT p.id FROM (${await staleRepoolSql()}) p)`, [JOB])) as { n: number }[])[0].n);
   }
   /**
    * Decide version 6 (SMD-4446 PR 2b-2): pools again the newer thought of each settled part that waits
@@ -1578,7 +1630,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     const forParts = jev && (await partsStore()).reads ? ` UNION SELECT id FROM (${partsToPoolSql()}) w` : "";
     const { n, t } = await ticketCallsSaved(
       `SELECT thought_id AS id FROM thought_work_claims WHERE work_type = $1 AND status IN ('pending'${RETRY_FAILED ? ", 'failed'" : ""})
-       UNION SELECT consolidation_pool($1) UNION SELECT id FROM (${STALE_REPOOL_SQL}) r${forParts}`, JOB);
+       UNION SELECT consolidation_pool($1) UNION SELECT id FROM (${await staleRepoolSql()}) r${forParts}`, JOB);
     out(`  tickets: ${n} judge call(s) fewer over the ${t} thought(s) still to judge${DRY_RUN && LIMIT ? " (before --limit)" : ""} — pairs of two tickets Linear links left out at --k ${K} (079)`);
   }
 
@@ -1765,17 +1817,6 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * worker among them: the worker's whole handling of a claimed thought runs inside its `attempt`, below.
    */
   const partPutBacks = new PutBacks(PART_PUT_BACKS);
-  /**
-   * Judge mode (review pass 4): whether this run reads the settled parts, asked once. Where the store stands (151)
-   * and the role may read it, a thought in hand reads its parts that wait, to leave their pairs to a decide-mode
-   * pass (processRow). A brain from before 151, or a role without SELECT there, reads none and judges as before. A
-   * read that throws is the worker's to classify, and is asked again by the next thought.
-   */
-  let judgeParts: boolean | null = null;
-  const judgeReadsParts = async (): Promise<boolean> => {
-    if (judgeParts === null) judgeParts = (await partsStore()).reads;
-    return judgeParts;
-  };
   /**
    * The thought in hand as it stands before one of its pairs is asked (decide version 6, review pass 4): as the pass
    * read it; its text moved since; or not ours, the thought gone or its claim no longer this worker's, which the
@@ -1986,9 +2027,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       SELECT s.id, s.older_id, content_fingerprint_of(o.content) AS older_fingerprint, (o.embedding IS NULL) AS older_vectorless, (me.embedding IS NULL) AS newer_vectorless,
              ${sql.unsafe(partHeldSql("s", "o", "me"))} AS held
         FROM settled_parts s JOIN thoughts o ON o.id = s.older_id JOIN thoughts me ON me.id = s.newer_id
-       WHERE s.newer_id = ${row.id}::uuid
-         AND (s.status = 'stale' OR (s.status = 'pending'
-              AND (s.older_fingerprint <> content_fingerprint_of(o.content) OR s.newer_fingerprint <> content_fingerprint_of(me.content))))
+       WHERE s.newer_id = ${row.id}::uuid AND ${sql.unsafe(partWaitsSql("s", "o", "me"))}
        ORDER BY s.older_id, s.id`) as WaitingPart[] : [];
     const waitingByOlder = new Map<string, WaitingPart[]>();
     for (const wp of waitingParts) waitingByOlder.set(wp.older_id, [...(waitingByOlder.get(wp.older_id) ?? []), wp]);
@@ -1997,13 +2036,12 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // part. A judge-mode pass judged the pair, asked for no part, and closed it with a proposal of its own, or
     // settled its stale one; the decide-mode pass then found the pair closed and removed the part with no judgement
     // of it (run: "1 removed by the pass (1 on a pair that is not judged again)" where a decide run alone records the
-    // statement again). So the pair is left: not among the candidates, and its stale proposal not settled. Read
-    // where the store stands and this role may read it (judgeReadsParts): the parts and their thoughts, nothing else.
-    const decideOnly = new Set<string>(jev || !(await judgeReadsParts()) ? [] : ((await sql`
+    // statement again). So the pair is left: not among the candidates, and its stale proposal not settled, nor
+    // pooled for again (staleRepoolSql). Read where the store stands and this role may read it (leavesParts): the
+    // parts and their thoughts, nothing else.
+    const decideOnly = new Set<string>(!(await leavesParts()) ? [] : ((await sql`
       SELECT DISTINCT s.older_id FROM settled_parts s JOIN thoughts o ON o.id = s.older_id JOIN thoughts me ON me.id = s.newer_id
-       WHERE s.newer_id = ${row.id}::uuid
-         AND (s.status = 'stale' OR (s.status = 'pending'
-              AND (s.older_fingerprint <> content_fingerprint_of(o.content) OR s.newer_fingerprint <> content_fingerprint_of(me.content))))`) as { older_id: string }[]).map((r) => r.older_id));
+       WHERE s.newer_id = ${row.id}::uuid AND ${sql.unsafe(partWaitsSql("s", "o", "me"))}`) as { older_id: string }[]).map((r) => r.older_id));
     let candidates = (await sql`SELECT older_id, similarity, shared_entities FROM consolidation_candidates(${row.id}::uuid, ${K}::int, ${MIN_SIM}::float)`) as Candidate[];
     const leftOut = [...new Set([...stale.map((s) => s.older_id), ...waitingByOlder.keys()])].filter((id) => !candidates.some((c) => c.older_id === id));
     if (leftOut.length) {
@@ -2012,13 +2050,17 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
         WHERE older_id = ANY(${sql.array(leftOut, "TEXT")}::uuid[])`) as Candidate[];
       candidates = candidates.concat(more);
     }
+    let leftSome = false;
     if (decideOnly.size > 0) {
       const all = candidates.length;
       candidates = candidates.filter((c) => !decideOnly.has(c.older_id));
       totals.leftToDecide += all - candidates.length;
+      leftSome = all > candidates.length;
     }
     if (candidates.length === 0) {
-      totals.noCandidates++;
+      // A thought whose candidates were all left to a decide-mode pass had some, and the line for the pairs left
+      // says so: it is not one that "had no candidate" (review pass 5: it was counted there too).
+      if (!leftSome) totals.noCandidates++;
       if (stale.length === 0 && waitingParts.length === 0) return { outcome: "succeeded" };
     }
     const olders = candidates.length === 0 ? [] : (await sql`
@@ -3141,7 +3183,8 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // 067: a stale proposal is this pass's work whatever key wrote it — its
     // newer thought re-pooled here where the pool rule above could not add it
     // (a terminal claim under this key, or a claim 063 left under the row's
-    // key, which is another pool).
+    // key, which is another pool). Not, in judge mode, for a row on a pair
+    // the pass leaves to a decide-mode one (staleRepoolSql).
     const restaled = await repoolStale();
     // Decide version 6 (SMD-4446 PR 2b-2): a settled part that waits is this pass's work too, in decide mode, which
     // alone names parts: its newer thought pooled again as a stale proposal's is.

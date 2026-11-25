@@ -25,7 +25,7 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, staleStandingOf, staleStandings, staleStandingsText, staleStandingText, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type StaleStandingRow, type TokenLogprob } from "./consolidate.ts";
 import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, isDecideKey, decideKeyModels, DECIDE_KEY_TAIL_SQL, partsClaimsFor, partsStanding, partsStandingSql, partsWaitWords, repooled, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
@@ -2701,6 +2701,19 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   const models = [decideKey("h2o", "writer"), "consolidate:a+b+c@p4d6", consolidateKey("judge"), `extract:a+b@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION}`, `${decideKey("h2o", "writer")}x`, "consolidate:+w@p4d6", ""].map((k) => decideKeyModels(k));
   assert(JSON.stringify(models) === JSON.stringify([{ decider: "h2o", writer: "writer" }, { decider: "a+b", writer: "c" }, null, null, null, null, null]),
     `a decide-mode key names its decider and its writer, parted at the last plus sign, and no other key names any (${JSON.stringify(models)})`);
+  // Review pass 5: a stale proposal on a pair a judge-mode pass leaves, as its reader marks one (`left`). It waits for
+  // a decide-mode run whatever claim its thought holds under the pass's key, since the pass will not judge the pair;
+  // only a missing vector comes first, which keeps every pass from it. A row not marked stands as before, and a
+  // reader with no key marks none.
+  const K5 = consolidateKey("judge");
+  const row5 = (o: Partial<StaleStandingRow>): StaleStandingRow => ({ id: "x", vectorless: false, failed_keys: [], live_keys: [], ...o });
+  const ranks5 = [row5({ left: true }), row5({ left: true, failed_keys: [K5] }), row5({ left: true, live_keys: [K5] }), row5({ left: true, vectorless: true }), row5({ failed_keys: [K5] }), row5({ live_keys: [K5] }), row5({})].map((r) => staleStandingOf(r, K5).s);
+  const counted5 = staleStandings([row5({ id: "a", left: true }), row5({ id: "b", left: true, failed_keys: [K5] }), row5({ id: "c" })], K5);
+  assert(JSON.stringify(ranks5) === JSON.stringify(["decide", "decide", "decide", "vector", "failed", "pooled", "waiting"])
+      && staleStandingsText(counted5, K5) === "2 waiting for a decide-mode run, their pair holding a settled part that waits, 1 waiting for the next run"
+      && staleStandingText(counted5.byId.get("b")!, K5) === "waiting for a decide-mode run: its pair holds a settled part that waits, and a judge-mode pass leaves such a pair"
+      && staleStandingText(counted5.byId.get("c")!, K5) === "waiting for the next run to re-pool it" && staleStandingOf(row5({ failed_keys: [K5] }), null).s === "failed",
+    `a stale proposal on a pair a judge-mode pass leaves stands as waiting for a decide-mode run, whatever claim its thought holds under the pass's key and behind a missing vector alone, and is counted and worded so; a row not marked stands as before (${ranks5.join(", ")}; ${staleStandingsText(counted5, K5)})`);
   // A re-pool statement tried again for a thought deleted under it or a deadlock, three tries in all, and thrown on at
   // once for anything else (repooled, review pass 1).
   const tried: string[] = [];

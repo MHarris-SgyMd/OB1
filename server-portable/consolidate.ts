@@ -779,8 +779,14 @@ export function passSettledNote(why: string, key: string): string {
  * none), so the doors never disagree (063's first review pass found three
  * copies of one rule in consolidation_pool once already). The rank, per
  * row: `vector` (the pair cannot be judged until the reembed pool writes the
- * vector; the pass does not pool it) → `failed` → `pooled` → `waiting` (the
- * next run under the key re-pools it). With a key, failed and pooled mean
+ * vector; the pass does not pool it) → `decide` (below) → `failed` →
+ * `pooled` → `waiting` (the next run under the key re-pools it). `decide`
+ * (SMD-4446, review pass 5) is a judge-mode reader's alone, which marks the
+ * row `left`: the pair holds a settled part that waits, and a judge-mode pass
+ * leaves such a pair and its stale proposal to a decide-mode one, whatever
+ * claim the thought holds under its key. It does not pool the thought for the
+ * row, and "waiting for the next run" was said of it. With a key, failed and
+ * pooled mean
  * THIS key's claim — a failed claim under another judge's key is not this
  * pass's to retry and does not stop its re-pool, and a live claim under
  * another key (063's requeue under the row's key after a judge change) is
@@ -790,8 +796,8 @@ export function passSettledNote(why: string, key: string): string {
  * named a --retry-failed that returned nothing). Without a key, any failed
  * or live claim counts and its key is named.
  */
-export type StaleStanding = "vector" | "failed" | "pooled" | "waiting";
-export type StaleStandingRow = { id: string; vectorless: boolean; failed_keys: string[]; live_keys: string[] };
+export type StaleStanding = "vector" | "decide" | "failed" | "pooled" | "waiting";
+export type StaleStandingRow = { id: string; vectorless: boolean; failed_keys: string[]; live_keys: string[]; left?: boolean };
 export const STALE_STANDING_ROWS_SQL = `SELECT p.id::text AS id,
        EXISTS (SELECT 1 FROM thoughts t WHERE t.id IN (p.older_id, p.newer_id) AND t.embedding IS NULL) AS vectorless,
        COALESCE((SELECT array_agg(c.work_type ORDER BY c.work_type) FROM thought_work_claims c
@@ -805,6 +811,7 @@ export type StaleStandingOf = { s: StaleStanding; keys: string[] };
 export function staleStandingOf(row: StaleStandingRow, key: string | null): StaleStandingOf {
   const failed = row.failed_keys ?? [], live = row.live_keys ?? [];
   if (row.vectorless) return { s: "vector", keys: [] };
+  if (row.left) return { s: "decide", keys: [] };
   if (key === null) {
     if (failed.length) return { s: "failed", keys: failed };
     if (live.length) return { s: "pooled", keys: live };
@@ -835,6 +842,7 @@ const keysText = (keys: string[]) => keys.join(", ");
 export function staleStandingText(st: StaleStandingOf, key: string | null, retry = "--retry-failed"): string {
   switch (st.s) {
     case "vector": return "waiting for a vector the reembed pool writes";
+    case "decide": return "waiting for a decide-mode run: its pair holds a settled part that waits, and a judge-mode pass leaves such a pair";
     case "failed": return key === null ? `failed in a pass under ${keysText(st.keys)} — ${retry} with that judge's model` : `failed in this pass — ${retry}`;
     case "pooled": return key === null ? `in a pass's pool under ${keysText(st.keys)}` : "in this pass's pool";
     default: return `waiting for the next run to re-pool it${st.keys.length ? ` (a claim stands under ${keysText(st.keys)}, another judge's pool)` : ""}`;
@@ -847,6 +855,7 @@ export function staleStandingsText(st: StaleStandings, key: string | null, retry
   return [
     part("pooled", key === null ? `in a pass's pool under ${keysText(st.keys.pooled ?? [])}` : "in this pass's pool"),
     part("vector", "waiting for a vector the reembed pool writes"),
+    part("decide", "waiting for a decide-mode run, their pair holding a settled part that waits"),
     part("failed", key === null ? `failed in a pass under ${keysText(st.keys.failed ?? [])} — ${retry} with that judge's model` : `failed in this pass — ${retry}`),
     part("waiting", `waiting for the next run${key !== null && st.keys.waiting?.length ? ` (a claim stands under ${keysText(st.keys.waiting)}, another judge's pool)` : ""}`),
   ].filter(Boolean).join(", ");

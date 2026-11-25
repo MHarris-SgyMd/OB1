@@ -5727,7 +5727,8 @@ egress gate or drew a malformed answer leaves the row stale and the thought
 failed, for `--retry-failed`. `--status` places each stale row against this
 pass's pool — in it, waiting for a vector, failed in this pass, waiting for
 the next run (a claim under another judge's key named beside it; `rebuild.ts
---status` reads the same rows without a key and names the keys) — and counts the pass's
+--status` reads the same rows without a key and names the keys), or, in judge
+mode, waiting for a decide-mode run (below) — and counts the pass's
 rejections apart from a person's; `--list stale` tags each row's standing
 and still offers the reviewer's decision (an accept takes `--force`).
 
@@ -5877,7 +5878,11 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
 A judge-mode pass names no part and removes none. A pair that holds a part
 that waits is a decide-mode pass's to judge, and a judge-mode pass leaves
 it: its judge is not asked about the pair, no proposal is recorded on it,
-and its stale proposal is not settled. Its summary says how many pairs it
+and its stale proposal is not settled. Its pool step does not pool the
+thought again for that proposal, and a dry run counts none for it: pooled,
+the thought had its other pairs asked again at every run, and the pair was
+left once more. `--status` and `--list stale` say such a proposal waits for
+a decide-mode run. Its summary says how many pairs it
 left (`left for a decide-mode run:`), and its `--status` line places the
 parts. It judged such a pair and closed it with a proposal of its own, and
 the decide-mode pass then found the pair closed and removed the part with

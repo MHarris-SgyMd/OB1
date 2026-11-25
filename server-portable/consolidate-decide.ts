@@ -944,6 +944,30 @@ export function partHeldSql(part: string, older: string, newer: string): string 
 }
 
 /**
+ * Whether a part waits: undecided, and no longer a judgement of its texts. Stale, a rebuild's mark, or pending at
+ * other fingerprints than its texts' own as they stand. Over the part `part`, its older thought `older` and its newer
+ * one `newer`, each an alias of the query it is written into. The test of a part whose pair is in hand: the pass's
+ * reads of one thought's parts, and of a stale proposal's pair (pairPartWaitsSql). waitingPartsSql reads the whole
+ * store by it, behind the thoughts' stored fingerprints (movedPartsSql).
+ */
+export function partWaitsSql(part: string, older: string, newer: string): string {
+  return `(${part}.status = 'stale' OR (${part}.status = 'pending'
+          AND (${part}.older_fingerprint <> public.content_fingerprint_of(${older}.content) OR ${part}.newer_fingerprint <> public.content_fingerprint_of(${newer}.content))))`;
+}
+
+/**
+ * Whether the pair of the proposal `proposal` holds a settled part that waits (partWaitsSql), `older` and `newer` the
+ * pair's two thoughts, each an alias of the query it is written into. A judge-mode pass leaves such a pair to a
+ * decide-mode one, and reads its stale proposal by this (review pass 5): not pooled for, and placed as waiting for a
+ * decide-mode run. The pair is one term, a row of two ids: a part on another pair of either thought says nothing of
+ * this one. For a brain that has the parts' store, and a role that reads it: the caller looks first (PARTS_STORE_SQL).
+ */
+export function pairPartWaitsSql(proposal: string, older: string, newer: string): string {
+  return `EXISTS (SELECT 1 FROM public.settled_parts waits
+           WHERE (waits.older_id, waits.newer_id) = (${proposal}.older_id, ${proposal}.newer_id) AND ${partWaitsSql("waits", older, newer)})`;
+}
+
+/**
  * The settled parts that wait: every undecided part that is no longer a judgement of its texts. `stale`, a rebuild's
  * mark, or pending at a text that has moved (movedPartsSql). The pass writes no status of its own to say so (review
  * pass 1: it set such a part stale at each pass's start, under the supersession advisory lock, and three findings
