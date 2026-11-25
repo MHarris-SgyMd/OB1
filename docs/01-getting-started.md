@@ -154,7 +154,7 @@ It prints two things once:
 > [!IMPORTANT]
 > The key cannot be recovered from the hash. If you lose it, mint another one and replace the line. Several keys are separated by commas — mint a `read` one later for anything that only searches, or a client whose URL might end up in a log.
 
-Then mint one more, the MCP server's own **forward key**. The server at `/mcp` hands every tool call to the brain's core with your key beside this one; it can do nothing on its own, and the stack refuses to start without it:
+Then mint one more, the MCP server's own **forward key**. The server at `/mcp` hands every tool call to the brain's core with your key beside this one; it calls no tool on its own, and the stack refuses to start without it:
 
 ```bash
 bun server-portable/keygen.ts --name mcp-forwarder --scope forward

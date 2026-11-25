@@ -330,6 +330,23 @@ export class AgentResolver {
   }
 
   /**
+   * Which of these digests the registry has revoked, read fresh and past the
+   * cache (SMD-4493): the answer for callers who are not calling, which
+   * `resolve` cannot be asked of, since its lookup registers and stamps whom
+   * it is asked of. A digest read as revoked loses what the cache holds for
+   * it, so its key's next request is looked up and refused then, not when the
+   * cached answer runs out. Throws where the registry cannot be read: that is
+   * no answer, and nothing here turns it into one.
+   */
+  async revoked(store: Promise<ThoughtStore>, keyHashes: readonly string[]): Promise<string[]> {
+    const revoked = await (await store).revokedKeys(keyHashes);
+    for (const keyHash of revoked) {
+      for (const key of this.cache.keys()) if (key.startsWith(`${keyHash} `)) this.cache.delete(key);
+    }
+    return revoked;
+  }
+
+  /**
    * The revocations the registry has answered, by digest — a rename keeps the
    * digest, and the revocation with it. Kept apart from the cache and whatever
    * its TTL (0 included), read only when a lookup fails, and cleared by the

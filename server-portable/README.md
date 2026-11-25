@@ -738,7 +738,7 @@ up. `bun api.ts` serves it on `PORT` (default 8000).
 Required in every environment:
 
 ```
-MCP_ACCESS_KEYS              name:scope:sha256 entries, scope read | write | capture | forward (grants nothing; SMD-2284) — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
+MCP_ACCESS_KEYS              name:scope:sha256 entries, scope read | write | capture | forward (no caller's; SMD-2284) — bun keygen.ts mints one (or the legacy MCP_ACCESS_KEY, one raw key, write scope)
 DATABASE_URL                 the brain's postgres:// connection string — the SQL store, the default
 OPENROUTER_API_KEY           embeddings, and metadata extraction unless OB1_CHAT_BASE_URL gives chat its own endpoint — then OB1_CHAT_API_KEY (neither needed for a local endpoint)
 ```
@@ -1903,8 +1903,21 @@ stripped (`X-Forwarded-Prefix`).
   does not take is a 405 naming those it does.
 - **`GET /openapi.json`** is built from the same two sources, so it lists every
   operation with the input its route parses. **`GET /v1/whoami`** names the
-  calling key, its scope, its agent id and the operations it may call, and — forwarded —
-  its `act`.
+  calling key, its scope, its digest, its agent id and the operations it may call, and — forwarded —
+  its `act`. The digest is what the agent registry knows the caller by: a key's
+  SHA-256, or a token's subject's. It is no credential.
+- **`POST /v1/callers/standing`** (SMD-4493) answers, for up to 256 callers each
+  named with the digest `whoami` gave for it, whether each `stands`, is
+  `revoked` in the agent registry, or is `unknown` to the key list (a key
+  caller whose line has gone, or whose key was rotated; never a token caller).
+  It is the forwarder's alone (below), made by hand as `whoami` is, and no
+  operation of the manifest. It reads the registry once and writes nothing: no
+  caller asked of is registered, renamed or stamped. Every pair is answered, or
+  none: a registry that cannot be read is a 503. A digest read as revoked also
+  loses the REST core's cached answer, so its key's next request is refused
+  then, not up to `OB1_AGENT_CACHE_TTL_MS` later. It is what the MCP server
+  will ask of the callers whose listen streams it holds
+  (`docs/mcp-listen-streams.md`); nothing asks it yet.
 - **Authorization** is the key's: `x-brain-key`, `x-access-key` or `Authorization:
   Bearer` — never `?key=`, which only URL-only MCP connectors need. No key or a
   wrong one is a 401 `UNAUTHORIZED`, a revoked one a 401 `REVOKED`, a busy registry
@@ -1925,7 +1938,7 @@ stripped (`X-Forwarded-Prefix`).
   `credential: "token"`. Elsewhere a token is an unknown key.
 - **Forwarded** (SMD-2284, the ADR's decision 7): beside a caller's key, the
   `x-brain-forwarder` header carries the key of whoever forwarded it — the MCP
-  server's, a `forward`-scope key that grants nothing (`keygen.ts --scope
+  server's, a `forward`-scope key, which is no caller's (`keygen.ts --scope
   forward`). The caller's key still decides everything; the forwarder is
   recorded as `act` (`{name, agentId}`) — on every thought write's audit row
   (`thought_audit.actor_context.act`) and in `whoami`; the action log, jobs and
@@ -1937,6 +1950,9 @@ stripped (`X-Forwarded-Prefix`).
   request it carries is answered its refusals and its captures whole (SMD-2287), the
   words the MCP server says them in, which the caller's key alone is not told over
   REST: a forwarder key is the MCP server's alone, never an integration's.
+  Alone in that header, with no caller's key, it reaches the one route above
+  (SMD-4493), where a caller's key is refused 403: so a holder of a forwarder
+  key can ask of any digest whether its key is revoked or still listed.
   The public `/api` route deletes the header, so it is read only inside the
   stack (`rest-client/` sends it, and nothing in the stack does until the MCP
   server forwards, SMD-2287). Mint a forwarder under a name never used before —

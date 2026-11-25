@@ -922,11 +922,31 @@ export interface paths {
         };
         /**
          * Who is calling
-         * @description The key's name, its scope, its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).
+         * @description The key's name, its scope, its `digest` (what the agent registry knows the caller by: the key's SHA-256, or a token's subject's; it is no credential), its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).
          */
         get: operations["whoami"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/callers/standing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Whether callers still stand
+         * @description For each caller, by its name and the `digest` whoami gave for it: `revoked` where the agent registry has revoked the digest; `unknown` where a key caller's digest is no longer in the key list (its line gone, or the key rotated), which is never said of a token caller (`oauth:…`); and `stands` otherwise, a renamed caller, one whose scope changed and one the registry has no row for among them. A read: it registers no one and writes nothing. Every pair is answered or none is. Asked with a forward-scope key in x-brain-forwarder and no caller's credential: the MCP server's question of the callers whose listen streams it holds (SMD-4493).
+         */
+        post: operations["callers_standing"];
         delete?: never;
         options?: never;
         head?: never;
@@ -7053,6 +7073,107 @@ export interface operations {
                 };
             };
             /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+        };
+    };
+    callers_standing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    callers: {
+                        name: string;
+                        digest: string;
+                    }[];
+                };
+            };
+        };
+        responses: {
+            /** @description Each caller asked of, in the order asked, with its standing. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        callers: {
+                            name: string;
+                            digest: string;
+                            /** @enum {string} */
+                            standing: "stands" | "revoked" | "unknown";
+                        }[];
+                    };
+                };
+            };
+            /** @description The body is not JSON, or does not fit the schema (REFUSED_INPUT). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The forwarder slot is empty or holds something other than a forward-scope key (UNAUTHORIZED), or a revoked one (REVOKED); each with `credential: "forwarder"`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A caller's credential was presented (FORBIDDEN, `needs: "forward"`): no caller's scope reaches this route. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The body is larger than 256 pairs can be (REFUSED_INPUT). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A fault (FAILED, with its message; no retryable until SMD-2461). */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Retry, after Retry-After: the agent registry is busy on the forwarder's own lookup (BUSY, `credential: "forwarder"`), or could not be read (STORE_UNAVAILABLE). Neither is an answer for any caller. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */

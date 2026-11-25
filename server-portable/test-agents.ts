@@ -743,6 +743,48 @@ console.log("\n[16] A lookup that times out on a lock, or fails to serialize, is
   }
 }
 
+console.log("\n[17] The registry's revocations read fresh, for callers who are not calling (SMD-4493): the store's read passed on, and a digest read as revoked loses its cached answer");
+{
+  let lookups = 0;
+  const gone = new Set<string>();
+  const asked: string[][] = [];
+  const store = Promise.resolve({
+    resolveAgent: async (): Promise<AgentResolution> => { lookups++; return { ok: true, agentId: "agent-7", label: "k7", created: false, rotated: false, labelConflict: false }; },
+    revokedKeys: async (hashes: readonly string[]) => { asked.push([...hashes]); return hashes.filter((h) => gone.has(h)); },
+  } as unknown as ThoughtStore);
+  const r = new AgentResolver(60_000, () => 0);
+  const k7 = principal("k7", H("7")), k8 = principal("k8", H("8")), k7b = principal("k7-renamed", H("7"));
+  await r.resolve(store, k7);
+  await r.resolve(store, k8);
+  await r.resolve(store, k7);
+  assert(lookups === 2, `two keys looked up once each, the third answer the cache's (${lookups})`);
+  let got = await r.revoked(store, [H("7"), H("8")]);
+  assert(got.length === 0 && asked.length === 1 && JSON.stringify(asked[0]) === JSON.stringify([H("7"), H("8")]) && lookups === 2, `none revoked: none said, the store read once with the digests it was given, and no lookup made by the read (${got.length}, ${asked.length}, ${lookups})`);
+  await r.resolve(store, k7);
+  assert(lookups === 2, `…and the cache answers still (${lookups})`);
+  gone.add(H("7"));
+  got = await r.revoked(store, [H("7"), H("8")]);
+  assert(JSON.stringify(got) === JSON.stringify([H("7")]), `a digest the registry has revoked is said, and no other (${got.length})`);
+  await r.resolve(store, k8);
+  assert(lookups === 2, `…the other key's cached answer is kept (${lookups})`);
+  await r.resolve(store, k7);
+  assert(lookups === 3, `…and the revoked digest's is dropped: its key's next request is looked up, not answered from the cache (${lookups})`);
+  await r.resolve(store, k7b);
+  await r.revoked(store, [H("7")]);
+  await r.resolve(store, k7);
+  await r.resolve(store, k7b);
+  assert(lookups === 6, `…under every name the digest was cached by (${lookups})`);
+  const locked = Promise.resolve({ revokedKeys: async () => { throw Object.assign(new Error("canceling statement due to lock timeout"), { errno: "55P03" }); } } as unknown as ThoughtStore);
+  let threw = "";
+  try {
+    await r.revoked(locked, [H("8")]);
+  } catch (e) {
+    threw = String((e as Error).message);
+  }
+  await r.resolve(store, k8);
+  assert(threw.includes("lock timeout") && lookups === 6, `a registry that cannot be read throws, no answer made of it, and nothing cached is dropped for it (${threw}; ${lookups})`);
+}
+
 await sql.close();
 server.stop();
 provider.stop();

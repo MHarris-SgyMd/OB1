@@ -16,7 +16,7 @@ export type { operations, paths };
 /** Where the REST core answers on the stack's mesh: its clients' OB1_REST_URL unless they set one — the MCP server's and the operator GUI's (SMD-2280). */
 export const DEFAULT_REST_URL = "http://api.ob1.internal.:8000";
 
-/** The header the REST core reads a carrier's forward-scope key from (SMD-2284): who carried the request, granting nothing. */
+/** The header the REST core reads a carrier's forward-scope key from (SMD-2284): who carried the request, granting it nothing. */
 export const FORWARDER_HEADER = "x-brain-forwarder";
 
 export interface RestClientOptions {

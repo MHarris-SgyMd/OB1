@@ -9,7 +9,7 @@
 
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { authenticate, canRead, CLIENT_SCOPES, queryOf, type AuthConfig, type Principal } from "../auth.ts";
+import { authenticate, canRead, CLIENT_SCOPES, hashKey, parseKeyRecords, queryOf, type AuthConfig, type Principal } from "../auth.ts";
 import type { AgentOutcome } from "../agents.ts";
 import { HEALTH_DEADLINE_MS, SPECS, type Core } from "../core/index.ts";
 import { failure, refusalValue, type Refusal } from "../core/refusal.ts";
@@ -42,6 +42,11 @@ export interface RestDeps {
   tokens?(): TokenCheck | null;
   /** The agent registry's answer for a key: its stable id, a revocation, or busy (agents.ts). */
   resolve(principal: Principal): Promise<AgentOutcome>;
+  /**
+   * Which of these key digests the agent registry has revoked, read fresh and nothing written (agents.ts's `revoked`,
+   * SMD-4493); a throw is a registry that could not be read. Absent, the route that asks it answers that it cannot.
+   */
+  revoked?(keyHashes: readonly string[]): Promise<string[]>;
   /** Wraps a detached run (a job), so the stop waits for it. */
   track: CallOptions["track"];
   /** Where the one line per request goes (telemetry.ts's requestLine); telemetry.ts's request log unless a suite listens. */
@@ -56,6 +61,25 @@ export interface RestDeps {
    * holds no free text (telemetry.ts); that line still says the 500 and FAILED.
    */
   faultLog?: (line: string) => void;
+}
+
+/** The most callers one question of their standing may name (SMD-4493): the MCP server's own bound on the streams it holds. */
+export const STANDING_CALLERS_MAX = 256;
+/** The most that question's body may be, past which it is refused (413) unread: 256 pairs, a name of 200 characters at four bytes each. */
+const STANDING_BODY_LIMIT = 256 * 1024;
+/** The question: each caller by its name and the digest `whoami` gave for it. */
+const STANDING_INPUT = z.object({
+  callers: z.array(z.object({ name: z.string().min(1).max(200), digest: z.string().regex(/^[0-9a-f]{64}$/, "not 64 lower-case hex digits") }).strict()).max(STANDING_CALLERS_MAX),
+}).strict();
+
+/**
+ * The digests of the keys a caller may present, as the key list holds them now: each listed key of a caller's scope,
+ * and the old single key's. A forwarder's key is no caller's.
+ */
+function callerDigests(cfg: AuthConfig): Set<string> {
+  const digests = new Set(cfg.MCP_ACCESS_KEYS ? parseKeyRecords(cfg.MCP_ACCESS_KEYS).keys.filter((k) => CLIENT_SCOPES.includes(k.scope)).map((k) => k.sha256) : []);
+  if (cfg.MCP_ACCESS_KEY) digests.add(hashKey(cfg.MCP_ACCESS_KEY));
+  return digests;
 }
 
 /** The most a webhook delivery's body may be: 1 MiB, past which it is refused (413) before a handler reads it. */
@@ -131,7 +155,7 @@ export function headerKeys(req: Request): string[] {
  * The forwarder slot (SMD-2284, the ADR's decision 7): when the MCP server
  * forwards a client's key, it sends its own key here, and the REST core records
  * it as who carried the request (`act`). Only a forward-scope key is taken — a
- * key that grants nothing (auth.ts) — so a client holding two keys cannot stamp
+ * key that is no caller's (auth.ts) — so a client holding two keys cannot stamp
  * one as the other's carrier. Its own header, apart from the caller's three, so
  * a forwarder is never read as a caller and a caller's key never as a forwarder.
  */
@@ -208,7 +232,7 @@ const issuesOf = (error: z.ZodError) => error.issues.map((i) => ({ path: i.path.
  */
 const ROUTE_METHODS: [RegExp, Method | "GET"][] = [
   ...Object.values(ROUTES).map((r) => [new RegExp(`^${r.path.replace(/\{[a-z_]+\}/g, "[^/]+")}$`), r.method] as [RegExp, Method]),
-  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/plugins$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
+  [/^\/v1\/whoami$/, "GET"], [/^\/v1\/callers\/standing$/, "POST"], [/^\/v1\/plugins$/, "GET"], [/^\/v1\/jobs\/[^/]+\/stream$/, "GET"], [/^\/health$/, "GET"], [/^\/openapi\.json$/, "GET"],
 ];
 const allowedOn = (path: string, plugins: readonly [RegExp, Method][]): string[] => {
   const methods = new Set<string>([...ROUTE_METHODS, ...plugins].filter(([re]) => re.test(path)).map(([, m]) => m));
@@ -507,7 +531,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     });
   });
 
-  // Who is calling: the key's name, its scope, its stable agent id, the
+  // Who is calling: the key's name, its scope, its digest (what the agent
+  // registry knows the caller by: the key's SHA-256, or a token's subject's;
+  // no credential, and what the MCP server keeps with a listen stream to ask
+  // of its caller's standing, SMD-4493), its stable agent id, the
   // operations it may call, and — forwarded — who carried it (`act`): what the
   // MCP server's tools/list and the GUI's sign-in read once SMD-2287 and
   // SMD-2280 are clients.
@@ -516,7 +543,64 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     if (named) named.route = c.req.routePath;
     const p = await caller(c);
     if (p instanceof Response) return p;
-    return c.json({ name: p.name, scope: p.scope, ...(p.agentId ? { agentId: p.agentId } : {}), operations: [...visibleToolNames(p), ...pluginRoutes().filter((r) => unlocks(p, r.op.scope)).map((r) => r.op.tool)].sort(), ...(p.act ? { act: p.act } : {}) });
+    return c.json({ name: p.name, scope: p.scope, digest: p.keyHash, ...(p.agentId ? { agentId: p.agentId } : {}), operations: [...visibleToolNames(p), ...pluginRoutes().filter((r) => unlocks(p, r.op.scope)).map((r) => r.op.tool)].sort(), ...(p.act ? { act: p.act } : {}) });
+  });
+
+  // Whether callers still stand (SMD-4493, docs/mcp-listen-streams.md): the
+  // MCP server's question of the callers whose listen streams it holds, each
+  // by its name and the digest whoami gave. Made by hand, as whoami is, and no
+  // operation of the manifest. It is asked under the forwarder's own key, in
+  // the forwarder's slot, with no caller's credential beside it: so no
+  // caller's scope reaches it, and where the REST core is published the proxy,
+  // which deletes that header, leaves it unreachable. It registers no one and
+  // writes nothing.
+  //   revoked  the registry has revoked the digest
+  //   unknown  a key caller's digest that the key list no longer holds: its
+  //            line gone, or the key rotated. Never said of a token caller
+  //            (`oauth:…`), which is in no key list
+  //   stands   every other: a renamed caller, one whose scope changed, and one
+  //            the registry has no row for among them
+  // Every pair is answered, or none: a registry that cannot be read is a 503,
+  // which is no answer, and the asker ends nothing on it.
+  app.post("/v1/callers/standing", async (c) => {
+    const named = traceOf(c.req.raw);
+    if (named) named.route = c.req.routePath;
+    // A caller's key here, forwarded or not, is refused by its scope: none reaches this route.
+    if (headerKeys(c.req.raw).length > 0) return refuse(c, 403, { code: "FORBIDDEN", needs: "forward" });
+    const keys = deps.keys();
+    const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
+    const checked = c.get("carrier");
+    const carrier = forwarded === null ? null : checked !== undefined ? checked : authenticate(forwarded, keys, { admit: ["forward"] });
+    if (!carrier) return refuse(c, 401, { code: "UNAUTHORIZED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
+    // The line names the forwarder, whose request this is.
+    if (named) named.agent = carrier.name;
+    const carried = await deps.resolve(carrier);
+    if (carried.status === "revoked") return refuse(c, 401, { code: "REVOKED", credential: "forwarder" }, { "WWW-Authenticate": "Bearer" });
+    if (carried.status === "busy") return refuse(c, 503, { code: "BUSY", retryable: true, credential: "forwarder" }, RETRY_AFTER);
+    const raw = await boundedBody(c.req.raw, STANDING_BODY_LIMIT);
+    if (raw === null) return answerError(c, { code: "REFUSED_INPUT", retryable: false }, 413);
+    let body: unknown;
+    try {
+      body = JSON.parse(new TextDecoder().decode(raw));
+    } catch {
+      return refuse(c, 400, { code: "REFUSED_INPUT", issues: [{ path: "", message: "the body is not JSON" }] });
+    }
+    const parsed = STANDING_INPUT.safeParse(body);
+    if (!parsed.success) return refuse(c, 400, { code: "REFUSED_INPUT", issues: issuesOf(parsed.error) });
+    const { callers } = parsed.data;
+    let revoked: Set<string>;
+    try {
+      if (!deps.revoked) throw new Error("this REST core was given no read of the agent registry");
+      revoked = new Set(callers.length > 0 ? await deps.revoked([...new Set(callers.map((p) => p.digest))]) : []);
+    } catch (err) {
+      // No answer: the registry could not be read, whatever the cause, and the asker keeps what it holds.
+      named?.fault(err);
+      return refuse(c, 503, { code: "STORE_UNAVAILABLE", retryable: true }, RETRY_AFTER);
+    }
+    const listed = callerDigests(keys);
+    return c.json({
+      callers: callers.map(({ name, digest }) => ({ name, digest, standing: revoked.has(digest) ? "revoked" : name.startsWith("oauth:") || listed.has(digest) ? "stands" : "unknown" })),
+    });
   });
 
   // A job's event stream (SMD-2273): its progress and its end as SSE, kept

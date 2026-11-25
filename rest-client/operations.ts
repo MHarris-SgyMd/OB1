@@ -5,6 +5,7 @@ export const OPERATIONS = {
   agenda: { method: "GET", path: "/v1/agenda" },
   append_thought_evidence: { method: "POST", path: "/v1/thoughts/{id}/evidence" },
   brain_info: { method: "GET", path: "/v1/brain" },
+  callers_standing: { method: "POST", path: "/v1/callers/standing" },
   capture_deliverable: { method: "POST", path: "/v1/deliverables" },
   capture_thought: { method: "POST", path: "/v1/thoughts" },
   claim_work: { method: "POST", path: "/v1/claims" },

@@ -1279,7 +1279,9 @@ a stack with the `auth` profile also carries the authorization server's tokens:
 "Tokens at the REST core", SMD-2286), never from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
 on `/mcp`. The proxy deletes `x-brain-forwarder` on the way in: a request's
 carrier (SMD-2284) is named only from inside the stack, where the MCP server
-names itself when it forwards a key (SMD-2287's `mcp-server/`). Its writes record their door as
+names itself when it forwards a key (SMD-2287's `mcp-server/`). The one route a
+forwarder's key reaches alone, `POST /v1/callers/standing` (SMD-4493), reads
+that header, so it is not reached through `/api`. Its writes record their door as
 `open-brain-api`
 (`thought_audit.origin`), the MCP server's at `/mcp` among them, carried by it,
 and the jobs it

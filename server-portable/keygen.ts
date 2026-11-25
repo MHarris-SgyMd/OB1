@@ -9,7 +9,7 @@
  *   bun keygen.ts --name laptop  --scope write
  *   bun keygen.ts --name chatgpt --scope read
  *   bun keygen.ts --name session-hook --scope capture   # may add a thought, and state a priority on its own (SMD-1298, SMD-3664)
- *   bun keygen.ts --name mcp-forwarder --scope forward  # grants nothing; names who forwarded a client's key (SMD-2284)
+ *   bun keygen.ts --name mcp-forwarder --scope forward  # no caller's; names who forwarded a client's key (SMD-2284)
  */
 
 import { randomBytes } from "node:crypto";
@@ -49,7 +49,7 @@ if (minted === "read") {
   console.log(`  hook or a pipeline that adds thoughts from a machine you do not sit at: a leak`);
   console.log(`  of this key can add, rank and track what it added, not read.\n`);
 } else if (minted === "forward") {
-  console.log(`  Forward: this key grants nothing by itself — every server refuses it as a`);
+  console.log(`  Forward: this key calls no operation — every server refuses it as a`);
   console.log(`  caller. It is for the MCP server's own use when it forwards a client's key to`);
   console.log(`  the REST core, in the x-brain-forwarder header: the client's key decides what`);
   console.log(`  the request may do, this one names who carried it (act). Never a client's:`);

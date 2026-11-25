@@ -1111,6 +1111,62 @@ console.log("\n[6c] The authorization server's token through REST (SMD-2286, SMD
   tokenApi.stop(true);
 }
 
+console.log("\n[6d] Whether callers still stand, against the real registry (SMD-4493): one read that writes nothing — a revoked key, a key in no line, a token caller revoked and not, a caller the registry has never seen — and no answer while the registry's table is held");
+{
+  const ask = async (callers: unknown, carrier: string | null = KEYS.forwarder, key = ""): Promise<Answer> => {
+    const r = await fetch(`${API}/v1/callers/standing`, { method: "POST", headers: { ...(key ? { "x-brain-key": key } : {}), ...(carrier ? { "x-brain-forwarder": carrier } : {}), "content-type": "application/json" }, body: JSON.stringify({ callers }) });
+    return { status: r.status, body: await r.json() as Record<string, unknown>, headers: r.headers };
+  };
+  const standings = (a: Answer) => ((a.body.callers ?? []) as { standing: string }[]).map((c) => c.standing);
+  const who = await rest("GET", "/v1/whoami", undefined, KEYS.reader);
+  assert(who.status === 200 && who.body.digest === hashKey(KEYS.reader), `whoami gives the caller's digest, its key's SHA-256 (${String(who.body.digest).slice(0, 12)}…)`);
+  // A token caller's row, as the REST core registers one, and then revoked; another never registered.
+  const tokenGone = hashKey("[6d] a token caller the registry revoked"), tokenNew = hashKey("[6d] a token caller never seen");
+  await sql`SELECT resolve_agent(${tokenGone}::text, ${"oauth:standing+suite"}::text, NULL::text)`;
+  await sql`SELECT revoke_agent_key(${tokenGone}, ${"rest suite [6d]"})`;
+  const registry = async () => JSON.stringify(await sql`SELECT (SELECT count(*)::int FROM ob1_agents) AS agents, (SELECT count(*)::int FROM ob1_agent_keys) AS keys, (SELECT max(last_used_at)::text FROM ob1_agent_keys WHERE key_hash <> ${hashKey(KEYS.forwarder)}) AS used, (SELECT max(updated_at)::text FROM ob1_agents) AS updated`);
+  const before = await registry();
+  const asked = [
+    { name: "reader", digest: hashKey(KEYS.reader) },
+    { name: "reader-as-it-was-named", digest: hashKey(KEYS.reader) },
+    { name: "gone", digest: hashKey(KEYS.gone) },
+    { name: "reader", digest: hashKey("reader-raw, before it was rotated") },
+    { name: "fresh", digest: hashKey(KEYS.fresh) },
+    { name: "MCP_ACCESS_KEY", digest: hashKey("legacy-raw") },
+    { name: "oauth:standing+suite", digest: tokenGone },
+    { name: "oauth:never-seen+suite", digest: tokenNew },
+    { name: "mcp-forwarder", digest: hashKey(KEYS.forwarder) },
+  ];
+  const answered = await ask(asked);
+  assert(answered.status === 200 && same(standings(answered), ["stands", "stands", "revoked", "unknown", "stands", "stands", "revoked", "stands", "unknown"]),
+    `a listed key stands, under an older name too; a revoked key is revoked; a rotated key's old digest is unknown; a listed key the registry has never seen stands; the old single key stands; a revoked token caller is revoked; a token caller the registry has never seen stands; a forwarder's digest is no caller's (${answered.status} ${JSON.stringify(standings(answered))})`);
+  const [fresh] = await sql`SELECT count(*)::int AS c FROM ob1_agent_keys WHERE key_hash IN (${hashKey(KEYS.fresh)}, ${tokenNew})`;
+  assert((await registry()) === before && Number(fresh.c) === 0, "…and the registry is as it was: no caller asked of registered, renamed or stamped");
+  const refused = await ask(asked, KEYS.forwarder, KEYS.writer);
+  assert(refused.status === 403 && refused.body.code === "FORBIDDEN" && refused.body.needs === "forward", `a write key, forwarded or not, does not reach it (${refused.status} ${JSON.stringify(refused.body)})`);
+  const alone = await ask(asked, null);
+  assert(alone.status === 401 && alone.body.credential === "forwarder", `no forwarder slot → 401, credential forwarder (${alone.status} ${JSON.stringify(alone.body)})`);
+  // The store's read under a held table: ended at its cap, a throw and no answer; and the route, the same, a 503.
+  const store = await db();
+  let threw = "", waited = 0, held: Answer | undefined;
+  await sql.begin(async (tx) => {
+    await tx`LOCK TABLE ob1_agent_keys IN ACCESS EXCLUSIVE MODE`;
+    const t0 = performance.now();
+    try {
+      await store.revokedKeys([hashKey(KEYS.gone)]);
+    } catch (e) {
+      threw = String((e as { errno?: unknown }).errno ?? (e as Error).message);
+    }
+    waited = performance.now() - t0;
+    held = await ask(asked);
+  });
+  assert(threw === "55P03" && waited < 2000, `the read of a held table ends at its lock cap, 55P03, and holds no connection for the lock (${threw}, ${Math.round(waited)} ms)`);
+  assert(held?.status === 503 && !("callers" in (held?.body ?? {})) && held?.headers.get("retry-after") !== null, `…and the route answers 503 with a Retry-After, for no caller (${held?.status} ${JSON.stringify(held?.body)})`);
+  const again = await ask(asked);
+  assert(again.status === 200 && same(standings(again), standings(answered)), `…and the same as before once the table is free (${again.status})`);
+  assert(same(await store.revokedKeys([]), []) && same((await store.revokedKeys([hashKey(KEYS.reader), hashKey(KEYS.gone), tokenGone, tokenNew])).sort(), [hashKey(KEYS.gone), tokenGone].sort()), "the store's read: none of none, and of four the two revoked");
+}
+
 console.log("\n[7] The OpenAPI document and the internal liveness answer with no key");
 {
   const doc = await fetch(`${API}/openapi.json`);
