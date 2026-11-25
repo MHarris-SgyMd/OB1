@@ -100,16 +100,17 @@ RETURNS text
 LANGUAGE sql
 IMMUTABLE
 AS $$
-  SELECT CASE WHEN count(DISTINCT s.k) = 1 THEN min(s.k) END
+  -- Every link of the number counts, a repository no key can name among them (review pass 2): two repositories
+  -- leave it to the setting's, and one that is no key gives nothing.
+  SELECT CASE WHEN count(DISTINCT s.k) = 1 AND subject_key_valid(min(s.k)) THEN min(s.k) END
     FROM (SELECT 'pr:' || lower(m[1]) || '/' || lower(m[2]) || '#' || substring(p_key FROM 4) AS k
             FROM regexp_matches(COALESCE(p_text, ''),
                    '(?:^|[^A-Za-z0-9.-])(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/0*([0-9]{1,9})(?![0-9])',
                    'gi') AS m
            WHERE p_key ~ '^pr:[0-9]{1,9}$' AND m[3]::bigint = substring(p_key FROM 4)::bigint) AS s
-   WHERE subject_key_valid(s.k)
 $$;
 COMMENT ON FUNCTION ob1_subject_linked_key(text, text) IS
-  'For a bare pr:<n> subject key, the key scoped to the repository a GitHub pull-request link in the text names for the same number (github.com/<owner>/<repo>/pull/<n>, www. or not, any case, leading zeros), owner and repository lowercased (ob1:subject-key-links); NULL when no link names the number, when links name it under two repositories, when the scoped key would be no key (subject_key_valid), and for any other key or a NULL text. IMMUTABLE. set_subject_repo''s mapping and record_thought_subjects read a bare key''s repository from it before the setting''s. Migration 154 / SMD-3887.';
+  'For a bare pr:<n> subject key, the key scoped to the repository a GitHub pull-request link in the text names for the same number (github.com/<owner>/<repo>/pull/<n>, www. or not, any case, leading zeros), owner and repository lowercased (ob1:subject-key-links); NULL when no link names the number, when links name it under two repositories (a repository no key can name counted among them), when the one it names would make no key (subject_key_valid), and for any other key or a NULL text. IMMUTABLE. set_subject_repo''s mapping and record_thought_subjects read a bare key''s repository from it before the setting''s. Migration 154 / SMD-3887.';
 
 -- ---------------------------------------------------------------------------
 -- 2. set_subject_repo — 153's setter, its keys scoped by their links first
@@ -427,7 +428,7 @@ BEGIN
   -- thought locked FOR KEY SHARE before its facet rows. A thought gone
   -- answers none.
   PERFORM pg_advisory_xact_lock(hashtextextended('ob1:subject:' || p_thought::text, 0));
-  SELECT COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)), ob1_filed_ticket(t.metadata), t.content INTO v_fp, v_filed, v_text  -- 154: its text, for its links
+  SELECT COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)), ob1_filed_ticket(t.metadata) INTO v_fp, v_filed
     FROM thoughts t WHERE t.id = p_thought FOR KEY SHARE;
   IF NOT FOUND THEN
     RETURN jsonb_build_object('ok', true, 'action', 'none', 'gone', true);
@@ -451,6 +452,11 @@ BEGIN
     -- Read here, past the key checks and the gone and stale answers, so a stored setting the refusal names raises only
     -- where a key is scoped (review pass 5).
     v_repo := ob1_subject_repo();
+    -- 154: the thought's text, for its links, read only where a key is scoped by one: a ticket's set, a close and a
+    -- brain with no repository set leave it unread (review pass 2). Under the thought's lock, taken above.
+    IF v_repo IS NOT NULL THEN
+      SELECT t.content INTO v_text FROM thoughts t WHERE t.id = p_thought;
+    END IF;
     SELECT COALESCE(array_agg(DISTINCT s ORDER BY s), '{}') INTO v_keys
       FROM (SELECT CASE WHEN NOT (k ~ '^pr:[0-9]{1,9}$' OR k ~ '^version:v[0-9]+(\.[0-9]+){1,3}$') THEN k
                         ELSE COALESCE(

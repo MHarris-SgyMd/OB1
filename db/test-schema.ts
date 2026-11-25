@@ -24117,14 +24117,15 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const c2 = await census();
     assert(c1.s === c2.s && c1.e === c2.e && (await functionsNamed("subject_key_valid")) === 1 && (await functionsNamed("set_subject_repo")) === 1 && (await repoNow()) === null,
       `a re-apply is a no-op: the subjects and edges stand, one of each function, no repository (${JSON.stringify(c1)} → ${JSON.stringify(c2)})`);
-    // 153 re-applied put its setter and door back; the shipped ones are 154's, which scope a bare pr: key by its link ([139]).
-    await restoreShipped("set_subject_repo", "record_thought_subjects");
   } catch (e) {
     assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
   } finally {
     // No repository is left standing for a later suite on this database: a clear by the operator, as the table takes no DELETE.
     await db.query(`SELECT set_subject_repo(NULL, $1::jsonb)`, [JSON.stringify({ name: "[138] op", agent_id: (await q<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = '[138] op'`))[0]?.id ?? null })]).catch(() => undefined);
     await db.exec(`DELETE FROM thoughts WHERE content LIKE '[138]%'`);
+    // 153 re-applied put its setter and door back; the shipped ones are 154's, which scope a bare pr: key by its link
+    // ([139]). In the finally, so a failure above leaves [139] 154's own (review pass 2).
+    await restoreShipped("set_subject_repo", "record_thought_subjects");
   }
   assert((await one<{ c: number }>(`SELECT count(*)::int AS c FROM subject_repo_settings WHERE ended_at IS NULL`)).c === 0, "the section leaves no repository standing");
 }
@@ -24160,6 +24161,7 @@ console.log("\n[139] Migration 154: a pr: subject key takes the repository its G
       ["github.com/o/r/pull/123", "pr:12", null],
       ["github.com/a/x/pull/12 and github.com/b/y/pull/12", "pr:12", null],
       ["github.com/a/x/pull/12 and https://github.com/A/X/pull/12#issuecomment-1", "pr:12", "pr:a/x#12"],
+      ["github.com/a/x/pull/12 and github.com/o/../pull/12", "pr:12", null],
       ["gitlab.com/o/r/pull/12", "pr:12", null],
       ["notgithub.com/o/r/pull/12", "pr:12", null],
       ["github.com/o/../pull/12", "pr:12", null],

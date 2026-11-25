@@ -3668,30 +3668,37 @@ else {
       }
       assert(/✓  subject repository\s+none set: pr: and version: keys stay unscoped; the server's role reads the setting/.test(missingBoth.out)
              && /!  subject repository\s+the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key and a thread read by one fault/.test(repoUnread.out)
-             && /✓  subject repository\s+o\/pf: a bare pr: or version: key is scoped to it, or to the repository its GitHub link names/.test(repoSet.out)
+             && /✓  subject repository\s+o\/pf: a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one/.test(repoSet.out)
              && /!  subject repository\s+o\/pf is set but migration 154 is not applied: a key its GitHub link names for another repository is scoped to o\/pf/.test(repoNoLinks.out)
              && /!  subject repository\s+the stored repository "Bad" is refused \(a repository is lowercase.*: no bare pr: or version: key can be written/.test(repoRefused.out)
              && (await claims`SELECT ob1_subject_repo() AS r`)[0].r === null,
              `…and the subject repository row: none set, ok; the role unable to read it, a warning; set, ok; set without 154, a warning; a stored value the refusal names, a warning; the test's setting cleared after (${[missingBoth, repoUnread, repoSet, repoNoLinks, repoRefused].map((r) => repoLine(r.out)).join(" | ").slice(0, 600)})`);
       // …and the schema half there (review pass 1): the table without its reader, a failure; 154 recorded without its link
       // rule, a failure whether or not a repository is set (a ledger planted as the validity rows above plant one).
-      let repoNoFn: { out: string }, repoNo154: { out: string };
+      let repoNoFn: { out: string }, repoNo154: { out: string }, repoNo154Unread: { out: string };
       await claims.unsafe("ALTER FUNCTION subject_repo_setting() RENAME TO subject_repo_setting_away_pf");
       try { repoNoFn = await run({ ...SQL_ENV, DATABASE_URL: LIVE }); } finally { await claims.unsafe("ALTER FUNCTION subject_repo_setting_away_pf() RENAME TO subject_repo_setting"); }
       const plantedLedger154 = (await claims`SELECT to_regclass('schema_migrations') IS NULL AS absent`)[0].absent as boolean;
       if (plantedLedger154) await claims.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
       const added154 = (await claims.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('154_subject_key_links.sql', 'test') ON CONFLICT DO NOTHING RETURNING name`)).length > 0;
+      // …and to a role that cannot read the ledger, a warning (review pass 2): a planted ledger is the owner's alone; a
+      // kept one, the role's own SELECT held back.
+      const roleReads154 = !plantedLedger154 && Boolean((await claims`SELECT has_table_privilege('ob1_pf_capture', 'schema_migrations', 'SELECT') AS r`)[0].r);
       await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key(text, text) RENAME TO ob1_subject_linked_key_away_pf");
       try {
         repoNo154 = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
+        if (roleReads154) await claims.unsafe("REVOKE SELECT ON schema_migrations FROM ob1_pf_capture");
+        repoNo154Unread = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
       } finally {
         await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key_away_pf(text, text) RENAME TO ob1_subject_linked_key");
+        if (roleReads154) await claims.unsafe("GRANT SELECT ON schema_migrations TO ob1_pf_capture");
         if (plantedLedger154) await claims.unsafe(`DROP TABLE schema_migrations`);
         else if (added154) await claims.unsafe(`DELETE FROM schema_migrations WHERE name = '154_subject_key_links.sql' AND sha256 = 'test'`);
       }
       assert(/✗  subject repository\s+migration 153's subject_repo_setting\(\) missing beside its table/.test(repoNoFn.out)
-             && /✗  subject repository\s+migration 154's ob1_subject_linked_key\(text, text\) missing though the ledger records 154/.test(repoNo154.out),
-             `…and the table without its reader, and 154 recorded without its link rule, each a failure (${repoLine(repoNoFn.out).slice(0, 120)} | ${repoLine(repoNo154.out).slice(0, 120)})`);
+             && /✗  subject repository\s+migration 154's ob1_subject_linked_key\(text, text\) missing though the ledger records 154/.test(repoNo154.out)
+             && /!  subject repository\s+ob1_subject_linked_key\(text, text\) missing, and .*so whether migration 154 is recorded is unknown/.test(repoNo154Unread.out),
+             `…and the table without its reader, and 154 recorded without its link rule, each a failure, the latter a warning to a role that cannot read the ledger (${repoLine(repoNoFn.out).slice(0, 120)} | ${repoLine(repoNo154.out).slice(0, 120)} | ${repoLine(repoNo154Unread.out).slice(0, 120)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });

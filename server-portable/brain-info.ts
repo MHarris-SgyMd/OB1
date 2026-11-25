@@ -2702,7 +2702,7 @@ export function subjectRepoLine(db: Pick<DatabaseSummary, "subjectRepo" | "unrea
   const when = `set ${r.setAt ?? "?"}${r.setBy ? ` by ${cut(JSON.stringify(r.setBy).slice(1, -1), 80)}` : ""}`;
   const repo = cut(JSON.stringify(r.repo).slice(1, -1), 160);
   return r.refused === null
-    ? `${repo} (${when}): a bare pr: or version: key is scoped to it, or to the repository its GitHub link names`
+    ? `${repo} (${when}): a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one`
     : `${repo}, REFUSED, so no bare pr: or version: key can be written (${when}): ${cut(r.refused, 300)}. An operator key sets it again, or clears it, through set_subject_repo`;
 }
 

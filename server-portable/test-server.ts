@@ -9340,7 +9340,7 @@ console.log("\n[36j] The operator's subject-key repository in brain_info (SMD-38
   const long = subjectRepoLine({ subjectRepo: subjectRepoValue({ repo: "o/r", source: "operator", set_at: "2026-11-24T10:00:00+00:00", set_by: "k".repeat(200), refused: "r".repeat(1000) }), unread: {} });
   assert(lines[0] === "none — migration 153 is not applied, so pr: and version: keys stay unscoped" && /^\? \(subject_repo_settings /.test(lines[1])
       && lines[2] === "none: pr: and version: keys stay unscoped"
-      && lines[3] === "mharris-sgymd/ob1 (set 2026-11-24T10:00:00.500Z by op-key): a bare pr: or version: key is scoped to it, or to the repository its GitHub link names"
+      && lines[3] === "mharris-sgymd/ob1 (set 2026-11-24T10:00:00.500Z by op-key): a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one"
       && lines[4] === "Bad, REFUSED, so no bare pr: or version: key can be written (set 2026-11-24T10:00:00.000Z by op-key): a repository is lowercase. An operator key sets it again, or clears it, through set_subject_repo"
       && badRead.every((r) => r === "threw") && subjectRepoValue(null) === null
       && long.length < 700 && long.includes(` by ${"k".repeat(79)}…)`) && long.includes(`${"r".repeat(299)}…. An operator key`),

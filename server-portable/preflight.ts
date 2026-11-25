@@ -3443,6 +3443,10 @@ if (configFailed) {
           } else if (!sr.has_t && ledger.has("153")) {
             add("subject repository", "fail", "migration 153's subject_repo_settings missing though the ledger records 153; every subject write faults",
                 ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 154_subject_key_links.sql."));
+          } else if (!sr.has_t && ledgerPresent && !ledgerRead) {
+            // Missing, and this role cannot read whether the ledger records 153: a warning, the remedy naming both (review pass 2).
+            add("subject repository", "warn", `subject_repo_settings missing, and ${whyUnread}, so whether migration 153 is recorded is unknown; if it is, every subject write faults`,
+                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 154_subject_key_links.sql."));
           } else if (!sr.has_t) {
             add("subject repository", "skip", "not checked — subject_repo_settings does not exist (migration 153 not applied); pr: and version: keys stay unscoped");
           } else if (!sr.has_fn) {
@@ -3452,6 +3456,10 @@ if (configFailed) {
           } else if (!sr.has_links && ledger.has("154")) {
             // Recorded and not there: 154's setter and writer call it, so they fault whether or not a repository is set (review pass 1).
             add("subject repository", "fail", "migration 154's ob1_subject_linked_key(text, text) missing though the ledger records 154; set_subject_repo, and every write of a bare pr: key once a repository is set, fault",
+                ledgerRemedy("154", "Apply db/migrations/154_subject_key_links.sql."));
+          } else if (!sr.has_links && ledgerPresent && !ledgerRead) {
+            // Missing, and this role cannot read whether the ledger records 154 (review pass 2).
+            add("subject repository", "warn", `ob1_subject_linked_key(text, text) missing, and ${whyUnread}, so whether migration 154 is recorded is unknown; if it is, set_subject_repo faults`,
                 ledgerRemedy("154", "Apply db/migrations/154_subject_key_links.sql."));
           } else if (!sr.can_read) {
             add("subject repository", "warn", "the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key and a thread read by one fault",
@@ -3466,7 +3474,7 @@ if (configFailed) {
                 ledgerRemedy("154", "Apply db/migrations/154_subject_key_links.sql."));
           } else {
             add("subject repository", "ok", typeof setting?.repo === "string"
-              ? `${setting.repo}: a bare pr: or version: key is scoped to it, or to the repository its GitHub link names`
+              ? `${setting.repo}: a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one`
               : "none set: pr: and version: keys stay unscoped; the server's role reads the setting");
           }
         }
