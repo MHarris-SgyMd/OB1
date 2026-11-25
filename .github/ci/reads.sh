@@ -707,18 +707,23 @@ self_check() {
   fi
   if [ -n "$watched" ]; then
     # Through a read-only bind mount in a mount namespace of its own, as a container is handed a path: the file's
-    # time cannot move, and the watch has it. Where mounting is allowed: as root, or by sudo with no password, a runner's.
+    # time cannot move, and the watch has it. A folder mounted, and a file mounted alone, which is opened by no
+    # name in its folder and is the watch's all the same. Where mounting is allowed: as root, or by sudo with no
+    # password, a runner's.
     as=()
     if [ "$(id -u)" != 0 ]; then as=(sudo -n); fi
     fresh
-    mkdir -p "$dir/mnt"
+    mkdir -p "$dir/mnt" && : > "$dir/mnt.file"
     out="$dir/reads/job.mounted.txt"
-    # shellcheck disable=SC2016 # sh expands "$1" and "$2", not this shell
+    # shellcheck disable=SC2016 # sh expands "$1" to "$4", not this shell
     if (cd "$dir/work" && bash tool/reads.sh mark --watch > /dev/null 2>&1 \
-        && ${as[@]+"${as[@]}"} unshare -m --propagation private sh -c 'mount --bind "$1" "$2" && mount -o remount,bind,ro "$2" && cat "$2/c.txt" > /dev/null' sh "$dir/work/walked" "$dir/mnt") > /dev/null 2> "$dir/mount.err"; then
+        && ${as[@]+"${as[@]}"} unshare -m --propagation private sh -c 'mount --bind "$1" "$2" && mount -o remount,bind,ro "$2" && cat "$2/c.txt" > /dev/null \
+          && mount --bind "$3" "$4" && mount -o remount,bind,ro "$4" && cat "$4" > /dev/null' sh "$dir/work/walked" "$dir/mnt" "$dir/work/deep/er/d.txt" "$dir/mnt.file") > /dev/null 2> "$dir/mount.err"; then
       (cd "$dir/work" && RUNNER_TEMP="$dir" bash tool/reads.sh list job mounted > "$dir/said" 2>&1) || { echo "reads.sh: the list after a read through a mount did not exit 0" >&2; fails=$((fails + 1)); }
       has "$(printf 'f\twalked/c.txt')" "a file read through a read-only bind mount"
       grep -qxF -- "$(printf '    f\twalked/c.txt')" "$dir/said" || { echo "reads.sh: a file read through a read-only bind mount is not among the rows the watch alone gave: its access time moved, so the mount was not read-only" >&2; fails=$((fails + 1)); }
+      has "$(printf 'f\tdeep/er/d.txt')" "a file mounted alone, read-only, and read"
+      grep -qxF -- "$(printf '    f\tdeep/er/d.txt')" "$dir/said" || wrong "a file mounted alone, read-only, and read is not among the rows the watch alone gave"
     elif [ -n "${GITHUB_ACTIONS:-}" ]; then echo "reads.sh: could not read a file through a read-only bind mount on this runner, the case the watch is for: $(tail -n 1 "$dir/mount.err" 2> /dev/null | grep . || echo 'no word of why')" >&2; fails=$((fails + 1))
     else
       (cd "$dir/work" && RUNNER_TEMP="$dir" bash tool/reads.sh list job mounted) > /dev/null 2>&1
