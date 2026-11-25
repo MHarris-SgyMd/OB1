@@ -41,11 +41,10 @@ export const APP_KEY_FILE = "github-app.pem";
 export const PEM_SHAPE = /^-----BEGIN (RSA )?PRIVATE KEY-----\n(?:[A-Za-z0-9+/=]{1,80}\n)+-----END (RSA )?PRIVATE KEY-----$/;
 /** The only branches the runner pushes: record.ts `branchFor`'s shape. */
 export const PUSH_BRANCH = /^agent\/smd-[1-9][0-9]{0,6}-[a-z0-9]+(?:-[a-z0-9]+)*$/;
-/** The permissions an installation token is asked for, and all it may come back with (`metadata: read` GitHub adds to every token). */
+/** The permissions an installation token is asked for. It may come back with these and `metadata: read` alone (APP_PERMISSIONS). */
 export const TOKEN_PERMISSIONS = { contents: "write", pull_requests: "write" } as const;
 /** All decision 13's App may hold: the two writes, and the metadata read GitHub gives every App. setup.ts checks the App against it. */
 export const APP_PERMISSIONS: Record<string, string> = { ...TOKEN_PERMISSIONS, metadata: "read" };
-const ALLOWED_BACK = APP_PERMISSIONS;
 /** The login the App's PRs carry. */
 export const botLogin = (slug: string): string => `${slug}[bot]`;
 /**
@@ -122,7 +121,8 @@ export function scrubToken(text: string, token: string | null): string {
     }
     for (const f of forms.filter((x) => x.length >= 16).sort((a, b) => b.length - a.length)) t = t.split(f).join("…");
   }
-  return t.replace(/\b(gh[pousr]_[A-Za-z0-9._-]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, "gh…");
+  // No word boundary first: a token right after a letter or digit (`xghs_…`, a URL-encoded `%3Aghs_…`) is masked too.
+  return t.replace(/(gh[pousr]_[A-Za-z0-9._-]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, "gh…");
 }
 
 const init = (method: string, bearer: string, body?: unknown): RequestInit => ({
@@ -255,7 +255,7 @@ export async function installationToken(fetchImpl: Fetch, app: App, pem: string,
   // Every check from here runs on GitHub's own values: one that throws (a hostile toString) must not leave the token live.
   try {
     const perms = b.permissions && typeof b.permissions === "object" && !Array.isArray(b.permissions) ? (b.permissions as Record<string, unknown>) : null;
-    const extra = perms === null ? ["(none listed)"] : Object.entries(perms).filter(([k, v]) => ALLOWED_BACK[k] !== v).map(([k, v]) => `${said(scrubToken(k, token), 60)}: ${said(scrubToken(rawText(v), token), 60)}`);
+    const extra = perms === null ? ["(none listed)"] : Object.entries(perms).filter(([k, v]) => APP_PERMISSIONS[k] !== v).map(([k, v]) => `${said(scrubToken(k, token), 60)}: ${said(scrubToken(rawText(v), token), 60)}`);
     const missing = perms === null ? [] : Object.entries(TOKEN_PERMISSIONS).filter(([k, v]) => perms[k] !== v).map(([k]) => k);
     if (extra.length || missing.length) {
       await revokeToken(fetchImpl, token);
@@ -333,7 +333,8 @@ export function pushCommand(opts: { bareRepo: string; remote: string; branch: st
  * Read `git push --porcelain`'s line for the ref: pushed (`*` a new branch, ` ` a fast-forward) or already there (`=`).
  * A refusal (`!`) is final when git says `rejected` (the branch is on GitHub at a commit this push doesn't descend
  * from) or `remote rejected` (GitHub refused it: a ruleset, a workflow file the App may not write, a hook), which only a
- * person can sort out; `remote failure` is retried, as is git failing before any ref.
+ * person can sort out, unless GitHub's words say it was passing (an internal error, a timeout, "try again"). A `remote
+ * failure` is retried, as is git failing before any ref.
  */
 export function pushOutcome(out: GitOut, branch: string): { ok: true } | { ok: false; final: boolean; detail: string } {
   const ref = `refs/heads/${branch}`;
@@ -346,7 +347,7 @@ export function pushOutcome(out: GitOut, branch: string): { ok: true } | { ok: f
     // GitHub's own refusal (a ruleset, a workflow file, a hook) is final; its passing errors and a remote failure are retried.
     const passing = /^\[remote failure\]/.test(why) || /internal server error|timed? ?out|try again|temporarily|unavailable/i.test(why);
     const local = /^\[rejected\]/.test(why);
-    return { ok: false, final: !passing, detail: `${local ? "the push was rejected" : "GitHub refused the push"} of ${branch}: ${why}` };
+    return { ok: false, final: !passing, detail: `${local ? "the push was rejected" : passing ? "the push failed" : "GitHub refused the push"} of ${branch}: ${why}` };
   }
   return { ok: false, final: false, detail: `git push of ${branch} exited ${out.code}: ${said(out.stderr || out.stdout, 200)}` };
 }
@@ -424,8 +425,8 @@ export function appClient(d: AppClientDeps): GitHubClient {
         const raw = await d.git(cmd.argv, cmd.env);
         // Scrubbed before anything cuts it short: a stateless token runs to about 520 characters, and a cut one no longer matches itself.
         const out = { code: raw.code, stdout: scrubToken(raw.stdout, t.token), stderr: scrubToken(raw.stderr, t.token) };
-        const r = pushOutcome(out, branch);
-        return r.ok ? r : { ...r, detail: scrubToken(r.detail, t.token) };
+        // out was scrubbed above, before pushOutcome cut anything.
+        return pushOutcome(out, branch);
       } catch (e) {
         return { ok: false, detail: `git push threw: ${errSaid(e, t.token)}` };
       } finally {

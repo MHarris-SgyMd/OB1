@@ -24,16 +24,21 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { createPrivateKey, createSign, generateKeyPairSync } from "node:crypto";
+import { createPrivateKey, createSign, generateKeyPairSync, randomBytes } from "node:crypto";
 import {
   chmodSync,
   closeSync,
   constants,
   existsSync,
+  fsyncSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
+  linkSync,
   readFileSync,
+  readdirSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -110,12 +115,12 @@ export function normalizePem(value: string): string {
   return value.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").split("\n").map((l) => l.trimEnd()).join("\n").trim();
 }
 
-/** Whether a PEM is an RSA private key that can sign a JWT (RS256), so a key that fits the shape but not the maths, or not RSA, is caught at install. */
+/** Whether a PEM is an RSA private key of 2048 bits or more that can sign a JWT (RS256), so a key that fits the shape but not the maths, isn't RSA, or is short, is caught at install. Whether it is this App's key, only check-github-app can tell. */
 export function canSign(pem: string): boolean {
   try {
     const key = createPrivateKey(pem);
     // GitHub's App keys are RSA, and the JWT is RS256: an EC key would sign, and GitHub would refuse what it signed.
-    if (key.asymmetricKeyType !== "rsa") return false;
+    if (key.asymmetricKeyType !== "rsa" || (key.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) return false;
     createSign("RSA-SHA256").update("probe").sign(key);
     return true;
   } catch {
@@ -134,19 +139,35 @@ export function installValue(dir: string, which: Which, value: string): { file: 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
   const path = join(dir, s.file);
+  // What's there now: a link or anything but a plain file is refused, never written through or over.
+  let st: ReturnType<typeof lstatSync> | null = null;
+  try {
+    st = lstatSync(path);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new Error(`${path} can't be read (${(e as NodeJS.ErrnoException).code})`);
+  }
+  if (st?.isSymbolicLink()) throw new Error(`${path} is a symlink; refusing to write a secret through it`);
+  if (st && !st.isFile()) throw new Error(`${path} is not a regular file; refusing to write a secret over it`);
+  // Written whole to a new file beside it, synced, then renamed over the old: a write that fails (a full disk, a size
+  // limit) leaves the old key in place, and a hard link to the old file keeps its content.
+  const tmp = join(dir, `.${s.file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`);
   let fd: number;
   try {
-    fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+    fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
   } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ELOOP") throw new Error(`${path} is a symlink; refusing to write a secret through it`);
-    throw new Error(`${path} can't be written (${code})`);
+    throw new Error(`${dir} can't take a new file (${(e as NodeJS.ErrnoException).code}); nothing written, the old ${s.file} in place`);
   }
   try {
-    writeSync(fd, `${v}\n`);
-  } finally {
+    const buf = Buffer.from(`${v}\n`);
+    for (let off = 0; off < buf.length; ) off += writeSync(fd, buf, off);
+    fsyncSync(fd);
+  } catch (e) {
     closeSync(fd);
+    rmSync(tmp, { force: true });
+    throw new Error(`the new ${s.file} couldn't be written (${(e as NodeJS.ErrnoException).code ?? "error"}); the old one is in place`);
   }
+  closeSync(fd);
+  renameSync(tmp, path);
   chmodSync(path, 0o600);
   const back = verifyOne(dir, which);
   if (!back.ok) throw new Error(`stored ${s.file}, but it didn't read back cleanly: ${back.detail}`);
@@ -280,7 +301,7 @@ export function appFindings(facts: AppFacts, cfg: { repo: string; githubAppId: s
 
   // The tag fence: every v* tag release.yml starts on, its creation, update and deletion restricted, past the App's reach.
   const tags = fenced("tag", "releaseTags", ["creation", "update", "deletion"]);
-  if (tags === "yes") say(true, "every v* tag's creation, update and deletion is restricted by a tag ruleset the App can't bypass");
+  if (tags === "yes") say(true, "the v<digit> tags a release starts from: their creation, update and deletion are restricted by a tag ruleset the App can't bypass");
   else if (tags === "unseen") say(false, "a tag ruleset restricts v* tags, but its bypass list couldn't be read (gh must have write access to it): the App may be on it");
   else say(false, "no active tag ruleset the App can't bypass restricts creating, moving and deleting every v* tag: the App could push or move one and start a release (.github/rulesets/tags.json)");
 
@@ -305,7 +326,7 @@ export async function checkGithubApp(cfg: Config, pem: string, fetchImpl: Fetch)
   // A GET that says why it failed: GitHub's status, or the transport's words, never a bare null.
   const get = async (path: string, bearer: string): Promise<{ ok: true; body: unknown } | { ok: false; why: string }> => {
     try {
-      const res = await fetchImpl(`https://api.github.com${path}`, { ...SAFE_REQUEST, headers: { Accept: "application/vnd.github+json", "User-Agent": "agent-runner-setup", Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(20_000) });
+      const res = await fetchImpl(`https://api.github.com${path}`, { ...SAFE_REQUEST, headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "agent-runner-setup", Authorization: `Bearer ${bearer}` }, signal: AbortSignal.timeout(20_000) });
       if (!res.ok) return { ok: false, why: `GitHub answered ${res.status}` };
       const body = await jsonOf(res);
       return body === NOT_JSON ? { ok: false, why: "GitHub answered with something that isn't JSON" } : { ok: true, body };
@@ -646,6 +667,35 @@ export function selfCheck(): number {
       ok(refuses(() => installValue(dir, "github-app", garbled)).includes("nothing written") && readFileSync(join(dir, APP_KEY_FILE), "utf8") === before && verifyOne(dir, "github-app").ok, "a rotation to a key that can't sign is refused before the write: the key in place is kept, and still verifies");
       const ec = generateKeyPairSync("ec", { namedCurve: "P-256", privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
       ok(PEM_SHAPE.test(ec.trim()) && refuses(() => installValue(join(root, "app-key-ec"), "github-app", ec)).includes("can sign"), "an EC key, PEM-shaped and able to sign, is refused: the JWT is RS256");
+      const short = generateKeyPairSync("rsa", { modulusLength: 1024, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+      ok(refuses(() => installValue(join(root, "app-key-short"), "github-app", short)).includes("nothing written"), "an RSA key under 2048 bits is refused");
+      // A key placed by hand, PEM-shaped but unable to sign: verify says so.
+      const handDir = join(root, "app-key-hand");
+      mkdirSync(handDir, { mode: 0o700 });
+      writeFileSync(join(handDir, APP_KEY_FILE), `${garbled}\n`, { mode: 0o600 });
+      ok(!verifyOne(handDir, "github-app").ok && verifyOne(handDir, "github-app").detail.includes("can sign"), "verify finds a hand-placed key that can't sign");
+      // The write is whole or not at all: a write that fails (a size limit) leaves the old key, and no temp file.
+      const limited = join(root, "app-key-limited");
+      installValue(limited, "github-app", APP_PEM);
+      const kept = readFileSync(join(limited, APP_KEY_FILE), "utf8");
+      const keyFile = join(root, "next-key.pem");
+      writeFileSync(keyFile, generateKeyPairSync("rsa", { modulusLength: 4096, privateKeyEncoding: { type: "pkcs1", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey);
+      const child = Bun.spawnSync(["/bin/sh", "-c", `ulimit -f 1; trap '' XFSZ; exec "$0" -e "$1"`, process.execPath, `import { installValue } from ${JSON.stringify(join(import.meta.dir, "setup.ts"))}; import { readFileSync } from "node:fs"; try { installValue(${JSON.stringify(limited)}, "github-app", readFileSync(${JSON.stringify(keyFile)}, "utf8")); console.log("WROTE"); } catch (e) { console.log("REFUSED " + e.message); }`], { stdout: "pipe", stderr: "pipe" });
+      const childSaid = child.stdout.toString();
+      ok(childSaid.includes("REFUSED") && childSaid.includes("the old one is in place") && readFileSync(join(limited, APP_KEY_FILE), "utf8") === kept && readdirSync(limited).every((f) => !f.endsWith(".tmp")), "a write that fails under a size limit leaves the old key whole and no temp file");
+      // A hard link at the key path: the rename replaces the name, and the linked file keeps its content.
+      const linked = join(root, "app-key-linked");
+      mkdirSync(linked, { mode: 0o700 });
+      const other = join(root, "other-file");
+      writeFileSync(other, "someone else's content\n", { mode: 0o600 });
+      linkSync(other, join(linked, APP_KEY_FILE));
+      installValue(linked, "github-app", APP_PEM);
+      ok(readFileSync(other, "utf8") === "someone else's content\n" && verifyOne(linked, "github-app").ok, "a hard link at the key path: the other file keeps its content, and the key is in place");
+      // A FIFO at the key path is refused at once, never opened (an open for writing would wait for a reader).
+      const fifoDir = join(root, "app-key-fifo");
+      mkdirSync(fifoDir, { mode: 0o700 });
+      Bun.spawnSync(["mkfifo", join(fifoDir, APP_KEY_FILE)]);
+      ok(refuses(() => installValue(fifoDir, "github-app", APP_PEM)).includes("not a regular file"), "a FIFO at the key path is refused, not opened");
       const mismatched = APP_PEM.trim().replace("-----END RSA PRIVATE KEY-----", "-----END PRIVATE KEY-----");
       ok(refuses(() => installValue(join(root, "app-key-bad2"), "github-app", mismatched)) !== "", "a key whose BEGIN and END lines disagree is refused");
     });
@@ -840,7 +890,7 @@ if (import.meta.main) {
     const report = stampReport(STATE_DIR, installDir(), await hostNow());
     for (const line of report.lines) console.log(`${line.ok ? "✓" : "✗"} stamp: ${line.text}`);
     failed += report.lines.filter((l) => !l.ok).length;
-    console.log(failed ? `${failed} not ready` : "every identity present and valid, and the probe stamp covers a run from this checkout");
+    console.log(failed ? `${failed} not ready` : "every identity a run needs present and valid (the optional ones as shown), and the probe stamp covers a run from this checkout");
     process.exit(failed ? 1 : 0);
   }
 
@@ -878,7 +928,8 @@ if (import.meta.main) {
       const cfg = parseConfig(text as string, homedir());
       if ("error" in cfg) fail(`the config: ${cfg.error}`);
       const pem = readOwnedFile(join(RUNNER_DIR, APP_KEY_FILE), true);
-      if (pem === null || !PEM_SHAPE.test(pem.trim())) fail(`no App key at ${join(RUNNER_DIR, APP_KEY_FILE)} (setup.ts install github-app)`);
+      if (pem === null) fail(`no App key at ${join(RUNNER_DIR, APP_KEY_FILE)} (setup.ts install github-app)`);
+      if (!PEM_SHAPE.test((pem as string).trim())) fail(`${join(RUNNER_DIR, APP_KEY_FILE)} isn't a PEM private key as install writes one: install it again (setup.ts install github-app)`);
       const g = await checkGithubApp(cfg as Config, (pem as string).trim(), noRedirect(fetch) as unknown as Fetch);
       for (const line of g.lines) console.log(line);
       process.exit(g.ok ? 0 : 1);

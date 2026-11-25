@@ -422,6 +422,9 @@ export async function selfCheck(): Promise<number> {
       const r2 = await publish(m2.input, m2.deps);
       const said = `${r2.owed.map((o) => o.why).join(" ")} ${r2.reason}`;
       ok(!said.includes("eyJ") && said.includes("gh…"), "a stateless installation token (ghs_<app id>_<JWT>) is masked whole");
+      const m3 = makePublish(root, { push: false, pushDetail: `url x-access-token%3A${stateless}@github.com` });
+      const r3 = await publish(m3.input, m3.deps);
+      ok(!`${r3.owed.map((o) => o.why).join(" ")} ${r3.reason}`.includes("eyJ"), "a token right after an encoded colon is masked too");
     });
 
     await section("publish: a PR-open failure — owed (publish), pushed but not published", async () => {

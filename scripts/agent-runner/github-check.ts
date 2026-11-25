@@ -213,6 +213,7 @@ export async function selfCheck(): Promise<number> {
       }
     }
     ok(!scrubToken(`tail ${TOKEN.slice(4)} end`, TOKEN).includes(TOKEN.slice(4, 44)), "the token's tail past ghs_ is scrubbed");
+    ok(["x", "9", "%3A", "TOKEN_"].every((pre) => !scrubToken(`${pre}${other}`, null).includes(other.slice(4, 30))), "another GitHub token right after a letter, a digit or an encoded colon is masked too");
     const s = scrubToken(`a ${TOKEN} b AUTHORIZATION: basic ${basic} c ghp_${"x".repeat(36)} d github_pat_${"y_".repeat(15)} e ${other} f`, TOKEN);
     ok(!s.includes(TOKEN) && !s.includes(basic) && !s.includes("ghp_x") && !s.includes("github_pat_y") && !s.includes("eyJ"), "none of them is left, another stateless token's JWT part included");
   });
@@ -234,7 +235,11 @@ export async function selfCheck(): Promise<number> {
     const failure = pushOutcome({ code: 1, stdout: `!\t${ref}\t[remote failure] (remote failed to report status)\n`, stderr: "" }, BRANCH);
     ok(!failure.ok && !failure.final, "a remote failure is retried");
     const ise = pushOutcome({ code: 1, stdout: `!\t${ref}\t[remote rejected] (Internal Server Error)\n`, stderr: "" }, BRANCH);
-    ok(!ise.ok && !ise.final, "GitHub's passing error, though rejected remotely, is retried");
+    ok(!ise.ok && !ise.final && ise.detail.startsWith("the push failed"), "GitHub's passing error, though rejected remotely, is retried, said as a failure");
+    for (const words of ["(operation timed out)", "(please try again)", "(temporarily unavailable)"]) {
+      const r = pushOutcome({ code: 1, stdout: `!\t${ref}\t[remote rejected] ${words}\n`, stderr: "" }, BRANCH);
+      ok(!r.ok && !r.final, `a remote rejection saying ${words} is retried`);
+    }
     const nonff = pushOutcome({ code: 1, stdout: `!\t${ref}\t[rejected] (fetch first)\n`, stderr: "" }, BRANCH);
     ok(!nonff.ok && nonff.final && nonff.detail.startsWith("the push was rejected"), "a non-fast-forward is final, and said as git's rejection, not GitHub's");
   });
@@ -418,6 +423,18 @@ export async function selfCheck(): Promise<number> {
       ok(!r.ok && !r.final && r.detail.includes("bad config line 3") && mints(mintRoute.sent) === before, "not pushed, not final, no token");
     });
 
+    await section("pushBranch: a config listing whose git throws is a result, never a throw", async () => {
+      const c = appClient({ app: APP, pem: PEM, fetch: mintRoute.fetch, git: async (argv) => { if (argv.includes("config")) throw new Error(`spawn EAGAIN ${TOKEN}`); return { code: 0, stdout: "", stderr: "" }; }, bareRepo: source, home, remote: target, now: () => NOW });
+      let threw = false;
+      let r: Awaited<ReturnType<typeof c.pushBranch>> | null = null;
+      try {
+        r = await c.pushBranch({ branch: BRANCH, commit: tip });
+      } catch {
+        threw = true;
+      }
+      ok(!threw && r !== null && !r.ok && !r.final && r.detail.includes("config threw"), "a retry, saying the config read threw");
+    });
+
     await section("repoConfigProblems: the allowlist, in every scope but the command line's", () => {
       const listing = "local\tcore.repositoryformatversion\nlocal\tcore.bare\nlocal\tremote.origin.url\nlocal\tgc.auto\nlocal\tmaintenance.auto\ncommand\tprotocol.file.allow\n";
       ok(repoConfigProblems(listing).length === 0, "what a bare clone and run.ts write, plus the command line, pass");
@@ -505,7 +522,7 @@ export async function selfCheck(): Promise<number> {
     }
   });
 
-  await section("openDraftPr: a 422 whose PR turns up is the PR; any other 422 is final", async () => {
+  await section("openDraftPr: a 422 whose PR turns up is the PR; no commits, a bad base or someone else's PR is final; any other 422 is retried", async () => {
     let lists = 0;
     const lost = prClient((m, u) => (m === "GET" && u === LIST ? (lists++ === 0 ? json([]) : json([prRow()])) : m === "POST" && u === PULLS ? json({ message: "Validation Failed", errors: [{ message: "A pull request already exists" }] }, 422) : null));
     const r1 = await lost.c.openDraftPr(OPEN);
@@ -535,7 +552,9 @@ export async function selfCheck(): Promise<number> {
     const thrown = await appClient({ app: APP, pem: PEM, fetch: f.fetch, git: realGitSpawn, bareRepo: "/x", home: "/x", now: () => NOW }).openDraftPr(OPEN);
     ok(!thrown.ok && !thrown.final && thrown.detail.includes("socket hang up") && !thrown.detail.includes(TOKEN.slice(4, 24)), "a transport failure: a result, no piece of the token left");
     const weird = await prClient((m, u) => (m === "GET" && u === LIST ? json([]) : m === "POST" && u === PULLS ? json(prRow({ user: { login: "someone" } }), 201) : null)).c.openDraftPr(OPEN);
-    ok(!weird.ok && weird.detail.includes("isn't the App's"), "a 201 answering someone else's PR is not taken");
+    ok(!weird.ok && !weird.final && weird.detail.includes("isn't the App's"), "a 201 answering someone else's PR is not taken, and retried");
+    const notList = await prClient((m, u) => (m === "GET" && u === LIST ? json({ message: "odd" }) : null)).c.openDraftPr(OPEN);
+    ok(!notList.ok && !notList.final && notList.detail.includes("isn't a list"), "a PR lookup that answers something not a list is a retry");
   });
 
   await section("openDraftPr: the repo's case in the config doesn't turn the App's own PR into a stranger's", async () => {
@@ -560,6 +579,18 @@ export async function selfCheck(): Promise<number> {
     const refused = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : m === "POST" ? json({ token: TOKEN }, 201) : json({ message: `no ${TOKEN}` }, 403)));
     const r2 = await installationRepos(refused.fetch, APP, PEM, NOW);
     ok(!r2.ok && r2.detail.includes("403") && !r2.detail.includes(TOKEN.slice(4, 24)) && revoked(refused.sent).join() === TOKEN, "a refused list is said, scrubbed, and the token still revoked");
+    const oddShape = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : json({ token: `${TOKEN}\n` }, 201)));
+    const r3 = await installationRepos(oddShape.fetch, APP, PEM, NOW);
+    ok(!r3.ok && revoked(oddShape.sent).join() === TOKEN, "a metadata token of an odd shape is refused and revoked");
+    const huge = stubFetch((m, u) => (m === "DELETE" ? new Response(null, { status: 204 }) : m === "POST" ? json({ token: TOKEN }, 201) : json({ repositories: page(100, Number(/page=(\d+)/.exec(u)?.[1] ?? 0) * 100) })));
+    const r4 = await installationRepos(huge.fetch, APP, PEM, NOW);
+    ok(!r4.ok && r4.detail.includes("over 1,000") && huge.sent.filter((x) => x.url.includes("/installation/repositories")).length === 10, "past ten full pages the list stops, refused, its token revoked");
+    const throws = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 204 }) : m === "POST" ? json({ token: TOKEN }, 201) : Promise.reject(new Error(`reset near ${TOKEN}`))));
+    const r5 = await installationRepos(throws.fetch, APP, PEM, NOW);
+    ok(!r5.ok && r5.detail.includes("reset near") && !r5.detail.includes(TOKEN.slice(4, 24)) && revoked(throws.sent).join() === TOKEN, "a list request that throws: a result, scrubbed, the token revoked");
+    const unrevoked = stubFetch((m) => (m === "DELETE" ? new Response(null, { status: 500 }) : m === "POST" ? json({ token: TOKEN }, 201) : json({ repositories: [{ full_name: "MHarris-SgyMd/OB1" }] })));
+    const r6 = await installationRepos(unrevoked.fetch, APP, PEM, NOW);
+    ok(r6.ok && r6.revoked === false, "a revoke that doesn't land is told to the caller");
   });
 
   await section("openDraftPr: a head outside the runner's prefix is refused, nothing sent", async () => {
@@ -582,24 +613,51 @@ export async function selfCheck(): Promise<number> {
         return d;
       };
       const goodBin = bin("good", true);
+      const halfBin = join(dir, "half");
+      mkdirSync(halfBin);
+      writeFileSync(join(halfBin, "gh"), `#!/bin/sh\ncase "$*" in\n  *rulesets\\?*) printf 'junk\\n1\\n\\n2\\n3\\n' ;;\n  *rulesets/1*) echo 'HTTP 500' >&2; exit 1 ;;\n  *rulesets/2*) cat '${rulesets}/main-merge.json' ;;\n  *rulesets/3*) cat '${rulesets}/tags.json' ;;\nesac\n`);
+      chmodSync(join(halfBin, "gh"), 0o755);
       const badBin = bin("bad", false);
       const emptyBin = join(dir, "none");
       mkdirSync(emptyBin);
       const cfg = { team: "SMD", initiative: "I", maintainerLinearId: "x", repo: "MHarris-SgyMd/OB1", mainCheckout: "/x", restUrl: null, githubAppId: "123456", githubAppInstallationId: "7890", githubAppSlug: "ob1-agent-runner" };
-      const github = (over: { app?: Response; revoke?: number } = {}) =>
-        stubFetch((m, u, b) =>
+      const META = TOKEN.replace("123456", "777777");
+      const bearer = (init?: RequestInit) => String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+      const github = (over: { app?: Response; installation?: Response; mint?: Response; repos?: Response; revokeMeta?: number; revokePublish?: number } = {}) => {
+        const f = stubFetch((m, u, b) =>
           m === "GET" && u.endsWith("/app") ? (over.app ?? json({ slug: "ob1-agent-runner", permissions: { contents: "write", pull_requests: "write", metadata: "read" } }))
-          : m === "GET" && u.endsWith("/app/installations/7890") ? json({ repository_selection: "selected" })
-          : m === "POST" && u.endsWith("/access_tokens") ? ((b as { repositories?: unknown })?.repositories ? tokenAnswer() : json({ token: TOKEN, permissions: { metadata: "read" } }, 201))
-          : m === "GET" && u.includes("/installation/repositories") ? json({ total_count: 1, repositories: [{ full_name: "MHarris-SgyMd/OB1" }] })
-          : m === "DELETE" ? new Response(null, { status: over.revoke ?? 204 }) : json({}, 404));
+          : m === "GET" && u.endsWith("/app/installations/7890") ? (over.installation ?? json({ repository_selection: "selected" }))
+          : m === "POST" && u.endsWith("/access_tokens") ? ((b as { repositories?: unknown })?.repositories ? (over.mint ?? tokenAnswer()) : json({ token: META, permissions: { metadata: "read" } }, 201))
+          : m === "GET" && u.includes("/installation/repositories") ? (over.repos ?? json({ total_count: 1, repositories: [{ full_name: "MHarris-SgyMd/OB1" }] }))
+          : json({}, 404));
+        // DELETE answers by the token it revokes, so each revoke can fail on its own.
+        const fetch: Fetch = async (u, init = {}) =>
+          (init.method ?? "GET") === "DELETE" ? (f.sent.push({ url: u, init }), new Response(null, { status: bearer(init) === META ? (over.revokeMeta ?? 204) : (over.revokePublish ?? 204) })) : f.fetch(u, init);
+        return { fetch, sent: f.sent };
+      };
       process.env.PATH = `${goodBin}:/usr/bin:/bin`;
       const good = await checkGithubApp(cfg, PEM, github().fetch);
       ok(good.ok && good.lines.every((l) => l.startsWith("✓")) && good.lines.length === 7, "the App as decision 13's and the repo's three rulesets as recorded: seven ✓ and ok");
       const down = await checkGithubApp(cfg, PEM, github({ app: json({ message: "boom" }, 500) }).fetch);
       ok(!down.ok && down.lines.some((l) => l.startsWith("✗") && l.includes("GitHub answered 500")), "a 500 on GET /app is said as GitHub's 500, not as a wrong key");
-      const unrevoked = await checkGithubApp(cfg, PEM, github({ revoke: 500 }).fetch);
-      ok(!unrevoked.ok && unrevoked.lines.some((l) => l.includes("couldn't be revoked")), "a revoke that didn't land fails the check, saying so");
+      const g1 = github();
+      await checkGithubApp(cfg, PEM, g1.fetch);
+      ok(g1.sent.filter((x) => (x.init.method ?? "GET") === "GET").every((x) => x.init.redirect === "manual"), "its GETs follow no redirect (SAFE_REQUEST)");
+      for (const [which, over] of [["the metadata token's", { revokeMeta: 500 }], ["the publish token's", { revokePublish: 500 }]] as const) {
+        const r = await checkGithubApp(cfg, PEM, github(over).fetch);
+        ok(!r.ok && r.lines.some((l) => l.includes("couldn't be revoked")), `${which} revoke not landing fails the check, saying so`);
+      }
+      const noMint = await checkGithubApp(cfg, PEM, github({ mint: json({ message: "Resource not accessible by integration" }, 403) }).fetch);
+      ok(!noMint.ok && noMint.lines.some((l) => l.startsWith("✗") && l.includes("couldn't be minted") && l.includes("403")), "the publish's token refused alone fails the check, saying why");
+      const noInst = await checkGithubApp(cfg, PEM, github({ installation: json({ message: "Not Found" }, 404) }).fetch);
+      ok(!noInst.ok && noInst.lines.some((l) => l.includes("installation couldn't be read") && l.includes("GitHub answered 404")), "a missing installation is said with GitHub's 404");
+      const noRepos = await checkGithubApp(cfg, PEM, github({ repos: json({ message: "Bad credentials" }, 401) }).fetch);
+      ok(!noRepos.ok && noRepos.lines.some((l) => l.includes("repositories couldn't be read") && l.includes("401")), "a refused repository list is said with its reason");
+      const noSign = await checkGithubApp(cfg, "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----", github().fetch);
+      ok(!noSign.ok && noSign.lines.some((l) => l.includes("couldn't sign a JWT")), "a key that can't sign is said as such");
+      process.env.PATH = `${halfBin}:/usr/bin:/bin`;
+      const half = await checkGithubApp(cfg, PEM, github().fetch);
+      ok(!half.ok && half.lines.some((l) => l.includes("ruleset 1") && l.includes("HTTP 500")), "one ruleset that can't be read fails the check, though the two fences read fine: a partial list isn't judged");
       process.env.PATH = `${badBin}:/usr/bin:/bin`;
       const loggedOut = await checkGithubApp(cfg, PEM, github().fetch);
       ok(!loggedOut.ok && loggedOut.lines.filter((l) => l.includes("rulesets")).length === 1 && loggedOut.lines.some((l) => l.includes("Bad credentials")), "gh refused: one line, with gh's words");
