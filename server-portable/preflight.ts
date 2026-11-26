@@ -5676,11 +5676,12 @@ if (configFailed) {
                 // A re-tag follower that ran under a key other than ob1_config.retag_key — a --switch-key since — is no
                 // worker's: a restart runs the key this configuration makes, the recorded one beside any follower there,
                 // or is refused under another. Its row is retired (SMD-2298 PR 4a-2 review pass 2, walkthrough: the
-                // restart ran a second follower on the new key). Not a row ended on its start's refusal, whose key is
-                // never the recorded one and whose remedy is the switch or the model put back, nor one a supervisor holds
-                // (review pass 3: they read retire).
+                // restart ran a second follower on the new key). Not a row ended on its start's refusal of the key, whose
+                // key is never the recorded one and whose remedy is the switch or the model put back (review pass 3), nor
+                // one a supervisor holds — but a row refused on anything else, a mid-run stop on the provider among them,
+                // under a key since switched, is retired as any other (review pass 4: all refusals were kept out).
                 const retagRecorded = recorded.retag_key || null;
-                if ((h.stale || h.ended) && h.worker === "retag" && !h.refused && !h.restart && retagRecorded !== null && h.job !== undefined && h.job !== retagRecorded) {
+                if ((h.stale || h.ended) && h.worker === "retag" && h.refused !== "key" && !h.restart && retagRecorded !== null && h.job !== undefined && h.job !== retagRecorded) {
                   return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, under a key other than ob1_config.retag_key (${retagRecorded}): started again, db/retag.ts runs the key this configuration makes — the recorded one, beside any follower there, or refused under another — so retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 }
                 // Held by its supervisor, which runs it again on its own (SMD-3214).

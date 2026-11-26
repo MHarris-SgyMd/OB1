@@ -2514,6 +2514,12 @@ else {
          `a follower gone with a live lease left warns: not running, its restart and the lease's release (review pass 1: no cell reached it; ${row(rtGoneLive.out, "retag pass")} | ${fix(rtGoneLive.out, "retag pass").trim()})`);
   await claims`UPDATE thought_work_claims SET ttl_expires_at = now() - interval '1 minute' WHERE work_type = ${RT} AND status = 'claimed'`;
   const rtDied = await run(RENV);
+  // A follower of the key running beside it: its next poll reclaims the expired one (review pass 4: untested).
+  await rtBeat({});
+  const rtDiedFollowed = await run(RENV);
+  await claims`DELETE FROM ob1_config WHERE key = ${`heartbeat:${RT}`}`;
+  assert(/✓\s+retag pass\s+\S+: .* — a follower is running this key \(stamped 1\d s ago\): 0 pending between its polls, 1 left by a worker that died, which its next poll reclaims\s*$/m.test(rtDiedFollowed.out),
+         `a follower of the key beside an expired lease: running, its next poll reclaims it (review pass 4; ${row(rtDiedFollowed.out, "retag pass")})`);
   assert(/!\s+retag pass\s+\S+: .* — a worker died holding 1 of the claim\(s\) in flight, their leases expired\s*$/m.test(rtDied.out)
       && /^\s*→ The next pass reclaims the expired claims \(a row on its third expiry is marked failed\); the release_stale_leases tool \(work_type \S+\) returns them now\. Finish it: cd db && bun retag\.ts/.test(fix(rtDied.out, "retag pass")),
          `an expired lease reads as a worker that died holding it, the reclaim before the finish (${row(rtDied.out, "retag pass")} | ${fix(rtDied.out, "retag pass").trim()})`);
@@ -4984,11 +4990,20 @@ else {
     await claims`DELETE FROM ob1_config WHERE key = 'heartbeat:retag:switched-model@p1'`;
     await beat("heartbeat:retag:tag-model@p1", v({ job: "retag:tag-model@p1", every_s: 60, outcome: "failed", ended: true, refused: "key" }), 30);
     const retagRefusedBesideFix = fix((await run(SQL_ENV)).out, "workers");
+    // …but a row refused on anything else under a key since switched — a mid-run stop on the provider — is retired as
+    // any other: started again it runs the recorded key beside another (review pass 4: every refusal was kept out).
+    await beat("heartbeat:retag:tag-model@p1", v({ job: "retag:tag-model@p1", every_s: 60, outcome: "failed", ended: true, refused: "provider" }), 30);
+    const retagProviderOldFix = fix((await run(SQL_ENV)).out, "workers");
+    // …and one a supervisor holds keeps the supervisor's words, not retire (review pass 4: untested).
+    await beat("heartbeat:retag:tag-model@p1", v({ job: "retag:tag-model@p1", every_s: 60, outcome: "failed", ended: true, restart: { in_s: 60, code: 1, tries: 2 } }), 30);
+    const retagHeldOldFix = fix((await run(SQL_ENV)).out, "workers");
     await claims`DELETE FROM ob1_config WHERE key = 'retag_key' OR key LIKE 'heartbeat:retag:%'`;
     assert(/retag:tag-model@p1 stopped, under a key other than ob1_config\.retag_key \(retag:switched-model@p1\): .* retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:retag:tag-model@p1' — rather than start it again\./.test(retagSupersededFix) && !/bun retag\.ts --url/.test(retagSupersededFix)
         && /retag:switched-model@p1 stopped \d+ s ago: start it again — cd db && bun retag\.ts --url \$DATABASE_URL --follow/.test(retagOwnFix)
-        && /retag:tag-model@p1 ended 3\d s ago on its start's refusal \(key\): the re-tag key is retag\.ts's to switch/.test(retagRefusedBesideFix) && !/retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:retag:tag-model@p1' — rather than/.test(retagRefusedBesideFix),
-      `a re-tag follower's row under a key no longer recorded is retired, not started again; under the recorded key, restarted; refused at its start on the key, its remedy, not retire (${retagSupersededFix} | ${retagOwnFix} | ${retagRefusedBesideFix})`);
+        && /retag:tag-model@p1 ended 3\d s ago on its start's refusal \(key\): the re-tag key is retag\.ts's to switch/.test(retagRefusedBesideFix) && !/retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:retag:tag-model@p1' — rather than/.test(retagRefusedBesideFix)
+        && /retag:tag-model@p1 ended on a failure, under a key other than ob1_config\.retag_key \(retag:switched-model@p1\): .* retire the row/.test(retagProviderOldFix)
+        && retagHeldOldFix.includes("retag:tag-model@p1") && !/retire the row — DELETE FROM ob1_config WHERE key = 'heartbeat:retag:tag-model@p1' — rather than/.test(retagHeldOldFix) && !/retag:tag-model@p1 ended \d+ s ago on its start's refusal/.test(retagProviderOldFix),
+      `a re-tag follower's row under a key no longer recorded is retired, not started again; under the recorded key, restarted; refused at its start on the key, its remedy, not retire; refused on the provider under the old key, retired (${retagSupersededFix} | ${retagOwnFix} | ${retagRefusedBesideFix} | ${retagProviderOldFix})`);
     // Its own row waiting mid-pass for the provider (SMD-2679 PR 4a-2b): said as the provider's, not a pass running.
     await beat("heartbeat:reembed:stub-embed@1024", v({ every_s: 60, outcome: "failed", running: true, waitingMidPass: ["reembed"] }), 5);
     const reembedWaitFix = fix((await run(SQL_ENV)).out, "workers");

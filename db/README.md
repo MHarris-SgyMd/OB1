@@ -6766,7 +6766,7 @@ bun retag.ts --url … --retry-failed     # failed rows back into the pool first
 bun retag.ts --url … --switch-key       # a model or prompt version other than ob1_config.retag_key's
 bun retag.ts --url … --follow [SECONDS] # then poll every SECONDS (15 bare), pooling again at each, until a signal
 #   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (OB1_LLM_TIMEOUT's)   --job <retag:model@pN>
-#   exits 0 clean (a follower stopped by a signal too) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
+#   exits 0 clean (a follower stopped by a signal too, once past its start wait) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
 ```
 
 The tags' re-run path (SMD-2298), the last of the lineage kinds to get one. The

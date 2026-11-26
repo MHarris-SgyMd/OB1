@@ -13,7 +13,7 @@
  *   bun db/retag.ts --url … --follow [SECONDS]     # then poll every SECONDS (15 bare), pooling again at each, until a signal (exit 0)
  *   await run({ url, dryRun: true })               # in-process: import { run } from "./retag.ts"
  *   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (per model call; OB1_LLM_TIMEOUT's, as the capture's, when absent)   --job <key> (a retag: key; a writing run's must be its model's and prompt version's, so in practice --status and --dry-run)
- *   exits 0 clean (a follower stopped by a signal too) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
+ *   exits 0 clean (a follower stopped by a signal too, once past its start wait) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
  *
  * ── What it re-tags ─────────────────────────────────────────────────────────
  * A thought's tags (`metadata`'s people, action_items, dates_mentioned,
@@ -708,8 +708,11 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   async function shapeOf(row: Row): Promise<ShapeVerdict> {
     const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata: row.metadata as Record<string, unknown>, content: row.content };
     const unknown = (why: string): ShapeVerdict => {
-      providerStops++;
-      err(`  the shape check's note was not answered (${why}): nothing known, so nothing stops — the next refusal asks again`);
+      // A stop that aborted the note is the stop's: nothing to say, no pass to mark (review pass 4).
+      if (!stopping) {
+        providerStops++;
+        err(`  the shape check's note was not answered (${why}): nothing known, so nothing stops — the next refusal asks again`);
+      }
       return "unknown";
     };
     // The gate first, as a thought's call meets it: a note it refuses is no model call.
@@ -998,7 +1001,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     ? passStamper({
         sql, worker: "retag", job: JOB, intervalS: FOLLOW,
         // The database gone is said as such, as reembed.ts says it (review pass 2, walkthrough: a grant was blamed).
-        onError: (e) => err(`  heartbeat ${stampKey("retag", JOB)} not written: ${e.message.split("\n")[0]} — ${databaseUnavailable(e) ? "the database is not answering" : "a role needs the worker grant group (INSERT, UPDATE on ob1_config)"}${stopping ? "" : "; the follower goes on"}`),
+        onError: (e) => err(`  heartbeat ${stampKey("retag", JOB)} not written: ${e.message.split("\n")[0]} — ${databaseUnavailable(e) ? "the database is not answering" : "a role needs the worker grant group (INSERT, UPDATE on ob1_config)"}${stopping || limitReached() ? "" : "; the follower goes on"}`),
       })
     : null;
   /**

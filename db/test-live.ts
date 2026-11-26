@@ -24645,6 +24645,8 @@ if (want("29")) {
     let missingAll = false;
     /** Every call refused 400, the shape note's included: the request's shape (PR 4a-2 review pass 1). */
     let shapeAll = false;
+    /** Every call refused 401, the probe's included: the request itself refused (PR 4a-2 review pass 4). */
+    let authAll = false;
     /**
      * How the shape note is answered (PR 4a-2 review pass 2): a status, prose, held 4 s then tags, or a 400 after 1.5 s;
      * `noteSeen` resolves once it is sent, which the thoughts "[29] N3 down" (answered 503 while `n3Down`) and "[29] N4
@@ -24678,6 +24680,7 @@ if (want("29")) {
       if (body.includes("[29] N4 ok")) await noteSeen;
       if (missingAll) return Response.json({ error: { message: 'model "stub-meta" not found, try pulling it first' } }, { status: 404 });
       if (shapeAll) return new Response("stub: the request's shape is refused", { status: 400 });
+      if (authAll) return new Response("stub: the key is refused", { status: 401 });
       if (heldMarker && body.includes(heldMarker)) {
         heldMarker = "";
         heldSeen();
@@ -25148,16 +25151,26 @@ if (want("29")) {
       const F3 = await tagged("[29] F3, re-tagged once the provider is back");
       await move(F3, "[29] F3, re-tagged once the provider is back, moved");
       let waitSeen: string[] | undefined;
+      let waitOutcome: string | undefined;
       for (let i = 0; i < 200 && waitSeen === undefined; i++) {
         await Bun.sleep(50);
-        waitSeen = (await beat())?.waitingMidPass;
+        const b = await beat();
+        waitSeen = b?.waitingMidPass;
+        waitOutcome = b?.outcome;
       }
       downAll = false;
       const f3ok = await settledSoon(F3, 300);
+      // The row says the pass the outage ended failed while it waits, and ok again after a pass with work (review pass 4:
+      // nothing read the outcome).
+      let backOutcome: string | undefined;
+      for (let i = 0; i < 100 && backOutcome !== "ok"; i++) {
+        backOutcome = (await beat())?.outcome;
+        if (backOutcome !== "ok") await Bun.sleep(50);
+      }
       if (oStop) (oStop as PassStop)();
       const oDone = await race(oRun);
-      assert(JSON.stringify(waitSeen) === '["retag"]' && f3ok && oDone.code === 0 && /is not answering/.test(oDone.err) && /answers again/.test(oDone.out),
-        `the provider down mid-follow: the follower waits it out on its heartbeat, probing, and re-tags once it answers (${JSON.stringify(waitSeen)}; ${f3ok}; ${oDone.code})`);
+      assert(JSON.stringify(waitSeen) === '["retag"]' && waitOutcome === "failed" && backOutcome === "ok" && f3ok && oDone.code === 0 && /is not answering/.test(oDone.err) && /answers again/.test(oDone.out),
+        `the provider down mid-follow: the follower waits it out on its heartbeat, the pass stamped failed, probing, and re-tags once it answers, ok again (${JSON.stringify(waitSeen)}; ${waitOutcome}/${backOutcome}; ${f3ok}; ${oDone.code})`);
       // The model missing: at start, a follower refuses before it writes (kind "model"); mid-follow, it waits the model
       // out as an outage, probing, and re-tags once it is served — where a one-shot run's rules would stop. Both raced:
       // a follower that did neither would follow for ever.
@@ -25197,7 +25210,7 @@ if (want("29")) {
       SPECIAL.delete("[29] F6");
       const f6Status = (await claims()).find((c) => c.id === F6)?.status;
       const p402Beat = await beat();
-      assert(p402Done.code === 2 && f6Status === "pending" && p402Beat?.ended === true && p402Beat.refused === "provider",
+      assert(p402Done.code === 2 && f6Status === "pending" && p402Beat?.ended === true && p402Beat.outcome === "failed" && p402Beat.refused === "provider",
         `a 402 mid-follow is the account's: the follower stops, exit 2, its row refused "provider", the thought pending, not failed (${p402Done.code}; ${f6Status}; ${JSON.stringify(p402Beat)})`);
       // Its first pass found nothing (the backlog drained above), and it said all the same that it polls (review pass 2,
       // walkthrough: the line came with a first pass's work alone).
@@ -25244,7 +25257,7 @@ if (want("29")) {
       const pShapeDone = await race(pShape);
       shapeAll = false;
       const shapeBeat = await beat();
-      assert(pShapeDone.code === 2 && /the request's shape/.test(pShapeDone.err) && shapeBeat?.ended === true && shapeBeat.refused === "provider",
+      assert(pShapeDone.code === 2 && /the request's shape/.test(pShapeDone.err) && shapeBeat?.ended === true && shapeBeat.outcome === "failed" && shapeBeat.refused === "provider",
         `…the note refused too: the request's shape, the follower stops, exit 2, its row refused "provider" (${pShapeDone.code}; ${JSON.stringify(shapeBeat)})`);
       // The shape check read three ways (review pass 2): only the note refused as the thoughts were stops a follower.
       // Answered in prose, the shape was taken, the streak reset; met by a 503, nothing is known, the streak left — a
@@ -25275,6 +25288,13 @@ if (want("29")) {
         SPECIAL.set(`[29] ${tag} long`, 400);
         const notes0 = notesSent();
         const failedAll = await allFailed(await streakOf(tag, 4));
+        // The pass the note went unanswered in is stamped failed; a prose answer leaves it ok (review pass 4: untested).
+        let outcome: string | undefined;
+        for (let i = 0; i < 60; i++) {
+          outcome = (await beat())?.outcome;
+          if (ans === 503 ? outcome === "failed" : i >= 30) break;
+          await Bun.sleep(50);
+        }
         const nAfter = await tagged(`[29] ${tag} after`);
         await move(nAfter, `[29] ${tag} after, moved`);
         const afterOk = await settledSoon(nAfter);
@@ -25285,8 +25305,8 @@ if (want("29")) {
         const asked = notesSent() - notes0;
         // An unanswered note is said, and a prose answer is no failure to say (review pass 3).
         const said = /the shape check's note was not answered \(provider_503\)/.test(done.err);
-        assert(failedAll && afterOk && asked === notes && done.code === 0 && !/the request's shape/.test(done.err) && said === (ans === 503),
-          `the shape note answered ${words}: the follower carries on, a thought after the four re-tagged, exit 0 (${failedAll}; ${afterOk}; ${asked} note(s); ${done.code})`);
+        assert(failedAll && afterOk && asked === notes && done.code === 0 && !/the request's shape/.test(done.err) && said === (ans === 503) && outcome === (ans === 503 ? "failed" : "ok"),
+          `the shape note answered ${words}: the follower carries on, a thought after the four re-tagged, exit 0, the pass ${ans === 503 ? "stamped failed" : "ok"} (${failedAll}; ${afterOk}; ${asked} note(s); ${outcome}; ${done.code})`);
       }
       // Two workers, the note out while the other worker's thought meets an outage: the outage halts the pass and aborts
       // the note — nothing known — so the follower waits the outage out, not stop on the shape (review pass 2). Planted
@@ -25394,6 +25414,64 @@ if (want("29")) {
       shapeAll = false;
       assert(JSON.stringify(oWait) === '["retag"]' && o1Ok && poDone.code === 2 && /the request's shape/.test(poDone.err),
         `after an outage waited out, the request's shape refused still stops the follower, exit 2 (${JSON.stringify(oWait)}; ${o1Ok}; ${poDone.code})`);
+      // --follow --limit: the follower ends by itself once its limit is taken, its row ended (review pass 4: untested).
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      for (const k of [1, 2]) {
+        const id = await tagged(`[29] L${k}, under a follower's limit`);
+        await move(id, `[29] L${k}, under a follower's limit, moved`);
+      }
+      const pl = await race(follow({ follow: 1, limit: 1, pausesMs: [10] }));
+      const lBeat = await beat();
+      assert(pl.code !== -1 && /^\s*1 re-tagged/m.test(pl.out) && lBeat?.ended === true && lBeat.outcome === "stopped",
+        `--follow --limit 1 re-tags one and ends by itself, its row ended "stopped" (${pl.code}; ${line(pl.out, "re-tagged (")}; ${JSON.stringify(lBeat)})`);
+      await retag({});
+      // The provider down at start: check says so; a follower pools nothing and records nothing until it answers, then
+      // re-tags; one refused once it answers stops, exit 2 (review pass 4: every case started with the provider up).
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      downAll = true;
+      const outStarts: StartResult[] = [];
+      const cOut = await race(follow({ follow: 1, check: true, onStart: (r) => outStarts.push(r) }));
+      const S1 = await tagged("[29] S1, behind its tags while the provider is down at start");
+      await move(S1, "[29] S1, behind its tags while the provider is down at start, moved");
+      const ps = follow({ follow: 1, pausesMs: [10] });
+      await Bun.sleep(1500);
+      const s1PooledDown = (await claims()).some((c) => c.id === S1);
+      downAll = false;
+      const s1Ok = await settledSoon(S1, 400);
+      ps.stop();
+      const psDone = await race(ps);
+      assert(cOut.code === 0 && JSON.stringify(outStarts) === '[{"ok":true,"provider":"out"}]' && !s1PooledDown && s1Ok && psDone.code === 0 && /is not answering at start/.test(psDone.err),
+        `the provider down at start: check says it is out; the follower pools nothing until it answers, then re-tags, exit 0 (${JSON.stringify(outStarts)}; ${s1PooledDown}; ${s1Ok}; ${psDone.code})`);
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      downAll = true;
+      const authStarts: StartResult[] = [];
+      const pa = follow({ follow: 1, pausesMs: [10], onStart: (r) => authStarts.push(r) });
+      await Bun.sleep(1000);
+      downAll = false;
+      authAll = true;
+      const paDone = await race(pa);
+      authAll = false;
+      assert(paDone.code === 2 && authStarts.length === 1 && authStarts[0].ok === false,
+        `…refused once it answers (a 401): the follower stops at its start, exit 2, a refusal by its kind (${paDone.code}; ${JSON.stringify(authStarts)})`);
+      // A check refused at its start writes no follower row: it is no follower (review pass 4: untested).
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      missingAll = true;
+      const cMissing = await race(follow({ follow: 1, check: true }));
+      missingAll = false;
+      const cMissingBeat = await beat();
+      assert(cMissing.code === 2 && cMissingBeat === undefined,
+        `a check refused at its start writes no follower row (${cMissing.code}; ${JSON.stringify(cMissingBeat)})`);
+      // The CLI wires --follow (review pass 4: no case ran it): bare, it polls every 15 s; a signal ends it, exit 0, its
+      // row ended "stopped".
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      const proc = Bun.spawn(["bun", join(HERE, "retag.ts"), "--url", URL_!, "--follow"], { cwd: HERE, env: base as Record<string, string>, stdout: "pipe", stderr: "pipe" });
+      for (let i = 0; i < 300 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      proc.kill("SIGTERM");
+      const cliExit = await Promise.race([proc.exited, Bun.sleep(15_000).then(() => { proc.kill("SIGKILL"); return -1; })]);
+      const cliText = `${await new Response(proc.stdout).text()}\n${await new Response(proc.stderr).text()}`;
+      const cliBeat = await beat();
+      assert(cliExit === 0 && /then polling every 15 s/.test(cliText) && cliBeat?.ended === true && cliBeat.outcome === "stopped",
+        `the CLI's --follow: polling every 15 s bare, a signal ends it, exit 0, its row ended "stopped" (${cliExit}; ${line(cliText, "worker(s)")}; ${JSON.stringify(cliBeat)})`);
       // check: the follower's start alone — through, nothing pooled.
       const F4 = await tagged("[29] F4, behind its tags at the check");
       await move(F4, "[29] F4, behind its tags at the check, moved");
