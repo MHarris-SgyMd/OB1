@@ -30,8 +30,13 @@ export type Config = {
   maintainerLinearId: string;
   /** owner/name of this repo on GitHub. */
   repo: string;
-  /** owner/name of the bot's own copy of the repo, once SMD-4089 makes it; null until then. */
-  botRepo: string | null;
+  /**
+   * The runner's GitHub App (decision 13, amended 2026-11-24): its id, its installation on this repo, and its slug,
+   * whose `<slug>[bot]` login its PRs carry. All three or none; null until SMD-4089 makes the App.
+   */
+  githubAppId: string | null;
+  githubAppInstallationId: string | null;
+  githubAppSlug: string | null;
   mainCheckout: string;
   /** The stable brain's REST core, as the host reaches it (its proxy's /api route); null until it is reachable. */
   restUrl: string | null;
@@ -53,9 +58,16 @@ export const TIME_LIMITS = { request: 20_000, linear: 30_000 };
 /** The request options every credentialed call carries: no redirect followed, no headers logged, TLS checked. Bun reads `verbose` and `tls`. */
 export const SAFE_REQUEST = { redirect: "manual", verbose: false, tls: { rejectUnauthorized: true } } as const;
 
-/** The environment git runs with: nothing of the maintainer's, no config but the repo's own, and no prompt. `home` is an empty directory. */
+/**
+ * The environment git runs with: nothing of the maintainer's, no config but the repo's own, and no prompt. `home` is an
+ * empty directory. Replace refs and grafts are off, so every read sees the objects themselves: a `refs/replace/` ref in
+ * the runner's bare repository would otherwise show the gate and the review one blob while the push sends another
+ * (SMD-4087 cut 3b-1 review pass 4). The graft file is a path that can't exist (under /dev/null, not a directory): git
+ * then reads no grafts and says nothing, where an existing empty file makes it print a deprecation hint on every
+ * command, which the bundle import's one-line error then showed in place of git's real refusal (review pass 5).
+ */
 export function gitEnv(home: string): Record<string, string> {
-  return { PATH: "/usr/bin:/bin", HOME: home, LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
+  return { PATH: "/usr/bin:/bin", HOME: home, LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null/no-grafts" };
 }
 /**
  * Arguments every git call starts with: no credential helper, https as the only transport, no redirect followed,
@@ -219,8 +231,9 @@ export function parseWorktrees(out: string): Worktree[] {
 }
 
 /**
- * Branches on this repo and the bot's copy, read from GitHub with `ls-remote` from outside any repository (so no
- * repository's config applies) and no local fetch; and the main checkout's local branches and worktrees.
+ * Branches on this repo, read from GitHub with `ls-remote` from outside any repository (so no repository's config
+ * applies) and no local fetch; and the main checkout's local branches and worktrees. The runner's App pushes to this
+ * repo, so its branches are among these.
  */
 export async function readBranches(run: Runner, cfg: Config): Promise<{ branches: Branch[]; worktrees: Worktree[] }> {
   const must = async (cmd: string[], cwd?: string): Promise<string> => {
@@ -229,9 +242,7 @@ export async function readBranches(run: Runner, cfg: Config): Promise<{ branches
     return r.stdout;
   };
   const branches: Branch[] = [];
-  for (const repo of [cfg.repo, ...(cfg.botRepo ? [cfg.botRepo] : [])]) {
-    branches.push(...parseLsRemote(await must(["git", ...GIT_SAFE, "ls-remote", "--heads", `https://github.com/${repo}.git`], "/")));
-  }
+  branches.push(...parseLsRemote(await must(["git", ...GIT_SAFE, "ls-remote", "--heads", `https://github.com/${cfg.repo}.git`], "/")));
   branches.push(...parseLocalBranches(await must(["git", ...GIT_SAFE, "-C", cfg.mainCheckout, "for-each-ref", "--format=%(objectname) %(refname:lstrip=2)", "refs/heads"])));
   const worktrees = parseWorktrees(await must(["git", ...GIT_SAFE, "-C", cfg.mainCheckout, "worktree", "list", "--porcelain"]));
   return { branches, worktrees };

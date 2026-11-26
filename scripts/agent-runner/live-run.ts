@@ -18,8 +18,9 @@
  *
  * It reuses dry-run.ts's loaders (the config, the keys, the hermetic fetch, the Linear client) and facts.ts's hermetic
  * git, so the one thing new here is the glue: the ticket's full fields from Linear, the bare repository, and (in the
- * execute layer) the real RunDeps and LiveDeps. The GitHub identity is cut 3, so a run commits as a placeholder bot and
- * never publishes; its branch stays in the bare repository for the maintainer.
+ * execute layer) the real RunDeps and LiveDeps. Publishing is cut 3b-2's to wire (github.ts is the App's client); until
+ * then a run commits as a placeholder bot and never publishes, and its branch stays in the bare repository for the
+ * maintainer.
  */
 
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -35,13 +36,14 @@ import { TICKET_ID, type Ticket } from "./select.ts";
 import { branchFor } from "./record.ts";
 import { run, type RunDeps, type RunInput, type RunLimits, type RunSession, type SessionRequest } from "./run.ts";
 import { liveRun, type LiveDeps, type LiveResult } from "./live.ts";
+import { repoConfigProblems } from "./github.ts";
 import { REAL_DEPS, runSession, type Pinned } from "./session.ts";
 import { profileHashes, settingsText, type SessionLimits, type SessionPaths } from "./profile.ts";
 import { hostNow, stampReport } from "./install.ts";
 import { PROBES, STAMP_FILE, developerGit, hostStamp, stampProblem } from "./probes.ts";
 import type { Commitlint, GitRun, ScanSecrets } from "./gate.ts";
 
-/** The commit identity a run's sessions use. The real bot (SMD-4089's GitHub machine account) is cut 3; until then a run commits as this placeholder and never publishes, so no real identity is needed. */
+/** The commit identity a run's sessions use: a placeholder until the wiring (cut 3b-2) sets the runner's GitHub App's own; until then a run never publishes. */
 export const BOT = { name: "Agent Runner", email: "agent-runner@runner.invalid" } as const;
 
 /** The runner's state, outside every checkout: the bare repository it clones per run, and the run records (docs, "Records"). */
@@ -50,12 +52,16 @@ export const STATE_DIR = join(homedir(), ".local", "share", "open-brain", "agent
 export const BARE_REPO = join(STATE_DIR, "repo.git");
 
 /**
- * git args for the runner's own LOCAL operations: no credential helper, and no background gc (an auto-gc mid-run races
- * the review checkout's clone — run.ts). Every repo the runner's own git touches is local — the main checkout, its own
- * bare repo, the per-run clone — never a remote, so the file transport stays at git's default. facts.ts's GIT_SAFE
- * (https only, no redirect) is for the GitHub `ls-remote` alone, and would wrongly refuse a local clone.
+ * git args for the runner's own LOCAL operations: no credential helper, no background gc (an auto-gc mid-run races
+ * the review checkout's clone — run.ts), no hook files and no fsmonitor command (a hook planted in the bare repository
+ * would run, as the runner's user, at its fetches and imports — SMD-4087 cut 3b-1 review pass 5). Config-based hooks
+ * (git 2.54's `hook.<name>.*`) aren't turned off by `core.hooksPath`: `ensureBareRepo` refuses a bare repository whose
+ * config holds any key outside github.ts's allowlist before it fetches, so none can be there (review pass 6). Every
+ * repo the runner's own git touches is local — the main checkout, its own bare repo, the per-run clone — never a
+ * remote, so the file transport stays at git's default. facts.ts's GIT_SAFE (https only, no redirect) is for git's
+ * talk with GitHub (the dry run's `ls-remote`, github.ts's push), and would wrongly refuse a local clone.
  */
-export const LOCAL_GIT = ["-c", "credential.helper=", "-c", "gc.auto=0"] as const;
+export const LOCAL_GIT = ["-c", "credential.helper=", "-c", "gc.auto=0", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"] as const;
 
 /** git for the runner's own steps (the bare repo, the clone), hermetic (gitEnv: no maintainer config, no prompt) and local-only (LOCAL_GIT). */
 export function gitRunner(home: string): GitRun {
@@ -68,8 +74,9 @@ export function gitRunner(home: string): GitRun {
 
 /**
  * Provision the runner's bare repository and read the base the run builds on. First run: a bare clone of the
- * maintainer's main checkout (a local path, no network). Every run: fetch `main` from it, so the base is the checkout's
- * current `origin/main`. Returns the base commit, or a problem.
+ * maintainer's main checkout (a local path, no network). Every run: refuse a bare repository whose config holds a key
+ * outside github.ts's allowlist, then fetch `main` from the checkout, so the base is its current `origin/main`. Returns
+ * the base commit, or a problem.
  */
 export function ensureBareRepo(git: GitRun, bareRepo: string, mainCheckout: string): { ok: true; base: string } | { ok: false; problem: string } {
   if (!existsSync(join(bareRepo, "HEAD"))) {
@@ -77,6 +84,12 @@ export function ensureBareRepo(git: GitRun, bareRepo: string, mainCheckout: stri
     const cloned = git(["clone", "--bare", "--quiet", mainCheckout, bareRepo]);
     if (cloned.code !== 0) return { ok: false, problem: `bare clone of ${mainCheckout} failed: ${cloned.stderr.trim()}` };
   }
+  // The bare repository's config, every scope, against the allowlist the push reads it by (github.ts): a config-based hook,
+  // an fsmonitor or a proxy planted there would otherwise run or apply at this fetch and the bundle import after it.
+  const keys = git(["-C", bareRepo, "config", "--show-scope", "--name-only", "--list"]);
+  if (keys.code !== 0) return { ok: false, problem: `reading the bare repo's config failed: ${keys.stderr.trim()}` };
+  const risky = repoConfigProblems(keys.stdout);
+  if (risky.length) return { ok: false, problem: `the bare repo's config sets ${risky.slice(0, 5).join(", ")}: the runner writes no such key, so it was tampered with` };
   // Fetch the checkout's main into the bare repo's own main, so the base is the maintainer's current origin/main.
   const fetched = git(["-C", bareRepo, "fetch", "--quiet", "--no-tags", mainCheckout, "refs/remotes/origin/main:refs/heads/main"]);
   // --quiet leaves a refused update without a word: the usual one is a main here that the checkout's origin/main is not ahead of.
@@ -356,7 +369,7 @@ export async function main(io: Io): Promise<number> {
       `  agent-ready label: ${agentReady ? "yes" : "NO (not labelled for the runner)"}`,
       `  branch:   ${branch}`,
       `  base:     ${bare.base} (the main checkout's origin/main, mirrored into ${BARE_REPO})`,
-      `  bot:      ${BOT.name} <${BOT.email}> (placeholder; GitHub identity is cut 3, so no PR)`,
+      `  bot:      ${BOT.name} <${BOT.email}> (placeholder; publishing is cut 3b-2, so no PR)`,
       `  Verify:   ${t.verify.length} item(s)${t.verify.length ? `\n${t.verify.map((v, i) => `    ${i + 1}. ${v}`).join("\n")}` : ""}`,
       `  names:    ${t.named.length ? t.named.join(", ") : "(none)"}`,
       `  stable:   ${cfg.restUrl}`,
