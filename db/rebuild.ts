@@ -454,9 +454,12 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
                (SELECT count(*)::int FROM supersession_proposals WHERE status = 'stale') AS stale_proposals`) as { rows: number; by_kind: Record<string, number> | null; marked: number; stale: number; orphans: number; legacy: number; stale_proposals: number }[];
       // 067: where each stale row stands against the judge pools — the one read
       // and rank db/consolidate.ts's --status uses (server-portable/consolidate.ts),
-      // so the two doors never disagree (first review pass, mutant: a copy here
-      // read one way while the worker's read another); keyless here, so a
-      // failed or live claim is named with its judge key.
+      // so the two doors never disagree on a row both place (first review pass,
+      // mutant: a copy here read one way while the worker's read another);
+      // keyless here, so a failed or live claim is named with its judge key. A
+      // judge-mode pass's own --status places one row apart, a stale proposal on
+      // a pair it leaves to decide mode (SMD-4446 PR 2b-2): this read knows no
+      // mode, and places that row as any other.
       const standings = staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], null);
       const bound = Number(c.rows) >= LINEAGE_WINDOW ? " (the first 10,001 lineage rows by id read; the rest not)" : "";
       out(`  lineage:     ${c.rows} row(s)${bound}: ${Object.entries(c.by_kind ?? {}).map(([k, n]) => `${n} ${k}`).join(", ") || "none"}`);

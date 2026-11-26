@@ -3257,7 +3257,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
-| | `settled_parts` (151) | `SELECT, UPDATE` — a settled part (SMD-4446) is listed and decided as a proposal is, through 151's `review_settled_part`, which runs as the caller. An accept reads both thoughts' texts, which the capture group grants: with this group alone a reject is made and an accept is refused on `thoughts`. The server's role reads the table in two places: the validity read takes a part's lineage row by its part (154), and preflight's `lineage` row counts the parts that wait and looks for one with no lineage row (SMD-4446 PR 2b-2); each says so where the role may not. The surfaces that list and decide parts come later in SMD-4446. 151 carries this grant to every role holding `SELECT` and `UPDATE` on `supersession_proposals`, so such a role granted before 151 needs nothing more. One granted before SMD-3338 holds `SELECT` alone there, gains nothing from 151, and needs `--grant <role> --groups server` as it does for a proposal's decisions. Recording a part (`INSERT`, `DELETE`) stays the worker group's |
+| | `settled_parts` (151) | `SELECT, UPDATE` — a settled part (SMD-4446) is listed and decided as a proposal is, through 151's `review_settled_part`, which runs as the caller. An accept reads both thoughts' texts, which the capture group grants: with this group alone a reject is made and an accept is refused on `thoughts`. The server's role reads the table in three places: the validity read takes a part's lineage row by its part (154), preflight's `lineage` row counts the parts that wait and looks for one with no lineage row, and on a judge-mode server its `proposals` row counts the stale proposals on a pair that holds an undecided part (SMD-4446 PR 2b-2); the first two say so where the role may not, and the third then counts none. The surfaces that list and decide parts come later in SMD-4446. 151 carries this grant to every role holding `SELECT` and `UPDATE` on `supersession_proposals`, so such a role granted before 151 needs nothing more. One granted before SMD-3338 holds `SELECT` alone there, gains nothing from 151, and needs `--grant <role> --groups server` as it does for a proposal's decisions. Recording a part (`INSERT`, `DELETE`) stays the worker group's |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
 | | `forget_thought(uuid, jsonb, boolean)` (144) | `EXECUTE` — `forget_thought`, which runs as its owner since 144 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 144 carries a grant 139's function held to the wrapper; a role granted before 144 needs `--grant` again |
 | | `ob1_forget_leftovers()` (144) | `EXECUTE` — preflight's `forgotten` row, which reads every store `forget_thought` reaches as the function's owner; without it the row says it could not verify |
@@ -5100,7 +5100,7 @@ tier gives each pair's verdict, not the judge:
       again at the texts as they stand. A part written before the write that
       found the text moved stays, pending at the text as it was, until a
       judgement that records its statement again takes its place, or one
-      that does not removes it (PR 2b-2, below). The calls
+      that names it in no item removes it (PR 2b-2, below). The calls
       for the pairs already judged are paid again, and an older thought's
       row is read once, before the thought's first pair: for a later pair
       that is before the earlier pairs were asked (SMD-4535).
@@ -5416,8 +5416,8 @@ ticket's later cuts.
 - **An edit is not followed by a rebuild.** `rebuild_derived` runs from
   `db/rebuild.ts`, from a forget, and from the sleep scheduler's sweep, which
   deletes orphans and marks nothing; not after `update_thought`. Until one
-  runs for the thought, or a decide-mode run of the pass judges its pair
-  again (Parts whose text has moved, under `consolidate.ts` below), a part
+  runs for the thought, or a decide-mode run of the pass takes the part
+  up (Parts whose text has moved, under `consolidate.ts` below), a part
   recorded before the edit stays pending at the old text: an accept of it
   is refused unless forced. When a rebuild does run, of
   either thought, it sets a pending part stale and queues its newer thought
@@ -5500,6 +5500,7 @@ ticket's later cuts.
   - **Where preflight's role may not read `thought_work_claims`,** as a
     server's may not unless extraction or the subject pool is on, it places
     the parts by the rest and says the claims were not read.
+
   Both censuses of stale lineage rows still leave a part's row out, as they
   do a proposal's: a decided part keeps the fingerprints it was judged at
   for good. `thought_validity` reads a part's lineage row by its part
@@ -5751,7 +5752,8 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
   with the ones its thoughts store, and for the parts that differ with each
   text's own (`content_fingerprint_of`): a thought's stored fingerprint is
   NULL where another thought holds its text, and is left behind by a raw
-  `UPDATE`.
+  `UPDATE`. That is the read of the whole store; a thought in hand has its
+  own parts compared with each text's own alone.
 - **It pools each such part's newer thought again,** at each pass's start
   and each poll of `--follow`, under its own key: both sides with a vector,
   no live or failed claim there, and no proposal holding the part (below).
@@ -5790,7 +5792,8 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
     part back. Two things the pass cannot tell keep every part they could
     be about that is not named again: an item whose statement is in its
     thought and cannot be read back (that thought's parts on the pair), and
-    more such items than the pass keeps the statements of, which is twelve
+    more items that are no part or past the twelve than the pass keeps the
+    statements of, which is twelve
     (both thoughts' parts). A statement the answer does name again in a
     part that stands is recorded in the earlier part's place all the same;
   - a part a reviewer decided meanwhile, which stands.
@@ -5811,8 +5814,8 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
   named in SMD-3340's measurement. How often it refuses a statement named
   again is not measured. Where it refuses the showing words, or the
   statement is not read back, the part is kept and the thought's claim
-  fails each time. Where it refuses the statement's own quote, the item
-  names no statement of the thought, and the part is removed as one named
+  fails each time. Where the statement's own quote is not in its thought,
+  the item names no statement of it, and the part is removed as one named
   no more (SMD-4442 has the check's rule). Without a part that waits, an
   answer not read is recorded as before (SMD-4518).
 - **A pair that is not judged again** has such a part removed too, where
@@ -5881,7 +5884,8 @@ stale, which is a rebuild's mark, or pending at a text that has moved.
   again and not recorded again, or on a pair that is not judged again),
   waiting on a vector, left for a rebuild, decided by a reviewer meanwhile,
   gone, left where a text moved again (the thought put back, or its claim
-  failed past the bound), refused by the store, kept for a statement named
+  failed past the bound), kept as a judgement of the texts as they stand by
+  then, refused by the store, kept for a statement named
   again in an item that is not recorded, kept for an answer that was
   unread or not read whole, and kept for an item that quotes a statement of
   its thought that was not read back. A part the attempt had not come to when it

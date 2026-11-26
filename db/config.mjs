@@ -504,7 +504,8 @@ function coordinatorUp(pass) {
  * (db/coordinator.ts, SMD-3476), and a recreate starts each again, whether
  * it ran or not; a checkout's command follows for a follower run by hand,
  * the one that can carry a custom --job. Consolidation takes no --job: its
- * key follows the judge model, so the job is named beside it.
+ * key follows the judge model or, in decide mode, the decider and its
+ * writer, so the job is named beside it.
  */
 export function restartCommand(worker, job) {
   if (worker === "sleep") return `${coordinatorUp("sleep")}; its settings are OB1_SLEEP_CAPTURE, OB1_SLEEP_ABORT_AFTER, OB1_SLEEP_REEMBED_SHARE, OB1_SLEEP_MAX_WAIT, OB1_SLEEP_RESCAN, OB1_SLEEP_POLL, OB1_SLEEP_WORKERS, OB1_SLEEP_STATEMENT_TIMEOUT, OB1_SLEEP_WORK_MEM and OB1_SLEEP_MAINTENANCE_WORK_MEM there); from a checkout, cd db && bun sleep.ts --url $DATABASE_URL --follow, with each as its flag`;
@@ -2617,7 +2618,7 @@ export const ROLE_GRANTS = Object.freeze({
     // A settled part (SMD-4446) is listed and decided as a proposal is, by
     // 151's SECURITY INVOKER review_settled_part, which updates the row as
     // the caller. The server reads the table in preflight's lineage census
-    // and through thought_validity (154); the listing and the
+    // and proposals row, and through thought_validity (154); the listing and the
     // decision arrive with the ticket's review surfaces, and 151 carries
     // this grant to the roles that hold the proposals' (SELECT and UPDATE
     // both) so those surfaces need no grant of their own. An accept reads both thoughts' texts, which is

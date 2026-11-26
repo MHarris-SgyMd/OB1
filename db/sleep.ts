@@ -1124,7 +1124,9 @@ const backlogCut = (sql: SQL, since: string, job: string) =>
  * A pass's pool, read as its own --status reads it: extraction's universe is
  * every thought (enqueue_thoughts adds those with no row under the key);
  * consolidation's is migration 029's consolidation_pool; the subject sweep's,
- * subjectsPool's. Extraction's with `backlogSince` (ISO text of the
+ * subjectsPool's. Under a decide-mode key consolidation's `unpooled` also
+ * counts the thoughts its pool step would pool again for a settled part that
+ * waits (below). Extraction's with `backlogSince` (ISO text of the
  * database's clock: a period's start), not claims only, carries
  * `backlogLeft`: whether a thought captured before the period is still to
  * extract, backlogCut's exceptions aside (SMD-4468): every neighbour of a

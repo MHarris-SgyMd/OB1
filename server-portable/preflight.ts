@@ -5282,7 +5282,8 @@ if (configFailed) {
             const fixes = [boardFix, old ? backlog : null, knobFix].filter((f): f is string => f !== null);
             const detail = `${words}${old ? ` — unreviewed past ${knob.days} day(s)` : ""}${knob.problem ? `${old ? ";" : " —"} ${knob.problem}, so ${PROPOSALS_WARN_DAYS} days are used` : ""}`;
             if (fixes.length) add("proposals", "warn", detail, fixes.join(" "));
-            // Stale alone: the next pass settles them, and --list stale shows each with the decision it takes (review pass 5).
+            // Stale alone: the next pass settles them, or a decide-mode pass those this server's pass leaves
+            // (`settles`), and --list stale shows each with the decision it takes (review pass 5).
             else add("proposals", "ok", p.pending > 0 ? `${words} — review with ${review}`
               : p.stale > 0 ? `${words} — ${settles}; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
