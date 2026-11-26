@@ -1964,7 +1964,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         field: "subjectRepo",
         table: "subject_repo_settings",
         read: async (sp) => {
-          const [r] = await sp`SELECT subject_repo_setting() AS s, to_regprocedure('public.ob1_subject_linked_key(text, text)') IS NOT NULL AS l`;
+          const [r] = await sp`SELECT subject_repo_setting() AS s, to_regprocedure('ob1_subject_linked_key(text, text)') IS NOT NULL AS l`;
           facts.subjectRepo = subjectRepoValue(r?.s, r?.l === true);
         },
         clear: () => { facts.subjectRepo = null; },
@@ -2707,7 +2707,7 @@ export function subjectRepoLine(db: Pick<DatabaseSummary, "subjectRepo" | "unrea
   const repo = cut(JSON.stringify(r.repo).slice(1, -1), 160);
   return r.refused === null
     ? `${repo} (${when}): a bare pr: or version: key is scoped to it${r.links ? ", and a pr: key whose GitHub link names another repository to that one" : " — migration 154 is not applied, so a GitHub link names no other repository"}`
-    : `${repo}, REFUSED, so no bare pr: or version: key can be written (${when}): ${cut(r.refused, 300)}. An operator key sets it again, or clears it, through set_subject_repo`;
+    : `${repo}, REFUSED, so no bare pr: or version: key can be written (${when}): ${cut(r.refused, 300)}. An operator key sets it again, or clears it, with SELECT set_subject_repo(<repo or NULL>, <its actor envelope>) (over REST and MCP in SMD-3887 PR 3b-2)`;
 }
 
 /**

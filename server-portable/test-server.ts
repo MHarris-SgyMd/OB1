@@ -9342,7 +9342,7 @@ console.log("\n[36j] The operator's subject-key repository in brain_info (SMD-38
   assert(lines[0] === "none — migration 153 is not applied, so pr: and version: keys stay unscoped" && /^\? \(subject_repo_settings /.test(lines[1])
       && lines[2] === "none: pr: and version: keys stay unscoped"
       && lines[3] === "mharris-sgymd/ob1 (set 2026-11-24T10:00:00.500Z by op-key): a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one"
-      && lines[4] === "Bad, REFUSED, so no bare pr: or version: key can be written (set 2026-11-24T10:00:00.000Z by op-key): a repository is lowercase. An operator key sets it again, or clears it, through set_subject_repo"
+      && lines[4] === "Bad, REFUSED, so no bare pr: or version: key can be written (set 2026-11-24T10:00:00.000Z by op-key): a repository is lowercase. An operator key sets it again, or clears it, with SELECT set_subject_repo(<repo or NULL>, <its actor envelope>) (over REST and MCP in SMD-3887 PR 3b-2)"
       && no154 === "mharris-sgymd/ob1 (set 2026-11-24T10:00:00.000Z by op-key): a bare pr: or version: key is scoped to it — migration 154 is not applied, so a GitHub link names no other repository"
       && badRead.every((r) => r === "threw") && subjectRepoValue(null) === null
       && long.length < 700 && long.includes(` by ${"k".repeat(79)}…)`) && long.includes(`${"r".repeat(299)}…. An operator key`),
@@ -9368,6 +9368,15 @@ console.log("\n[36j] The operator's subject-key repository in brain_info (SMD-38
   } catch (e) {
     said.push(`the read threw: ${(e as Error).message}`);
   } finally { console.error = realError; }
+  // The answer says it was read unscoped, in its value and its words (review pass 5: it answered as if no thought held
+  // the key); one the repository was read for says nothing.
+  const say139 = await import("./render.ts");
+  // Rendered only when the read answered (a throw above leaves no outcome to render).
+  const bareText = readBare.ok ? say139.renderThread(readBare as never) : null, scopedText = scoped.ok ? say139.renderThread(scoped as never) : null;
+  assert((readBare as { value?: { scopeUnread?: boolean } }).value?.scopeUnread === true && (scoped as { value?: { scopeUnread?: boolean } }).value?.scopeUnread === undefined
+         && bareText?.structuredContent.scopeUnread === true && /The subject-key repository could not be read, so this bare key was read as written/.test(bareText?.content[0].text ?? "")
+         && scopedText?.structuredContent.scopeUnread === undefined && !/could not be read/.test(scopedText?.content[0].text ?? "could not be read"),
+    `a bare key read unscoped says so, in the value and the text (${bareText?.content[0].text.slice(-120) ?? "no answer"})`);
   assert(readBare.ok && scoped.ok && asked.join(",") === "pr:12,pr:o/r#12" && said.length === 1 && /subject-key repository could not be read, so pr:12 is read as written: permission denied/.test(said[0]),
     `the thread read reads a bare key as the setting's repository, and bare when the setting cannot be read, said in the log (${asked.join(",")}; ${said[0]?.slice(0, 100)})`);
 }

@@ -44,7 +44,7 @@
 --   [20cq].
 --
 -- Prerequisites
---   016 (content_fingerprint_of), 046 (ob1_registry_kind), 111
+--   016 (content_fingerprint_of), 046 (ob1_registry_kind), 061 (derivations), 111
 --   (ob1_record_derivation), 113 (ob1_filed_ticket), 115
 --   (ob1_work_claim_actor), 130 (ob1_thread_lock_keys and the
 --   one-standing-subject-a-key index), 153 (the setting, its functions and
@@ -71,6 +71,12 @@ DECLARE
     ARRAY['ob1_subject_repo_map_max()', '153 (ob1_subject_repo_map_max)']];
   i int;
 BEGIN
+  IF to_regclass('derivations') IS NULL THEN
+    RAISE EXCEPTION USING
+      MESSAGE = 'migration 154 needs 061 (derivations, the lineage the mapping copies); this schema lacks it',
+      HINT = 'The ledger records the migrations but the schema is older (adopted with --baseline?). Re-apply every migration in one transaction: cd db && bun migrate.ts --url <url> --reapply',
+      ERRCODE = 'invalid_schema_definition';
+  END IF;
   IF to_regclass('subject_repo_settings') IS NULL THEN
     RAISE EXCEPTION USING
       MESSAGE = 'migration 154 needs 153 (subject_repo_settings, the operator''s subject-key repository); this schema lacks it',
@@ -108,7 +114,7 @@ AS $$
   -- Every link of the number counts, a repository no key can name among them (review pass 2): two repositories
   -- leave it to the setting's, and one that is no key gives nothing.
   SELECT CASE WHEN count(DISTINCT s.k) = 1 AND subject_key_valid(min(s.k)) THEN min(s.k) END
-    FROM (SELECT 'pr:' || lower(m[1]) || '/' || lower(m[2]) || '#' || substring(p_key FROM 4) AS k
+    FROM (SELECT 'pr:' || lower(m[1]) || '/' || lower(m[2]) || '#' || m[3]::bigint::text AS k
             FROM regexp_matches(COALESCE(p_text, ''),
                    '(?:^|[^A-Za-z0-9./=?&%_:-]|://)(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/0*([0-9]{1,9})(?![0-9])',
                    'gi') AS m

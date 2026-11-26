@@ -7827,8 +7827,12 @@ console.log("\n[20cq] Migration 154: onto a populated brain at the file before i
     const noTable = await apply154();
     await sql.unsafe(`ALTER TABLE subject_repo_settings_away RENAME TO subject_repo_settings`);
     if (!noTable.startsWith(`migration ${NUM} needs 153 (subject_repo_settings`) || (await linked())) unrefused.push(`the setting: ${noTable.slice(0, 80)}`);
+    await sql.unsafe(`ALTER TABLE derivations RENAME TO derivations_away`);
+    const noLineage = await apply154();
+    await sql.unsafe(`ALTER TABLE derivations_away RENAME TO derivations`);
+    if (!noLineage.startsWith(`migration ${NUM} needs 061 (derivations`) || (await linked())) unrefused.push(`the lineage: ${noLineage.slice(0, 80)}`);
     assert(unrefused.length === 0 && !(await linked()) && `${await keyOf(a)};${await keyOf(b)}` === before,
-      `without any one of the twelve functions or 153's setting it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the table tried`})`);
+      `without any one of the twelve functions, 061's lineage or 153's setting it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the table tried`})`);
 
     // Applied: nothing stored moves, and with no repository set a link changes nothing.
     await applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 });

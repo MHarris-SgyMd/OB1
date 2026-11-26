@@ -24156,6 +24156,7 @@ console.log("\n[139] Migration 154: a pr: subject key takes the repository its G
     const cases: [string | null, string, string | null][] = [
       ["see https://github.com/SiggyMD/Client/pull/12 for it", "pr:12", "pr:siggymd/client#12"],
       ["(github.com/o/r/pull/0012)", "pr:12", "pr:o/r#12"],
+      ["github.com/o/r/pull/12", "pr:012", "pr:o/r#12"],
       ["www.github.com/o/r/pull/12/files", "pr:12", "pr:o/r#12"],
       ["github.com/o/r/pull/12", "pr:13", null],
       ["github.com/o/r/pull/123", "pr:12", null],

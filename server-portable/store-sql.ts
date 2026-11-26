@@ -1832,8 +1832,12 @@ export class SqlStore implements ThoughtStore {
     try {
       [r] = await this.sql`SELECT subject_repo_setting() AS s`;
     } catch (e) {
-      // A brain before 153 has no setting; any other failure, the role's grant included, is a fault.
-      if (String((e as { errno?: unknown }).errno ?? "") === "42883" && /subject_repo_setting\(/.test(String((e as Error).message))) return null;
+      // A brain before 153 has no setting; any other failure, the role's grant included, is a fault. The function gone
+      // beside its table (a partial re-apply) is one too, not a brain before 153 (review pass 5).
+      if (String((e as { errno?: unknown }).errno ?? "") === "42883" && /subject_repo_setting\(/.test(String((e as Error).message))) {
+        const [t] = await this.sql`SELECT to_regclass('subject_repo_settings') IS NULL AS absent`;
+        if (t?.absent === true) return null;
+      }
       throw e;
     }
     const s = r?.s as { repo?: unknown; refused?: unknown } | null | undefined;

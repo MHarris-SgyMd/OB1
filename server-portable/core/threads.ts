@@ -25,7 +25,11 @@ export type ThreadMemberShown = { id: string; title: string; created_at: string 
  */
 export type ThreadShown = { key: string; total: number; place: number | null; members: ThreadMemberShown[]; earlier: boolean; cursor: string | null; linked: ThreadLink[]; linkedMore: boolean };
 /** The read: the thought it was asked about (null for a key's), and each thread — one for a key, one per subject for an id, none when it stands in no thread. */
-export type ThreadResult = { id: string | null; threads: ThreadShown[] };
+/**
+ * The thread read's answer. `scopeUnread` (SMD-3887 PR 3b-1 review pass 5): a bare pr: or version: key read as written
+ * because the operator's repository could not be read, so the answer may miss a thread that stands under the scoped key.
+ */
+export type ThreadResult = { id: string | null; threads: ThreadShown[]; scopeUnread?: true };
 
 /** A number's digits without their leading zeros, as text (a version's part may pass 2^53, which Number would round). */
 const noLeadingZeros = (n: string) => n.replace(/^0+(?=[0-9])/, "");
@@ -91,6 +95,7 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
   const store = await ctx.store();
   if (byKey) {
     let k = threadKey(key);
+    let scopeUnread = false;
     if (k === null) return refuse({ code: "REFUSED_THREAD_INPUT", retryable: false, problem: "key_shape", value: key });
     // A bare pr: or version: key reads as the operator's repository, where the setter and the writer put its subjects
     // (153, SMD-3887 PR 3b-1; the maintainer, 2026-11-23); a key scoped already reads as given. One too long once
@@ -99,8 +104,10 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
     if (/^(pr:[0-9]{1,9}|version:v[0-9]+(\.[0-9]+){1,3})$/.test(k)) {
       // A setting the role cannot read leaves the key bare, said in the log, as fetch's threads do (review pass 3: a
       // read that worked before 153 faulted); preflight's subject repository row names the grant.
+      // …and the answer says so (review pass 5: a bare read of a mapped brain's key answered empty, as if no thought held it).
       const repo = await store.subjectRepo().catch((e: unknown) => {
         console.error(`thread: the subject-key repository could not be read, so ${k} is read as written: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        scopeUnread = true;
         return null;
       });
       if (repo !== null && subjectKeyValid(scopedKey(k, repo))) k = scopedKey(k, repo);
@@ -114,7 +121,7 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
       if (e instanceof ListCursorRefused) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after ?? "", reason: "shape" });
       throw e;
     }
-    return ok({ id: null, threads: await shown(store, [page], null) });
+    return ok({ id: null, threads: await shown(store, [page], null), ...(scopeUnread ? { scopeUnread: true as const } : {}) });
   }
   const asked = (id ?? "").trim(), thought = asked.toLowerCase();
   if (!UUID_RE.test(thought)) return refuse({ code: "NOT_FOUND", retryable: false, id: asked });
