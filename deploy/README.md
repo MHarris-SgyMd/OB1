@@ -644,9 +644,9 @@ free:
     and the model server had been idle for a minute. Fourteen runs were
     made and ten are called calm: the load average of the machine, which
     has 18 cores, had a median under 8 through their 12 minutes, a cut
-    set after the sixth run with its figures in view. Other work loaded
-    the machine during the other four. Eight calm runs were on the
-    broker, four a build, in pairs back to back, two pairs in each
+    set after the sixth run with six runs' figures in view. Other work
+    loaded the machine during the other four. Eight calm runs were on
+    the broker, four a build, in pairs back to back, two pairs in each
     order:
     - Extraction ended 38 to 44 thoughts with the yield and 24 to 29
       before it, and the two brains' sweeps ended 6 calls of the judge
@@ -717,12 +717,13 @@ free:
     running. Before the yield such an instant came 42 s into one run and
     47 s into the other, the two brains, which hold the same notes,
     ending a thought within 11 ms of each other. With the yield it first
-    came 16 minutes into one run; in the other it never did, and the
-    load began 19 minutes in, after the first capture had paused both
-    sleeps. The two sleeps had resumed within 0.2 s of each other before
-    the yield and 0.8 and 2.5 s apart with it, by the same code. Nothing
-    shows the yield setting that, brains that hold different notes were
-    not tried, and a brain taking captures calls the metadata model too.
+    came 16 minutes into one run; in the other none came until the first
+    capture paused both sleeps, and the load began 19 minutes in. The
+    two sleeps had resumed within 0.2 s of each other before the yield
+    and 0.8 and 2.5 s apart with it, by the same code. Nothing shows the
+    yield setting when such an instant comes, brains that hold different
+    notes were not tried, and a brain taking captures calls the metadata
+    model too.
   - **Fixed shares bound the slots a brain's background takes, not which
     models stay loaded.** Three models were in use here, the embedder
     with the two the background asked for, on a server that keeps two
