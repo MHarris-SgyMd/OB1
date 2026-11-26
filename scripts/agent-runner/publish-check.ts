@@ -7,9 +7,10 @@
  *     that itself holds a fence can't break out; a section the scanner flags is withheld, not shown; a claim token in
  *     the text is masked; and a body that would pass GitHub's cap drops the model sections whole, never mid-fence.
  *   - `renewVerdict` / `publish`: the step-8 renewal maps every reply to publish / owed / hand-to-a-person; the sequence
- *     confirms the claim (day lease), pushes, opens the draft PR with the right head/base/body, records its number, sets
- *     the week lease, and comments — and each failure (a throwing precheck or GitHub client, a renew that can't land, a
- *     push or PR failure, a failing week renewal, a failed comment) comes back as the right result, never thrown.
+ *     confirms the claim (day lease), pushes the gated commit, opens the draft PR from the pushed branch, records its
+ *     number, sets the week lease, and comments — and each failure (a throwing precheck or GitHub client, a renew that
+ *     can't land, a push or PR failure, a failing week renewal, a failed comment) comes back as the right result, never
+ *     thrown. A push or PR refusal the client calls final hands the ticket to a person, with nothing owed.
  *
  *   bun scripts/agent-runner/publish-check.ts --self-check
  */
@@ -103,10 +104,10 @@ function stubGql(commentSuccess = true, seq: string[] = []): { gql: Gql; calls: 
   return { gql, calls };
 }
 
-/** A GitHub client stub that records its arguments, so the test asserts publish passes the right head/base/body/branch. */
-type PushArg = { branch: string };
+/** A GitHub client stub that records its arguments, so the test asserts publish passes the right branch/commit/head/base/body. */
+type PushArg = { branch: string; commit: string };
 type PrArg = { title: string; head: string; base: string; body: string };
-function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string } = {}, seq: string[] = []): { client: GitHubClient; pushes: PushArg[]; prs: PrArg[] } {
+function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string; final?: boolean } = {}, seq: string[] = []): { client: GitHubClient; pushes: PushArg[]; prs: PrArg[] } {
   const pushes: PushArg[] = [];
   const prs: PrArg[] = [];
   const client: GitHubClient = {
@@ -114,13 +115,13 @@ function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; 
       seq.push("push");
       pushes.push(o);
       if (opts.pushThrows) throw new Error("git push: connection reset");
-      return opts.push === false ? { ok: false, detail: opts.pushDetail ?? "remote rejected" } : { ok: true };
+      return opts.push === false ? { ok: false, detail: opts.pushDetail ?? "remote rejected", ...(opts.final ? { final: true } : {}) } : { ok: true };
     },
     openDraftPr: async (o) => {
       seq.push("pr");
       prs.push(o);
       if (opts.prThrows) throw new Error("fetch failed: the network is down");
-      return opts.pr === false ? { ok: false, detail: "GitHub 422" } : { ok: true, number: 777, url: "https://github.com/owner/repo/pull/777" };
+      return opts.pr === false ? { ok: false, detail: "GitHub 422", ...(opts.final ? { final: true } : {}) } : { ok: true, number: 777, url: "https://github.com/owner/repo/pull/777" };
     },
   };
   return { client, pushes, prs };
@@ -129,7 +130,7 @@ function stubGithub(opts: { push?: boolean; pr?: boolean; pushThrows?: boolean; 
 /** Make a PublishInput over a fresh record, and the deps, for a scenario. */
 function makePublish(
   state: string,
-  opts: { renew?: RenewScenario; push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string; comment?: boolean; precheck?: boolean | "throw" } = {},
+  opts: { renew?: RenewScenario; push?: boolean; pr?: boolean; pushThrows?: boolean; prThrows?: boolean; pushDetail?: string; final?: boolean; comment?: boolean; precheck?: boolean | "throw" } = {},
 ): { input: PublishInput; deps: PublishDeps; dir: string; seq: string[]; pushes: PushArg[]; prs: PrArg[]; fetchCalls: string[]; gqlCalls: string[]; leases: number[] } {
   const n = runSeq++;
   const run = `2026-01-02T03-04-05-${String(n).padStart(3, "0")}Z`;
@@ -138,7 +139,7 @@ function makePublish(
   const seq: string[] = [];
   const f = stubFetch(opts.renew ?? "clean", seq);
   const g = stubGql(opts.comment ?? true, seq);
-  const gh = stubGithub({ push: opts.push, pr: opts.pr, pushThrows: opts.pushThrows, prThrows: opts.prThrows, pushDetail: opts.pushDetail }, seq);
+  const gh = stubGithub({ push: opts.push, pr: opts.pr, pushThrows: opts.pushThrows, prThrows: opts.prThrows, pushDetail: opts.pushDetail, final: opts.final }, seq);
   const deps: PublishDeps = { github: gh.client, fetch: f.fetch, base: "http://127.0.0.1:8010/api", brainKey: `bk${"0".repeat(60)}`, runnerDir: state, gql: g.gql, now: () => new Date("2026-01-02T03:04:05Z") };
   const precheck: PublishInput["precheck"] =
     opts.precheck === "throw"
@@ -153,7 +154,7 @@ function makePublish(
     leaseDaySeconds: DAY,
     leaseWeekSeconds: WEEK,
     branch: "agent/smd-1234-fix-the-thing",
-    head: "ob1-agent-runner:agent/smd-1234-fix-the-thing",
+    commit: "d".repeat(40),
     baseBranch: "main",
     title: "[core] Fix the thing (SMD-1234)",
     body: "the pre-built body",
@@ -319,8 +320,8 @@ export async function selfCheck(): Promise<number> {
       const r = await publish(m.input, m.deps);
       ok(r.published && r.prNumber === 777 && r.prUrl?.includes("/777"), "published, with the PR number and URL");
       ok(r.pushed && r.leaseRenewed && r.commented && r.owed.length === 0 && !r.handToPerson, "pushed, lease renewed, commented, nothing owed, not a person's");
-      ok(m.pushes[0]?.branch === "agent/smd-1234-fix-the-thing", "pushBranch got the run's branch");
-      ok(m.prs[0]?.head === m.input.head && m.prs[0]?.base === "main" && m.prs[0]?.body === m.input.body, "openDraftPr got the right head, base and body");
+      ok(m.pushes[0]?.branch === "agent/smd-1234-fix-the-thing" && m.pushes[0]?.commit === "d".repeat(40), "pushBranch got the run's branch and the gated commit");
+      ok(m.prs[0]?.head === m.input.branch && m.prs[0]?.head === m.pushes[0]?.branch && m.prs[0]?.base === "main" && m.prs[0]?.body === m.input.body, "openDraftPr got the pushed branch as its head, the base and the body");
       ok(readRecord(m.dir).pr === 777, "the record holds the PR number");
       ok(readToken(claimsDir(root), m.input.claimId).lease_seconds === WEEK, "the token file's lease is bumped to a week after the PR opens");
       ok(m.seq.filter((s) => s === "renew").length === 2, "two renewals: the day-lease confirm, then the week lease after the PR");
@@ -397,12 +398,34 @@ export async function selfCheck(): Promise<number> {
       ok(!m.seq.includes("pr"), "it did not open a PR");
     });
 
+    await section("publish: a push GitHub refused for good (final) — a person's, nothing owed, no PR", async () => {
+      const m = makePublish(root, { push: false, final: true, pushDetail: "GitHub refused the push of agent/smd-1234-fix-the-thing: [rejected] (fetch first)" });
+      const r = await publish(m.input, m.deps);
+      ok(!r.published && !r.pushed && r.leaseRenewed && r.handToPerson && r.owed.length === 0, "not pushed, handed to a person, nothing owed to retry");
+      ok(r.reason.startsWith("the push was refused") && !m.seq.includes("pr"), "the reason says the push was refused, and no PR was asked for");
+    });
+
+    await section("publish: a draft PR GitHub refused for good (final) — pushed, a person's, nothing owed", async () => {
+      const m = makePublish(root, { pr: false, final: true });
+      const r = await publish(m.input, m.deps);
+      ok(!r.published && r.pushed && r.handToPerson && r.owed.length === 0 && r.prNumber === null, "pushed, no PR, handed to a person, nothing owed");
+      ok(r.reason.startsWith("the branch was pushed but GitHub refused the draft PR") && readRecord(m.dir).pr === null, "the reason says so, and the record has no PR");
+    });
+
     await section("publish: a GitHub token in a push error is scrubbed from the record strings", async () => {
       const token = `ghp_${"A".repeat(36)}`;
       const m = makePublish(root, { push: false, pushDetail: `remote: https://x-access-token:${token}@github.com/bot/fork rejected` });
       const r = await publish(m.input, m.deps);
       const combined = `${r.owed.map((o) => o.why).join(" ")} ${r.reason}`;
-      ok(!combined.includes(token) && combined.includes("gh_…"), "the GitHub token is masked in owed.why and reason");
+      ok(!combined.includes(token) && combined.includes("gh…"), "the GitHub token is masked in owed.why and reason");
+      const stateless = `ghs_123456_eyJhbGciOiJSUzI1NiJ9.${"eyJpc3MiOiIxIn0-_".repeat(20)}.c2ln`;
+      const m2 = makePublish(root, { push: false, pushDetail: `remote: token ${stateless} refused` });
+      const r2 = await publish(m2.input, m2.deps);
+      const said = `${r2.owed.map((o) => o.why).join(" ")} ${r2.reason}`;
+      ok(!said.includes("eyJ") && said.includes("gh…"), "a stateless installation token (ghs_<app id>_<JWT>) is masked whole");
+      const m3 = makePublish(root, { push: false, pushDetail: `url x-access-token%3A${stateless}@github.com` });
+      const r3 = await publish(m3.input, m3.deps);
+      ok(!`${r3.owed.map((o) => o.why).join(" ")} ${r3.reason}`.includes("eyJ"), "a token right after an encoded colon is masked too");
     });
 
     await section("publish: a PR-open failure — owed (publish), pushed but not published", async () => {
