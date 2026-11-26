@@ -2611,9 +2611,9 @@ which would stand a repository with no key mapped.
 refusal names. `subject_repo_setting()` gives brain_info the setting without
 raising. `ob1_subject_scoped_key(key, repo)` scopes a bare key.
 
-Nothing changes until an operator sets a repository. The sweep's own reading
-of the setting and of a pull request's URL, a bare key's thread read and the
-operation that sets it over REST and MCP come in PR 3b.
+Nothing changes until an operator sets a repository. A pull request's GitHub
+link and a bare key's thread read came in PR 3b-1 (migration 154, above); the
+operation that sets it over REST and MCP comes in PR 3b-2.
 153 carries `SELECT` on the setting to every role reading or writing
 `thought_facets`, and `INSERT, UPDATE` to one writing `thought_sources` too,
 the structure group's mark: a deliverables writer never sets it. It is refused

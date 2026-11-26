@@ -1963,7 +1963,10 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       {
         field: "subjectRepo",
         table: "subject_repo_settings",
-        read: async (sp) => { facts.subjectRepo = subjectRepoValue((await sp`SELECT subject_repo_setting() AS s`)[0]?.s); },
+        read: async (sp) => {
+          const [r] = await sp`SELECT subject_repo_setting() AS s, to_regprocedure('public.ob1_subject_linked_key(text, text)') IS NOT NULL AS l`;
+          facts.subjectRepo = subjectRepoValue(r?.s, r?.l === true);
+        },
         clear: () => { facts.subjectRepo = null; },
       },
       // The priority review's findings (SMD-3671 PR 2, migration 142): the pending and the decided in 30 days alone, as
@@ -2195,17 +2198,18 @@ export function capSettingValue(r: unknown): WorkClaimCapSetting | null {
 
 /**
  * The operator's repository for the brain's pr: and version: subject keys (SMD-3887, migration 153): the one standing,
- * or null when none is (keys stay unscoped), who set it and when, and `refused` what is wrong with a stored value.
+ * or null when none is (keys stay unscoped), who set it and when, `refused` what is wrong with a stored value, and
+ * `links` whether migration 154's GitHub-link rule is applied (a pr: key a link names going to that repository).
  */
-export type SubjectRepoSetting = { repo: string | null; setAt: string | null; setBy: string | null; refused: string | null };
+export type SubjectRepoSetting = { repo: string | null; setAt: string | null; setBy: string | null; refused: string | null; links: boolean };
 /** subject_repo_setting()'s jsonb → the record's setting. An answer with no `source` throws: a reply this server cannot read is a fault. */
-export function subjectRepoValue(r: unknown): SubjectRepoSetting | null {
+export function subjectRepoValue(r: unknown, links = true): SubjectRepoSetting | null {
   if (r === null || r === undefined) return null;
   const o = typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : null;
   if (!o || (o.source !== "none" && o.source !== "operator")) throw new Error("the subject-key repository read answered no setting");
-  if (o.source === "none") return { repo: null, setAt: null, setBy: null, refused: null };
+  if (o.source === "none") return { repo: null, setAt: null, setBy: null, refused: null, links };
   const at = typeof o.set_at === "string" && !Number.isNaN(Date.parse(o.set_at)) ? new Date(o.set_at).toISOString() : null;
-  return { repo: typeof o.repo === "string" ? o.repo : null, setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null };
+  return { repo: typeof o.repo === "string" ? o.repo : null, setAt: at, setBy: typeof o.set_by === "string" ? o.set_by : null, refused: typeof o.refused === "string" ? o.refused : null, links };
 }
 
 /** The threads' census as the record carries it: its counts, and no key (see DatabaseFacts.threads). */
@@ -2702,7 +2706,7 @@ export function subjectRepoLine(db: Pick<DatabaseSummary, "subjectRepo" | "unrea
   const when = `set ${r.setAt ?? "?"}${r.setBy ? ` by ${cut(JSON.stringify(r.setBy).slice(1, -1), 80)}` : ""}`;
   const repo = cut(JSON.stringify(r.repo).slice(1, -1), 160);
   return r.refused === null
-    ? `${repo} (${when}): a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one`
+    ? `${repo} (${when}): a bare pr: or version: key is scoped to it${r.links ? ", and a pr: key whose GitHub link names another repository to that one" : " — migration 154 is not applied, so a GitHub link names no other repository"}`
     : `${repo}, REFUSED, so no bare pr: or version: key can be written (${when}): ${cut(r.refused, 300)}. An operator key sets it again, or clears it, through set_subject_repo`;
 }
 

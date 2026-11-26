@@ -95,7 +95,8 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
     // A bare pr: or version: key reads as the operator's repository, where the setter and the writer put its subjects
     // (153, SMD-3887 PR 3b-1; the maintainer, 2026-11-23); a key scoped already reads as given. One too long once
     // scoped stays bare, as the writer leaves it.
-    if (/^(pr:[0-9]|version:v)/.test(k)) {
+    // Bare alone: `pr:3scale/apicast#12` and `version:vercel/next.js@v1.2` are scoped already (review pass 4).
+    if (/^(pr:[0-9]{1,9}|version:v[0-9]+(\.[0-9]+){1,3})$/.test(k)) {
       // A setting the role cannot read leaves the key bare, said in the log, as fetch's threads do (review pass 3: a
       // read that worked before 153 faulted); preflight's subject repository row names the grant.
       const repo = await store.subjectRepo().catch((e: unknown) => {

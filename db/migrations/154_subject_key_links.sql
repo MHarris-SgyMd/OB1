@@ -63,6 +63,7 @@ DECLARE
     ARRAY['ob1_filed_ticket(jsonb)', '113 (ob1_filed_ticket)'],
     ARRAY['ob1_work_claim_actor(jsonb, text)', '115 (ob1_work_claim_actor)'],
     ARRAY['ob1_thread_lock_keys(text[])', '130 (ob1_thread_lock_keys)'],
+    ARRAY['subject_key_valid(text)', '153 (subject_key_valid)'],
     ARRAY['ob1_subject_scoped_key(text, text)', '153 (ob1_subject_scoped_key)'],
     ARRAY['ob1_subject_unscoped_key(text)', '153 (ob1_subject_unscoped_key)'],
     ARRAY['ob1_subject_repo()', '153 (ob1_subject_repo)'],
@@ -94,7 +95,11 @@ $qc$;
 -- ob1:subject-key-links — a CONTRACT SENTINEL, not prose: a GitHub
 -- pull-request link alone names a key's repository (the maintainer,
 -- 2026-11-23): any other host leaves the key to the setting's. The number must
--- be the key's, read as a number, and one repository alone must claim it.
+-- be the key's, read as a number, and one repository alone must claim it. A
+-- link begins the text or a URL (`://`), or follows any mark but one a host's
+-- name, a path or a query holds (a letter, digit, `.`, `-`, `_`, `/`, `=`,
+-- `?`, `&`, `%` or `:`): a comma, a backtick or `**` before it is no bar
+-- (review pass 4), and `mirror.example.com/github.com/…` no link (pass 3).
 CREATE OR REPLACE FUNCTION ob1_subject_linked_key(p_text text, p_key text)
 RETURNS text
 LANGUAGE sql
@@ -105,7 +110,7 @@ AS $$
   SELECT CASE WHEN count(DISTINCT s.k) = 1 AND subject_key_valid(min(s.k)) THEN min(s.k) END
     FROM (SELECT 'pr:' || lower(m[1]) || '/' || lower(m[2]) || '#' || substring(p_key FROM 4) AS k
             FROM regexp_matches(COALESCE(p_text, ''),
-                   '(?:^|[\s(<\[''"]|://)(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/0*([0-9]{1,9})(?![0-9])',
+                   '(?:^|[^A-Za-z0-9./=?&%_:-]|://)(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/0*([0-9]{1,9})(?![0-9])',
                    'gi') AS m
            WHERE p_key ~ '^pr:[0-9]{1,9}$' AND m[3]::bigint = substring(p_key FROM 4)::bigint) AS s
 $$;
@@ -149,6 +154,7 @@ DECLARE
   v_remapped integer := 0;
   v_targets text[] := '{}';
   v_map     jsonb := '{}';
+  v_lower   integer;
 BEGIN
   SELECT * INTO v_who FROM ob1_work_claim_actor(p_actor, 'set_subject_repo');
   -- The operator's kind by its agent id alone: a name lends no kind (SMD-2608).
@@ -195,8 +201,23 @@ BEGIN
     -- repository a remap moves from) does not move. Each facet's target is read here once, from its thought's text
     -- now, and the mapping below takes it from v_map rather than read the text again: an edit committed between the
     -- two would otherwise move a key to a target whose thread lock was never taken first (review pass 1).
+    -- A bound first, from the keys alone (review pass 4): each distinct bare key the setting can scope moves, to a
+    -- target of its own (no two bare keys share one), so past the cap of them the check below would refuse too, and
+    -- no text need be read to say so.
+    SELECT count(DISTINCT f2.payload->>'key') INTO v_lower
+      FROM thought_facets f2
+     WHERE f2.kind = 'subject' AND f2.valid_until IS NULL
+       AND (f2.payload->>'key' ~ '^pr:[0-9]{1,9}$' OR f2.payload->>'key' ~ '^version:v[0-9]+(\.[0-9]+){1,3}$')
+       AND subject_key_valid(ob1_subject_scoped_key(f2.payload->>'key', v_repo));
+    IF v_lower > ob1_subject_repo_map_max() THEN
+      RETURN jsonb_build_object('ok', false, 'error', 'TOO_MANY_KEYS', 'keys', v_lower, 'targets', NULL, 'max', ob1_subject_repo_map_max(),
+        'message', format('setting %s would move at least %s distinct pr: and version: keys, each to a target of its own, in one transaction, %s or more thread locks held to the commit, past the %s (two for each of %s keys) one mapping takes; nothing is set',
+                          v_repo, v_lower, 2 * v_lower, 2 * ob1_subject_repo_map_max(), ob1_subject_repo_map_max()));
+    END IF;
+    -- The text is read for a pr: key alone, the one a link can scope (review pass 4).
     SELECT COALESCE(jsonb_object_agg(f2.id::text,
-                      COALESCE(ob1_subject_linked_key(t2.content, ob1_subject_unscoped_key(f2.payload->>'key')),
+                      COALESCE(CASE WHEN ob1_subject_unscoped_key(f2.payload->>'key') ~ '^pr:'
+                                    THEN ob1_subject_linked_key(t2.content, ob1_subject_unscoped_key(f2.payload->>'key')) END,
                                ob1_subject_scoped_key(ob1_subject_unscoped_key(f2.payload->>'key'), v_repo))), '{}') INTO v_map
       FROM thought_facets f2 JOIN thoughts t2 ON t2.id = f2.thought_id
      WHERE f2.kind = 'subject' AND f2.valid_until IS NULL

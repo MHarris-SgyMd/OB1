@@ -23902,7 +23902,7 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     const capped = await setRepo("o/r", OP);
     const keysCapped = `${await keysOf(t1)};${await keysOf(t3)};${await keysOf(t5)}`;
     await restoreShipped("ob1_subject_repo_map_max");
-    assert(capped.ok === false && capped.error === "TOO_MANY_KEYS" && capped.keys === 3 && capped.max === 2 && /would move 3 distinct pr: and version: keys to 3 targets in one transaction, 6 thread locks held to the commit, past the 4 \(two for each of 2 keys\)/.test(String(capped.message)) && capped.targets === 3
+    assert(capped.ok === false && capped.error === "TOO_MANY_KEYS" && capped.keys === 3 && capped.max === 2 && /would move at least 3 distinct pr: and version: keys, each to a target of its own, in one transaction, 6 or more thread locks held to the commit, past the 4 \(two for each of 2 keys\)/.test(String(capped.message)) && capped.targets === null
            && (await repoNow()) === null && keysCapped === "pr:12;ticket:SMD-91370,version:v1.2;pr:7,pr:o/r#7"
            && (await one<{ m: number }>(`SELECT ob1_subject_repo_map_max() AS m`)).m === 2000,
       `past the cap the setting answers TOO_MANY_KEYS, naming the keys and the cap, and nothing is set or mapped; the shipped cap is 2,000 (${JSON.stringify(capped).slice(0, 160)})`);
@@ -24166,6 +24166,10 @@ console.log("\n[139] Migration 154: a pr: subject key takes the repository its G
       ["notgithub.com/o/r/pull/12", "pr:12", null],
       ["https://mirror.example.com/github.com/acme/app/pull/12", "pr:12", null],
       ["see ?url=github.com/acme/app/pull/12", "pr:12", null],
+      ["a&b=github.com/acme/app/pull/12", "pr:12", null],
+      ["github.com/a/x/pull/12,github.com/b/y/pull/12", "pr:12", null],
+      ["`github.com/siggymd/client/pull/12`", "pr:12", "pr:siggymd/client#12"],
+      ["**github.com/a/x/pull/12**", "pr:12", "pr:a/x#12"],
       ["[the PR](https://github.com/acme/app/pull/12)", "pr:12", "pr:acme/app#12"],
       ["github.com/o/../pull/12", "pr:12", null],
       ["github.com/o/r/pull/12", "version:v1.2", null],

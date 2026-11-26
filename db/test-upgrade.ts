@@ -7809,6 +7809,7 @@ console.log("\n[20cq] Migration 154: onto a populated brain at the file before i
       ["ob1_filed_ticket", "jsonb", "113 (ob1_filed_ticket)"],
       ["ob1_work_claim_actor", "jsonb, text", "115 (ob1_work_claim_actor)"],
       ["ob1_thread_lock_keys", "text[]", "130 (ob1_thread_lock_keys)"],
+      ["subject_key_valid", "text", "153 (subject_key_valid)"],
       ["ob1_subject_scoped_key", "text, text", "153 (ob1_subject_scoped_key)"],
       ["ob1_subject_unscoped_key", "text", "153 (ob1_subject_unscoped_key)"],
       ["ob1_subject_repo", "", "153 (ob1_subject_repo)"],
@@ -7827,7 +7828,7 @@ console.log("\n[20cq] Migration 154: onto a populated brain at the file before i
     await sql.unsafe(`ALTER TABLE subject_repo_settings_away RENAME TO subject_repo_settings`);
     if (!noTable.startsWith(`migration ${NUM} needs 153 (subject_repo_settings`) || (await linked())) unrefused.push(`the setting: ${noTable.slice(0, 80)}`);
     assert(unrefused.length === 0 && !(await linked()) && `${await keyOf(a)};${await keyOf(b)}` === before,
-      `without any one of the eleven functions or 153's setting it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the table tried`})`);
+      `without any one of the twelve functions or 153's setting it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the table tried`})`);
 
     // Applied: nothing stored moves, and with no repository set a link changes nothing.
     await applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 });
