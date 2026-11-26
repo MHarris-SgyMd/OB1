@@ -571,14 +571,14 @@ free:
   `yield:` line). The two on one model were made twice, the first pair
   disturbed, and the second is shown. The last four rows are the runs on
   two models made again on a model server of their own, on two builds:
-  the last before the yield (the first rows' build and one unrelated
-  change) and the first with it. The yield applies where the judge's
-  model is not extraction's, as in these brains. Those rows are the runs
-  on a calm machine, as the fourth bullet says, and their broker cells
-  give the range over four runs. No row is a build with the yield on the
-  usual server: the two broker runs of that kind are in the fourth
-  bullet. The table is of the first 12 minutes, and its medians are of
-  every call the probe sent:
+  the last build before the yield (the first rows' build and one
+  unrelated change) and the first build with it. The yield applies where
+  the judge's model is not extraction's, as in these brains. Those four
+  rows are the runs on a calm machine, as the fourth bullet says, and
+  their broker cells give the range over four runs. No row shows a build
+  with the yield on the usual server: the two broker runs of that kind
+  are in the fourth bullet. The table is of the first 12 minutes, and
+  its medians are of every call the probe sent:
 
   | Background asks for | Shares | Search, median | Metadata call, median | Judge model listed, of 720 s | Thoughts extracted, the two brains |
   |---|---|---|---|---|---|
@@ -638,15 +638,16 @@ free:
     `OB1_SLEEP_MAX_WAIT` says otherwise; it does not see another brain's
     extraction. To tell its effect from the rest, the two-model runs
     were made again on two builds one pull request apart, the one before
-    the yield and the one with it, on a model server no other caller
-    used, with this Mac's other brains' background stopped, and with no
-    note going in until both sleeps' first period had ended and the
-    model server had been idle for a minute. Fourteen runs were made and
-    ten are called calm: the load average of the machine, which has 18
-    cores, had a median under 8 through their 12 minutes, a cut set
-    after the sixth run with its figures in view. Other work loaded the
-    machine during the other four. Eight calm runs were on the broker,
-    four a build, in pairs back to back, two pairs in each order:
+    the yield and the one with it. They ran on a model server no other
+    caller used, with the background of this Mac's other brains stopped,
+    and with no note going in until both sleeps' first period had ended
+    and the model server had been idle for a minute. Fourteen runs were
+    made and ten are called calm: the load average of the machine, which
+    has 18 cores, had a median under 8 through their 12 minutes, a cut
+    set after the sixth run with its figures in view. Other work loaded
+    the machine during the other four. Eight calm runs were on the
+    broker, four a build, in pairs back to back, two pairs in each
+    order:
     - Extraction ended 38 to 44 thoughts with the yield and 24 to 29
       before it, and the two brains' sweeps ended 6 calls of the judge
       model where they had ended 8, in every calm run. Of the 12 loads
@@ -665,87 +666,89 @@ free:
       tags with the yield, and 114 of 120 before it.
 
     That gain is of runs that all began one way. A fifth run with the
-    yield ended 25 thoughts in its 12 minutes, as before the yield, with
-    a search at 20.6 s at the median. Loading the notes is a live write,
-    and in that run the pause cut off a call one brain's sweep had in
-    hand. The brain asked for the judge model again the moment its sleep
-    resumed, and the run's turns ran about two minutes out of step with
-    the other four from there. Four minutes in it had ended 2 thoughts
-    where they had ended 11 to 14, and ten minutes in 25 where they had
-    ended 28 to 31; the 12-minute mark then fell after a judge-model
-    turn of its and an extraction turn of theirs. Other work also made
-    the machine busy from its sixth minute (a load average of up to 15;
-    hence not calm). It was behind before that, and from minute 4 the
-    brain whose call was cut off ended 8 thoughts and the other 15. A
-    capture that pauses a sleep for over a minute while a sweep's call
-    is in hand cuts that call off the same way, so what the yield gains
-    a brain that takes captures through a backlog was not measured. A
-    run before the yield under a load average of 26 to 88 had a search
-    at 112.4 s at the median, 24 of 48 answered by exact matches alone
-    and 12 of 24 metadata calls timed out. Two earlier runs with the
-    yield (PR 3c-4), on the usual server and a machine at a load average
-    of 3 to 18, had searches at 51.2 and 22.4 s at the median, 12 and 4
-    of 48 answered by exact matches alone, and 17 and 40 thoughts where
-    the run before the yield there had 27. Which condition made each of
-    those figures is not shown. In those two earlier runs the 30 notes
-    that go in before a run's 150 took six to nine times as long to load
-    as they had before the yield. With no note going in before both
-    sleeps' first period had ended, they loaded in 75 to 104 s, every
-    note with its vector and tags, in all fourteen runs on either build.
+    yield ended 25 thoughts in its 12 minutes, as runs before the yield
+    did, with a search at 20.6 s at the median. Loading the notes is a
+    live write, and in that run the pause cut off a call one brain's
+    sweep had in hand. The brain asked for the judge model again the
+    moment its sleep resumed, and the run's turns ran about two minutes
+    out of step with the other four from there. Four minutes in it had
+    ended 2 thoughts where they had ended 11 to 14, and ten minutes in
+    25 where they had ended 28 to 31; the 12-minute mark then fell after
+    one of its judge-model turns and one of their extraction turns.
+    Other work also made the machine busy from the run's sixth minute (a
+    load average of up to 15; hence not calm). The run was behind before
+    that, and from minute 4 the brain whose call was cut off ended 8
+    thoughts and the other 15. A capture that pauses a sleep for over a
+    minute while a sweep's call is in hand cuts that call off the same
+    way, so what the yield gains a brain that takes captures through a
+    backlog was not measured. A run before the yield under a load
+    average of 26 to 88 had a search at 112.4 s at the median, 24 of 48
+    answered by exact matches alone and 12 of 24 metadata calls timed
+    out. Two earlier runs with the yield (PR 3c-4), on the usual server
+    and a machine at a load average of 3 to 18, had searches at 51.2 and
+    22.4 s at the median, 12 and 4 of 48 answered by exact matches
+    alone, and 17 and 40 thoughts where the run before the yield there
+    had 27. Which condition made each of those figures is not shown. In
+    those two earlier runs the 30 notes that go in before a run's 150
+    took six to nine times as long to load as they had before the yield.
+    With no note going in before both sleeps' first period had ended,
+    they loaded in 75 to 104 s, every note with its vector and tags, in
+    all fourteen runs on either build.
   - **Under fixed shares on two models one side went without in every
     run.** With the yield, on a calm machine, the metadata model was
     listed for all 720 s and the judge model for none: Ollama decided
-    its load 20 s in and began it over 18 minutes later. Extraction
-    ended 83 thoughts, the metadata call took 3.3 s, and the sweeps
-    ended no call: each one's single call timed out after 15 minutes.
-    Before the yield, on a calm machine, it was the other way: the judge
-    model's load began 22 s after it was decided and it was listed for
-    673 s, 22 of 24 metadata calls timed out at 120 s, extraction ended
-    4 thoughts, and the notes' own load before the run took half as long
-    again as with the yield, with 8 of each brain's 150 saved without a
-    vector or without tags against 4. A second run of each, on a busy
-    machine, went the same way. The embedder went unlisted either way,
-    so 44 to 46 of 48 searches were answered by exact matches alone.
-    Counting two runs on the usual server, the table's third row and one
-    with the yield (PR 3c-4): with the yield the metadata model kept the
-    server in three runs of three, and before it the judge model did in
-    two of three. In these runs the judge model's load began only at an
-    instant with no call on the metadata model: both brains between
-    calls and the probe's call not running. Before the yield that came
-    42 s into one run and 47 s into the other, the two brains, which
-    hold the same notes, ending a thought within 11 ms of each other.
-    With the yield it first came 16 minutes into one run; in the other
-    it never did, and the load began 19 minutes in, after the first
-    capture had paused both sleeps. The two sleeps had resumed within
-    0.2 s of each other before the yield and 0.8 and 2.5 s apart with
-    it, by the same code. Nothing shows the yield setting that, brains
-    that hold different notes were not tried, and a brain taking
-    captures calls the metadata model too.
+    the judge model's load 20 s in and began it over 18 minutes later.
+    Extraction ended 83 thoughts, the metadata call took 3.3 s, and the
+    sweeps ended no call: each one's single call timed out after 15
+    minutes. Before the yield, on a calm machine, it was the other way:
+    the judge model's load began 22 s after it was decided and the model
+    was listed for 673 s, 22 of 24 metadata calls timed out at 120 s,
+    extraction ended 4 thoughts, and the notes' own load before the run
+    took half as long again as with the yield, with 8 of each brain's
+    150 saved without a vector or without tags against 4. A second run
+    of each, on a busy machine, went the same way. The embedder went
+    unlisted either way, so 44 to 46 of 48 searches were answered by
+    exact matches alone. Counting two runs on the usual server, the
+    table's third row and one with the yield (PR 3c-4): with the yield
+    the metadata model kept the server in three runs of three, and
+    before it the judge model did in two of three. In these runs the
+    judge model's load began only at an instant with no call on the
+    metadata model: both brains between calls and the probe's call not
+    running. Before the yield such an instant came 42 s into one run and
+    47 s into the other, the two brains, which hold the same notes,
+    ending a thought within 11 ms of each other. With the yield it first
+    came 16 minutes into one run; in the other it never did, and the
+    load began 19 minutes in, after the first capture had paused both
+    sleeps. The two sleeps had resumed within 0.2 s of each other before
+    the yield and 0.8 and 2.5 s apart with it, by the same code. Nothing
+    shows the yield setting that, brains that hold different notes were
+    not tried, and a brain taking captures calls the metadata model too.
   - **Fixed shares bound the slots a brain's background takes, not which
     models stay loaded.** Three models were in use here, the embedder
     with the two the background asked for, on a server that keeps two
     loaded. Brains whose calls between them, live and background, use
     more models than the server keeps loaded belong on the broker with
     `ps`: under fixed shares nearly every search went without its
-    embedding, and one of extraction and the judge model's passes got
+    embedding, and either extraction or the judge model's passes got
     nothing. In figures: under fixed shares 44 to 46 of 48 searches were
     answered by exact matches alone in every run made, six in all. On
-    the broker none was on a calm machine with a model server of its
-    own, and up to 24 of 48 were otherwise. On the broker a tenth of the
-    searches took over a minute even then. Fixed shares gave more on one
-    side and nothing on the other. Where the metadata model kept the
-    server, in all three runs with the yield and one of three before it,
-    the metadata call took 3.2 to 3.9 s and extraction did about twice
-    the broker's, with no judge-model work and nearly no search
-    embedding, and from minute 12 the harness could time no capture for
-    five to eight minutes, in the three runs where that was read. Where
-    the judge model kept it, in two runs before the yield, 22 of 24
-    metadata calls timed out. Nothing here shows which side a given pair
-    of brains will get. A raised `OB1_SLEEP_MAX_WAIT`, which cost live
-    calls least in the runs above with one brain backlogged, before the
-    yield, was not tried with two. Since the yield the same setting also
-    caps how long a brain's judge-model passes wait behind its own
-    extraction, so raising it changes two things.
+    the broker none was answered that way on a calm machine with a model
+    server of its own, and up to 24 of 48 were otherwise. On the broker
+    a tenth of the searches took over a minute even then. Fixed shares
+    gave more on one side and nothing on the other. Where the metadata
+    model kept the server, in all three runs with the yield and one of
+    three before it, the metadata call took 3.2 to 3.9 s and extraction
+    did about twice the broker's, with no judge-model work and nearly no
+    search embedding. From minute 12 in those runs the harness could
+    time no capture for five to eight minutes, in the three where that
+    was read. Where the judge model kept it, in two runs before the
+    yield, 22 of 24 metadata calls timed out. Nothing here shows which
+    side a given pair of brains will get. A raised `OB1_SLEEP_MAX_WAIT`,
+    which cost live calls least in the runs above with one brain
+    backlogged, before the yield, was not tried with two. Since the
+    yield the same setting also caps how long a brain's judge-model
+    passes wait behind its own extraction, so raising it changes two
+    things.
 
 **A brain asks it through its coordinator** (SMD-3379 PR 3b), with
 `OB1_SLOT_BROKER_URL` and `OB1_SLOT_BROKER_KEY` set in its `deploy/.env`: the
