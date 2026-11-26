@@ -2990,8 +2990,8 @@ A brain whose key was moved back before this rule, or by hand, holds the
 other model's entities under rows that read done. Its next run returns the
 finished rows another key's pool read since, with no flag and behind what is
 pending; `--status` counts them. A thought another model was run over
-outside the pools is not among them: its entities
-stand until a `--switch-key` (SMD-4579).
+outside the pools is not among them: its entities stand until a
+`--switch-key` (SMD-4579).
 
 Consolidation's key follows its judge model (`OB1_JUDGE_MODEL`, else the
 metadata model) and prompt version, with no switch to refuse: a new one is a

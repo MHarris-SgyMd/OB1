@@ -859,12 +859,12 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
    * thought's entities was a second one, and it is true as well of a thought
    * another model was run over on purpose, with no pool: both dogfood brains
    * held 22 the 27B had read once, in September, which an unattended run
-   * would have read again under the recorded key. A reading
-   * written outside the pools is the operator's, and stands until a
-   * --switch-key asks for the brain under this key (unvouched, below). What
-   * that gives up: a thought the other key's pool read and that was then
-   * edited, its row there pending again, on a brain moved back before
-   * SMD-2607 — returned by no run, and by any switch made since.
+   * would have read again under the recorded key. A reading written outside
+   * the pools is the operator's, and stands until a --switch-key asks for
+   * the brain under this key (unvouched, below). What that gives up: a
+   * thought the other key's pool read and that was then edited, its row
+   * there pending again, on a brain moved back before SMD-2607 — returned by
+   * no run, and by any switch made since.
    */
   const readSince = () => sql`c.status = 'succeeded' AND EXISTS (
     SELECT 1 FROM thought_work_claims o
