@@ -48,6 +48,7 @@ import {
   type Runner,
 } from "./facts.ts";
 import { printable, shownText } from "./guard.ts";
+import { botLogin } from "./github.ts";
 import {
   HIDDEN_TEXT,
   boardReasons,
@@ -132,7 +133,9 @@ const CONFIG_KEYS: Record<keyof Config, { required: true } | { default: string |
   initiative: { required: true },
   maintainerLinearId: { required: true },
   repo: { default: "MHarris-SgyMd/OB1" },
-  botRepo: { default: null },
+  githubAppId: { default: null },
+  githubAppInstallationId: { default: null },
+  githubAppSlug: { default: null },
   mainCheckout: { required: true },
   restUrl: { default: null },
 };
@@ -188,12 +191,16 @@ export function parseConfig(text: string, home: string): Config | { error: strin
   }
   if (!LINEAR_USER_ID.test(String(out.maintainerLinearId))) return { error: "maintainerLinearId must be a Linear user id, a UUID: the README beside this script says how to find yours" };
   if (typeof out.mainCheckout === "string" && out.mainCheckout.startsWith("~/")) out.mainCheckout = join(home, out.mainCheckout.slice(2));
-  for (const key of ["repo", "botRepo"] as const) {
-    const v = out[key];
-    if (typeof v !== "string") continue;
-    const parts = v.split("/");
-    if (parts.length !== 2 || parts.some((p) => !/^[A-Za-z0-9_.-]+$/.test(p) || p === "." || p === "..")) return { error: `${key} must be owner/name` };
+  if (typeof out.repo === "string") {
+    const parts = out.repo.split("/");
+    if (parts.length !== 2 || parts.some((p) => !/^[A-Za-z0-9_.-]+$/.test(p) || p === "." || p === "..")) return { error: "repo must be owner/name" };
   }
+  const app = [out.githubAppId, out.githubAppInstallationId, out.githubAppSlug];
+  if (app.some((v) => v !== null) && app.some((v) => v === null)) return { error: "githubAppId, githubAppInstallationId and githubAppSlug come together: give all three, or none" };
+  for (const key of ["githubAppId", "githubAppInstallationId"] as const) {
+    if (typeof out[key] === "string" && !/^[1-9][0-9]{0,15}$/.test(out[key] as string)) return { error: `${key} must be the number GitHub shows, in a string` };
+  }
+  if (typeof out.githubAppSlug === "string" && !/^[a-z0-9](?:[a-z0-9-]{0,32}[a-z0-9])?$/.test(out.githubAppSlug)) return { error: "githubAppSlug must be the App's slug, as its URL shows it (lower case, digits and hyphens)" };
   if (typeof out.restUrl === "string") {
     const checked = checkRestUrl(out.restUrl);
     if ("error" in checked) return checked;
@@ -225,6 +232,18 @@ export const OPEN_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW | constants.
  * bit. Null when there is no file.
  */
 export function readOwnedFile(path: string, secret: boolean): string | null {
+  // A file renamed over while it was open (setup.ts installs a key by rename) shows no links: read the new one instead.
+  for (let tries = 0; tries < 3; tries++) {
+    const got = readOwnedOnce(path, secret);
+    if (got !== REPLACED) return got;
+  }
+  throw new Error(`${path} was replaced three times while being read`);
+}
+
+/** What readOwnedOnce answers for a file renamed over while it was open (no links left). */
+const REPLACED = Symbol("replaced");
+
+function readOwnedOnce(path: string, secret: boolean): string | null | typeof REPLACED {
   let fd: number;
   try {
     fd = openSync(path, OPEN_FLAGS);
@@ -238,6 +257,7 @@ export function readOwnedFile(path: string, secret: boolean): string | null {
     const st = fstatSync(fd);
     if (!st.isFile()) throw new Error(`${path} is not a regular file`);
     if (st.uid !== process.getuid?.()) throw new Error(`${path} must be yours`);
+    if (st.nlink === 0) return REPLACED;
     if (secret && st.nlink !== 1) throw new Error(`${path} has other links to it`);
     if (secret && (st.mode & 0o077) !== 0) throw new Error(`${path} can be read by others (mode ${(st.mode & 0o777).toString(8)}): chmod 600 it`);
     if (!secret && (st.mode & 0o022) !== 0) throw new Error(`${path} can be written by others (mode ${(st.mode & 0o777).toString(8)}): chmod go-w it`);
@@ -326,7 +346,7 @@ export async function dryRun(cfg: Config, deps: Deps): Promise<DryRun> {
     branches,
     worktrees,
     openPrs,
-    trustedAuthors: [cfg.repo.split("/")[0], ...(cfg.botRepo ? [cfg.botRepo.split("/")[0]] : [])],
+    trustedAuthors: [cfg.repo.split("/")[0], ...(cfg.githubAppSlug ? [botLogin(cfg.githubAppSlug)] : [])],
     claims: (id) => ("unreadable" in claimsRead ? { unreadable: claimsRead.unreadable } : (claimsRead.get(id) ?? { unreadable: "not read" })),
     prsOfBranch: (b) => (prs.has(b) ? (prs.get(b) ?? null) : undefined),
   };
@@ -525,7 +545,7 @@ async function selfCheck(): Promise<number> {
   const esc = chr(0x1b);
   const base = { initiative: "Initiative", maintainerLinearId: MAINTAINER, mainCheckout: "~/src/repo" };
   const conf = (over: Record<string, unknown>) => parseConfig(JSON.stringify({ ...base, ...over }), "/home/x");
-  const cfg = conf({ restUrl: "http://127.0.0.1:8010/api", botRepo: "bot-user/OB1" }) as Config;
+  const cfg = conf({ restUrl: "http://127.0.0.1:8010/api", githubAppId: "123456", githubAppInstallationId: "7890", githubAppSlug: "ob1-agent-runner" }) as Config;
   const noUrl = conf({}) as Config;
   const issue = (over: Record<string, unknown> = {}) => ({
     identifier: "SMD-9", title: "t", priority: 2, createdAt: "2026-11-01T00:00:00.000Z", state: { name: "Backlog", type: "backlog" }, assignee: null, delegate: null, labelIds: ["L-ready"],
@@ -546,7 +566,7 @@ async function selfCheck(): Promise<number> {
     await ok(() => parseArgs(["--config", "a.json", "--json"])["--config"] === "a.json" && parseArgs(["--config=b.json"])["--config"] === "b.json", "values by space and by =");
     await ok(() => !!parseArgs(["--configs", "x"]).error && !!parseArgs(["--config"]).error && !!parseArgs(["--json=1"]).error && !!parseArgs(["constructor"]).error && !!parseArgs(["constructor", "x"]).error && !!parseArgs(["toString"]).error, "an unknown option, a missing value, a flag with a value and a prototype name, with a value or without, are refused");
     const good = conf({});
-    await ok(() => !("error" in good) && good.mainCheckout === "/home/x/src/repo" && good.team === "SMD" && good.repo === "MHarris-SgyMd/OB1" && good.restUrl === null && good.botRepo === null && good.initiative === "Initiative" && good.maintainerLinearId === MAINTAINER, "a config fills its defaults and expands a ~/ path");
+    await ok(() => !("error" in good) && good.mainCheckout === "/home/x/src/repo" && good.team === "SMD" && good.repo === "MHarris-SgyMd/OB1" && good.restUrl === null && good.githubAppId === null && good.githubAppInstallationId === null && good.githubAppSlug === null && good.initiative === "Initiative" && good.maintainerLinearId === MAINTAINER, "a config fills its defaults and expands a ~/ path");
     await ok(() => ["initiative", "maintainerLinearId", "mainCheckout"].every((k) => {
       const c: Record<string, unknown> = { ...base };
       delete c[k];
@@ -559,12 +579,17 @@ async function selfCheck(): Promise<number> {
     await ok(() => "error" in secretName && !secretName.error.includes("lin_api_") && secretName.error.includes("1 key(s)"), "an unknown key is counted, not named");
     const notJson = parseConfig("lin_api_" + "s".repeat(20), "/h");
     await ok(() => "error" in notJson && notJson.error === "the config is not JSON", "a config that is no JSON is refused without echoing what it held");
-    await ok(() => ["not a repo", "../..", "a b/c", "a/b/c", "a/", "/b"].every((r) => "error" in conf({ repo: r })) && "error" in conf({ botRepo: "a/." }) && "error" in conf({ team: 7 }) && "error" in conf({ mainCheckout: "  " }) && !("error" in conf({ repo: "a-b.c_d/e-f.g_h" })), "a bad repo, a dot segment, a non-string and a blank value are refused, and a repo of the allowed characters is taken");
+    await ok(() => ["not a repo", "../..", "a b/c", "a/b/c", "a/", "/b"].every((r) => "error" in conf({ repo: r })) && "error" in conf({ team: 7 }) && "error" in conf({ mainCheckout: "  " }) && !("error" in conf({ repo: "a-b.c_d/e-f.g_h" })), "a bad repo, a dot segment, a non-string and a blank value are refused, and a repo of the allowed characters is taken");
     const badRepo = conf({ repo: "evil/../x" });
     await ok(() => "error" in badRepo && !badRepo.error.includes("evil"), "a refused repo isn't echoed");
     await ok(() => "error" in conf({ maintainerLinearId: "<the maintainer's Linear user id>" }) && "error" in conf({ maintainerLinearId: "u1" }) && !("error" in conf({ maintainerLinearId: MAINTAINER.toUpperCase() })), "the maintainer's id must be a Linear user id, a UUID");
-    const nulls = conf({ botRepo: null, restUrl: null });
-    await ok(() => !("error" in nulls) && nulls.botRepo === null && nulls.restUrl === null && "error" in conf({ initiative: null }) && "error" in conf({ team: null }), "null is taken for a key whose default is null, and refused for any other");
+    const app = { githubAppId: "123456", githubAppInstallationId: "7890", githubAppSlug: "ob1-agent-runner" };
+    const withApp = conf(app);
+    await ok(() => !("error" in withApp) && withApp.githubAppId === "123456" && withApp.githubAppInstallationId === "7890" && withApp.githubAppSlug === "ob1-agent-runner", "the App's id, installation and slug are read");
+    await ok(() => ["githubAppId", "githubAppInstallationId", "githubAppSlug"].every((k) => { const r = conf({ ...app, [k]: null }); return "error" in r && r.error.includes("all three"); }), "the App's keys come together: one missing is refused");
+    await ok(() => ["0", "12a", "-1", "1".repeat(17)].every((v) => "error" in conf({ ...app, githubAppId: v })) && "error" in conf({ ...app, githubAppInstallationId: "x" }) && ["Bad", "a b", "-a", "a-", "a/b", "a[bot]"].every((v) => "error" in conf({ ...app, githubAppSlug: v })), "an id that isn't a number, or a slug that isn't one, is refused");
+    const nulls = conf({ githubAppSlug: null, restUrl: null });
+    await ok(() => !("error" in nulls) && nulls.githubAppSlug === null && nulls.restUrl === null && "error" in conf({ initiative: null }) && "error" in conf({ team: null }), "null is taken for a key whose default is null, and refused for any other");
     const url = (u: string) => conf({ restUrl: u });
     const okUrl = url("http://127.0.0.1:8010/api/");
     await ok(() => !("error" in okUrl) && okUrl.restUrl === "http://127.0.0.1:8010/api" && !("error" in url("https://brain.example.com/api")) && !("error" in url("http://localhost:8010/api")) && !("error" in url("http://[::1]:8010/api")), "a loopback http URL and an https one are taken, the trailing slash dropped");
@@ -775,7 +800,7 @@ async function selfCheck(): Promise<number> {
   });
 
   await section("git's environment, arguments and process", async () => {
-    await ok(() => JSON.stringify(gitEnv("/empty")) === JSON.stringify({ PATH: "/usr/bin:/bin", HOME: "/empty", LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }), "git's environment is built from nothing: no credential, agent socket, prompt or config of the maintainer's");
+    await ok(() => JSON.stringify(gitEnv("/empty")) === JSON.stringify({ PATH: "/usr/bin:/bin", HOME: "/empty", LANG: "C", GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_NO_REPLACE_OBJECTS: "1", GIT_GRAFT_FILE: "/dev/null/no-grafts" }), "git's environment is built from nothing: no credential, agent socket, prompt or config of the maintainer's");
     await ok(() => GIT_SAFE.join(" ") === "-c credential.helper= -c protocol.allow=never -c protocol.https.allow=always -c http.followRedirects=false -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=20", "every git call drops the credential helpers, allows https alone, follows no redirect and gives up a stalled transfer");
     const spawned: { cmd: string[]; opts: Parameters<SpawnImpl>[1] }[] = [];
     const recorder: SpawnImpl = (cmd, opts) => {
@@ -979,7 +1004,7 @@ async function selfCheck(): Promise<number> {
     };
     const GH = "https://api.github.com/repos/MHarris-SgyMd/OB1/pulls";
     const lookup = (b: string) => `${GH}?state=all&per_page=100&head=${encodeURIComponent(`MHarris-SgyMd:${b}`)}&page=1`;
-    const fullPage = Array.from({ length: 100 }, (_, i) => (i === 0 ? { number: 999, title: "work", body: "Closes SMD-16.", head: { ref: "feature" }, user: { login: "MHarris-SgyMd" } } : i === 1 ? { number: 1001, title: "bot work", body: "Fixes SMD-17.", head: { ref: "agent/fix" }, user: { login: "bot-user" } } : { number: 1000 + i, title: "other", body: "Mentions SMD-10 in passing.", head: { ref: `other-${i}` }, user: { login: "someone" } }));
+    const fullPage = Array.from({ length: 100 }, (_, i) => (i === 0 ? { number: 999, title: "work", body: "Closes SMD-16.", head: { ref: "feature" }, user: { login: "MHarris-SgyMd" } } : i === 1 ? { number: 1001, title: "bot work", body: "Fixes SMD-17.", head: { ref: "agent/fix" }, user: { login: "ob1-agent-runner[bot]" } } : { number: 1000 + i, title: "other", body: "Mentions SMD-10 in passing.", head: { ref: `other-${i}` }, user: { login: "someone" } }));
     const fetchStub: Fetch = async (u, init) => {
       sent.push({ url: u, init });
       if (u === `${GH}?state=open&per_page=100&page=1`) return json(fullPage);
@@ -1000,7 +1025,7 @@ async function selfCheck(): Promise<number> {
     await ok(() => verdict("SMD-13").reasons[0] === "branch smd-13-local (no PR)", "a local branch of the main checkout, with no PR, holds its ticket");
     await ok(() => verdict("SMD-13").reasons[1] === 'a lapsed claim on its piece "PR 2" by codex (codex@laptop michaelharris/smd-13-piece)' && !sent.some((s) => s.url === lookup("michaelharris/smd-13-piece")), "a piece claim holds its ticket, and its label's branch isn't looked up");
     await ok(() => verdict("SMD-15").reasons.join() === "assigned to someone" && !sent.some((s) => s.url.includes("smd-15") || s.url.includes("SMD-15")), "a ticket failing the board checks gets no claim or PR lookup");
-    await ok(() => verdict("SMD-16").reasons.join() === "open PR 999 by MHarris-SgyMd" && verdict("SMD-17").reasons.join() === "open PR 1001 by bot-user" && verdict("SMD-10").reasons.length === 0, "a PR body of the maintainer's or the bot's holds its ticket, and other people's bodies hold none");
+    await ok(() => verdict("SMD-16").reasons.join() === "open PR 999 by MHarris-SgyMd" && verdict("SMD-17").reasons.join() === "open PR 1001 by ob1-agent-runner[bot]" && verdict("SMD-10").reasons.length === 0, "a PR body of the maintainer's or the bot's holds its ticket, and other people's bodies hold none");
     await ok(() => sent.length > 0 && sent.every((s) => (s.init?.method ?? "GET") === "GET" && s.init?.redirect === "manual" && (s.init as { verbose?: boolean }).verbose === false && (s.init as { tls?: { rejectUnauthorized?: boolean } }).tls?.rejectUnauthorized === true) && queries.every((q) => !/^\s*mutation\b/.test(q)), "every request is a GET or a GraphQL query, follows no redirect, logs nothing and checks TLS: it writes nothing");
     await ok(() => sent.length > 0 && sent.every((s) => s.init?.signal instanceof AbortSignal), "every request carries an abort signal");
     const claimUrls = sent.filter((s) => s.url.includes("/v1/claims"));
@@ -1009,7 +1034,7 @@ async function selfCheck(): Promise<number> {
     await ok(() => ["smd-12-merged", "smd-13-local", "smd-11-wip", "feature-x", "michaelharris/smd-14-x"].every((b) => sent.some((s) => s.url === lookup(b))), "each branch or worktree naming a candidate, and each claim's labelled branch, is looked up with state=all and the owner");
     await ok(() => sent.filter((s) => s.url.includes("pulls?state=open")).map((s) => s.url).join() === `${GH}?state=open&per_page=100&page=1,${GH}?state=open&per_page=100&page=2`, "the open PRs are listed with state=open, 100 a page, and a full first page brings the second");
     const lsRemotes = commands.filter((c) => c.cmd.includes("ls-remote"));
-    await ok(() => lsRemotes.length === 2 && lsRemotes.some((c) => c.cmd.includes("https://github.com/MHarris-SgyMd/OB1.git")) && lsRemotes.some((c) => c.cmd.includes("https://github.com/bot-user/OB1.git")) && lsRemotes.every((c) => c.cwd === "/"), "ls-remote reads this repo and the bot's copy, from outside any repository");
+    await ok(() => lsRemotes.length === 1 && lsRemotes[0].cmd.includes("https://github.com/MHarris-SgyMd/OB1.git") && lsRemotes[0].cwd === "/", "ls-remote reads this repo, where the App's branches are too, from outside any repository");
     const local = (verb: string) => commands.find((c) => c.cmd.includes(verb));
     await ok(() => commands.every((c) => c.cmd[0] === "git" && c.cmd.slice(1, 1 + GIT_SAFE.length).join(" ") === GIT_SAFE.join(" ")) && local("for-each-ref")?.cmd.slice(1 + GIT_SAFE.length).join(" ") === "-C /home/x/src/repo for-each-ref --format=%(objectname) %(refname:lstrip=2) refs/heads" && local("worktree")?.cmd.slice(1 + GIT_SAFE.length).join(" ") === "-C /home/x/src/repo worktree list --porcelain", "every git call starts with the safe arguments, and the main checkout's branches, named whole, and worktrees are read there");
     const text = render(result, cfg);
