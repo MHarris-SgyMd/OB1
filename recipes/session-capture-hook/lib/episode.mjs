@@ -612,7 +612,7 @@ export function provenanceOf(s) {
  * Each reached message is read on its own too, as well as joined: the joiner's
  * blank line after a message's last line read to the 64-hex rule as
  * `sha256sum`'s two-space gap, and a key ending a message went out whole
- * (review pass 3; SMD-4546 has the rule read that gap as spaces or tabs only).
+ * (review pass 3; SMD-4546 has the rule read that gap as whitespace on its line, never a line break).
  */
 export function assistantExcerpt(ep) {
   const SEP = "\n\n----\n\n";

@@ -1475,17 +1475,22 @@ console.log("\n[5] The foreground half decides, writes a payload, and never a ke
   const bare = [`Your key is:\n${bareHex}\n\nUse it well.`, `${bareHex}\n\nat the start`, `Your key is:\r\n${bareHex}\r\nUse it well.`,
     // Review pass 3: each line-break gap the record names, pinned (a mutant letting `\r` or a line separator be the gap
     // passed the suite).
-    `key:\n${bareHex}\r\rnext`, `key:\n${bareHex}\u2028\u2028next`, `key:\n${bareHex}\n\tnext`, `key:\n${bareHex}\f\fnext`].map((text) => {
+    `key:\n${bareHex}\r\rnext`, `key:\n${bareHex}\u2028\u2028next`, `key:\n${bareHex}\n\tnext`, `key:\n${bareHex}\f\fnext`,
+    // Review pass 4: a vertical tab pair and a paragraph separator pair, each pinned alone.
+    `key:\n${bareHex}\v\vnext`, `key:\n${bareHex}\u2029\u2029next`].map((text) => {
     const inPrompt = cleanEpisode(segment([{ t: "prompt", text }, { t: "outcome", text: "ok" }]).episodes[0], "redact");
     const inOutcome = cleanEpisode(segment([{ t: "prompt", text: "x" }, { t: "outcome", text }]).episodes[0], "redact");
     return { prompt: !inPrompt.text.includes(bareHex), outcome: !inOutcome.text.includes(bareHex) && /\[redacted:64-hex token/.test(inOutcome.text), gate: gateFindings(inOutcome, inOutcome.text).length, withheld: /64-hex token/.test(assistantExcerpt({ assistant: [text] }).withheld ?? "") };
   });
   // …and the gaps that stay a digest's: two spaces then a blank line, two tabs, two non-breaking spaces (as the brain
   // reads them after its fold, review pass 3), an indented line and a `0x` one.
-  const sumThenBlank = [`${bareHex}  release.tar.gz\n\nverified above`, `${bareHex}\t\trelease.tar.gz`, `${bareHex}\u00a0\u00a0release.tar.gz`,
+  const sumThenBlank = [`${bareHex}  release.tar.gz\n\nverified above`, `${bareHex}\t\trelease.tar.gz`, `${bareHex}\u00a0\u00a0release.tar.gz`, `${bareHex}\u3000\u3000release.tar.gz`,
     `  ${bareHex}  indented.tar.gz`, `0x${bareHex}  hex.tar.gz`].map((t) => scanForSecrets(t).length).reduce((a, b) => a + b, 0);
   // …and a gap of three spaces before a line break is no digest's: the gap must end at a file name.
-  const spacesThenBreak = scanForSecrets(`key:\n${bareHex}   \nnext`).some((f) => /64-hex token/.test(f.reason));
+  // …and the gap is exactly two (review pass 4): one space then text, three spaces then a name, two at the text's end,
+  // and sha256sum's binary-mode ` *file` are a key's line, on main as here.
+  const spacesThenBreak = [`key:\n${bareHex}   \nnext`, `Your key is:\n${bareHex} (rotate monthly)`, `${bareHex}   release.tar.gz`, `key:\n${bareHex}  `, `${bareHex} *release.tar.gz`]
+    .every((t) => scanForSecrets(t).some((f) => /64-hex token/.test(f.reason)));
   assert(bare.every((b) => b.prompt && b.outcome && b.gate === 0 && b.withheld) && sumThenBlank === 0 && spacesThenBreak,
     `a bare 64-hex key on its own line before a blank line or a CRLF line end is found in a prompt, the outcome and the excerpt; a sha256sum line before a blank line, or with two tabs or two non-breaking spaces for its gap, indented or 0x-led, is still a digest (SMD-4546) (${JSON.stringify([bare, sumThenBlank, spacesThenBreak])})`);
 }
