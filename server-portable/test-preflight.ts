@@ -3168,8 +3168,12 @@ else {
   // The remedy where the settled parts' table stands (SMD-4446, review pass 5): 067, then the parts' file, which last
   // defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, all
   // three put back by 063 re-applied by hand. It stands in 150's place in the remedy: it carries 150's body.
-  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out) && /Apply db\/migrations\/067_pass_settles_stale\.sql, then db\/migrations\/151_settled_parts\.sql — 151 last defines rebuild_derived \(on 150's body, and so 067's\), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused \(bun migrate\.ts --reapply runs every file in order\)\./.test(fix(pre067.out, "lineage")),
-         `063 re-applied over 067 is a warning on rebuild_derived, naming 067 then the settled parts' file as the remedy, the last definer of the three bodies 063 put back (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)}; ${fix(pre067.out, "lineage").trim().slice(0, 240)})`);
+  // …and then the stale parts' file (review pass 2): 151 applied by hand writes its three catalog comments as it first
+  // had them, and that file amends them. Its name is read from the tree, as the remedy for 149 is held to it.
+  const STALE_PARTS_067 = readdirSync(join(HERE, "..", "db", "migrations")).find((n) => n.endsWith("_stale_parts.sql")) ?? "no _stale_parts.sql";
+  assert(pre067.code === 0 && /!  lineage\s+every derived row has its lineage row, but rebuild_derived is from before 067 \(063 re-applied by hand over it\): a proposal the consolidation pass settled is kept as a person's decision on a later text move, so the pair is never judged again \(SMD-2297\)/.test(pre067.out)
+         && fix(pre067.out, "lineage").includes(`Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql, then db/migrations/${STALE_PARTS_067} — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused; and ${STALE_PARTS_067.slice(0, 3)} amends three catalog comments 151 writes, which 151 alone leaves naming no removal of a part (bun migrate.ts --reapply runs every file in order).`),
+         `063 re-applied over 067 is a warning on rebuild_derived, naming 067, then the settled parts' file, the last definer of the three bodies 063 put back, then the stale parts' file, which amends three comments that file writes (${(pre067.out.split("\n").find((l) => /^\s*[✓✗!·]\s+lineage\s/.test(l)) ?? "").trim().slice(0, 200)}; ${fix(pre067.out, "lineage").trim().slice(0, 300)})`);
   // On a brain from before the parts' file, where the migrator applies it in its turn, the remedy is 067 then 150,
   // which last defines rebuild_derived there (SMD-2298).
   const parts067 = new SQL({ url: LIVE, max: 1 });
@@ -3622,9 +3626,16 @@ else {
       let noAudit: { out: string };
       await claims.unsafe("REVOKE SELECT ON thought_audit FROM ob1_pf_capture");
       try { noAudit = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { await claims.unsafe("GRANT SELECT ON thought_audit TO ob1_pf_capture"); }
+      // The parts' table is among them since the stale parts' file (SMD-4446): the read takes a part's lineage row by its part.
+      let noParts: { out: string };
+      /** The stale parts' migration as the tree names it: preflight's remedy must name this very file. */
+      const STALE_PARTS_FILE = readdirSync(join(HERE, "..", "db", "migrations")).find((n) => n.endsWith("_stale_parts.sql")) ?? "no _stale_parts.sql";
+      const heldParts = Boolean((await claims`SELECT has_table_privilege('ob1_pf_capture', 'settled_parts', 'SELECT') AS r`)[0].r);
+      await claims.unsafe("REVOKE SELECT ON settled_parts FROM ob1_pf_capture");
+      try { noParts = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { if (heldParts) await claims.unsafe("GRANT SELECT ON settled_parts TO ob1_pf_capture"); }
       // The function gone while the ledger records 149 (a --baseline adoption): a failure naming the re-run, not a skip —
       // read as the owner, who reads the ledger; this role cannot, and is told so in a warning.
-      let noFn: { out: string }, noFnUnread: { out: string };
+      let noFn: { out: string }, noFnUnread: { out: string }, noFnNoParts: { out: string };
       // This suite's brain keeps no ledger: plant one recording 149 (as [ledger] below plants 014's), removed after.
       const plantedLedger = (await claims`SELECT to_regclass('schema_migrations') IS NULL AS absent`)[0].absent as boolean;
       if (plantedLedger) await claims.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
@@ -3637,6 +3648,10 @@ else {
         noFn = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
         if (roleReads) await claims.unsafe("REVOKE SELECT ON schema_migrations FROM ob1_pf_capture");
         noFnUnread = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+        // A brain from before the parts' table: the by-hand remedy is 149's alone (the migrator applies the stale
+        // parts' file in its turn, and its guard would refuse a hand apply ahead of 151).
+        await claims.unsafe("ALTER TABLE settled_parts RENAME TO settled_parts_away_pf");
+        try { noFnNoParts = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { await claims.unsafe("ALTER TABLE settled_parts_away_pf RENAME TO settled_parts"); }
       } finally {
         await claims.unsafe("ALTER FUNCTION thought_validity_away_pf(uuid[]) RENAME TO thought_validity");
         if (roleReads) await claims.unsafe("GRANT SELECT ON schema_migrations TO ob1_pf_capture");
@@ -3644,10 +3659,17 @@ else {
         else if (added) await claims.unsafe(`DELETE FROM schema_migrations WHERE name = '149_thought_validity.sql' AND sha256 = 'test'`);
       }
       assert(/!  validity\s+the server's role cannot SELECT thought_audit: the validity read answers the axes resting on them unknown, naming them in unread/.test(noAudit.out)
+             && heldParts && /!  validity\s+the server's role cannot SELECT settled_parts: the validity read answers the axes resting on them unknown, naming them in unread/.test(noParts.out)
              && /✓  validity\s+thought_validity present; the server's role reads every table it reads/.test(missingBoth.out)
              && /✗  validity\s+migration 149's thought_validity\(uuid\[\]\) missing though the ledger records 149; the validity tool faults on every call/.test(noFn.out)
-             && /!  validity\s+thought_validity\(uuid\[\]\) missing, and .*so whether migration 149 is recorded is unknown/.test(noFnUnread.out),
-             `…and the validity row names a table its read cannot SELECT, a warning; with every table readable, ok; the function gone while the ledger records 149, a failure, and to a role that cannot read the ledger a warning (${validityLine(noAudit.out)} | ${validityLine(missingBoth.out)} | ${validityLine(noFn.out)} | ${validityLine(noFnUnread.out)})`);
+             && /!  validity\s+thought_validity\(uuid\[\]\) missing, and .*so whether migration 149 is recorded is unknown/.test(noFnUnread.out)
+             // The by-hand remedy names the stale parts' file after 149 (SMD-4446): it last defines the read, and 149 alone
+             // would put back one with no arm for a settled part's row. The file's name is read from the tree, so a
+             // file renumbered when main takes its number fails this row until the remedy names it (review pass 1: a
+             // pattern for any number passed a remedy that named a file no longer there).
+             && noFnUnread.out.includes(`Apply db/migrations/149_thought_validity.sql, then db/migrations/${STALE_PARTS_FILE} — ${STALE_PARTS_FILE.slice(0, 3)} last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.`)
+             && /!  validity\s+thought_validity\(uuid\[\]\) missing, and /.test(noFnNoParts.out) && /Apply db\/migrations\/149_thought_validity\.sql\./.test(noFnNoParts.out) && !/_stale_parts\.sql/.test(noFnNoParts.out),
+             `…and the validity row names a table its read cannot SELECT, a warning, the settled parts' among them; with every table readable, ok; the function gone while the ledger records 149, a failure, and to a role that cannot read the ledger a warning whose by-hand remedy names the stale parts' file after 149, and on a brain without the parts' table 149 alone (${validityLine(noAudit.out)} | ${validityLine(noParts.out)} | ${validityLine(missingBoth.out)} | ${validityLine(noFn.out)} | ${validityLine(noFnUnread.out)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
