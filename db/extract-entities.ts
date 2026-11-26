@@ -185,7 +185,20 @@
  * other than the recorded one needs --switch-key, as a re-embed under another
  * model needs --switch-model: record_thought_entities replaces a thought's rows
  * whatever key wrote them, so a partial run under a second model leaves a
- * per-thought mixture that nothing repairs.
+ * per-thought mixture that nothing repairs. A switch to a key the brain used
+ * before (SMD-2607) returns, in the transaction that records the key, the
+ * rows under it that it cannot show are its reading of the text their
+ * thought holds: the failed ones, the leases expired with no live holder,
+ * the finished ones another extraction key read since, and the finished ones
+ * with no lineage row of this key at the thought's fingerprint. A finished
+ * row its lineage vouches for stays, so a trial of another model over a few
+ * thoughts does not send the corpus again. And every run returns, at its
+ * first pass and behind what is pending, the finished rows another key's
+ * pool read since — that key's finished row for the thought is the later
+ * one: a brain whose key was moved back with nothing returned is mended by
+ * its next run. A reading another model wrote outside the pools stands
+ * until a switch (SMD-4579).
+ * --dry-run and --status count what a run would return.
  *
  * ── A thought's own subject (SMD-3306) ──────────────────────────────────────
  * With its entities, each thought's own subjects are recorded when a rule
@@ -221,7 +234,7 @@ import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, lease
 import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
 import { claimWorker, recordFailedAndStop, releaseFinished, setBackAborted, thoughtFault, type FaultHost, type ReleaseHost } from "./claim-loop.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
-import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm } from "./config.mjs";
+import { EXTRACT_MALFORMED_ALARM_MIN, EXTRACT_MALFORMED_ALARM_SHARE, malformedAlarm, REQUEUE_SET_SQL } from "./config.mjs";
 import { endOnRefusal, passStamper, stampKey, type MalformedBlock, type PassStamper } from "./pass-stamp.ts";
 
 /**
@@ -834,6 +847,65 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     return { pending: by.pending ?? 0, claimed: by.claimed ?? 0, succeeded: by.succeeded ?? 0, partial, leftOut, leftOutOver, failed: by.failed ?? 0, unpooled: Number(unpooled), thoughts: Number(thoughts) };
   }
 
+  /**
+   * A finished row of this job (`c`) whose thought another extraction key's
+   * POOL read after it (SMD-2607): that key's finished claim row for the
+   * thought is the later one. Every run returns these to the pool at its
+   * first pass, so a brain whose key was moved back with nothing returned (a
+   * switch before this rule, or the record set by hand) is mended by its
+   * next run. A row read again finishes last, so it is not returned twice.
+   *
+   * The claim row is the only sign (SMD-4579). The other key's lineage on the
+   * thought's entities was a second one, and it is true as well of a thought
+   * another model was run over on purpose, with no pool: both dogfood brains
+   * held 22 the 27B had read once, in September, which an unattended run
+   * would have read again under the recorded key. A reading written outside
+   * the pools is the operator's, and stands until a --switch-key asks for
+   * the brain under this key (unvouched, below). What that gives up: a
+   * thought the other key's pool read and that was then edited, its row
+   * there pending again, on a brain moved back before SMD-2607 — returned by
+   * no run, and by any switch made since.
+   */
+  const readSince = () => sql`c.status = 'succeeded' AND EXISTS (
+    SELECT 1 FROM thought_work_claims o
+     WHERE o.thought_id = c.thought_id AND o.work_type <> c.work_type AND starts_with(o.work_type, 'extract:')
+       AND o.status = 'succeeded' AND o.finished_at > c.finished_at)`;
+  /**
+   * The rows a switch to this key returns as it records it (SMD-2607), the
+   * ones it cannot show are this key's reading of the text their thought
+   * holds: the failed ones and the leases expired with no live holder, as
+   * reembed.ts's model change returns its own; the finished ones another key
+   * read since; and the finished ones with no lineage row of this key at the
+   * thought's fingerprint. 016's trigger pools an edit under the recorded key
+   * alone, so a thought edited while another key was recorded kept its row
+   * here, and a reading that named nothing left no lineage row to compare;
+   * nor has a thought whose entities another key wrote outside its pool one
+   * of this key's, so a switch returns it too (SMD-4579). A finished row its
+   * lineage vouches for is left: a trial of another model over a few
+   * thoughts does not send the rest again.
+   */
+  const unvouched = () => sql`c.status = 'failed' OR (c.status = 'claimed' AND c.ttl_expires_at < now()) OR (${readSince()})
+    OR (c.status = 'succeeded' AND NOT EXISTS (
+      SELECT 1 FROM derivations d JOIN thoughts t ON t.id = d.artifact_id
+       WHERE d.artifact_kind = 'entities' AND d.artifact_id = c.thought_id AND d.produced_by = c.work_type
+         AND d.input_fingerprints[1] = COALESCE(t.content_fingerprint, content_fingerprint_of(t.content))))`;
+  /** unvouched's four kinds in words, for the three lines that count them. */
+  const UNVOUCHED_WORDS = "failed, lapsed, read by another key since, or not shown to be its reading of the text the thought holds";
+  const countRows = async (where: ReturnType<typeof readSince>): Promise<number> =>
+    Number((await sql`SELECT count(*)::int AS n FROM thought_work_claims c WHERE c.work_type = ${JOB} AND (${where})`)[0].n);
+  /**
+   * Return this job's rows a predicate selects to the pool, as if never
+   * tried; how many. `behind`: dated now, not where each was first pooled, so
+   * a run's own mending waits behind the captures already pending (review
+   * pass 2) — reembed.ts's word for it.
+   */
+  const returnRows = async (tx: SQL, where: ReturnType<typeof readSince>, behind = false): Promise<number> =>
+    Number((await tx`
+      WITH back AS (
+        UPDATE thought_work_claims c SET ${tx.unsafe(REQUEUE_SET_SQL)}${behind ? tx`, enqueued_at = GREATEST(enqueued_at, now())` : tx``}
+         WHERE c.work_type = ${JOB} AND (${where}) RETURNING 1)
+      SELECT count(*)::int AS n FROM back`)[0].n);
+
   /** The two kinds of partial row in words, a kind with no rows omitted, and how many of the second are over the bound too: "1 over a prefix only, 2 with windows left out as malformed, 1 of those also over the bound". */
   function partialKinds(partial: number, leftOut: number, leftOutOver = 0): string {
     return [
@@ -972,7 +1044,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
 
   if (STATUS_ONLY || DRY_RUN) {
     const c = await counts();
+    // What a run would return to the pool (SMD-2607): under another key than the recorded one, the switch's rows; under the recorded one, the rows another key's pool read since.
+    const switching = !!recordedKey && recordedKey !== JOB;
+    const toReturn = await countRows(switching ? unvouched() : readSince());
     printCounts(c, STATUS_ONLY ? "status" : "before");
+    if (STATUS_ONLY && toReturn > 0) {
+      out(switching
+        ? `  the brain used ${JOB} before: a --switch-key run returns ${toReturn} of its row(s) to the pool — ${UNVOUCHED_WORDS}`
+        : `  ${toReturn} finished row(s) are of thoughts another extraction key's pool read since: the next run returns them to the pool`);
+    }
     if (c.claimed > 0) for (const h of await leaseHolders(sql, JOB)) out(describeHolder(h));
     await printGraph();
     if (c.partial > 0) await printPartials(c);
@@ -982,12 +1062,16 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     }
     await printKept();
     if (DRY_RUN) {
-      const todo = c.pending + c.unpooled + (RETRY_FAILED ? c.failed : 0) + (RETRY_PARTIAL ? c.partial : RETRY_LEFT_OUT ? c.leftOut : 0);
+      // A partial row is a finished one, so it can be among the rows a run returns by itself too: then the sum is an upper bound, and the line says so (review pass 2).
+      const retriedPartial = RETRY_PARTIAL ? c.partial : RETRY_LEFT_OUT ? c.leftOut : 0;
+      const todo = c.pending + c.unpooled + toReturn + (RETRY_FAILED && !switching ? c.failed : 0) + retriedPartial;
+      const atMost = toReturn > 0 && retriedPartial > 0 ? "at most " : "";
       out(
         `\n  would: ${recordedKey === JOB ? "" : `record ${JOB} in ob1_config so new captures enqueue; `}` +
-          `${RETRY_FAILED ? `return ${c.failed} failed rows to the pool; ` : ""}` +
+          `${toReturn > 0 ? (switching ? `return ${toReturn} of this key's row(s) from an earlier use to the pool (${UNVOUCHED_WORDS}); ` : `return ${toReturn} finished row(s) another extraction key's pool read since to the pool; `) : ""}` +
+          `${RETRY_FAILED && !switching ? `return ${c.failed} failed rows to the pool; ` : ""}` +
           `${RETRY_PARTIAL ? `return ${c.partial} row(s) extracted in part to the pool${c.partial ? ` (${partialKinds(c.partial, c.leftOut, c.leftOutOver)})` : ""}; ` : RETRY_LEFT_OUT ? `return ${c.leftOut} row(s) with windows left out to the pool${c.leftOut ? ` (${partialKinds(c.leftOut, c.leftOut, c.leftOutOver)})` : ""}; ` : ""}` +
-          `add ${c.unpooled} thoughts to the pool; send ${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) to ${cfg.metadataModel} ` +
+          `add ${c.unpooled} thoughts to the pool; send ${atMost}${LIMIT ? Math.min(LIMIT, todo) : todo} thought(s) to ${cfg.metadataModel} ` +
           `with ${WORKERS} worker(s), ${TTL} s leases renewed every ${HEARTBEAT} s. Nothing was written.`
       );
     }
@@ -1013,18 +1097,60 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     if (waited !== null && waited !== "up") return refused(waited.refused.kind, waited.refused.line);
   }
   if (stoppedEarly()) return 130;
-  if (recordedKey !== JOB) {
+  /** Thoughts the switch's transaction pooled, for the first pass's `pool:` line. */
+  let pooledAtSwitch = 0;
+  /** Whether this run made the switch, which returned the key's failed rows with the rest. */
+  let switchedHere = false;
+  if (!recordedKey) {
     const set = await atStart(() => sql`
       INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${JOB})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`);
     if (set === null) return stoppedWaiting();
     out(`  ob1_config.entity_extraction_key = ${JOB} — new and edited thoughts now enqueue for extraction`);
+  } else if (recordedKey !== JOB) {
+    // The switch (SMD-2607). A key the brain used before holds a finished row
+    // for every thought it extracted then, and 015's enqueue adds nothing
+    // beside one: the run found nothing to do while the thoughts another key
+    // read since held that key's entities. So the record, the return of the
+    // rows this key cannot vouch for (unvouched, above) and the pooling are
+    // one transaction: a record that landed alone would read as this key's at
+    // the next run, which returns only what another key read. The record is
+    // read again under its lock, so a switch another run made meanwhile, or
+    // this one's own lost answer retried, is not made twice.
+    const switched = await atStart(() => sql.begin(async (tx: SQL) => {
+      const [now] = (await tx`SELECT value FROM ob1_config WHERE key = 'entity_extraction_key' FOR UPDATE`) as { value: string }[];
+      if (now?.value === JOB) return { already: true, from: JOB, back: 0, added: 0 };
+      await tx`
+        INSERT INTO ob1_config (key, value) VALUES ('entity_extraction_key', ${JOB})
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
+      const back = await returnRows(tx, unvouched());
+      const [{ added }] = await tx`SELECT enqueue_thoughts(${JOB}) AS added`;
+      // enqueue_thoughts analyses only when it added rows; a return moves as
+      // many into the pending index (migration 015, "Cost of a claim").
+      if (back > 0 && Number(added) === 0) await tx`ANALYZE thought_work_claims`;
+      // The key this switch replaced, as read under the lock: another run may have moved it since the start's read.
+      return { already: false, from: now?.value ?? recordedKey, back, added: Number(added) };
+    }));
+    if (switched === null) return stoppedWaiting();
+    pooledAtSwitch = switched.added;
+    switchedHere = !switched.already;
+    if (switched.already) {
+      out(`  ob1_config.entity_extraction_key was ${JOB} by the time this run came to record it — another run's switch, or the record set by hand: this run makes no switch, and returns only the rows another key's pool read since`);
+    } else {
+      out(`  ob1_config.entity_extraction_key = ${JOB}, in place of ${switched.from} — new and edited thoughts now enqueue for extraction`);
+      out(switched.back > 0
+        ? `  --switch-key: the brain used ${JOB} before — ${switched.back} of its row(s) returned to the pool (${UNVOUCHED_WORDS})`
+        : `  --switch-key: none of ${JOB}'s rows to return to the pool`);
+    }
   }
 
   /** Rows a --retry-* flag returned to the pool: the run's first judgement is of rows chosen for failing (SMD-2266, review pass 2). */
   let returned = 0;
   if (stoppedEarly()) return 130;
-  if (RETRY_FAILED) {
+  if (RETRY_FAILED && switchedHere) {
+    // The switch returned them (SMD-2607): a count here would be a 0 that reads as none failed.
+    out(`  --retry-failed: the switch returned this key's failed rows with the rest`);
+  } else if (RETRY_FAILED) {
     // An operator's flag, never the scheduler's: not under the start's wait,
     // since a count committed and then lost with its connection would be
     // retried into a false 0 (review pass 1).
@@ -1957,7 +2083,15 @@ async function extractWith(sql: SQL, opts: ExtractOptions, settled: Numbers, out
     // The backlog is pooled once. While following, the trigger enqueues every
     // new capture, so re-running enqueue_thoughts — a scan of every thought —
     // each poll would find nothing and cost the table.
-    const added = firstPass ? Number((await sql`SELECT enqueue_thoughts(${JOB}) AS added`)[0].added) : 0;
+    // Once a run, before its pool: the finished rows another extraction key
+    // read since (readSince, above). None on a brain that has kept one key,
+    // and none after a switch made here, which returned them.
+    const reread = firstPass ? await returnRows(sql, readSince(), true) : 0;
+    if (reread > 0) out(`  ${reread} finished row(s) returned to the pool, behind what is pending: another extraction key's pool read their thoughts after ${JOB} did, so their entities are not its reading (SMD-2607)`);
+    const pooledNow = firstPass ? Number((await sql`SELECT enqueue_thoughts(${JOB}) AS added`)[0].added) : 0;
+    // enqueue_thoughts analyses only when it added rows; a return moves as many into the pending index (migration 015, "Cost of a claim").
+    if (reread > 0 && pooledNow === 0) await sql`ANALYZE thought_work_claims`;
+    const added = firstPass ? pooledAtSwitch + pooledNow : 0;
     // Once a run, 093's rows no reader can use (review pass 5): beside a
     // claim released succeeded — left only when the table was out of reach at
     // the release — or of this pool's thoughts at text they no longer hold.

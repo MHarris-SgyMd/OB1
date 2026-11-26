@@ -778,6 +778,10 @@ EOF
     # …nor does one cut short: a header that counts two files over one row.
     BASE_OPS=$mb LISTS="$std; FILES=2 list db-schema 'f db/migrations/1.sql'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     BASE_OPS=$mb LISTS="$std; ODD=1 list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    # …nor one whose header ends in the word of a watch (reads.sh mark --watch, PR 3c-1), lost or ok: no job here
+    # watches, and by_map reads no such word until PR 3c-2 has it ask ok of the jobs that do, by name.
+    BASE_OPS=$mb LISTS="$std; ODD='0 watch=lost' list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
+    BASE_OPS=$mb LISTS="$std; ODD='0 watch=ok' list db-schema 'f db/migrations/1.sql' 'd db/migrations/'" SKIP='data-layer db-live' run true pull_request main 'echo x >> db/tool.sh'
     # shellcheck disable=SC2016 # as above
     BASE_OPS=$mb LISTS="$std"'; printf %s "$(cat "$dir/map/data-layer.txt")" > "$dir/map/cut" && mv "$dir/map/cut" "$dir/map/data-layer.txt"' SKIP='db-schema db-live' run true pull_request main 'echo x >> db/tool.sh'
     # Lists of two commits, or of one that is not here, skip nothing at all.
