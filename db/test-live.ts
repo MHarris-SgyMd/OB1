@@ -25283,7 +25283,9 @@ if (want("29")) {
         SPECIAL.delete(`[29] ${tag} long`);
         noteAnswer = null;
         const asked = notesSent() - notes0;
-        assert(failedAll && afterOk && asked === notes && done.code === 0 && !/the request's shape/.test(done.err),
+        // An unanswered note is said, and a prose answer is no failure to say (review pass 3).
+        const said = /the shape check's note was not answered \(provider_503\)/.test(done.err);
+        assert(failedAll && afterOk && asked === notes && done.code === 0 && !/the request's shape/.test(done.err) && said === (ans === 503),
           `the shape note answered ${words}: the follower carries on, a thought after the four re-tagged, exit 0 (${failedAll}; ${afterOk}; ${asked} note(s); ${done.code})`);
       }
       // Two workers, the note out while the other worker's thought meets an outage: the outage halts the pass and aborts
@@ -25349,6 +25351,49 @@ if (want("29")) {
       SPECIAL.delete("[29] N5 long");
       assert(n5Failed && n5Ok && notesSent() > notes5 && n5Done.code === 0 && !/the request's shape/.test(n5Done.err),
         `under the gate's deny default the note goes as its thought would: sent, answered, the follower carries on (${n5Failed}; ${n5Ok}; ${notesSent() - notes5} note(s); ${n5Done.code})`);
+      // Every call refused 400 under an allow list of a `marker:` term the thoughts carry: the note is judged as the call
+      // it stands for, its thought's text included, so it is sent, refused too, and the follower stops on the shape
+      // (review pass 3: judged under its own text, the gate refused every note, and the follower never stopped).
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      const envMarker = { ...base, OB1_LLM_LOCAL: "", OB1_EGRESS_POLICY: "deny", OB1_EGRESS_ALLOW: "marker:shapeword29" };
+      const pm = follow({ follow: 1, pausesMs: [10], workers: 1 }, envMarker);
+      for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      const notesM = notesSent();
+      shapeAll = true;
+      for (const k of [1, 2, 3]) {
+        const id = await tagged(`[29] M${k} shapeword29`);
+        await move(id, `[29] M${k} shapeword29, moved`);
+      }
+      const pmDone = await race(pm);
+      shapeAll = false;
+      const pmBeat = await beat();
+      assert(pmDone.code === 2 && /the request's shape/.test(pmDone.err) && notesSent() > notesM && pmBeat?.refused === "provider",
+        `under a marker: allow list the note is judged as its thought, sent, refused too: the follower stops on the shape, exit 2 (${pmDone.code}; ${notesSent() - notesM} note(s); ${JSON.stringify(pmBeat)})`);
+      // One outage, then the request's shape refused: the note is the pass's own, not aborted by the outage before it,
+      // so the follower stops on the shape (review pass 3: a halt shared across passes, which an outage's pause aborts,
+      // aborted every later note — nothing known, never the stop).
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      const po = follow({ follow: 1, pausesMs: [10], workers: 1 });
+      for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      downAll = true;
+      const O1 = await tagged("[29] O1, re-tagged once the provider is back");
+      await move(O1, "[29] O1, re-tagged once the provider is back, moved");
+      let oWait: string[] | undefined;
+      for (let i = 0; i < 200 && oWait === undefined; i++) {
+        await Bun.sleep(50);
+        oWait = (await beat())?.waitingMidPass;
+      }
+      downAll = false;
+      const o1Ok = await settledSoon(O1, 300);
+      shapeAll = true;
+      for (const k of [1, 2, 3]) {
+        const id = await tagged(`[29] O shape ${k}`);
+        await move(id, `[29] O shape ${k}, moved`);
+      }
+      const poDone = await race(po);
+      shapeAll = false;
+      assert(JSON.stringify(oWait) === '["retag"]' && o1Ok && poDone.code === 2 && /the request's shape/.test(poDone.err),
+        `after an outage waited out, the request's shape refused still stops the follower, exit 2 (${JSON.stringify(oWait)}; ${o1Ok}; ${poDone.code})`);
       // check: the follower's start alone — through, nothing pooled.
       const F4 = await tagged("[29] F4, behind its tags at the check");
       await move(F4, "[29] F4, behind its tags at the check, moved");

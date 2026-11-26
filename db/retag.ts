@@ -78,10 +78,10 @@
  *     other leases back to the pool; a timeout is the thought's, recorded
  *     failed; a 401, 402, 403, 404 or any other 4xx not below is the
  *     request's, every worker stopped, exit 2, nothing marked failed. A
- *     follower reads them as the other followers do (worker-bootstrap.ts's
- *     fault): an outage waited out — a 404 naming the model among them, a
- *     model gone missing mid-run — or the probe's to decide, a 402 the
- *     account's and fatal (review pass 2);
+ *     follower reads them by worker-bootstrap.ts's fault, which asks the
+ *     probe, the error carrying none of the provider's words: a model gone
+ *     missing mid-run, an outage waited out; a key or base URL refused, the
+ *     stop. A 402 is the account's and fatal (PR 4a-2 review passes 1-3);
  *   - an answer that is not tags (not JSON, no content), or a 400, 413 or
  *     422, which are this thought's (its length, a filter): the claim is
  *     failed and nothing is written — the tags the thought had stand. A
@@ -184,7 +184,8 @@ const SHAPE_STREAK = 3;
 /**
  * The note a follower tags, in the request's own shape, when SHAPE_STREAK is reached (review pass 1): an answer of tags
  * says the shape is taken, so the streak was the thoughts' (their length, a filter) and the follower carries on, where a
- * stop would hold it down until an operator acted. Exported for test-live [29], which looks for it among the calls.
+ * stop would leave a follower run by hand down until someone restarted it, and one a supervisor runs restarted only to
+ * stop again. Exported for test-live [29], which looks for it among the calls.
  */
 export const SHAPE_NOTE = "A short note to tag: the request's shape, checked after three thoughts in a row were refused.";
 /** What a follower's shape check found (shapeOf): the request's shape refused, taken, or not known. */
@@ -697,19 +698,30 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
    * - "refused": the note met a 400 or 422, as the thoughts did — the request's shape;
    * - "taken": it was answered at all — tags, or prose, as a thought's prose answer resets the streak;
    * - "unknown": anything else — an outage, a timeout, another status, a throw, an abort (a stop, or another worker's
-   *   outage halting the pass), the egress gate — which stops nothing and leaves the streak, so the next refusal asks
-   *   again.
-   * The gate judges it under the thought's metadata, whose call it stands for: only the note's own text leaves.
+   *   outage halting the pass) — which stops nothing and leaves the streak, so the next refusal asks again. It is
+   *   said, and the pass stamped failed: a follower whose every note goes unanswered fails each refused thought, and
+   *   its row says so (review pass 3).
+   * The gate judges it as the call it stands for — the thought's subject, its text included, which a `marker:` term
+   * reads (review pass 3: under the note's own text such an allow list refused every note, and the follower never
+   * stopped); only the note's own text is sent.
    */
-  async function shapeOf(metadata: Record<string, unknown>): Promise<ShapeVerdict> {
+  async function shapeOf(row: Row): Promise<ShapeVerdict> {
+    const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata: row.metadata as Record<string, unknown>, content: row.content };
+    const unknown = (why: string): ShapeVerdict => {
+      providerStops++;
+      err(`  the shape check's note was not answered (${why}): nothing known, so nothing stops — the next refusal asks again`);
+      return "unknown";
+    };
+    // The gate first, as a thought's call meets it: a note it refuses is no model call.
+    const gate = mayLeaveBox(subject, cfg.chat, cfg.egress);
+    if (!gate.allowed) return unknown(`the egress policy refused it: ${gate.reason}`);
     calls++;
-    const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata, content: SHAPE_NOTE };
-    const answer = await extractMetadata(SHAPE_NOTE, subject, cfg, halt.signal).catch(() => null);
-    if (answer === null) return "unknown";
+    const answer = await extractMetadata(SHAPE_NOTE, subject, cfg, halt.signal).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+    if (answer instanceof Error) return unknown(answer.message.split("\n")[0]);
     const mark = answer.metadata_extraction_failed;
     if (typeof mark !== "string") return "taken";
     if (mark === "provider_400" || mark === "provider_422") return "refused";
-    return mark.startsWith("provider_") || mark === REFUSED_MARK ? "unknown" : "taken";
+    return mark.startsWith("provider_") || mark === REFUSED_MARK ? unknown(mark) : "taken";
   }
 
   /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read; a call aborted in hand, as AbortedInHand. */
@@ -756,7 +768,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
         // A follower asks the shape first (SHAPE_NOTE): three long thoughts in a row are no reason to hold it down. A
         // one-shot run stops, as before: the operator re-runs it (review pass 1).
         if (FOLLOW) {
-          const verdict = await (shapeCheck ??= shapeOf(row.metadata as Record<string, unknown>).finally(() => { shapeCheck = null; }));
+          const verdict = await (shapeCheck ??= shapeOf(row).finally(() => { shapeCheck = null; }));
           if (verdict === "taken") shapeStreak = 0;
           // Stopped only where the note was refused as the thoughts were and the streak still stands when it comes back:
           // a thought answered meanwhile reset it (review pass 2), and a stop or another worker's stop reads first.
@@ -986,12 +998,12 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     ? passStamper({
         sql, worker: "retag", job: JOB, intervalS: FOLLOW,
         // The database gone is said as such, as reembed.ts says it (review pass 2, walkthrough: a grant was blamed).
-        onError: (e) => err(`  heartbeat ${stampKey("retag", JOB)} not written: ${e.message.split("\n")[0]} — ${databaseUnavailable(e) ? "the database is not answering" : "a role needs the worker grant group (INSERT, UPDATE on ob1_config)"}; the follower goes on`),
+        onError: (e) => err(`  heartbeat ${stampKey("retag", JOB)} not written: ${e.message.split("\n")[0]} — ${databaseUnavailable(e) ? "the database is not answering" : "a role needs the worker grant group (INSERT, UPDATE on ob1_config)"}${stopping ? "" : "; the follower goes on"}`),
       })
     : null;
   /**
    * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2), said on the row it stamps. The schedule carries
-   * on waitOutProvider's rules, counting thoughts settled past the provider — re-tagged, current, failed; an answer
+   * on waitOutProvider's rules, counting thoughts settled — re-tagged, already current (no call), failed; an answer
    * polls again at once; a refusal ends the follower, exit 2.
    */
   async function waitForProvider(wake: AbortSignal): Promise<void> {

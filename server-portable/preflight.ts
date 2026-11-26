@@ -5212,7 +5212,9 @@ if (configFailed) {
          * pending, leased or failed. "Not yet in the pool" is the worker's own
          * backlog, db/config.mjs's RETAG_BACKLOG_SQL, one definition. A live
          * lease, or a follower's fresh heartbeat for the key (PR 4a-2), is a
-         * run in progress; no sleep pass runs it yet (PR 4b), so otherwise
+         * run in progress — but a live lease beside the key's follower row
+         * stale or ended is a follower gone, its leases named for release; no
+         * sleep pass runs it yet (PR 4b), so otherwise
          * pending rows wait for a run: one that
          * stopped, or a text move's rebuild requeued them (150), which nothing
          * here tells apart. An earlier key's pool is no worker's and counts as
@@ -5671,13 +5673,15 @@ if (configFailed) {
                   return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs re-embed here instead${when}, which will not run beside a re-embed follower: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.${backfill}`;
                 }
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: the coordinator runs no follower beside it, so retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
-                // A re-tag follower under a key other than ob1_config.retag_key — a --switch-key since, or a start
-                // refused under another model — is no worker's: started again under this configuration it follows the
-                // recorded key, beside any follower there, or is refused. Its row is retired (SMD-2298 PR 4a-2 review
-                // pass 2, walkthrough: the restart ran a second follower on the new key).
+                // A re-tag follower that ran under a key other than ob1_config.retag_key — a --switch-key since — is no
+                // worker's: a restart runs the key this configuration makes, the recorded one beside any follower there,
+                // or is refused under another. Its row is retired (SMD-2298 PR 4a-2 review pass 2, walkthrough: the
+                // restart ran a second follower on the new key). Not a row ended on its start's refusal, whose key is
+                // never the recorded one and whose remedy is the switch or the model put back, nor one a supervisor holds
+                // (review pass 3: they read retire).
                 const retagRecorded = recorded.retag_key || null;
-                if ((h.stale || h.ended) && h.worker === "retag" && retagRecorded !== null && h.job !== undefined && h.job !== retagRecorded) {
-                  return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, under a key other than ob1_config.retag_key (${retagRecorded}): db/retag.ts follows the recorded key alone, so started again it would follow that one, beside any follower there, or be refused — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
+                if ((h.stale || h.ended) && h.worker === "retag" && !h.refused && !h.restart && retagRecorded !== null && h.job !== undefined && h.job !== retagRecorded) {
+                  return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, under a key other than ob1_config.retag_key (${retagRecorded}): started again, db/retag.ts runs the key this configuration makes — the recorded one, beside any follower there, or refused under another — so retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
                 }
                 // Held by its supervisor, which runs it again on its own (SMD-3214).
                 const held = heldFix(h, name);

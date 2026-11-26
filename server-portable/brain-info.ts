@@ -600,7 +600,9 @@ export type SleepHoldWhy = (typeof SLEEP_HOLD_WHY)[number];
 /**
  * The passes the sleep scheduler runs, as its `holds` and its waiting name
  * them: the subject sweep the fourth, beside consolidation (SMD-3306 PR 6b-2;
- * read since PR 6b-1, as SMD-3379 PR 1c-2's readers were before it).
+ * read since PR 6b-1, as SMD-3379 PR 1c-2's readers were before it), and the
+ * re-tag pass, read for a re-tag follower's own `waitingMidPass` ahead of the
+ * scheduler's (SMD-2298 PR 4a-2; PR 4b runs it).
  */
 export const SLEEP_PASSES = ["reembed", "extract", "consolidate", "subjects", "retag"] as const;
 /** A pass the sleep scheduler runs (SLEEP_PASSES). */
@@ -608,7 +610,7 @@ export type SleepPass = (typeof SLEEP_PASSES)[number];
 /** A pass the sleep scheduler holds (WorkerHeartbeat.holds). */
 export type SleepHold = { pass: SleepPass; why: SleepHoldWhy; until: string | null };
 
-/** A `holds` value as db/sleep.ts writes it, or undefined: one to four passes, each once, each of the shape. */
+/** A `holds` value as db/sleep.ts writes it, or undefined: one to SLEEP_PASSES.length passes, each once, each of the shape. */
 function parseHolds(h: unknown): SleepHold[] | undefined {
   if (!Array.isArray(h) || h.length < 1 || h.length > SLEEP_PASSES.length) return undefined;
   const out: SleepHold[] = [];

@@ -6408,8 +6408,8 @@ consolidate waiting for the provider mid-pass", a warning naming the
 provider, where it read "its passes running" and "its log says which". The
 provider answering clears it, and so does a period's end. A follower's own row
 (`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`, `heartbeat:retag:…`) carries the word with its
-own name while it waits, and the `workers` and `consolidate pass` rows say
-it. A follower's start wait stays unsaid: its row does not exist until its
+own name while it waits, and the `workers` row and the follower's own pass
+row (`consolidate pass`, `re-embed pass`, `retag pass`) say it. A follower's start wait stays unsaid: its row does not exist until its
 first pass begins. Since SMD-4254 the sleep's row carries, beside
 `waitingMidPass` naming `reembed`, `reembedWait` while the scheduler leaves
 re-embed waiting on an outage that made a thought a suspect: `since`, the
