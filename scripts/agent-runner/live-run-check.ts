@@ -23,13 +23,14 @@ function stubGql(issue: { identifier: string; title: string; description: string
 }
 
 /** A stub git: each call's reply by the subcommand it runs, so ensureBareRepo runs with no real git. */
-function stubGit(opts: { cloneCode?: number; fetchCode?: number; rev?: string } = {}): { git: GitRun; calls: string[][] } {
+function stubGit(opts: { cloneCode?: number; fetchCode?: number; rev?: string; config?: string } = {}): { git: GitRun; calls: string[][] } {
   const calls: string[][] = [];
   const git: GitRun = (args) => {
     calls.push(args);
     if (args.includes("clone")) return { code: opts.cloneCode ?? 0, stdout: "", stderr: opts.cloneCode ? "clone boom" : "" };
     if (args.includes("fetch")) return { code: opts.fetchCode ?? 0, stdout: "", stderr: opts.fetchCode ? "fetch boom" : "" };
     if (args.includes("rev-parse")) return { code: 0, stdout: `${opts.rev ?? "a".repeat(40)}\n`, stderr: "" };
+    if (args.includes("config")) return { code: 0, stdout: opts.config ?? "local\tcore.bare\nlocal\tremote.origin.url\n", stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   };
   return { git, calls };
@@ -104,6 +105,11 @@ export async function selfCheck(): Promise<number> {
       const r = ensureBareRepo(git, join(tmp, "c.git"), "/some/checkout");
       return !r.ok && r.problem.includes("fetch main");
     }, "a failed fetch is a problem");
+    await ok(() => {
+      const { git, calls } = stubGit({ config: "local\tcore.bare\nlocal\thook.x.command\nlocal\thook.x.event\n" });
+      const r = ensureBareRepo(git, join(tmp, "d.git"), "/some/checkout");
+      return !r.ok && r.problem.includes("hook.x.command (local)") && !calls.some((c) => c.includes("fetch"));
+    }, "a bare repo whose config holds a key past the allowlist (a config-based hook) is refused before any fetch");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
