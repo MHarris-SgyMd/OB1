@@ -7779,7 +7779,7 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
   }
 }
 
-console.log("\n[20cq] Migration 154: onto a populated brain at the file before it — refused by name without 151's settled_parts, no function made; then applied: the parts standing are kept as they are; an undecided one at a text that has since moved reads stale, is refused a settle that names the texts as they were and removed by one that names them as they stand; a decided one is kept by the settle and no longer read once the undecided one is gone, where the read before the file read it stale for good; applied again a no-op (SMD-4446)");
+console.log("\n[20cq] Migration 154: onto a populated brain at the file before it — refused by name without 151's settled_parts or a table 149's read reads, no function made; then applied: the parts standing are kept as they are; an undecided one at a text that has since moved reads stale, is refused a settle that names the texts as they were and removed by one that names them as they stand, the supersession lock and the part's row held in the call's transaction and no thought's row locked, and refused above READ COMMITTED; a decided one is kept by the settle and no longer read from the apply on, where the read before the file read it stale for good; applied again a no-op (SMD-4446)");
 {
   const the154 = MIGRATIONS.find((f) => /^\d{3}_stale_parts\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   const NUM = the154.slice(0, 3);
@@ -7810,30 +7810,59 @@ console.log("\n[20cq] Migration 154: onto a populated brain at the file before i
   await sql`UPDATE thoughts SET content = ${movedText}, content_fingerprint = content_fingerprint_of(${movedText}) WHERE id = ${O}::uuid`;
   const oNow = await fp(O), nNow = await fp(N);
   const before = await parts();
-  // The read before the file has no arm for a part's row: both rows read as standing, at a moved text stale.
+  // The read before the file has no arm for a part's row: both rows read as standing, at a moved text stale. Each
+  // part's own record is read, since the kind is the worst of the two (review pass 5: `stale` before and after said
+  // nothing of the accepted part's row, the undecided one's reading stale either way).
+  const recordsOf = async (id: string) => ((await sql`SELECT thought_validity(${`{${id}}`}::uuid[]) AS r`)[0].r as { thoughts: { freshness: { records: { kind: string; artifact: string; state: string }[] } }[] })
+    .thoughts[0].freshness.records.filter((r) => r.kind === "part").map((r) => `${r.artifact === decided ? "decided" : r.artifact === undecided ? "undecided" : "other"}=${r.state}`).sort().join();
   const kindBefore = await partKind(N);
+  const recordsBefore = await recordsOf(N);
 
-  // Without 151's settled_parts the file is refused by name, and makes no function.
+  // Without 151's settled_parts the file is refused by name, the table and each of its three columns the file
+  // reads, and makes no function; and without one thing 149's read reads, by that name alone (review pass 5: the
+  // message was read to its second name, so the guard without two of the columns, or without all of what 149 reads,
+  // passed).
   await sql`ALTER TABLE settled_parts RENAME TO settled_parts_away`;
   const without = await apply154();
   await sql`ALTER TABLE settled_parts_away RENAME TO settled_parts`;
-  assert(new RegExp(`^migration ${NUM} needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134, 139, 149 and 151; this schema lacks settled_parts, settled_parts\\.older_fingerprint`).test(without) && !(await made()),
-    `without 151's settled_parts the file is refused by name, and settle_stale_part is not made (${without.slice(0, 120)})`);
+  await sql`ALTER TABLE ob1_superseded_by RENAME TO ob1_superseded_by_away`;
+  const withoutRead = await apply154();
+  await sql`ALTER TABLE ob1_superseded_by_away RENAME TO ob1_superseded_by`;
+  const NEEDS = `migration ${NUM} needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134, 139, 149 and 151; this schema lacks `;
+  assert(without === `${NEEDS}settled_parts, settled_parts.older_fingerprint, settled_parts.newer_fingerprint, settled_parts.status` && withoutRead === `${NEEDS}ob1_superseded_by` && !(await made()),
+    `without 151's settled_parts the file is refused by name, the table and its three columns, and without a table 149's read reads, by that one; settle_stale_part is not made (${without}; ${withoutRead})`);
 
   const applied = await apply154();
   const kept = await parts();
   const kindAfter = await partKind(N);
+  const recordsAfter = await recordsOf(N);
+  // On a real Postgres, in one session ([139] runs on PGlite and reads the settle's order from its source): above
+  // READ COMMITTED the settle is refused with its code; and inside its caller's transaction it holds the supersession
+  // advisory lock and the part's row, has read the thoughts with no row of theirs locked, and leaves no advisory lock
+  // once that transaction ends (review pass 5: no row on a real Postgres held a lock or the level).
+  await sql.unsafe("BEGIN ISOLATION LEVEL REPEATABLE READ");
+  const aboveLevel = await settle(undecided, oJudged, nNow).then(() => "answered", (e: Error) => `${String((e as { errno?: unknown }).errno ?? "?")}: ${e.message}`);
+  await sql.unsafe("ROLLBACK");
   // The settle on the parts the brain already held: by the texts as they were judged it is refused; by the texts as
   // they stand it removes the undecided part and keeps the reviewer's.
+  await sql.unsafe("BEGIN");
   const byOldRead = await settle(undecided, oJudged, nNow);
+  const held = ((await sql`SELECT l.locktype || ':' || COALESCE(c.relname, '') || ':' || l.mode AS m FROM pg_locks l LEFT JOIN pg_class c ON c.oid = l.relation
+                            WHERE l.pid = pg_backend_pid() AND l.granted AND (l.locktype = 'advisory' OR c.relname IN ('settled_parts', 'thoughts')) ORDER BY 1`) as { m: string }[]).map((r) => r.m).join();
+  await sql.unsafe("COMMIT");
+  const heldAfter = Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'advisory'`)[0].c);
   const removed = await settle(undecided, oNow, nNow);
   const onDecided = await settle(decided, oNow, nNow);
   const left = (await sql`SELECT id::text AS id, status FROM settled_parts ORDER BY id`) as { id: string; status: string }[];
   const kindSettled = await partKind(N);
   assert(applied === "applied" && (await made()) && kept === before && oNow !== oJudged && kindBefore === "stale" && kindAfter === "stale"
+         && recordsBefore === "decided=stale,undecided=stale" && recordsAfter === "undecided=stale"
          && byOldRead.error === "EDITED_SINCE" && removed.action === "removed" && removed.was === "pending" && onDecided.error === "DECIDED" && onDecided.status === "accepted"
          && left.length === 1 && left[0].id === decided && left[0].status === "accepted" && kindSettled === "absent",
-    `applied, the parts standing are as they were; the undecided one at a moved text reads stale, is refused a settle by the texts as judged and removed by one at the texts as they stand; the accepted one is kept and no longer read, where the read before read it stale (${kindBefore} before, ${kindAfter} after, ${kindSettled} once settled; ${byOldRead.error}, ${removed.action}, ${onDecided.error}; ${left.length} left)`);
+    `applied, the parts standing are as they were; the undecided one at a moved text reads stale, is refused a settle by the texts as judged and removed by one at the texts as they stand; the accepted one is kept and no longer read from the apply on, where the read before read it stale (${kindBefore} before, ${kindAfter} after, ${kindSettled} once settled; each part's record before the file: ${recordsBefore}; after it: ${recordsAfter}; ${byOldRead.error}, ${removed.action}, ${onDecided.error}; ${left.length} left)`);
+  assert(aboveLevel === "0A000: settle_stale_part must run under READ COMMITTED; this transaction is REPEATABLE READ"
+         && held === "advisory::ExclusiveLock,relation:settled_parts:RowShareLock,relation:thoughts:AccessShareLock" && heldAfter === 0,
+    `on this Postgres the settle is refused above READ COMMITTED with its code; in its caller's transaction it holds the supersession advisory lock and the part's row and locks no thought's row, and no advisory lock is left once the transaction ends (${aboveLevel}; held: ${held}; advisory locks after: ${heldAfter})`);
 
   // A re-apply is a no-op: the part left as it is, the read and the settle answering as before.
   const again = await apply154();

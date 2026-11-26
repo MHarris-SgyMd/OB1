@@ -33,8 +33,8 @@
 --     Under the supersession advisory lock and the row's own, it answers, as
 --     values:
 --       {ok: false, error: NOT_FOUND, id}: no such part (a later judgement
---         replaced it, a reviewer's client or another worker removed it, a
---         thought of its pair is gone and took it);
+--         replaced it, another caller removed it, or a thought of its pair
+--         is gone and took it);
 --       {ok: false, error: DECIDED, id, status}: accepted or rejected. A
 --         reviewer's decision stands whatever its texts have done since;
 --       {ok: false, error: EDITED_SINCE, id, older_edited, newer_edited}: a
@@ -72,7 +72,7 @@
 --   apply time but the DDL, and no row is written. Nothing calls
 --   settle_stale_part yet: the pass does from SMD-4446's PR 2b-2. MINOR under
 --   MAINTAINING.md's versioning.
---   test-schema [138], test-upgrade [20cp].
+--   test-schema [139], test-upgrade [20cq].
 --
 -- Prerequisites
 --   149 (thought_validity and everything it reads) and 151 (settled_parts).
@@ -146,13 +146,14 @@ BEGIN
   IF p_id IS NULL OR p_older_fingerprint IS NULL OR p_older_fingerprint = ''
      OR p_newer_fingerprint IS NULL OR p_newer_fingerprint = '' THEN
     RAISE EXCEPTION USING
-      MESSAGE = 'settle_stale_part: the part''s id and the fingerprint of each text as judged are required',
+      MESSAGE = 'settle_stale_part: the part''s id and the fingerprint of each text as the caller read it are required',
       ERRCODE = 'invalid_parameter_value';
   END IF;
   -- READ COMMITTED alone, checked before anything is read (068's rule, as
   -- 151's write and decision): above it the two texts would be read as the
   -- transaction first saw them, before the lock below was had, and a part
-  -- recorded meanwhile at the texts as they stand could be removed.
+  -- whose text was put back meanwhile, a judgement of the texts as they
+  -- stand again, could be removed.
   IF current_setting('transaction_isolation') NOT IN ('read committed', 'read uncommitted') THEN
     RAISE EXCEPTION USING
       MESSAGE = format('settle_stale_part must run under READ COMMITTED; this transaction is %s', upper(current_setting('transaction_isolation'))),
@@ -178,7 +179,7 @@ BEGIN
 
   -- ob1:a-settle-is-of-the-texts-as-they-stand — a CONTRACT SENTINEL (the
   -- 014 convention), read by db/test-schema.ts. The caller says which texts
-  -- it judged, and both are compared with the texts as they stand, under the
+  -- it read, and both are compared with the texts as they stand, under the
   -- lock: a settle that trusted the judge's read removed a part the next
   -- judgement would have kept (SMD-4446's PR 1, review pass 4: 20 of 20).
   SELECT content_fingerprint_of(content) INTO v_old FROM thoughts WHERE id = r.older_id;
@@ -573,8 +574,8 @@ BEGIN
         -- convention), read by db/test-schema.ts. A settled part's row (151)
         -- reads its part's status: pending or stale it stands; a reviewer's
         -- decision is history, which no re-run rewrites (nothing reopens one:
-        -- a part the pass does not record again is removed with its lineage
-        -- row, settle_stale_part, where a proposal is rejected); with no part
+        -- a part the pass settles is removed with its lineage row,
+        -- settle_stale_part, where a proposal is rejected); with no part
         -- it is orphaned, as 151's rebuild_derived reads it. The part is read
         -- behind its own IF: a role that may not read settled_parts leaves
         -- the row unread, and the axis unknown below.
@@ -669,11 +670,15 @@ COMMENT ON FUNCTION thought_validity(uuid[]) IS
 -- 151 wrote the part's contract into three comments before anything removed
 -- a part: the table's and the status column's name no removal, and
 -- rebuild_derived's says of a decided part "nothing settles a part yet". Each
--- standing comment gains what this file adds, in place. The table's and the
--- column's gain a sentence unless they name the settle already, so a re-apply
--- changes nothing, and one a later file has rewritten without that name
--- gains the sentence at a re-apply. rebuild_derived's has that clause
--- replaced where it still stands, and is otherwise left as it is.
+-- standing comment gains what this file adds, in place: that such a part
+-- may be removed, and by whom. Which of them the pass removes is the pass's
+-- rule, and is not written into the catalog (review pass 5: three passes
+-- found it too narrow as these sentences gave it, and the pass has since
+-- kept a part they said it removes). The table's and the column's gain a
+-- sentence unless they name the settle already, so a re-apply changes
+-- nothing, and one a later file has rewritten without that name gains the
+-- sentence at a re-apply. rebuild_derived's has that clause replaced where
+-- it still stands, and is otherwise left as it is.
 -- (151 applied by hand over this file writes its own comments back.)
 DO $$
 DECLARE
@@ -685,11 +690,11 @@ DECLARE
 BEGIN
   IF v_table IS NOT NULL AND position('settle_stale_part' IN v_table) = 0 THEN
     EXECUTE format('COMMENT ON TABLE settled_parts IS %L', v_table
-      || ' An undecided part that is no longer a judgement of its texts, and that the pass does not record again when it judges the pair again or whose pair nothing will judge again, is removed with its lineage row (settle_stale_part, migration 154).');
+      || ' An undecided part that is no longer a judgement of its texts may be removed by the consolidation pass, its lineage row with it (settle_stale_part, migration 154).');
   END IF;
   IF v_status IS NOT NULL AND position('settle_stale_part' IN v_status) = 0 THEN
     EXECUTE format('COMMENT ON COLUMN settled_parts.status IS %L', v_status
-      || ' An undecided row that is no longer a judgement of its texts is removed where the pass judges the pair again and does not record it again, or where nothing will judge the pair again (settle_stale_part, migration 154).');
+      || ' An undecided row that is no longer a judgement of its texts may be removed by the consolidation pass (settle_stale_part, migration 154).');
   END IF;
   IF v_rebuild IS NOT NULL AND position('nothing settles a part yet' IN v_rebuild) > 0 THEN
     EXECUTE format('COMMENT ON FUNCTION %s IS %L', v_fn, replace(v_rebuild, 'nothing settles a part yet',
