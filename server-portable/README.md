@@ -1905,8 +1905,9 @@ stripped (`X-Forwarded-Prefix`).
   operation with the input its route parses. **`GET /v1/whoami`** names the
   calling key, its scope, its digest, its agent id and the operations it may call, and — forwarded —
   its `act`. The digest is what the agent registry knows the caller by: a key's
-  SHA-256, or, of a token caller, a digest of its issuer, subject and client,
-  which a new token of theirs keeps. It is no credential.
+  SHA-256, or, of a token caller, a digest of its issuer, its subject and the
+  client it signed in through, if any, which a new token of theirs keeps. It is
+  no credential.
 - **`POST /v1/callers/standing`** (SMD-4493) answers, for up to 256 callers each
   named with the digest `whoami` gave for it, whether each `stands`, is
   `revoked` in the agent registry, or is `unknown` to the key list (a key
@@ -1916,11 +1917,15 @@ stripped (`X-Forwarded-Prefix`).
   of, and writes nothing of them: none is registered, renamed or stamped. (The
   forwarder is looked up as on any request it carries.) Every pair is answered,
   or none: any answer but the 200 answers for no caller. A registry that cannot
-  be read is a 503 `STORE_UNAVAILABLE`; one held by a lock is first the
-  forwarder's own lookup's 503 `BUSY`, after its retries, some two seconds. A
-  name has no bound but the body's, 1 MiB. A digest read as revoked also
-  loses the REST core's cached answer, so its key's next request is refused
-  then, not up to `OB1_AGENT_CACHE_TTL_MS` later. It is what the MCP server
+  be read is a 503: `STORE_UNAVAILABLE` from the read, which a table held by a
+  lock ends at 250 ms; or `BUSY` with `credential: "forwarder"` where the
+  forwarder's own lookup met the fault first, as it does when the REST core
+  does not remember the forwarder, after that lookup's retries, some two
+  seconds. A name has no bound but the body's, 1 MiB, so 256 names of some four
+  thousand characters each are a 413 for all of them. A digest read as revoked also
+  loses the REST core's cached answer, so its key's next request is looked up
+  and refused then, not up to `OB1_AGENT_CACHE_TTL_MS` later, but for a lookup
+  of that key already in flight, which caches its earlier answer again. It is what the MCP server
   will ask of the callers whose listen streams it holds
   (`docs/mcp-listen-streams.md`); nothing asks it yet.
 - **Authorization** is the key's: `x-brain-key`, `x-access-key` or `Authorization:
@@ -1956,7 +1961,8 @@ stripped (`X-Forwarded-Prefix`).
   words the MCP server says them in, which the caller's key alone is not told over
   REST: a forwarder key is the MCP server's alone, never an integration's.
   Alone in that header, with no caller's key, it reaches the one route above
-  (SMD-4493), where anything in a caller's header is refused 403: so a holder of
+  (SMD-4493), where a key or a bearer token in a caller's header is refused
+  403, whatever it is: so a holder of
   a forwarder key can ask of any digest whether its key is revoked or still
   listed, and so try guesses at a key, 256 a request. That finds no key
   `keygen.ts` minted; it could find an old single key someone chose.

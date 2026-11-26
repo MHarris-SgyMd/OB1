@@ -430,7 +430,7 @@ records it as who carried the request (SMD-2284), continuing that request's
 `traceparent` (SMD-2287). Alone in that header it asks one thing, whether
 callers still stand (`POST /v1/callers/standing`, SMD-4493): whoever holds it
 can learn of any key's digest whether that key is revoked or still listed, and
-nothing more. Give it to no client.
+so test a guess at a key, and nothing more. Give it to no client.
 
 That matters because the key can travel in the URL (`?key=…`). Claude Desktop's
 custom connectors are URL-only, so Daemonic Brain keeps that form — but query

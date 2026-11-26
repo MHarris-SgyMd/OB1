@@ -922,7 +922,7 @@ export interface paths {
         };
         /**
          * Who is calling
-         * @description The key's name, its scope, its `digest` (what the agent registry knows the caller by: the key's SHA-256, or of a token caller a digest of its issuer, subject and client, which a new token keeps; it is no credential), its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).
+         * @description The key's name, its scope, its `digest` (what the agent registry knows the caller by: the key's SHA-256, or of a token caller a digest of its issuer, its subject and the client it signed in through, if any, which a new token keeps; it is no credential), its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).
          */
         get: operations["whoami"];
         put?: never;
@@ -7137,7 +7137,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Something was presented in a caller's header, whatever it was and unchecked: a key, a token, a forwarder's key (FORBIDDEN, `needs: "forward"`). No caller's scope reaches this route. */
+            /** @description A key or a bearer token was presented in a caller's header, whatever it was and unchecked, a forwarder's key among them (FORBIDDEN, `needs: "forward"`). No caller's scope reaches this route. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -7173,7 +7173,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy on the forwarder's own lookup (BUSY, `credential: "forwarder"`; answered after that lookup's retries, some two seconds), or could not be read (STORE_UNAVAILABLE). Neither is an answer for any caller. */
+            /** @description Retry, after Retry-After: the agent registry could not be read (STORE_UNAVAILABLE; a table held by a lock ends the read at 250 ms), or was busy on the forwarder's own lookup, which meets a held table first where the forwarder is not remembered (BUSY, `credential: "forwarder"`, after that lookup's retries, some two seconds). Neither is an answer for any caller. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */

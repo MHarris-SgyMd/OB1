@@ -569,14 +569,17 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   //            the registry has no row for among them
   // Every pair is answered, or none: any answer but the 200 answers for no
   // caller, and the asker ends nothing on it. A registry that cannot be read
-  // is a 503 here (STORE_UNAVAILABLE); one held by a lock is first the
-  // forwarder's own lookup's 503 (BUSY, `credential: "forwarder"`), after its
-  // retries, some two seconds.
+  // is a 503: the read's (STORE_UNAVAILABLE; a held table ends it at its cap),
+  // or the forwarder's own lookup's where that met the fault first, as it does
+  // when the forwarder is not remembered (BUSY, `credential: "forwarder"`,
+  // after its retries, some two seconds). A name is taken on the asker's word:
+  // one that begins `oauth:` is answered as a token caller's.
   app.post("/v1/callers/standing", async (c) => {
     const named = traceOf(c.req.raw);
     if (named) named.route = c.req.routePath;
-    // Anything in a caller's header, forwarded or not, is refused before it is checked: no caller's scope reaches
-    // this route, and what the header held is not asked of the key list, the registry or the token check.
+    // A key or a bearer token in a caller's header, forwarded or not, is refused before it is checked: no caller's
+    // scope reaches this route, and what the header held is not asked of the key list, the registry or the token
+    // check. (A header that carries neither, an Authorization of another scheme among them, is not a caller's.)
     if (headerKeys(c.req.raw).length > 0) return refuse(c, 403, { code: "FORBIDDEN", needs: "forward" });
     const keys = deps.keys();
     const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
@@ -602,9 +605,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     let revoked: Set<string>;
     try {
       if (!deps.revoked) throw new Error("this REST core was given no read of the agent registry");
-      const read = callers.length > 0 ? await deps.revoked([...new Set(callers.map((p) => p.digest))]) : [];
-      // Anything but a list is a read that did not answer: never "none revoked".
-      if (!Array.isArray(read)) throw new Error("the agent registry's read answered no list");
+      const asked = new Set(callers.map((p) => p.digest));
+      const read = callers.length > 0 ? await deps.revoked([...asked]) : [];
+      // Anything but a list of digests that were asked of is a read that did not answer: never "none revoked".
+      if (!Array.isArray(read) || read.some((digest) => typeof digest !== "string" || !asked.has(digest))) throw new Error("the agent registry's read answered something other than digests it was asked of");
       revoked = new Set(read);
     } catch (err) {
       // No answer: the registry could not be read, whatever the cause, and the asker keeps what it holds.

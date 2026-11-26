@@ -782,6 +782,15 @@ console.log("\n[17] The registry's revocations read fresh, for callers who are n
   await r.resolve(store, k7);
   await r.resolve(store, k7b);
   assert(lookups === 6, `…under every name the digest was cached by (${lookups})`);
+  gone.add(H("8"));
+  await r.resolve(store, k7);
+  await r.resolve(store, k8);
+  const cached = lookups;
+  await r.revoked(store, [H("7"), H("8")]);
+  await r.resolve(store, k7);
+  await r.resolve(store, k8);
+  assert(lookups === cached + 2, `two digests revoked in one read each lose their cached answer (${lookups - cached})`);
+  const before = lookups;
   const locked = Promise.resolve({ revokedKeys: async () => { throw Object.assign(new Error("canceling statement due to lock timeout"), { errno: "55P03" }); } } as unknown as ThoughtStore);
   let threw = "";
   try {
@@ -790,7 +799,7 @@ console.log("\n[17] The registry's revocations read fresh, for callers who are n
     threw = String((e as Error).message);
   }
   await r.resolve(store, k8);
-  assert(threw.includes("lock timeout") && lookups === 6, `a registry that cannot be read throws, no answer made of it, and nothing cached is dropped for it (${threw}; ${lookups})`);
+  assert(threw.includes("lock timeout") && lookups === before, `a registry that cannot be read throws, no answer made of it, and nothing cached is dropped for it (${threw}; ${lookups})`);
 }
 
 await sql.close();
