@@ -7053,6 +7053,7 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ["export function closeStore(): Promise<boolean> {\n  return _store ? _store.then(async (s) => { await s.close(); return true; }) : Promise.resolve(false);\n}\n", false, ROOT_ROLE],
   ["const identity = await agents().resolve(db(), principal);\n", false],
   ["const gone = await agents().revoked(db(), keyHashes);\n", false],
+  ["const gone = await agents().revoke(db(), keyHashes);\n", true],
   ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
   ["const core = createCore({\n  env,\n  store: db,\n  door: SERVER_NAME,\n});\n", false],
   ['import {\n  createStore,\n  type ThoughtStore,\n} from "./store.ts";\n', false, ROOT_ROLE],

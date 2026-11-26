@@ -99,7 +99,7 @@ const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gon
 process.env.MCP_ACCESS_KEYS = [
   `writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`,
   `hook:capture:${hashKey(KEYS.hook)}`, `gone:write:${hashKey(KEYS.gone)}`,
-  // Forwarders (SMD-2284): grant nothing; read in the REST core's forwarder slot alone.
+  // Forwarders (SMD-2284): no caller's keys; read in the REST core's forwarder slot alone.
   `mcp-forwarder:forward:${hashKey(KEYS.forwarder)}`, `old-forwarder:forward:${hashKey(KEYS.forwarderGone)}`,
   `fresh:write:${hashKey(KEYS.fresh)}`, // never used but by [6b]'s refused forwarded request
   `rival:write:${hashKey(KEYS.rival)}`, // [10]'s second agent, beside the writer
@@ -1124,6 +1124,8 @@ console.log("\n[6d] Whether callers still stand, against the real registry (SMD-
   const tokenGone = hashKey("[6d] a token caller the registry revoked"), tokenNew = hashKey("[6d] a token caller never seen");
   await sql`SELECT resolve_agent(${tokenGone}::text, ${"oauth:standing+suite"}::text, NULL::text)`;
   await sql`SELECT revoke_agent_key(${tokenGone}, ${"rest suite [6d]"})`;
+  // The registry as the callers asked of left it. The forwarder's own row is left out: its lookup, as on any request
+  // it carries, may stamp it.
   const registry = async () => JSON.stringify(await sql`SELECT (SELECT count(*)::int FROM ob1_agents) AS agents, (SELECT count(*)::int FROM ob1_agent_keys) AS keys, (SELECT max(last_used_at)::text FROM ob1_agent_keys WHERE key_hash <> ${hashKey(KEYS.forwarder)}) AS used, (SELECT max(updated_at)::text FROM ob1_agents) AS updated`);
   const before = await registry();
   const asked = [
@@ -1152,16 +1154,15 @@ console.log("\n[6d] Whether callers still stand, against the real registry (SMD-
   await sql.begin(async (tx) => {
     await tx`LOCK TABLE ob1_agent_keys IN ACCESS EXCLUSIVE MODE`;
     const t0 = performance.now();
-    try {
-      await store.revokedKeys([hashKey(KEYS.gone)]);
-    } catch (e) {
-      threw = String((e as { errno?: unknown }).errno ?? (e as Error).message);
-    }
+    // Raced with five seconds: a read with no cap would wait on this very transaction, which waits on it.
+    const read = store.revokedKeys([hashKey(KEYS.gone)]).then(() => "it answered", (e) => String((e as { errno?: unknown }).errno ?? (e as Error).message));
+    threw = await Promise.race([read, new Promise<string>((resolve) => setTimeout(() => resolve("no end in 5 s"), 5000))]);
     waited = performance.now() - t0;
     held = await ask(asked);
   });
   assert(threw === "55P03" && waited < 2000, `the read of a held table ends at its lock cap, 55P03, and holds no connection for the lock (${threw}, ${Math.round(waited)} ms)`);
-  assert(held?.status === 503 && !("callers" in (held?.body ?? {})) && held?.headers.get("retry-after") !== null, `…and the route answers 503 with a Retry-After, for no caller (${held?.status} ${JSON.stringify(held?.body)})`);
+  assert(held?.status === 503 && held?.body.code === "BUSY" && held?.body.credential === "forwarder" && !("callers" in (held?.body ?? {})) && held?.headers.get("retry-after") !== null,
+    `…and the route answers 503 with a Retry-After, for no caller: the forwarder's own lookup met the held table first, and is BUSY after its retries (${held?.status} ${JSON.stringify(held?.body)})`);
   const again = await ask(asked);
   assert(again.status === 200 && same(standings(again), standings(answered)), `…and the same as before once the table is free (${again.status})`);
   assert(same(await store.revokedKeys([]), []) && same((await store.revokedKeys([hashKey(KEYS.reader), hashKey(KEYS.gone), tokenGone, tokenNew])).sort(), [hashKey(KEYS.gone), tokenGone].sort()), "the store's read: none of none, and of four the two revoked");

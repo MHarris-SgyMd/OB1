@@ -103,7 +103,7 @@ async function importServer(file: string): Promise<Handler> {
 const WRITE_KEY = "w".repeat(64);
 const READ_KEY = "r".repeat(64);
 const LEGACY_KEY = "old-style-key";
-// A forwarder (SMD-2284): grants nothing; DEFAULT_ADMIT leaves it out, so to a vendored server it is no key at all.
+// A forwarder (SMD-2284): no caller's key; DEFAULT_ADMIT leaves it out, so to a vendored server it is no key at all.
 const FORWARD_KEY = "f".repeat(64);
 const KEYS = [`laptop:write:${hashKey(WRITE_KEY)}`, `chatgpt:read:${hashKey(READ_KEY)}`].join(",");
 
@@ -301,7 +301,7 @@ for (const s of SERVERS.filter((s) => s.kind === "worker")) {
   assert(passed(await run(s, READ_KEY, true)), "…and the other keeps working");
 
   env(s, `${KEYS},mcp-forwarder:forward:${hashKey(FORWARD_KEY)}`);
-  assert((await run(s, FORWARD_KEY, true)).status === 401, "a configured forwarder key is refused with 401, even for a dry run — it grants nothing, and no vendored worker admits it (SMD-2284)");
+  assert((await run(s, FORWARD_KEY, true)).status === 401, "a configured forwarder key is refused with 401, even for a dry run — it is no caller's, and no vendored worker admits it (SMD-2284)");
 
   env(s, undefined, LEGACY_KEY);
   assert(passed(await run(s, LEGACY_KEY, false)), `the legacy single ${s.legacy} still authenticates, as write`);

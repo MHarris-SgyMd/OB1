@@ -49,12 +49,15 @@ if (minted === "read") {
   console.log(`  hook or a pipeline that adds thoughts from a machine you do not sit at: a leak`);
   console.log(`  of this key can add, rank and track what it added, not read.\n`);
 } else if (minted === "forward") {
-  console.log(`  Forward: this key calls no operation — every server refuses it as a`);
+  console.log(`  Forward: this key calls no tool — every server refuses it as a`);
   console.log(`  caller. It is for the MCP server's own use when it forwards a client's key to`);
   console.log(`  the REST core, in the x-brain-forwarder header: the client's key decides what`);
   console.log(`  the request may do, this one names who carried it (act). Never a client's:`);
   console.log(`  beside a caller's key it is answered that key's refusals and captures whole,`);
   console.log(`  the words the MCP server says them in, which REST withholds from the key alone.`);
+  console.log(`  Alone in that header it asks one thing, whether callers still stand: a leak`);
+  console.log(`  of this key lets its holder, inside the stack, learn of any key's digest`);
+  console.log(`  whether that key is revoked or still listed (SMD-4493).`);
   console.log(`  Use a name no key has had: the registry reads a known name as a rotation.\n`);
 } else {
   console.log(`  Write scope: this key can capture and modify thoughts. Prefer --scope read`);

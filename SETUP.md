@@ -423,7 +423,7 @@ a leak of it can add a thought, state how much its own thoughts matter and keep
 its own to-dos, and cannot read one
 ([`recipes/session-capture-hook`](recipes/session-capture-hook/)).
 
-A fourth, `--scope forward`, reaches no operation: every server refuses it as a
+A fourth, `--scope forward`, calls no tool: every server refuses it as a
 caller. It is for the MCP server's own use when it forwards a client's key to the
 REST core, which reads it in a header of its own (`x-brain-forwarder`) and
 records it as who carried the request (SMD-2284), continuing that request's

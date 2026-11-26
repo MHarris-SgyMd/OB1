@@ -1905,15 +1905,20 @@ stripped (`X-Forwarded-Prefix`).
   operation with the input its route parses. **`GET /v1/whoami`** names the
   calling key, its scope, its digest, its agent id and the operations it may call, and — forwarded —
   its `act`. The digest is what the agent registry knows the caller by: a key's
-  SHA-256, or a token's subject's. It is no credential.
+  SHA-256, or, of a token caller, a digest of its issuer, subject and client,
+  which a new token of theirs keeps. It is no credential.
 - **`POST /v1/callers/standing`** (SMD-4493) answers, for up to 256 callers each
   named with the digest `whoami` gave for it, whether each `stands`, is
   `revoked` in the agent registry, or is `unknown` to the key list (a key
   caller whose line has gone, or whose key was rotated; never a token caller).
   It is the forwarder's alone (below), made by hand as `whoami` is, and no
-  operation of the manifest. It reads the registry once and writes nothing: no
-  caller asked of is registered, renamed or stamped. Every pair is answered, or
-  none: a registry that cannot be read is a 503. A digest read as revoked also
+  operation of the manifest. It reads the registry once for the callers asked
+  of, and writes nothing of them: none is registered, renamed or stamped. (The
+  forwarder is looked up as on any request it carries.) Every pair is answered,
+  or none: any answer but the 200 answers for no caller. A registry that cannot
+  be read is a 503 `STORE_UNAVAILABLE`; one held by a lock is first the
+  forwarder's own lookup's 503 `BUSY`, after its retries, some two seconds. A
+  name has no bound but the body's, 1 MiB. A digest read as revoked also
   loses the REST core's cached answer, so its key's next request is refused
   then, not up to `OB1_AGENT_CACHE_TTL_MS` later. It is what the MCP server
   will ask of the callers whose listen streams it holds
@@ -1951,8 +1956,10 @@ stripped (`X-Forwarded-Prefix`).
   words the MCP server says them in, which the caller's key alone is not told over
   REST: a forwarder key is the MCP server's alone, never an integration's.
   Alone in that header, with no caller's key, it reaches the one route above
-  (SMD-4493), where a caller's key is refused 403: so a holder of a forwarder
-  key can ask of any digest whether its key is revoked or still listed.
+  (SMD-4493), where anything in a caller's header is refused 403: so a holder of
+  a forwarder key can ask of any digest whether its key is revoked or still
+  listed, and so try guesses at a key, 256 a request. That finds no key
+  `keygen.ts` minted; it could find an old single key someone chose.
   The public `/api` route deletes the header, so it is read only inside the
   stack (`rest-client/` sends it, and nothing in the stack does until the MCP
   server forwards, SMD-2287). Mint a forwarder under a name never used before —

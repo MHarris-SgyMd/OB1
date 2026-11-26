@@ -1305,7 +1305,7 @@ if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
     // A capture-only key (SMD-1298) adds thoughts and reads nothing: it counts
     // as a capturer here and as a writer for the "every key can write" warning,
     // since either kind of leak can put a thought into the brain. A forwarder
-    // (SMD-2284) grants nothing and is no server's caller: it is neither, and
+    // (SMD-2284) is no server's caller: it is neither, and
     // a list of forwarders alone is a server no client can reach. The legacy
     // single key, set beside the list, is one more client, with write scope.
     const clients = keys.filter((k) => k.scope !== "forward");
@@ -1314,7 +1314,7 @@ if (!env.MCP_ACCESS_KEYS && !env.MCP_ACCESS_KEY) {
     add("access keys", "ok",
         `${keys.length} key(s): ${keys.map((k) => `${k.name}(${k.scope})`).join(", ")}`);
     if (clients.length + legacyClient === 0) {
-      add("access keys scope", "fail", "every key is a forwarder — forward scope grants nothing, so no client can authenticate",
+      add("access keys scope", "fail", "every key is a forwarder — a forward-scope key is no caller's, so no client can authenticate",
           "Mint a client key: bun keygen.ts --name laptop --scope write");
     } else if (capturers === 0) {
       add("access keys scope", "warn", "every key is read-only — capture_thought will not be registered for anyone",

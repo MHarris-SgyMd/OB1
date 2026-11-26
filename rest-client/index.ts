@@ -24,7 +24,10 @@ export interface RestClientOptions {
   baseUrl: string;
   /** What sends a request: globalThis.fetch unless given (a suite hands it the REST app's own). */
   fetch?: (request: Request) => Promise<Response>;
-  /** This caller's forward-scope key, sent in the forwarder slot beside the caller's key on every call: the MCP server's own. */
+  /**
+   * This caller's forward-scope key, sent in the forwarder slot on every call: the MCP server's own. It rides beside the
+   * caller's key, but for `callers_standing` (SMD-4493), which is called with no key and no token: the forwarder alone.
+   */
   forwarderKey?: string;
   /** Headers each request adds as it is sent — the calling span's `traceparent`. */
   headers?: () => Record<string, string>;

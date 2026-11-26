@@ -754,6 +754,11 @@ console.log("\n[17] The registry's revocations read fresh, for callers who are n
   } as unknown as ThoughtStore);
   const r = new AgentResolver(60_000, () => 0);
   const k7 = principal("k7", H("7")), k8 = principal("k8", H("8")), k7b = principal("k7-renamed", H("7"));
+  // Two whose cached answers a loose match would drop with k7's: a digest that begins as k7's does, and a name that holds k7's digest.
+  const near = principal("near", "7".repeat(8) + "9".repeat(56)), named = principal(`named ${H("7")}`, H("a"));
+  await r.resolve(store, near);
+  await r.resolve(store, named);
+  lookups = 0;
   await r.resolve(store, k7);
   await r.resolve(store, k8);
   await r.resolve(store, k7);
@@ -767,6 +772,9 @@ console.log("\n[17] The registry's revocations read fresh, for callers who are n
   assert(JSON.stringify(got) === JSON.stringify([H("7")]), `a digest the registry has revoked is said, and no other (${got.length})`);
   await r.resolve(store, k8);
   assert(lookups === 2, `…the other key's cached answer is kept (${lookups})`);
+  await r.resolve(store, near);
+  await r.resolve(store, named);
+  assert(lookups === 2, `…and so are those of a digest that begins as the revoked one does, and of a name that holds it (${lookups})`);
   await r.resolve(store, k7);
   assert(lookups === 3, `…and the revoked digest's is dropped: its key's next request is looked up, not answered from the cache (${lookups})`);
   await r.resolve(store, k7b);

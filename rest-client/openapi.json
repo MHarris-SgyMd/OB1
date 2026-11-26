@@ -9667,7 +9667,7 @@
       "get": {
         "operationId": "whoami",
         "summary": "Who is calling",
-        "description": "The key's name, its scope, its `digest` (what the agent registry knows the caller by: the key's SHA-256, or a token's subject's; it is no credential), its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).",
+        "description": "The key's name, its scope, its `digest` (what the agent registry knows the caller by: the key's SHA-256, or of a token caller a digest of its issuer, subject and client, which a new token keeps; it is no credential), its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).",
         "responses": {
           "200": {
             "description": "The caller.",
@@ -9767,7 +9767,7 @@
       "post": {
         "operationId": "callers_standing",
         "summary": "Whether callers still stand",
-        "description": "For each caller, by its name and the `digest` whoami gave for it: `revoked` where the agent registry has revoked the digest; `unknown` where a key caller's digest is no longer in the key list (its line gone, or the key rotated), which is never said of a token caller (`oauth:…`); and `stands` otherwise, a renamed caller, one whose scope changed and one the registry has no row for among them. A read: it registers no one and writes nothing. Every pair is answered or none is. Asked with a forward-scope key in x-brain-forwarder and no caller's credential: the MCP server's question of the callers whose listen streams it holds (SMD-4493).",
+        "description": "For each caller, by its name and the `digest` whoami gave for it: `revoked` where the agent registry has revoked the digest; `unknown` where a key caller's digest is no longer in the key list (its line gone, or the key rotated), which is never said of a token caller (`oauth:…`); and `stands` otherwise, a renamed caller, one whose scope changed and one the registry has no row for among them. A read of the callers asked of: none is registered, renamed or stamped (the forwarder is looked up as on any request it carries). Every pair is answered or none is: any answer but the 200 answers for no caller. Asked with a forward-scope key in x-brain-forwarder and no caller's credential: the MCP server's question of the callers whose listen streams it holds (SMD-4493).",
         "requestBody": {
           "required": true,
           "content": {
@@ -9792,8 +9792,7 @@
                       "properties": {
                         "name": {
                           "type": "string",
-                          "minLength": 1,
-                          "maxLength": 200
+                          "minLength": 1
                         },
                         "digest": {
                           "type": "string",
@@ -9871,7 +9870,7 @@
             }
           },
           "403": {
-            "description": "A caller's credential was presented (FORBIDDEN, `needs: \"forward\"`): no caller's scope reaches this route.",
+            "description": "Something was presented in a caller's header, whatever it was and unchecked: a key, a token, a forwarder's key (FORBIDDEN, `needs: \"forward\"`). No caller's scope reaches this route.",
             "content": {
               "application/json": {
                 "schema": {
@@ -9891,7 +9890,7 @@
             }
           },
           "413": {
-            "description": "The body is larger than 256 pairs can be (REFUSED_INPUT).",
+            "description": "The body is larger than 1 MiB (REFUSED_INPUT).",
             "content": {
               "application/json": {
                 "schema": {
@@ -9911,7 +9910,7 @@
             }
           },
           "503": {
-            "description": "Retry, after Retry-After: the agent registry is busy on the forwarder's own lookup (BUSY, `credential: \"forwarder\"`), or could not be read (STORE_UNAVAILABLE). Neither is an answer for any caller.",
+            "description": "Retry, after Retry-After: the agent registry is busy on the forwarder's own lookup (BUSY, `credential: \"forwarder\"`; answered after that lookup's retries, some two seconds), or could not be read (STORE_UNAVAILABLE). Neither is an answer for any caller.",
             "content": {
               "application/json": {
                 "schema": {
@@ -10268,7 +10267,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "x-brain-forwarder",
-        "description": "A forward-scope key. Beside a caller's key it names who carried the request (recorded as act) and grants that request nothing — but a request it carries is answered its refusals and its captures whole, the words the MCP server says them in. Alone, it reaches one route, POST /v1/callers/standing, and no operation. So it is the MCP server's alone. Read only inside the stack: the public /api route deletes it."
+        "description": "A forward-scope key. Beside a caller's key it names who carried the request (recorded as act) and grants that request nothing — but a request it carries is answered its refusals and its captures whole, the words the MCP server says them in. Alone, it reaches one route, POST /v1/callers/standing, and no tool. So it is the MCP server's alone. Read only inside the stack: the public /api route deletes it."
       }
     },
     "schemas": {

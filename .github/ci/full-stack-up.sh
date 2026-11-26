@@ -30,7 +30,7 @@ echo "OB1_SMOKE_READ_KEY=$READ_KEY" >> "$GITHUB_ENV"
 CAPTURE_KEY=$(openssl rand -hex 32)
 CAPTURE_HASH=$(printf '%s' "$CAPTURE_KEY" | shasum -a 256 | cut -d' ' -f1)
 echo "OB1_SMOKE_CAPTURE_KEY=$CAPTURE_KEY" >> "$GITHUB_ENV"
-# And a forwarder (SMD-2284): grants nothing; the REST core reads it
+# And a forwarder (SMD-2284): no caller's key; the REST core reads it
 # beside a caller's key on the mesh, and /api deletes it. The MCP server
 # built on the REST core holds it as OB1_FORWARDER_KEY (SMD-2287), which
 # compose requires.

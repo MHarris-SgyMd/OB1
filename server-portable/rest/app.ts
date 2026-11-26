@@ -65,11 +65,15 @@ export interface RestDeps {
 
 /** The most callers one question of their standing may name (SMD-4493): the MCP server's own bound on the streams it holds. */
 export const STANDING_CALLERS_MAX = 256;
-/** The most that question's body may be, past which it is refused (413) unread: 256 pairs, a name of 200 characters at four bytes each. */
-const STANDING_BODY_LIMIT = 256 * 1024;
+/**
+ * The most that question's body may be, past which it is refused (413) unread: 1 MiB, some four thousand bytes a pair.
+ * A name has no bound of its own here, since a key's has none in the key list: one caller with a long name must not
+ * turn every question that names it into a refusal, which answers for no caller.
+ */
+const STANDING_BODY_LIMIT = 1024 * 1024;
 /** The question: each caller by its name and the digest `whoami` gave for it. */
 const STANDING_INPUT = z.object({
-  callers: z.array(z.object({ name: z.string().min(1).max(200), digest: z.string().regex(/^[0-9a-f]{64}$/, "not 64 lower-case hex digits") }).strict()).max(STANDING_CALLERS_MAX),
+  callers: z.array(z.object({ name: z.string().min(1), digest: z.string().regex(/^[0-9a-f]{64}$/, "not 64 lower-case hex digits") }).strict()).max(STANDING_CALLERS_MAX),
 }).strict();
 
 /**
@@ -532,8 +536,9 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   });
 
   // Who is calling: the key's name, its scope, its digest (what the agent
-  // registry knows the caller by: the key's SHA-256, or a token's subject's;
-  // no credential, and what the MCP server keeps with a listen stream to ask
+  // registry knows the caller by: the key's SHA-256, or of a token caller a
+  // digest of its issuer, subject and client, which a new token keeps; no
+  // credential, and what the MCP server keeps with a listen stream to ask
   // of its caller's standing, SMD-4493), its stable agent id, the
   // operations it may call, and — forwarded — who carried it (`act`): what the
   // MCP server's tools/list and the GUI's sign-in read once SMD-2287 and
@@ -552,20 +557,26 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // operation of the manifest. It is asked under the forwarder's own key, in
   // the forwarder's slot, with no caller's credential beside it: so no
   // caller's scope reaches it, and where the REST core is published the proxy,
-  // which deletes that header, leaves it unreachable. It registers no one and
-  // writes nothing.
+  // which deletes that header, leaves it unreachable. No caller asked of is
+  // registered, renamed or stamped: of them it reads, and writes nothing. The
+  // forwarder itself is looked up as on any request it carries, which registers
+  // it at first sight and stamps it when its last use is five minutes old.
   //   revoked  the registry has revoked the digest
   //   unknown  a key caller's digest that the key list no longer holds: its
   //            line gone, or the key rotated. Never said of a token caller
   //            (`oauth:…`), which is in no key list
   //   stands   every other: a renamed caller, one whose scope changed, and one
   //            the registry has no row for among them
-  // Every pair is answered, or none: a registry that cannot be read is a 503,
-  // which is no answer, and the asker ends nothing on it.
+  // Every pair is answered, or none: any answer but the 200 answers for no
+  // caller, and the asker ends nothing on it. A registry that cannot be read
+  // is a 503 here (STORE_UNAVAILABLE); one held by a lock is first the
+  // forwarder's own lookup's 503 (BUSY, `credential: "forwarder"`), after its
+  // retries, some two seconds.
   app.post("/v1/callers/standing", async (c) => {
     const named = traceOf(c.req.raw);
     if (named) named.route = c.req.routePath;
-    // A caller's key here, forwarded or not, is refused by its scope: none reaches this route.
+    // Anything in a caller's header, forwarded or not, is refused before it is checked: no caller's scope reaches
+    // this route, and what the header held is not asked of the key list, the registry or the token check.
     if (headerKeys(c.req.raw).length > 0) return refuse(c, 403, { code: "FORBIDDEN", needs: "forward" });
     const keys = deps.keys();
     const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);
@@ -591,7 +602,10 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
     let revoked: Set<string>;
     try {
       if (!deps.revoked) throw new Error("this REST core was given no read of the agent registry");
-      revoked = new Set(callers.length > 0 ? await deps.revoked([...new Set(callers.map((p) => p.digest))]) : []);
+      const read = callers.length > 0 ? await deps.revoked([...new Set(callers.map((p) => p.digest))]) : [];
+      // Anything but a list is a read that did not answer: never "none revoked".
+      if (!Array.isArray(read)) throw new Error("the agent registry's read answered no list");
+      revoked = new Set(read);
     } catch (err) {
       // No answer: the registry could not be read, whatever the cause, and the asker keeps what it holds.
       named?.fault(err);

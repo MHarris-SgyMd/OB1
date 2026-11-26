@@ -1565,7 +1565,8 @@ export class SqlStore implements ThoughtStore {
     // A plain read of the table, which writes nothing (SMD-4493). Its one lock wait is the table's own, taken as the
     // statement is planned, before any of it runs: so the cap (RESOLVE_LOCK_TIMEOUT_MS, a stricter setting kept) is
     // set by a statement of its own, and the two share a transaction. A migration holding the table ends the read at
-    // the cap with 55P03, and the read is no answer.
+    // the cap with 55P03, and the read is no answer. A transaction, so not for a pooler in statement mode, which
+    // resolveAgent's one statement passes: behind one this read never answers, and nothing is ended on its word.
     return await this.sql.begin(async (tx) => {
       await tx`SELECT set_config('lock_timeout', (CASE WHEN s.lt = 0 OR s.lt > ${RESOLVE_LOCK_TIMEOUT_MS}::int THEN ${RESOLVE_LOCK_TIMEOUT_MS}::int ELSE s.lt END)::text, true)
                  FROM (SELECT setting::int AS lt FROM pg_settings WHERE name = 'lock_timeout') s`;

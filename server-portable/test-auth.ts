@@ -31,7 +31,7 @@ const WRITE_KEY = "w".repeat(64);
 const READ_KEY = "r".repeat(64);
 // The capture-only scope (SMD-1298): the key a session-end hook holds.
 const CAPTURE_KEY = "c".repeat(64);
-// The forwarder (SMD-2284): grants nothing, the MCP server's own key when it forwards a client's.
+// The forwarder (SMD-2284): no caller's, the MCP server's own key when it forwards a client's.
 const FORWARD_KEY = "f".repeat(64);
 const KEYS = [
   `laptop:write:${hashKey(WRITE_KEY)}`,
@@ -145,7 +145,7 @@ console.log("\n[4] Scopes");
   assert(canCapture(w) && canCapture(c), "write and capture scopes may capture");
   assert(!canCapture(r), "read scope may not capture");
   const f = { name: "mcp-forwarder", scope: "forward", keyHash: hashKey(FORWARD_KEY) } as const;
-  assert(!canWrite(f) && !canRead(f) && !canCapture(f), "forward scope may not write, read or capture — it grants nothing (SMD-2284)");
+  assert(!canWrite(f) && !canRead(f) && !canCapture(f), "forward scope may not write, read or capture — it is no caller's (SMD-2284)");
   assert(visibleToolNames({ scope: "forward" }).length === 0, "…and unlocks no tool");
   // canRead, canCapture and canWrite restate the hierarchy for callers without a
   // tool name and for auth.ts's copies, which have no manifest: each agrees with

@@ -922,7 +922,7 @@ export interface paths {
         };
         /**
          * Who is calling
-         * @description The key's name, its scope, its `digest` (what the agent registry knows the caller by: the key's SHA-256, or a token's subject's; it is no credential), its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).
+         * @description The key's name, its scope, its `digest` (what the agent registry knows the caller by: the key's SHA-256, or of a token caller a digest of its issuer, subject and client, which a new token keeps; it is no credential), its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).
          */
         get: operations["whoami"];
         put?: never;
@@ -944,7 +944,7 @@ export interface paths {
         put?: never;
         /**
          * Whether callers still stand
-         * @description For each caller, by its name and the `digest` whoami gave for it: `revoked` where the agent registry has revoked the digest; `unknown` where a key caller's digest is no longer in the key list (its line gone, or the key rotated), which is never said of a token caller (`oauth:…`); and `stands` otherwise, a renamed caller, one whose scope changed and one the registry has no row for among them. A read: it registers no one and writes nothing. Every pair is answered or none is. Asked with a forward-scope key in x-brain-forwarder and no caller's credential: the MCP server's question of the callers whose listen streams it holds (SMD-4493).
+         * @description For each caller, by its name and the `digest` whoami gave for it: `revoked` where the agent registry has revoked the digest; `unknown` where a key caller's digest is no longer in the key list (its line gone, or the key rotated), which is never said of a token caller (`oauth:…`); and `stands` otherwise, a renamed caller, one whose scope changed and one the registry has no row for among them. A read of the callers asked of: none is registered, renamed or stamped (the forwarder is looked up as on any request it carries). Every pair is answered or none is: any answer but the 200 answers for no caller. Asked with a forward-scope key in x-brain-forwarder and no caller's credential: the MCP server's question of the callers whose listen streams it holds (SMD-4493).
          */
         post: operations["callers_standing"];
         delete?: never;
@@ -7137,7 +7137,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description A caller's credential was presented (FORBIDDEN, `needs: "forward"`): no caller's scope reaches this route. */
+            /** @description Something was presented in a caller's header, whatever it was and unchecked: a key, a token, a forwarder's key (FORBIDDEN, `needs: "forward"`). No caller's scope reaches this route. */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -7155,7 +7155,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description The body is larger than 256 pairs can be (REFUSED_INPUT). */
+            /** @description The body is larger than 1 MiB (REFUSED_INPUT). */
             413: {
                 headers: {
                     [name: string]: unknown;
@@ -7173,7 +7173,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry is busy on the forwarder's own lookup (BUSY, `credential: "forwarder"`), or could not be read (STORE_UNAVAILABLE). Neither is an answer for any caller. */
+            /** @description Retry, after Retry-After: the agent registry is busy on the forwarder's own lookup (BUSY, `credential: "forwarder"`; answered after that lookup's retries, some two seconds), or could not be read (STORE_UNAVAILABLE). Neither is an answer for any caller. */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */

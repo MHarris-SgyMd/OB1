@@ -390,7 +390,7 @@ export function checkBrainKey(credential: any, env: Record<string, string>): voi
   const hits = candidates(credential.data).map(hashKey).flatMap((h) => records.filter((r) => r.sha256 === h));
   for (const r of hits) {
     if (r.scope === "write") throw new Error(`credential "${credential.name}": it holds ${r.name}, a WRITE-scope brain key — a workflow holds a capture key (or, for an eval's read tool, a read key), never a write key`);
-    // A forwarder grants nothing, but in the REST core's forwarder slot it will
+    // A forwarder is no caller's key, but in the REST core's forwarder slot it will
     // name the actor of another key's request (SMD-2284): the MCP server's alone.
     // Said by name, whatever brainScope the template declares.
     if (r.scope === "forward") throw new Error(`credential "${credential.name}": it holds ${r.name}, a FORWARD-scope brain key — the MCP server's own, which names who carried another key's request; a workflow holds a capture key (or, for an eval's read tool, a read key)`);
