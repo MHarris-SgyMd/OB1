@@ -629,9 +629,11 @@ const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
  * remedy names that file after it, in place of 150, whose body it carries.
  * On a brain from before the file the remedy is APPLY_067's, and the
  * migrator applies the file in its turn: its guard would refuse a hand
- * apply ahead of 114.
+ * apply ahead of 114. The stale parts' file is named after it (review pass
+ * 2): 151 applied by hand writes its three catalog comments as it first had
+ * them, naming no removal of a part, and that file amends them.
  */
-const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused (bun migrate.ts --reapply runs every file in order).";
+const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql, then db/migrations/154_stale_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused; and 154 amends three catalog comments 151 writes, which 151 alone leaves naming no removal of a part (bun migrate.ts --reapply runs every file in order).";
 /**
  * 149's thought_validity is last defined by the stale parts' file (SMD-4446),
  * which carries it whole with an arm for a settled part's lineage row. 149
