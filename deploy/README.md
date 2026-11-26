@@ -2116,7 +2116,11 @@ streams open, or left open. Restarting `mcp` ends every stream, and is no lever
 to pull twice. What a client does when its stream ends is its own: Claude Code
 asks again 6, 8 and 12 seconds on and then stops asking (measured, SMD-4347),
 its documentation says five reopens in an hour make it wait about six hours,
-and no other client has been measured.
+and no other client has been measured. Of what the documentation says,
+measured against a probe (SMD-4493): with its stream ended every 15 seconds,
+and in another session every 20, Claude Code opened a stream again five
+times, and after the sixth end made no attempt in the 75 and the 90 seconds
+watched. The six hours were not watched.
 
 On a server that holds listen streams, a stream's end writes a line of its own
 (SMD-4459), where the request lines go:
@@ -2200,8 +2204,9 @@ A client that has stopped asking (above) leaves a `client` end with no
 session; another session of that key asks under the same name. A client that
 closed its stream and left reads the same, and its other requests tell the
 two apart: one that gave up and works on still writes lines under its name
-(`tools/list`, `tools/call`) with no listen among them, and one that left
-writes none.
+with no listen among them, and one that left writes none. Against a probe,
+the requests a client that had given up went on sending were its
+`tools/call`s, and no `tools/list` (measured, SMD-4493).
 
 A stop writes a `stop` line for each stream that was open, in the log of the
 container that stopped; its own two lines count them too, as it began ("N
@@ -2976,11 +2981,20 @@ podman compose -f deploy/compose.yaml up -d api coordinator
 ```
 
 The switch re-extracts every thought that has no row under the new key — all
-of them, for a key the brain has never used. **Going back to a model or
-prompt version used before re-extracts nothing**: every thought still has
-its finished row under that key, so the graph stays the other model's while
-`--status` reads done (SMD-2607 fixes this). Until then, judge a new model on
-a working copy (`db/tier.ts`) rather than switching the brain to it and back.
+of them, for a key the brain has never used. Going back to a model or prompt
+version used before returns the rows that key cannot vouch for to the pool as
+it records the key (SMD-2607): the failed ones, the leases no worker holds,
+the thoughts the other key read since, and the thoughts edited meanwhile or
+whose reading named nothing. The run says how many, and `--status` and
+`--dry-run` under that key count them first. A thought the other key never
+read keeps its row, so a trial over a few thoughts sends only those again.
+Even so, judge a new model on a working copy (`db/tier.ts`) rather than
+switching the brain to it and back: the trial's thoughts are read twice more.
+
+A brain whose key was moved back before this rule, or by hand, holds the
+other model's entities under rows that read done. Its next run returns the
+finished rows another key read since, with no flag and behind what is
+pending; `--status` counts them.
 
 Consolidation's key follows its judge model (`OB1_JUDGE_MODEL`, else the
 metadata model) and prompt version, with no switch to refuse: a new one is a

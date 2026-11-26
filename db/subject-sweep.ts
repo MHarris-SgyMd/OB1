@@ -146,7 +146,7 @@ import { hostname } from "node:os";
 import { ProviderError, resolveEmbedConfig, type EmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { localKnob, ROW_UNITS } from "../server-portable/egress.ts";
 import { actorKindOf, cleanForDisplay } from "../server-portable/consolidate.ts";
-import { askOwnSubject, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectPoolKey, subjectReasoning, subjectReasoningOn, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
+import { askOwnSubject, heldAs, ruleSubject, SUBJECT_KEY_PREFIX, subjectModelKey, subjectModelSuffix, subjectPoolKey, subjectReasoning, subjectReasoningOn, subjectRuleKey, type SubjectBy } from "../server-portable/subject.ts";
 import { subjectRecipe, type Recipe } from "../server-portable/lineage.ts";
 import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, followClassify, isOut, lookupOutage, MAX_CALL_TIMEOUT_S, modelMissing, OUTAGE_MS, outageWait, probeChat, probeRefusal, probeUntil, ProviderDown, ProviderOutage, regateMessage, SUSPECT_WINDOW, throughOutage, timedOut, TRANSIENT_PAUSES_MS, workerIdentity, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
@@ -166,7 +166,7 @@ const CLOSE = "close_thought_subjects(uuid, uuid[], text)";
  * What the door needs of the role that calls it (111's and 130's comments), and where each grant comes from: the
  * sweep's refusals and the pass's say this.
  */
-export const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), and INSERT, UPDATE and SELECT on derivations (the capture group's)";
+export const DOOR_GRANTS = "INSERT and UPDATE on thought_facets (INSERT is the structure group's), UPDATE on thoughts (its row lock), INSERT, UPDATE and SELECT on derivations, and since migration 153 SELECT on subject_repo_settings (the capture group's)";
 
 /** What the pool needs of the role (113): the claims' reads and writes, and the pool's name in ob1_config. */
 export const POOL_GRANTS = "SELECT, INSERT and UPDATE on thought_work_claims, and INSERT and UPDATE on ob1_config";
@@ -409,9 +409,14 @@ export async function recordSubject(sql: SQL, row: { id: string; fingerprint: st
   return r.r as SubjectWrite;
 }
 
-/** Whether two sets of keys are the same set, in any order; null (none standing) is the empty set. */
+/**
+ * Whether the keys found are the set standing, in any order, a bare pr: or version: key read as the standing key 153's
+ * door writes it as (heldAs: on a brain whose repository is set, `pr:12` found is `pr:o/r#12` standing, review pass 5);
+ * null (none standing) is the empty set.
+ */
 export function sameKeys(a: readonly string[] | null, b: readonly string[] | null): boolean {
-  const x = new Set(a ?? []), y = new Set(b ?? []);
+  const y = new Set(b ?? []);
+  const x = new Set((a ?? []).map((k) => heldAs(k, b ?? []) ?? k));
   return x.size === y.size && [...x].every((k) => y.has(k));
 }
 
@@ -840,7 +845,9 @@ async function sweep(
   const grantRows = await atStart(() => sql`
     SELECT has_any_column_privilege('thought_facets', 'INSERT') AND has_any_column_privilege('thought_facets', 'UPDATE')
        AND has_any_column_privilege('thoughts', 'UPDATE')
-       AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE') AS can,
+       AND has_any_column_privilege('derivations', 'INSERT') AND has_any_column_privilege('derivations', 'UPDATE')
+       -- 153's setting, which the door reads for a bare pr: or version: key (SMD-3887 review pass 2); none before 153.
+       AND COALESCE((SELECT has_table_privilege(c.oid, 'SELECT') FROM pg_class c WHERE c.oid = to_regclass('subject_repo_settings')), true) AS can,
            has_table_privilege('thought_work_claims', 'SELECT') AND has_table_privilege('thought_work_claims', 'INSERT')
        AND has_table_privilege('thought_work_claims', 'UPDATE')
        AND has_any_column_privilege('ob1_config', 'INSERT') AND has_any_column_privilege('ob1_config', 'UPDATE') AS pools`);
@@ -2218,7 +2225,7 @@ async function sweep(
         if (row.standing_keys !== null) {
           n.replaced++;
           // A key the set did not hold (review pass 1: a set narrowed to one of its keys was counted a new key).
-          if (found.keys.some((k) => !row.standing_keys!.includes(k))) n.newKey++;
+          if (found.keys.some((k) => heldAs(k, row.standing_keys!) === undefined)) n.newKey++;
         }
       }
       return { release: "none" };
@@ -2560,7 +2567,7 @@ async function sweep(
         // Review pass 3: the replacements of a version's bump mostly keep their key; how many changed is what a
         // reader wants: a key the set did not hold (this PR's review pass 1: a narrowed set counted a new key) — the
         // set read at the claim, which another writer may have changed since (PR 7a-3b-2's review pass 3, cold read).
-        if (keys.some((k) => !(row.standing_keys ?? []).includes(k))) n.newKey++;
+        if (keys.some((k) => heldAs(k, row.standing_keys ?? []) === undefined)) n.newKey++;
       }
     }
     return { release: "succeeded" };
