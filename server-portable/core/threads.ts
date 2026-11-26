@@ -96,7 +96,12 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
     // (153, SMD-3887 PR 3b-1; the maintainer, 2026-11-23); a key scoped already reads as given. One too long once
     // scoped stays bare, as the writer leaves it.
     if (/^(pr:[0-9]|version:v)/.test(k)) {
-      const repo = await store.subjectRepo();
+      // A setting the role cannot read leaves the key bare, said in the log, as fetch's threads do (review pass 3: a
+      // read that worked before 153 faulted); preflight's subject repository row names the grant.
+      const repo = await store.subjectRepo().catch((e: unknown) => {
+        console.error(`thread: the subject-key repository could not be read, so ${k} is read as written: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        return null;
+      });
       if (repo !== null && subjectKeyValid(scopedKey(k, repo))) k = scopedKey(k, repo);
     }
     const pos = after === undefined ? undefined : parseThreadCursor(after);

@@ -9345,6 +9345,29 @@ console.log("\n[36j] The operator's subject-key repository in brain_info (SMD-38
       && badRead.every((r) => r === "threw") && subjectRepoValue(null) === null
       && long.length < 700 && long.includes(` by ${"k".repeat(79)}…)`) && long.includes(`${"r".repeat(299)}…. An operator key`),
     `brain_info's Subject repository row: before 153, unread, none, the operator's, the operator's refused, cut; a reply with no source throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+
+  // The thread read resolves a bare key to the setting's repository, and reads it bare when the setting cannot be read
+  // (review pass 3: it faulted), saying so in the log.
+  const { thread } = await import("./core/threads.ts");
+  const asked: string[] = [];
+  const stub = (repo: () => Promise<string | null>) => ({ door: "test", store: async () => ({
+    subjectRepo: repo,
+    threadPage: async (k: string) => { asked.push(k); return { key: k, total: 0, members: [], links: [], linksMore: false }; },
+    supersededAmong: async () => ({}),
+  }) }) as never;
+  const said: string[] = [];
+  const realError = console.error;
+  console.error = (...a: unknown[]) => { said.push(a.map(String).join(" ")); };
+  // A throw out of the read is this row's failure, not the suite's.
+  let readBare: { ok: boolean } = { ok: false }, scoped: { ok: boolean } = { ok: false };
+  try {
+    readBare = await thread(stub(async () => { throw new Error("permission denied for table subject_repo_settings"); }), {} as never, { key: "pr:12", limit: 10 } as never);
+    scoped = await thread(stub(async () => "o/r"), {} as never, { key: "PR:012", limit: 10 } as never);
+  } catch (e) {
+    said.push(`the read threw: ${(e as Error).message}`);
+  } finally { console.error = realError; }
+  assert(readBare.ok && scoped.ok && asked.join(",") === "pr:12,pr:o/r#12" && said.length === 1 && /subject-key repository could not be read, so pr:12 is read as written: permission denied/.test(said[0]),
+    `the thread read reads a bare key as the setting's repository, and bare when the setting cannot be read, said in the log (${asked.join(",")}; ${said[0]?.slice(0, 100)})`);
 }
 
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");

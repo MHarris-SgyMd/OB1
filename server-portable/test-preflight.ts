@@ -3654,20 +3654,22 @@ else {
       let repoUnread: { out: string }, repoSet: { out: string }, repoNoLinks: { out: string }, repoRefused: { out: string };
       await claims.unsafe("REVOKE SELECT ON subject_repo_settings FROM ob1_pf_capture");
       try { repoUnread = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { await claims.unsafe("GRANT SELECT ON subject_repo_settings TO ob1_pf_capture"); }
-      await claims`SELECT set_agent_kind('pf-subject-op', 'operator')`;
-      const pfOp = JSON.stringify({ name: "pf-subject-op", agent_id: String((await claims`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'pf-subject-op'`)[0].id) });
-      await claims`SELECT set_subject_repo('o/pf', (${pfOp}::text)::jsonb)`;
+      // The setting planted raw, the guard off, and taken out after, as test-rest-sql [16b] plants one: the setter's
+      // mapping would move every bare key this database holds for the sections after (review pass 3).
+      await claims.unsafe("ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history");
+      const [{ id: pfRepo }] = await claims`INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at) VALUES ('o/pf', 'test', gen_random_uuid(), now()) RETURNING id`;
+      await claims.unsafe("ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history");
       try {
         repoSet = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
         await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key(text, text) RENAME TO ob1_subject_linked_key_away_pf");
         try { repoNoLinks = await run({ ...SQL_ENV, DATABASE_URL: LIVE }); } finally { await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key_away_pf(text, text) RENAME TO ob1_subject_linked_key"); }
-        await claims.unsafe("ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history; UPDATE subject_repo_settings SET repo = 'Bad' WHERE ended_at IS NULL; ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history");
+        await claims.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history; UPDATE subject_repo_settings SET repo = 'Bad' WHERE id = ${Number(pfRepo)}; ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
         repoRefused = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
       } finally {
-        await claims`SELECT set_subject_repo(NULL, (${pfOp}::text)::jsonb)`;
+        await claims.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history; DELETE FROM subject_repo_settings WHERE id = ${Number(pfRepo)}; ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
       }
       assert(/✓  subject repository\s+none set: pr: and version: keys stay unscoped; the server's role reads the setting/.test(missingBoth.out)
-             && /!  subject repository\s+the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key and a thread read by one fault/.test(repoUnread.out)
+             && /!  subject repository\s+the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key faults, and a thread read by one reads it unscoped/.test(repoUnread.out)
              && /✓  subject repository\s+o\/pf: a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one/.test(repoSet.out)
              && /!  subject repository\s+o\/pf is set but migration 154 is not applied: a key its GitHub link names for another repository is scoped to o\/pf/.test(repoNoLinks.out)
              && /!  subject repository\s+the stored repository "Bad" is refused \(a repository is lowercase.*: no bare pr: or version: key can be written/.test(repoRefused.out)

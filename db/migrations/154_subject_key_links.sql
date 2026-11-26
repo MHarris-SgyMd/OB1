@@ -105,7 +105,7 @@ AS $$
   SELECT CASE WHEN count(DISTINCT s.k) = 1 AND subject_key_valid(min(s.k)) THEN min(s.k) END
     FROM (SELECT 'pr:' || lower(m[1]) || '/' || lower(m[2]) || '#' || substring(p_key FROM 4) AS k
             FROM regexp_matches(COALESCE(p_text, ''),
-                   '(?:^|[^A-Za-z0-9.-])(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/0*([0-9]{1,9})(?![0-9])',
+                   '(?:^|[\s(<\[''"]|://)(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/0*([0-9]{1,9})(?![0-9])',
                    'gi') AS m
            WHERE p_key ~ '^pr:[0-9]{1,9}$' AND m[3]::bigint = substring(p_key FROM 4)::bigint) AS s
 $$;
@@ -304,7 +304,7 @@ BEGIN
         IF FOUND THEN
           PERFORM ob1_record_derivation('subject', v_id, v_lin.input_ids, v_lin.input_fingerprints, f.judge,
                                         COALESCE(v_lin.recipe, jsonb_build_object('deterministic', f.way <> 'model'))
-                                          || jsonb_build_object('scoped_from', f.key, 'repo', v_repo),
+                                          || jsonb_build_object('scoped_from', f.key, 'repo', COALESCE(substring(v_key FROM '^pr:([^#]+)#'), substring(v_key FROM '^version:([^@]+)@'))),  -- 154: the key's own repository, a link's or the setting's
                                         v_lin.canonical_agent_id);
           IF v_lin.stale_since IS NOT NULL THEN
             -- A rebuild asked of the closed facet's row (063's mark) is asked of its twin's, which ob1_record_derivation
@@ -315,7 +315,7 @@ BEGIN
         ELSE
           PERFORM ob1_record_derivation('subject', v_id, ARRAY[v_thought], ARRAY[v_fp], f.judge,
                                         jsonb_build_object('deterministic', f.way <> 'model', 'declared', false,
-                                                           'scoped_from', f.key, 'repo', v_repo),
+                                                           'scoped_from', f.key, 'repo', COALESCE(substring(v_key FROM '^pr:([^#]+)#'), substring(v_key FROM '^version:([^@]+)@'))),  -- 154: as above
                                         NULL);
         END IF;
         v_mapped := v_mapped + 1;
@@ -335,7 +335,7 @@ BEGIN
 END
 $$;
 COMMENT ON FUNCTION set_subject_repo(text, jsonb, boolean) IS
-  'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes no setting ({changed: false}), and maps any unscoped key a raw write left standing under it. Setting a repository maps every standing unscoped pr:/version: subject to it (ob1:subject-repo-mapping): the facet closed and its scoped twin (ob1_subject_scoped_key) written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo and a rebuild asked of it (stale_since, stale_reason) kept; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. More than ob1_subject_repo_map_max() distinct keys to map answers {ok: false, error: TOO_MANY_KEYS, keys, max, message}, nothing written. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked, and every key moved has its thread lock (ob1_thread_lock_keys) taken first, in key order. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay, unless p_remap_previous: a change of repository then moves the keys scoped to the one it replaces to the new one as it maps a bare key (lineage noting scoped_from), to correct a mistaken setting; with no new repository it answers {ok: false, error: REMAP_NEEDS_REPO}. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, remapped (facets moved from the previous repository), keys (the distinct scoped keys), thoughts (those a facet moved on)}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Since 154 a bare pr: key, and a remap''s, is scoped to the repository a GitHub link in its thought''s text names for its number (ob1_subject_linked_key), else to the setting''s; the cap counts the keys moved and their targets, two thread locks apiece. Migrations 153, 154 / SMD-3887.';
+  'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes no setting ({changed: false}), and maps any unscoped key a raw write left standing under it. Setting a repository maps every standing unscoped pr:/version: subject (ob1:subject-repo-mapping), a pr: key to the repository a GitHub link in its thought''s text names for its number (ob1_subject_linked_key) and every other to the setting''s: the facet closed and its scoped twin written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo and a rebuild asked of it (stale_since, stale_reason) kept; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. Keys and targets past twice ob1_subject_repo_map_max() (two thread locks apiece) answer {ok: false, error: TOO_MANY_KEYS, keys, targets, max, message}, nothing written. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked, and every key moved has its thread lock (ob1_thread_lock_keys) taken first, in key order. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay, unless p_remap_previous: a change of repository then moves the keys scoped to the one it replaces to the new one as it maps a bare key (lineage noting scoped_from), to correct a mistaken setting; with no new repository it answers {ok: false, error: REMAP_NEEDS_REPO}. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, remapped (facets moved from the previous repository), keys (the distinct scoped keys), thoughts (those a facet moved on)}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Since 154 a bare pr: key, and a remap''s, is scoped to the repository a GitHub link in its thought''s text names for its number (ob1_subject_linked_key), else to the setting''s; the cap counts the keys moved and their targets, two thread locks apiece. Migrations 153, 154 / SMD-3887.';
 
 
 -- ---------------------------------------------------------------------------
@@ -428,7 +428,8 @@ BEGIN
   -- thought locked FOR KEY SHARE before its facet rows. A thought gone
   -- answers none.
   PERFORM pg_advisory_xact_lock(hashtextextended('ob1:subject:' || p_thought::text, 0));
-  SELECT COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)), ob1_filed_ticket(t.metadata) INTO v_fp, v_filed
+  SELECT COALESCE(t.content_fingerprint, content_fingerprint_of(t.content)), ob1_filed_ticket(t.metadata),
+         CASE WHEN v_bare THEN t.content END INTO v_fp, v_filed, v_text  -- 154: the text the fingerprint is of, for its links
     FROM thoughts t WHERE t.id = p_thought FOR KEY SHARE;
   IF NOT FOUND THEN
     RETURN jsonb_build_object('ok', true, 'action', 'none', 'gone', true);
@@ -452,10 +453,11 @@ BEGIN
     -- Read here, past the key checks and the gone and stale answers, so a stored setting the refusal names raises only
     -- where a key is scoped (review pass 5).
     v_repo := ob1_subject_repo();
-    -- 154: the thought's text, for its links, read only where a key is scoped by one: a ticket's set, a close and a
-    -- brain with no repository set leave it unread (review pass 2). Under the thought's lock, taken above.
-    IF v_repo IS NOT NULL THEN
-      SELECT t.content INTO v_text FROM thoughts t WHERE t.id = p_thought;
+    -- 154: the thought's text was read with its fingerprint above, for a set holding a bare key alone (review pass 2), in
+    -- the same statement, so it is the text the fingerprint checked: a read of its own could see an edit committed
+    -- since, as FOR KEY SHARE does not hold one off (review pass 3). With no repository set it names nothing.
+    IF v_repo IS NULL THEN
+      v_text := NULL;
     END IF;
     SELECT COALESCE(array_agg(DISTINCT s ORDER BY s), '{}') INTO v_keys
       FROM (SELECT CASE WHEN NOT (k ~ '^pr:[0-9]{1,9}$' OR k ~ '^version:v[0-9]+(\.[0-9]+){1,3}$') THEN k

@@ -24164,6 +24164,9 @@ console.log("\n[139] Migration 154: a pr: subject key takes the repository its G
       ["github.com/a/x/pull/12 and github.com/o/../pull/12", "pr:12", null],
       ["gitlab.com/o/r/pull/12", "pr:12", null],
       ["notgithub.com/o/r/pull/12", "pr:12", null],
+      ["https://mirror.example.com/github.com/acme/app/pull/12", "pr:12", null],
+      ["see ?url=github.com/acme/app/pull/12", "pr:12", null],
+      ["[the PR](https://github.com/acme/app/pull/12)", "pr:12", "pr:acme/app#12"],
       ["github.com/o/../pull/12", "pr:12", null],
       ["github.com/o/r/pull/12", "version:v1.2", null],
       ["github.com/o/r/pull/12", "pr:o/r#12", null],
@@ -24215,6 +24218,12 @@ console.log("\n[139] Migration 154: a pr: subject key takes the repository its G
            && (await keysOf(p1)) === "pr:x/a#31" && (await keysOf(p2)) === "pr:x/b#31"
            && (await edges("pr:12")) === "" && (await edges("pr:siggymd/client#12")) === "" && (await edges("pr:o/r#12")) === "",
       `the mapping sends each bare key to its link's repository, else the setting's, a number two repositories claim to the setting's, PR 12's two thoughts now apart (${JSON.stringify(set1).slice(0, 140)})`);
+
+    // The twin's lineage names the repository its key went to, the link's or the setting's (review pass 3).
+    const repoOf = async (id: string) => (await one<{ r: string | null }>(`SELECT d.recipe->>'repo' AS r FROM thought_facets f JOIN derivations d ON d.artifact_kind = 'subject' AND d.artifact_id = f.id
+        WHERE f.thought_id = $1::uuid AND f.kind = 'subject' AND f.valid_until IS NULL`, [id])).r;
+    const lineRepos = `${await repoOf(a)};${await repoOf(b)};${await repoOf(p2)}`;
+    assert(lineRepos === "siggymd/client;o/r;x/b", `each twin's lineage names the repository its key went to, a link's or the setting's (${lineRepos})`);
 
     // The door: a bare key goes to its link's repository first, else the setting's; a re-pass keeps its key.
     const e = await thought("e", "again https://github.com/siggymd/client/pull/12");

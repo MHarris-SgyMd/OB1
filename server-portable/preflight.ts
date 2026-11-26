@@ -3462,7 +3462,7 @@ if (configFailed) {
             add("subject repository", "warn", `ob1_subject_linked_key(text, text) missing, and ${whyUnread}, so whether migration 154 is recorded is unknown; if it is, set_subject_repo faults`,
                 ledgerRemedy("154", "Apply db/migrations/154_subject_key_links.sql."));
           } else if (!sr.can_read) {
-            add("subject repository", "warn", "the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key and a thread read by one fault",
+            add("subject repository", "warn", "the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key faults, and a thread read by one reads it unscoped",
                 "Grant the capture group (SMD-3887): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture (db/README.md, Grants for a capturing role).");
           } else if (setting instanceof Error) {
             add("subject repository", "warn", `could not read the setting: ${setting.message}`, "The check calls subject_repo_setting(); the message says why it failed.");
