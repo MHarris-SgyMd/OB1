@@ -10,8 +10,9 @@
 --   a pull request's URL naming another repository scopes its key to that one,
 --   once a repository is set. On the canary on 2026-11-24, 64 of the 85 bare
 --   `pr:` subjects stood on texts holding the PR's GitHub link with the same
---   number, 56 of them under repositories other than the brain's
---   (siggymd/client 31, siggymd/infrastructure 11, siggymd/platform 11). 153's
+--   number, 56 of them under repositories other than the brain's (among
+--   them siggymd/client 31, siggymd/infrastructure 11 and siggymd/platform
+--   11). 153's
 --   mapping would have scoped them all to the setting's repository, and its
 --   writer would then have kept the wrong key. The maintainer chose
 --   (2026-11-24) that one SQL rule scope by the link, so the mapping, the
@@ -29,7 +30,8 @@
 --     its link's repository first, else the setting's, for a bare key and for
 --     a remap's alike; a key its link already scopes does not move. The cap
 --     counts the keys moved and their targets (two thread locks apiece), and
---     the thread locks taken first are both.
+--     both have their thread locks taken first. A twin's lineage names the
+--     repository its key went to, a link's or the setting's.
 --   * record_thought_subjects — 153's body, but where marked 155: on a brain
 --     whose operator names a repository, a bare `pr:` key a link in the
 --     thought's text names is written to the link's repository before any
@@ -44,8 +46,8 @@
 --   [20cr].
 --
 -- Prerequisites
---   016 (content_fingerprint_of), 046 (ob1_registry_kind), 061 (derivations), 111
---   (ob1_record_derivation), 113 (ob1_filed_ticket), 115
+--   016 (content_fingerprint_of), 046 (ob1_registry_kind), 061 (derivations),
+--   111 (ob1_record_derivation), 113 (ob1_filed_ticket), 115
 --   (ob1_work_claim_actor), 130 (ob1_thread_lock_keys and the
 --   one-standing-subject-a-key index), 153 (the setting, its functions and
 --   the bodies this file carries). Applied by `bun db/migrate.ts`. Re-applied:
@@ -162,6 +164,7 @@ DECLARE
   v_moved   boolean;
   v_from    text;
   v_remapped integer := 0;
+  -- 155: the targets the count reads, each facet's target, and the bound from the keys alone.
   v_targets text[] := '{}';
   v_map     jsonb := '{}';
   v_lower   integer;
@@ -368,7 +371,6 @@ $$;
 COMMENT ON FUNCTION set_subject_repo(text, jsonb, boolean) IS
   'The operator names the repository a brain scopes its pr: and version: subject keys to (docs/claim-validity.md row 13). Only a key the registry classifies operator, named by its agent id in p_actor (a name lends no kind); any other answers {ok: false, error: NOT_OPERATOR, key, kind, message}. The value is trimmed and lowercased; one ob1_subject_repo_refusal names answers {ok: false, error: BAD_REPO, message}. NULL clears it: keys scoped already stay, and new keys are unscoped. Setting what stands writes no setting ({changed: false}), and maps any unscoped key a raw write left standing under it. Setting a repository maps every standing unscoped pr:/version: subject (ob1:subject-repo-mapping), a pr: key to the repository a GitHub link in its thought''s text names for its number (ob1_subject_linked_key) and every other to the setting''s: the facet closed and its scoped twin written with the same by and judge_key and the closed facet''s lineage, its recipe noting scoped_from and repo and a rebuild asked of it (stale_since, stale_reason) kept; a thought holding the scoped key already has the unscoped one closed alone; a key too long once scoped stands bare, counted unscopable. Keys and targets past twice ob1_subject_repo_map_max() (two thread locks apiece) answer {ok: false, error: TOO_MANY_KEYS, keys, targets, max, message}, nothing written. Under the ob1:subject-repo lock, exclusive here and shared in record_thought_subjects, so no subject write interleaves with the mapping; the facets and thoughts moved are row-locked, and every key moved has its thread lock (ob1_thread_lock_keys) taken first, in key order. The thread triggers re-link both keys at the commit, so each thread keeps its members. Keys scoped to another repository stay, unless p_remap_previous: a change of repository then moves the keys scoped to the one it replaces to the new one as it maps a bare key (lineage noting scoped_from), to correct a mistaken setting; with no new repository it answers {ok: false, error: REMAP_NEEDS_REPO}. Returns {ok: true, changed, repo, previous, set_at (ISO, UTC), set_by, mapped, closed_alone, unscopable, remapped (facets moved from the previous repository), keys (the distinct scoped keys), thoughts (those a facet moved on)}, the same shape when nothing changed. SECURITY INVOKER: the caller needs the setting''s INSERT and UPDATE, and to map, what record_thought_subjects needs. Since 155 a bare pr: key, and a remap''s, is scoped to the repository a GitHub link in its thought''s text names for its number (ob1_subject_linked_key), else to the setting''s; the cap counts the keys moved and their targets, two thread locks apiece. Migrations 153, 155 / SMD-3887.';
 
-
 -- ---------------------------------------------------------------------------
 -- 3. record_thought_subjects — 153's door, a bare pr: key scoped by its link first
 -- ---------------------------------------------------------------------------
@@ -394,6 +396,7 @@ DECLARE
   v_bare   boolean;
   v_repo   text;
   v_fp     text;
+  -- 155: the thought's text, read with its fingerprint, for its links.
   v_text   text;
   v_filed  text;
   v_stood  integer;
@@ -570,4 +573,3 @@ $$;
 
 COMMENT ON FUNCTION record_thought_subjects(uuid, text[], text, text, uuid, text, jsonb) IS
   'The subject pass''s write of one thought''s own subjects as a set (SMD-3306 PR 7a-3a): the standing `subject` facets made to be exactly these keys (each once; at most three, ob1:subject-set), found one way (`by`) by one pass (judge_key). A standing subject under a key of the set, found the same way by the same pass, is kept (its lineage row moved to the fingerprint read now); every other standing subject is closed (valid_until); each key not kept is written, with its lineage row (artifact_kind subject, its thought at the fingerprint read, produced_by the pass''s key; the recipe the caller''s, else deterministic unless the model found it) in the same transaction. NULL or an empty set closes every standing subject. `metadata` names one key. Refused, writing nothing (action none, stale), when the thought''s fingerprint is not the one the pass read, or the ticket it is filed under (ob1_filed_ticket) disagrees: metadata''s key under another ticket than it is filed under now, or any other way''s set on a thought filed since. Under the advisory lock on the thought (111''s), the thought locked FOR KEY SHARE first; the threads of the keys it moves re-link at the commit (120''s triggers, which lock them all in key order). Returns {ok, action, ids (the standing facets after, by key), kept, added, closed, closedIds (on a write), stale?, gone?}: action added when it wrote and closed nothing, closed when it closed and wrote nothing, replaced when it did both, kept when it did neither, none when nothing stood and nothing was asked, or on a refusal. SECURITY INVOKER: the caller needs INSERT on thought_facets (the structure group), UPDATE on it and on thoughts (the row locks) and the writes on derivations (the capture group), and since 120 what a re-link writes, as record_thought_subject. Since 153 (SMD-3887), each bare pr: or version: key is written as the key the thought holds already for the same number scoped to a repository (the setting''s first), so a thread keeps its members after the repository changes or is cleared; else, on a brain whose operator names a repository (ob1_subject_repo), scoped to it (ob1_subject_scoped_key), bare only when too long once scoped. Every write takes the ob1:subject-repo lock, shared here and in close_thought_subjects and exclusive in set_subject_repo, so no write interleaves with a mapping; a set holding a bare key reads the setting, and its caller needs SELECT on subject_repo_settings. Since 155, on a brain whose operator names a repository, a bare pr: key a GitHub link in the text names for its number is written scoped to that link''s repository (ob1_subject_linked_key) before any other rule. Migrations 130, 153, 155 / SMD-3306, SMD-3887.';
-

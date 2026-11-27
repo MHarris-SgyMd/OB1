@@ -3439,11 +3439,15 @@ if (configFailed) {
         /**
          * Migrations 153 and 155's subject-key repository (SMD-3887 PR 3b-1): whether the server's role reads the
          * operator's setting, which the subject writer reads for a bare pr: or version: key and the thread read for a
-         * bare key, and what stands. Before 153 a skip, the table missing where the ledger records 153 a failure; the
-         * role unable to read it, a stored value the refusal names, and a repository set without 155 (a key its GitHub
-         * link names would be scoped to the setting's repository) warnings.
+         * bare key, and what stands. Before 153 a skip. Failures: the table missing where the ledger records 153, its
+         * reader missing beside it, and 155's link rule missing where the ledger records 155; the table or the link
+         * rule missing where the role cannot read the ledger, a warning instead (review passes 1 and 2). Warnings: the
+         * role unable to read the setting, the setting's read failing, a stored value the refusal names, and a
+         * repository set without 155 (a key its GitHub link names would be scoped to the setting's repository).
          */
         {
+          const APPLY_153 = "Apply db/migrations/153_subject_repo_scope.sql, then 155_subject_key_links.sql.";
+          const APPLY_155 = "Apply db/migrations/155_subject_key_links.sql.";
           const sRows = await sql.unsafe(`
             SELECT to_regclass('public.subject_repo_settings') IS NOT NULL AS has_t,
                    to_regprocedure('public.subject_repo_setting()') IS NOT NULL AS has_fn,
@@ -3459,25 +3463,25 @@ if (configFailed) {
             add("subject repository", "warn", `could not verify: ${(sRows as Error).message}`, "The check reads subject_repo_settings and its functions in public; the message says why it failed.");
           } else if (!sr.has_t && ledger.has("153")) {
             add("subject repository", "fail", "migration 153's subject_repo_settings missing though the ledger records 153; every subject write faults",
-                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 155_subject_key_links.sql."));
+                ledgerRemedy("153", APPLY_153));
           } else if (!sr.has_t && ledgerPresent && !ledgerRead) {
             // Missing, and this role cannot read whether the ledger records 153: a warning, the remedy naming both (review pass 2).
             add("subject repository", "warn", `subject_repo_settings missing, and ${whyUnread}, so whether migration 153 is recorded is unknown; if it is, every subject write faults`,
-                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 155_subject_key_links.sql."));
+                ledgerRemedy("153", APPLY_153));
           } else if (!sr.has_t) {
             add("subject repository", "skip", "not checked — subject_repo_settings does not exist (migration 153 not applied); pr: and version: keys stay unscoped");
           } else if (!sr.has_fn) {
             // The table without its reader (a partial re-apply): brain_info's row reads unread, a bare key's thread read unscoped (review passes 1, 6).
             add("subject repository", "fail", "migration 153's subject_repo_setting() missing beside its table: brain_info's row reads unread, and a thread read by a bare pr: or version: key reads it as written, saying so (scopeUnread)",
-                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 155_subject_key_links.sql."));
+                ledgerRemedy("153", APPLY_153));
           } else if (!sr.has_links && ledger.has("155")) {
             // Recorded and not there: 155's setter and writer call it, so they fault whether or not a repository is set (review pass 1).
             add("subject repository", "fail", "migration 155's ob1_subject_linked_key(text, text) missing though the ledger records 155; set_subject_repo, and every write of a bare pr: key once a repository is set, fault",
-                ledgerRemedy("155", "Apply db/migrations/155_subject_key_links.sql."));
+                ledgerRemedy("155", APPLY_155));
           } else if (!sr.has_links && ledgerPresent && !ledgerRead) {
             // Missing, and this role cannot read whether the ledger records 155 (review pass 2).
             add("subject repository", "warn", `ob1_subject_linked_key(text, text) missing, and ${whyUnread}, so whether migration 155 is recorded is unknown; if it is, set_subject_repo faults`,
-                ledgerRemedy("155", "Apply db/migrations/155_subject_key_links.sql."));
+                ledgerRemedy("155", APPLY_155));
           } else if (!sr.can_read) {
             add("subject repository", "warn", "the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key faults, and a thread read by one reads it unscoped",
                 "Grant the capture group (SMD-3887): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture (db/README.md, Grants for a capturing role).");
@@ -3488,7 +3492,7 @@ if (configFailed) {
                 "An operator key sets it again, or clears it, with SELECT set_subject_repo(<repo or NULL>, <its actor envelope>) (over REST and MCP in SMD-3887 PR 3b-2).");
           } else if (typeof setting?.repo === "string" && !sr.has_links) {
             add("subject repository", "warn", `${setting.repo} is set but migration 155 is not applied: a key its GitHub link names for another repository is scoped to ${setting.repo}`,
-                ledgerRemedy("155", "Apply db/migrations/155_subject_key_links.sql."));
+                ledgerRemedy("155", APPLY_155));
           } else {
             add("subject repository", "ok", typeof setting?.repo === "string"
               ? `${setting.repo}: a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one`

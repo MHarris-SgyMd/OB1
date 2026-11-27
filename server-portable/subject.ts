@@ -91,6 +91,11 @@ export function unscopedKey(key: string): string {
   return key.replace(/^pr:[^#/]+\/[^#]+#/, "pr:").replace(/^version:[^@/]+\/[^@]+@/, "version:");
 }
 
+/** A bare pr: or version: key, one no repository scopes (111's shapes): the thread read resolves it to the operator's repository. */
+export function isBareKey(key: string): boolean {
+  return BARE_PR.test(key) || BARE_VERSION.test(key);
+}
+
 /** 153's ob1_subject_scoped_key: a bare pr: or version: key scoped to a repository (`pr:12` in `o/r` is `pr:o/r#12`); any other key as given. */
 export function scopedKey(key: string, repo: string): string {
   return BARE_PR.test(key) ? key.replace(/^pr:/, `pr:${repo}#`) : BARE_VERSION.test(key) ? key.replace(/^version:/, `version:${repo}@`) : key;
@@ -108,7 +113,7 @@ export function scopedKey(key: string, repo: string): string {
  */
 export function heldAs(found: string, standing: readonly string[], repo: string | null = null): string | undefined {
   if (standing.includes(found)) return found;
-  if (!BARE_PR.test(found) && !BARE_VERSION.test(found)) return undefined;
+  if (!isBareKey(found)) return undefined;
   const scoped = standing.filter((s) => unscopedKey(s) === found).sort();
   const own = repo === null ? undefined : scoped.find((s) => s === scopedKey(found, repo));
   return own ?? scoped[0];

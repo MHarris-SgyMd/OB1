@@ -193,9 +193,10 @@ export interface DatabaseFacts {
   workClaimCap: WorkClaimCapSetting | null;
   /**
    * The operator's repository for the brain's pr: and version: subject keys (SMD-3887, migration 153): `repo` the one
-   * standing, or null (keys stay unscoped), who set it and when, and `refused` what is wrong with a stored value (no
-   * bare key can be written while it stands), from subject_repo_setting(). Null when the table is absent (no `unread`
-   * entry: before 153) or not read (`unread` names it). Not a stats read.
+   * standing, or null (keys stay unscoped), who set it and when, `refused` what is wrong with a stored value (no bare
+   * key can be written while it stands), from subject_repo_setting(), and `links` whether migration 155's GitHub-link
+   * rule is applied. Null when the table is absent (no `unread` entry: before 153) or not read (`unread` names it).
+   * Not a stats read.
    */
   subjectRepo: SubjectRepoSetting | null;
   /**
@@ -1844,7 +1845,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                 SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
-                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'subject_repo_settings', 'work_claim_cap_settings', 'priority_findings')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'work_claim_cap_settings', 'subject_repo_settings', 'priority_findings')
                    -- Another tool's schema_migrations (Supabase's auth and
                    -- supabase_migrations, Rails, dbmate) is not this ledger:
                    -- only one carrying migrate.ts's sha256 column counts
@@ -1959,7 +1960,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         clear: () => { facts.workClaimCap = null; },
       },
       // The operator's subject-key repository (SMD-3887, migration 153): read by 153's function, which says what is
-      // wrong with a stored value without raising.
+      // wrong with a stored value without raising, beside whether 155's link rule is applied.
       {
         field: "subjectRepo",
         table: "subject_repo_settings",
@@ -2202,7 +2203,7 @@ export function capSettingValue(r: unknown): WorkClaimCapSetting | null {
  * `links` whether migration 155's GitHub-link rule is applied (a pr: key a link names going to that repository).
  */
 export type SubjectRepoSetting = { repo: string | null; setAt: string | null; setBy: string | null; refused: string | null; links: boolean };
-/** subject_repo_setting()'s jsonb → the record's setting. An answer with no `source` throws: a reply this server cannot read is a fault. */
+/** subject_repo_setting()'s jsonb → the record's setting, `links` as the caller read it. An answer whose `source` is neither none nor operator throws: a reply this server cannot read is a fault. */
 export function subjectRepoValue(r: unknown, links = true): SubjectRepoSetting | null {
   if (r === null || r === undefined) return null;
   const o = typeof r === "object" && !Array.isArray(r) ? (r as Record<string, unknown>) : null;
@@ -2694,7 +2695,7 @@ export function workClaimCapLine(db: Pick<DatabaseSummary, "workClaimCap" | "unr
     : `the operator's, REFUSED, so every new claim fails: ${c.cap} (${when}): ${cut(c.refused, 300)}. An operator key sets it again, or clears it, through set_work_claim_cap`;
 }
 
-/** The operator's subject-key repository (SMD-3887): none (keys unscoped), the operator's, or the operator's refused (no bare key can be written). */
+/** The operator's subject-key repository (SMD-3887): none (keys unscoped), the operator's (saying whether 155's link rule applies), or the operator's refused (no bare key can be written). */
 export function subjectRepoLine(db: Pick<DatabaseSummary, "subjectRepo" | "unread">): string {
   const r = db.subjectRepo;
   if (r === null) {

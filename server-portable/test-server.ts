@@ -9370,9 +9370,9 @@ console.log("\n[36j] The operator's subject-key repository in brain_info (SMD-38
   } finally { console.error = realError; }
   // The answer says it was read unscoped, in its value and its words (review pass 5: it answered as if no thought held
   // the key); one the repository was read for says nothing.
-  const say139 = await import("./render.ts");
+  const say = await import("./render.ts");
   // Rendered only when the read answered (a throw above leaves no outcome to render).
-  const bareText = readBare.ok ? say139.renderThread(readBare as never) : null, scopedText = scoped.ok ? say139.renderThread(scoped as never) : null;
+  const bareText = readBare.ok ? say.renderThread(readBare as never) : null, scopedText = scoped.ok ? say.renderThread(scoped as never) : null;
   assert((readBare as { value?: { scopeUnread?: boolean } }).value?.scopeUnread === true && (scoped as { value?: { scopeUnread?: boolean } }).value?.scopeUnread === undefined
          && bareText?.structuredContent.scopeUnread === true && /The subject-key repository could not be read, or is stored refused, so this bare key was read as written/.test(bareText?.content[0].text ?? "")
          && scopedText?.structuredContent.scopeUnread === undefined && !/could not be read/.test(scopedText?.content[0].text ?? "could not be read"),

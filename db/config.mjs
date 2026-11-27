@@ -2711,8 +2711,8 @@ export const ROLE_GRANTS = Object.freeze({
     Object.freeze({ table: "thought_facets",  privileges: Object.freeze(["INSERT"]),                               since: "053" }),
     // 153's subject-key repository (SMD-3887): a subject writer reads the
     // operator's setting to scope its keys (record_thought_subjects since 153,
-    // for the sweep and every subject pass), and the operator's setter writes it
-    // and maps the standing keys, as a writer of subjects.
+    // for the sweep and every subject pass), and the operator's setter writes
+    // it and maps the standing keys, as a writer of subjects.
     Object.freeze({ table: "subject_repo_settings", privileges: Object.freeze(["SELECT", "INSERT", "UPDATE"]),  since: "153" }),
     // board-sync's findings step (SMD-2681, db/board-findings.ts) records what
     // it posted: read for the cap and "not posted again", inserted after Linear

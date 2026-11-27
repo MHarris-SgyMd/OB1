@@ -1153,7 +1153,8 @@ function threadText(t: ThreadShown, thought: string | null): string {
 
 export function renderThread(o: Outcome<ThreadResult>): Reply {
   return render(o, ({ id, threads, scopeUnread }) => {
-    // A bare key read as written, the repository unread, says so (SMD-3887 PR 3b-1 review pass 5).
+    // A bare key read as written, the repository unread or stored refused, says so (SMD-3887 PR 3b-1 review passes 5
+    // and 6).
     const note = scopeUnread ? "\n\nThe subject-key repository could not be read, or is stored refused, so this bare key was read as written: on a brain whose operator names a repository, its thread stands under the scoped key, and this answer may miss it." : "";
     if (id !== null && threads.length === 0) return `Thought ${id} stands in no thread: no subject has been found for it yet (the extraction worker's rules find a ticket's, its --subjects sweep asks the judge model for the rest).`;
     const t = threads[0];

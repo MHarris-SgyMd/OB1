@@ -2549,12 +2549,13 @@ PR's GitHub link with the same number, 56 of them under other repositories;
 
 The `thread` read resolves a bare `pr:` or `version:` key to the setting's
 repository. brain_info gains a Subject repository row, and preflight a
-`subject repository` row: a skip before 153, and warnings when the server's
-role cannot read the setting, when a stored value is refused, or when a
-repository is set without 155. Nothing stored changes on the upgrade, since
-no brain has a repository set yet. 155 is refused by name without 016, 046,
-061, 111, 113, 115, 130 or 153, and a re-apply is a no-op. Covered by test-schema
-[140] and test-upgrade [20cr].
+`subject repository` row: a skip before 153, a failure when a part of 153 or
+155 the ledger records is missing, and warnings when the server's role cannot
+read the setting, when a stored value is refused, or when a repository is set
+without 155. Nothing stored changes on the upgrade, since no brain has a
+repository set yet. 155 is refused by name without 016, 046, 061, 111, 113,
+115, 130 or 153, and a re-apply is a no-op. Covered by test-schema [140] and
+test-upgrade [20cr].
 
 Migration 153 has a `pr:` or `version:` subject key name its repository, on a
 brain whose operator names one (SMD-3887 PR 3a, row 13 of

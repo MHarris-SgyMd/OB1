@@ -243,7 +243,7 @@ function definedIn(file: string): string[] {
  * no entry: 149 defines nothing else, so no restore has to run it first.
  * 155 is 153's set_subject_repo and record_thought_subjects with a GitHub
  * link's repository first (SMD-3887 PR 3b-1), and carries 153: a restore
- * re-runs 153, then 155.
+ * re-runs 130 and 153 (153 carries 130), then 155.
  */
 const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"], "153": ["130"], "155": ["153"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
@@ -18898,9 +18898,10 @@ console.log("\n[116] Migration 130: a thought's own subjects are a set — one s
   await db.exec(`DELETE FROM thoughts WHERE content LIKE '[116]%'`);
 
   // The shape: 130 the last definer of four of its six functions; one index per thought and key, 111's gone; statistics
-  // on a facet's key; the sentinels; SECURITY INVOKER throughout; the comments. record_thought_subjects's and
-  // close_thought_subjects's last definer is the subject-repo file, which carries 130's bodies with a bare key scoped
-  // once a repository is set and the repository's lock taken ([138]); by name.
+  // on a facet's key; the sentinels; SECURITY INVOKER throughout; the comments. close_thought_subjects's last definer
+  // is the subject-repo file, which carries 130's bodies with a bare key scoped once a repository is set and the
+  // repository's lock taken ([138]), and record_thought_subjects's the subject-key links file, which carries that
+  // file's with a link's repository first ([140]); by name.
   for (const fn of ["ob1_thread_lock_keys", "record_thought_subjects", "record_thought_subject", "close_thought_subjects", "close_thought_subject", "ob1_thread_relink_subject"]) {
     const by = fn === "record_thought_subjects" ? (files.find((f) => /^\d{3}_subject_key_links\.sql$/.test(f)) ?? "no NNN_subject_key_links.sql")
       : fn === "close_thought_subjects" ? (files.find((f) => /^\d{3}_subject_repo_scope\.sql$/.test(f)) ?? "no NNN_subject_repo_scope.sql") : file;
@@ -23801,7 +23802,8 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
 
     // The shape: the table, its one-standing index, two triggers; nine functions made by 153 and subject_key_valid
     // replaced, all ten commented by 153, the reads and the setter-frame check STABLE, the rules IMMUTABLE, the setter
-    // and the guard VOLATILE, none SECURITY DEFINER; 153 the last definer of each, and of close_thought_subjects.
+    // and the guard VOLATILE, none SECURITY DEFINER; 153 the last definer of each but the setter (155's, [140]), and of
+    // close_thought_subjects.
     const cols = (await one<{ c: string }>(`SELECT string_agg(attname || ' ' || format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END, ', ' ORDER BY attnum) AS c
         FROM pg_attribute WHERE attrelid = 'subject_repo_settings'::regclass AND attnum > 0 AND NOT attisdropped`)).c;
     const idx = (await one<{ d: string | null }>(`SELECT pg_get_indexdef(to_regclass('subject_repo_settings_one_standing')) AS d`)).d ?? "";
@@ -24551,7 +24553,7 @@ console.log("\n[140] Migration 155: a pr: subject key takes the repository its G
       `SELECT thought_id::text AS newer, payload->>'target' AS older FROM thought_facets WHERE kind = 'relation' AND valid_until IS NULL AND payload->>'key' = $1`, [key]))
       .map((e) => `${name[e.newer] ?? "?"}→${name[e.older] ?? "?"}`).sort().join(" ");
 
-    // With no repository set a link changes nothing: the door writes the bare key (row 13).
+    // With no repository set a link changes nothing: the door writes the bare key (docs/claim-validity.md row 13).
     const a = await thought("a", "PR 12 https://github.com/siggymd/client/pull/12");
     const b = await thought("b", "PR 12 in this repository");
     const c = await thought("c", "github.com/o/r/pull/7 merged");

@@ -8,7 +8,7 @@
 // across one.
 
 import { thoughtTitle } from "../thoughts.ts";
-import { isTicket, scopedKey, subjectKeyValid } from "../subject.ts";
+import { isBareKey, isTicket, scopedKey, subjectKeyValid } from "../subject.ts";
 import { ListCursorRefused, UUID_RE, type ThoughtStore, type ThreadLink, type ThreadPage, type ThreadTicket } from "../store.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
@@ -24,10 +24,11 @@ export type ThreadMemberShown = { id: string; title: string; created_at: string 
  * ticket's linked threads.
  */
 export type ThreadShown = { key: string; total: number; place: number | null; members: ThreadMemberShown[]; earlier: boolean; cursor: string | null; linked: ThreadLink[]; linkedMore: boolean };
-/** The read: the thought it was asked about (null for a key's), and each thread — one for a key, one per subject for an id, none when it stands in no thread. */
 /**
- * The thread read's answer. `scopeUnread` (SMD-3887 PR 3b-1 review pass 5): a bare pr: or version: key read as written
- * because the operator's repository could not be read, so the answer may miss a thread that stands under the scoped key.
+ * The read: the thought it was asked about (null for a key's), and each thread — one for a key, one per subject for an
+ * id, none when it stands in no thread. `scopeUnread` (SMD-3887 PR 3b-1 review passes 5 and 6): a bare pr: or version:
+ * key read as written because the operator's repository could not be read, or is stored refused, so the answer may
+ * miss a thread that stands under the scoped key.
  */
 export type ThreadResult = { id: string | null; threads: ThreadShown[]; scopeUnread?: true };
 
@@ -98,19 +99,22 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
     let scopeUnread = false;
     if (k === null) return refuse({ code: "REFUSED_THREAD_INPUT", retryable: false, problem: "key_shape", value: key });
     // A bare pr: or version: key reads as the operator's repository, where the setter and the writer put its subjects
-    // (153, SMD-3887 PR 3b-1; the maintainer, 2026-11-23); a key scoped already reads as given. One too long once
+    // (153, SMD-3887 PR 3b-1; the maintainer, 2026-11-23), but for one whose GitHub link names another repository,
+    // which stands under that one's key (155); a key scoped already reads as given. One too long once
     // scoped stays bare, as the writer leaves it.
     // Bare alone: `pr:3scale/apicast#12` and `version:vercel/next.js@v1.2` are scoped already (review pass 4).
-    if (/^(pr:[0-9]{1,9}|version:v[0-9]+(\.[0-9]+){1,3})$/.test(k)) {
-      // A setting the role cannot read leaves the key bare, said in the log, as fetch's threads do (review pass 3: a
-      // read that worked before 153 faulted); preflight's subject repository row names the grant.
-      // …and the answer says so (review pass 5: a bare read of a mapped brain's key answered empty, as if no thought held it).
+    if (isBareKey(k)) {
+      // A setting the role cannot read, or a stored value the refusal names (review pass 6), leaves the key bare, said
+      // in the log, as fetch's threads do (review pass 3: a read that worked before 153 faulted); preflight's subject
+      // repository row names the grant. The answer says so too (review pass 5: a bare read of a mapped brain's key
+      // answered empty, as if no thought held it).
       const repo = await store.subjectRepo().catch((e: unknown) => {
         console.error(`thread: the subject-key repository could not be read, so ${k} is read as written: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
         scopeUnread = true;
         return null;
       });
-      if (repo !== null && subjectKeyValid(scopedKey(k, repo))) k = scopedKey(k, repo);
+      const scoped = repo === null ? null : scopedKey(k, repo);
+      if (scoped !== null && subjectKeyValid(scoped)) k = scoped;
     }
     const pos = after === undefined ? undefined : parseThreadCursor(after);
     if (pos === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after ?? "", reason: "shape" });
