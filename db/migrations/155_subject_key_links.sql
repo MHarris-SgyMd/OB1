@@ -40,8 +40,8 @@
 --   One new function, and two replaced on 153's bodies. Nothing stored
 --   changes: no brain has a repository set before 3b-1 (the maintainer's word
 --   on SMD-3887, 2026-11-24), and with none set the two write as 153's did.
---   MINOR under FORK.md's version rules. test-schema [139], test-upgrade
---   [20cq].
+--   MINOR under FORK.md's version rules. test-schema [140], test-upgrade
+--   [20cr].
 --
 -- Prerequisites
 --   016 (content_fingerprint_of), 046 (ob1_registry_kind), 061 (derivations), 111
@@ -106,6 +106,8 @@ $qc$;
 -- name, a path or a query holds (a letter, digit, `.`, `-`, `_`, `/`, `=`,
 -- `?`, `&`, `%` or `:`): a comma, a backtick or `**` before it is no bar
 -- (review pass 4), and `mirror.example.com/github.com/…` no link (pass 3).
+-- A protocol-relative `//github.com/…` where a link may begin is one too
+-- (`href="//github.com/…"`, review pass 6).
 CREATE OR REPLACE FUNCTION ob1_subject_linked_key(p_text text, p_key text)
 RETURNS text
 LANGUAGE sql
@@ -116,9 +118,11 @@ AS $$
   SELECT CASE WHEN count(DISTINCT s.k) = 1 AND subject_key_valid(min(s.k)) THEN min(s.k) END
     FROM (SELECT 'pr:' || lower(m[1]) || '/' || lower(m[2]) || '#' || m[3]::bigint::text AS k
             FROM regexp_matches(COALESCE(p_text, ''),
-                   '(?:^|[^A-Za-z0-9./=?&%_:-]|://)(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/0*([0-9]{1,9})(?![0-9])',
+                   '(?:(?:^|[^A-Za-z0-9./=?&%_:-])(?://)?|://)(?:www\.)?github\.com/([A-Za-z0-9-]{1,39})/([A-Za-z0-9._-]{1,100})/pull/0*([0-9]{1,9})(?![0-9])',
                    'gi') AS m
-           WHERE p_key ~ '^pr:[0-9]{1,9}$' AND m[3]::bigint = substring(p_key FROM 4)::bigint) AS s
+           -- The key's number by a pattern, NULL for any other key, so no cast meets a key not pr:<n> whatever order the
+           -- planner reads the condition in (review pass 6).
+           WHERE m[3]::bigint = substring(p_key FROM '^pr:([0-9]{1,9})$')::bigint) AS s
 $$;
 COMMENT ON FUNCTION ob1_subject_linked_key(text, text) IS
   'For a bare pr:<n> subject key, the key scoped to the repository a GitHub pull-request link in the text names for the same number (github.com/<owner>/<repo>/pull/<n>, www. or not, any case, leading zeros), owner and repository lowercased (ob1:subject-key-links); NULL when no link names the number, when links name it under two repositories (a repository no key can name counted among them), when the one it names would make no key (subject_key_valid), and for any other key or a NULL text. IMMUTABLE. set_subject_repo''s mapping and record_thought_subjects read a bare key''s repository from it before the setting''s. Migration 155 / SMD-3887.';

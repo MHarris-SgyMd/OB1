@@ -1841,7 +1841,10 @@ export class SqlStore implements ThoughtStore {
       throw e;
     }
     const s = r?.s as { repo?: unknown; refused?: unknown } | null | undefined;
-    return typeof s?.repo === "string" && s.repo !== "" && (s.refused ?? null) === null ? s.repo : null;
+    // A stored value the refusal names is no repository, but its keys may stand mapped: a fault the thread read says,
+    // not "none set" (review pass 6).
+    if (typeof s?.refused === "string") throw new Error(`the stored subject repository is refused: ${s.refused.slice(0, 200)}`);
+    return typeof s?.repo === "string" && s.repo !== "" ? s.repo : null;
   }
 
   async threadPlaces(id: string): Promise<ThreadPlace[]> {

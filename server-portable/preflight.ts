@@ -3467,8 +3467,8 @@ if (configFailed) {
           } else if (!sr.has_t) {
             add("subject repository", "skip", "not checked — subject_repo_settings does not exist (migration 153 not applied); pr: and version: keys stay unscoped");
           } else if (!sr.has_fn) {
-            // The table without its reader (a partial re-apply): brain_info's row and a bare key's thread read fault (review pass 1).
-            add("subject repository", "fail", "migration 153's subject_repo_setting() missing beside its table: brain_info's row faults, and a thread read by a bare pr: or version: key faults",
+            // The table without its reader (a partial re-apply): brain_info's row reads unread, a bare key's thread read unscoped (review passes 1, 6).
+            add("subject repository", "fail", "migration 153's subject_repo_setting() missing beside its table: brain_info's row reads unread, and a thread read by a bare pr: or version: key reads it as written, saying so (scopeUnread)",
                 ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 155_subject_key_links.sql."));
           } else if (!sr.has_links && ledger.has("155")) {
             // Recorded and not there: 155's setter and writer call it, so they fault whether or not a repository is set (review pass 1).
@@ -3484,7 +3484,7 @@ if (configFailed) {
           } else if (setting instanceof Error) {
             add("subject repository", "warn", `could not read the setting: ${setting.message}`, "The check calls subject_repo_setting(); the message says why it failed.");
           } else if (typeof setting?.refused === "string") {
-            add("subject repository", "warn", `the stored repository ${JSON.stringify(String(setting.repo ?? "")).slice(0, 120)} is refused (${setting.refused.slice(0, 200)}): no bare pr: or version: key can be written`,
+            add("subject repository", "warn", `the stored repository ${JSON.stringify(String(setting.repo ?? "")).slice(0, 120)} is refused (${setting.refused.slice(0, 200)}): no bare pr: or version: key can be written, and a thread read by one reads it as written, saying so (scopeUnread)`,
                 "An operator key sets it again, or clears it, with SELECT set_subject_repo(<repo or NULL>, <its actor envelope>) (over REST and MCP in SMD-3887 PR 3b-2).");
           } else if (typeof setting?.repo === "string" && !sr.has_links) {
             add("subject repository", "warn", `${setting.repo} is set but migration 155 is not applied: a key its GitHub link names for another repository is scoped to ${setting.repo}`,

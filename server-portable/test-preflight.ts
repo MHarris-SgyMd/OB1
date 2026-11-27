@@ -3719,7 +3719,7 @@ else {
         if (plantedLedger155) await claims.unsafe(`DROP TABLE schema_migrations`);
         else if (added155) await claims.unsafe(`DELETE FROM schema_migrations WHERE name = '155_subject_key_links.sql' AND sha256 = 'test'`);
       }
-      assert(/✗  subject repository\s+migration 153's subject_repo_setting\(\) missing beside its table: brain_info's row faults, and a thread read by a bare pr: or version: key faults/.test(repoNoFn.out)
+      assert(/✗  subject repository\s+migration 153's subject_repo_setting\(\) missing beside its table: brain_info's row reads unread, and a thread read by a bare pr: or version: key reads it as written, saying so \(scopeUnread\)/.test(repoNoFn.out)
              && /✗  subject repository\s+migration 155's ob1_subject_linked_key\(text, text\) missing though the ledger records 155/.test(repoNo155.out)
              && /!  subject repository\s+ob1_subject_linked_key\(text, text\) missing, and .*so whether migration 155 is recorded is unknown/.test(repoNo155Unread.out),
              `…and the table without its reader, and 155 recorded without its link rule, each a failure, the latter a warning to a role that cannot read the ledger (${repoLine(repoNoFn.out).slice(0, 120)} | ${repoLine(repoNo155.out).slice(0, 120)} | ${repoLine(repoNo155Unread.out).slice(0, 120)})`);

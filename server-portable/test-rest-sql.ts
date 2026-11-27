@@ -2308,8 +2308,14 @@ console.log("\n[16b] Work threads, review pass 1 (SMD-3306 PR 7a-2a): a thread w
   const [{ id: plantedRepo }] = await sql`INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at) VALUES ('o3/x.y', 'test', gen_random_uuid(), now()) RETURNING id`;
   await sql.unsafe(`ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
   let bareRead: { body: Record<string, unknown> }, bareVer: { body: Record<string, unknown> }, bareMcp: { sc: Record<string, unknown> };
+  let refusedRead: { body: Record<string, unknown> };
   try {
     [bareRead, bareVer, bareMcp] = await Promise.all([rest("GET", "/v1/thread?key=pr:12"), rest("GET", "/v1/thread?key=version:v01.2"), mcp("thread", { key: "PR:12" })]);
+    // A stored value the refusal names (review pass 6): the key is read as written, and the answer says it is unscoped.
+    await sql.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history`);
+    await sql`UPDATE subject_repo_settings SET repo = 'O3/X.Y' WHERE id = ${plantedRepo}`;
+    await sql.unsafe(`ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+    refusedRead = await rest("GET", "/v1/thread?key=pr:12");
   } finally {
     await sql.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history`);
     await sql`DELETE FROM subject_repo_settings WHERE id = ${plantedRepo}`;
@@ -2318,8 +2324,9 @@ console.log("\n[16b] Work threads, review pass 1 (SMD-3306 PR 7a-2a): a thread w
   const afterClear = threadsOf((await rest("GET", "/v1/thread?key=pr:12")).body)[0];
   assert(threadsOf(bareRead.body)[0]?.key === "pr:o3/x.y#12" && threadsOf(bareRead.body)[0].total === 1 && threadsOf(bareRead.body)[0].members[0]?.id === scopedPr
          && threadsOf(bareVer.body)[0]?.key === "version:o3/x.y@v1.2" && threadsOf(bareMcp.sc)[0]?.key === "pr:o3/x.y#12"
-         && afterClear?.key === "pr:12" && afterClear.total === 1 && afterClear.members[0]?.id === prThought,
-    `with a repository set a bare key reads its scoped thread through both doors, and with none the bare one again (${threadsOf(bareRead.body)[0]?.key}; ${threadsOf(bareVer.body)[0]?.key}; ${afterClear?.key})`);
+         && afterClear?.key === "pr:12" && afterClear.total === 1 && afterClear.members[0]?.id === prThought
+         && bareRead.body.scopeUnread === undefined && threadsOf(refusedRead.body)[0]?.key === "pr:12" && refusedRead.body.scopeUnread === true,
+    `with a repository set a bare key reads its scoped thread through both doors, with a refused one the bare thread said unscoped, and with none the bare one again (${threadsOf(bareRead.body)[0]?.key}; ${threadsOf(bareVer.body)[0]?.key}; ${threadsOf(refusedRead.body)[0]?.key} ${refusedRead.body.scopeUnread}; ${afterClear?.key})`);
   // The render's shape check is subject_key_valid's (review pass 3): a key of the scoped shape whose repository is `..`
   // is shown as a JSON string and given as null in the value, as a phrase key is, never as a shaped key.
   const dotsShown = say.renderThread(ok({ id: null, threads: [{ key: "pr:o/..#1", total: 0, place: null, members: [], earlier: false, cursor: null, linked: [], linkedMore: false }] }));

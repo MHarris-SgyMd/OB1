@@ -3198,8 +3198,9 @@ export interface ThoughtStore {
 
   /**
    * The repository the operator names for the brain's subject keys (migration 153's subject_repo_setting(), SMD-3887):
-   * the thread read resolves a bare `pr:` or `version:` key to it. Null when none is set, when the stored value is one
-   * the refusal names (scoping is off until an operator mends it), and on a brain before 153.
+   * the thread read resolves a bare `pr:` or `version:` key to it. Null when none is set and on a brain before 153.
+   * Throws when the stored value is one the refusal names (its keys may stand mapped, so the read says it is unscoped),
+   * and what Postgres throws otherwise.
    */
   subjectRepo(): Promise<string | null>;
 

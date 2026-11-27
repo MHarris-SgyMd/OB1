@@ -2553,7 +2553,7 @@ repository. brain_info gains a Subject repository row, and preflight a
 role cannot read the setting, when a stored value is refused, or when a
 repository is set without 155. Nothing stored changes on the upgrade, since
 no brain has a repository set yet. 155 is refused by name without 016, 046,
-111, 113, 115, 130 or 153, and a re-apply is a no-op. Covered by test-schema
+061, 111, 113, 115, 130 or 153, and a re-apply is a no-op. Covered by test-schema
 [140] and test-upgrade [20cr].
 
 Migration 153 has a `pr:` or `version:` subject key name its repository, on a

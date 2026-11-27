@@ -9374,7 +9374,7 @@ console.log("\n[36j] The operator's subject-key repository in brain_info (SMD-38
   // Rendered only when the read answered (a throw above leaves no outcome to render).
   const bareText = readBare.ok ? say139.renderThread(readBare as never) : null, scopedText = scoped.ok ? say139.renderThread(scoped as never) : null;
   assert((readBare as { value?: { scopeUnread?: boolean } }).value?.scopeUnread === true && (scoped as { value?: { scopeUnread?: boolean } }).value?.scopeUnread === undefined
-         && bareText?.structuredContent.scopeUnread === true && /The subject-key repository could not be read, so this bare key was read as written/.test(bareText?.content[0].text ?? "")
+         && bareText?.structuredContent.scopeUnread === true && /The subject-key repository could not be read, or is stored refused, so this bare key was read as written/.test(bareText?.content[0].text ?? "")
          && scopedText?.structuredContent.scopeUnread === undefined && !/could not be read/.test(scopedText?.content[0].text ?? "could not be read"),
     `a bare key read unscoped says so, in the value and the text (${bareText?.content[0].text.slice(-120) ?? "no answer"})`);
   assert(readBare.ok && scoped.ok && asked.join(",") === "pr:12,pr:o/r#12" && said.length === 1 && /subject-key repository could not be read, so pr:12 is read as written: permission denied/.test(said[0]),
