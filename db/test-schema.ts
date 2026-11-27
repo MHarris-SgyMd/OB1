@@ -24473,7 +24473,7 @@ console.log("\n[139] Migration 154: a settled part that is no longer a judgement
     await db.exec(`DELETE FROM settled_parts WHERE older_id IN (SELECT id FROM thoughts WHERE content LIKE '[139]%') OR newer_id IN (SELECT id FROM thoughts WHERE content LIKE '[139]%')`);
     await db.exec(`DELETE FROM derivations WHERE artifact_kind = 'part'`);
     await db.exec(`DELETE FROM thought_work_claims WHERE thought_id IN (SELECT id FROM thoughts WHERE content LIKE '[139]%')`);
-    await db.exec(`DELETE FROM thoughts WHERE content LIKE '[140]%'`);
+    await db.exec(`DELETE FROM thoughts WHERE content LIKE '[139]%'`);
     await db.exec(`DO $$ DECLARE r text; BEGIN FOR r IN SELECT rolname FROM pg_roles WHERE rolname LIKE 'ob1_t139_%' LOOP EXECUTE format('DROP OWNED BY %I', r); EXECUTE format('DROP ROLE %I', r); END LOOP; END $$`);
   }
   // No part and no part's lineage row is left for a later section's re-apply of an older file to trip on (111's CHECK lacks the kind).
