@@ -10,9 +10,10 @@
  *   bun db/retag.ts --url … --limit 25             # a trial: this many thoughts, then stop
  *   bun db/retag.ts --url … --retry-failed         # failed rows back into the pool first
  *   bun db/retag.ts --url … --switch-key           # required when the model or prompt version differs from ob1_config's
+ *   bun db/retag.ts --url … --follow [SECONDS]     # then poll every SECONDS (15 bare), pooling again at each, until a signal (exit 0), --limit or a refusal
  *   await run({ url, dryRun: true })               # in-process: import { run } from "./retag.ts"
  *   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (per model call; OB1_LLM_TIMEOUT's, as the capture's, when absent)   --job <key> (a retag: key; a writing run's must be its model's and prompt version's, so in practice --status and --dry-run)
- *   exits 0 clean · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
+ *   exits 0 clean (a follower stopped by a signal too, once past its start wait) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
  *
  * ── What it re-tags ─────────────────────────────────────────────────────────
  * A thought's tags (`metadata`'s people, action_items, dates_mentioned,
@@ -76,7 +77,11 @@
  *     again, and past the pauses recorded failed and the worker stopped, its
  *     other leases back to the pool; a timeout is the thought's, recorded
  *     failed; a 401, 402, 403, 404 or any other 4xx not below is the
- *     request's, every worker stopped, exit 2, nothing marked failed;
+ *     request's, every worker stopped, exit 2, nothing marked failed. A
+ *     follower reads them by worker-bootstrap.ts's fault, which asks the
+ *     probe, the error carrying none of the provider's words: a model gone
+ *     missing mid-run, an outage waited out; a key or base URL refused, the
+ *     stop. A 402 is the account's and fatal (PR 4a-2 review passes 1-3);
  *   - an answer that is not tags (not JSON, no content), or a 400, 413 or
  *     422, which are this thought's (its length, a filter): the claim is
  *     failed and nothing is written — the tags the thought had stand. A
@@ -85,7 +90,10 @@
  *     to three thoughts in a row, none answered between, is the request's
  *     shape (a field the server refuses: reasoning_effort, response_format),
  *     not the thoughts': the run stops, exit 2, those three failed for
- *     --retry-failed once it is fixed (review pass 2);
+ *     --retry-failed once it is fixed (review pass 2). A follower asks first
+ *     (SHAPE_NOTE, one more call): only the note refused as the thoughts
+ *     were stops it; answered, they were the thoughts'; anything else (an
+ *     outage, the gate) stops nothing, and the next refusal asks again;
  *   - a thought whose metadata is null or no JSON object (a raw writer's)
  *     takes no patch through update_thought: it is failed before any call,
  *     nothing sent (review pass 1).
@@ -124,11 +132,15 @@
  * db/config.mjs's RETAG_DUE_SQL (PR 3a). The engine takes what a caller like
  * the sleep scheduler passes (PR 4a-1, RetagOptions): the abort of a call in
  * hand, the admit gate, session settings, the banner and summary left out, the
- * start told. Not here (SMD-2298 PR 4a-2, PR 4b): --follow on the shared
- * follower, and the sleep pass. recipes/thought-enrichment's
- * enrich-thoughts.mjs, which wrote its own tag set through the SQL shim, is
- * retired for this (decided 2026-11-15: "not a second re-tag path"; SMD-3318
- * PR 3b): its summary, importance and confidence fields are not the core's.
+ * start told. --follow (PR 4a-2) runs it on the shared follower helpers
+ * (SMD-2636): the model probed before any write, a provider that does not
+ * answer at start waited for, a pass a database outage does not end, an
+ * outage mid-pass waited out on the heartbeat (heartbeat:retag:<job>), the
+ * pool again at every pass. Not here (SMD-2298 PR 4b): the sleep pass.
+ * recipes/thought-enrichment's enrich-thoughts.mjs, which wrote its own tag
+ * set through the SQL shim, is retired for this (decided 2026-11-15: "not a
+ * second re-tag path"; SMD-3318 PR 3b): its summary, importance and
+ * confidence fields are not the core's.
  *
  * ── Identity ────────────────────────────────────────────────────────────────
  * OB1_WORKER_KEY, a key MCP_ACCESS_KEYS holds, names the worker as every
@@ -145,8 +157,9 @@ import { extractMetadata, metadataRefused, METADATA_PROMPT_VERSION, TAG_KEYS } f
 import { metadataRecipe } from "../server-portable/lineage.ts";
 import { actorPayload } from "../server-portable/store.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
-import { blanketGate, classifyError, egressDescription, egressRefusal, MAX_CALL_TIMEOUT_S, probeChat, ProviderOutage, regateMessage, Unreturned, workerIdentity, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
-import { AbortedInHand, admitted, callWaitsFor, DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, inHandCalls, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, stopOnSignals, STOPPED_EARLY, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { blanketGate, classifyError, databaseUnavailable, egressDescription, egressRefusal, fault, followedPass, lookupOutage, MAX_CALL_TIMEOUT_S, probeAtStart, probeChat, probeRefusal, ProviderOutage, regateMessage, Unreturned, waitAtStart, waitOutProvider, workerIdentity, type FollowerRefusal, type Probe, type StartRefusal, type StartResult } from "./worker-bootstrap.ts";
+import { AbortedInHand, admitted, callWaitsFor, DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, inHandCalls, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
+import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
 import { blankProblem, commandLine, consoleWriter, flagList, optionReader, type Writer } from "./cli.ts";
 import { claimWorker, recordFailedAndStop, releaseFinished, setBackAborted, thoughtFault, type FaultHost, type ReleaseHost } from "./claim-loop.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql, type SessionSettings } from "./connect.ts";
@@ -154,10 +167,10 @@ import { parseRetagKey, RETAG_BACKLOG_AS_KEY_SQL, RETAG_BACKLOG_SQL, RETAG_DUE_S
 
 /** Every argument accounted for (db/cli.ts): an unknown flag, or one given twice, is refused before anything is read (SMD-2015). */
 const FLAGS = {
-  url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one", limit: "one", job: "one",
+  url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one", limit: "one", job: "one", follow: "optional",
   status: "none", "dry-run": "none", "retry-failed": "none", "switch-key": "none",
 } as const;
-const HINTS = { url: "<postgres://…>", job: "<retag:model@pN>" };
+const HINTS = { url: "<postgres://…>", job: "<retag:model@pN>", follow: "[SECONDS]" };
 
 /** The ob1_config row the first writing run records its key in. */
 export const RETAG_CONFIG_KEY = "retag_key";
@@ -169,6 +182,15 @@ const REFUSED_MARK = String(metadataRefused().metadata_extraction_failed);
 const THOUGHT_STATUSES: ReadonlySet<string> = new Set(["400", "413", "422"]);
 /** A 400 or 422 to this many thoughts in a row, none answered between, is the request's shape, not theirs (review pass 2). */
 const SHAPE_STREAK = 3;
+/**
+ * The note a follower tags, in the request's own shape, when SHAPE_STREAK is reached (review pass 1): an answer at all
+ * (tags, or prose) says the shape is taken, so the streak was the thoughts' (their length, a filter) and the follower
+ * carries on, where a stop would leave a follower run by hand down until someone restarted it, and one a supervisor
+ * runs restarted only to stop again. Exported for test-live [29], which looks for it among the calls.
+ */
+export const SHAPE_NOTE = "A short note to tag: the request's shape, checked after three thoughts in a row were refused.";
+/** What a follower's shape check found (shapeOf): the request's shape refused, taken, or not known. */
+type ShapeVerdict = "refused" | "taken" | "unknown";
 /** The tag keys whose value is a list: cleared to [], not null, so a reader's jsonb_array_length or _elements meets a list (review pass 2). */
 const LIST_TAGS: ReadonlySet<string> = new Set(["people", "action_items", "dates_mentioned", "topics"]);
 
@@ -216,7 +238,7 @@ export interface RetagOptions {
   admit?: Admit;
   /** Postgres settings the run's own client opens every connection with (connect.ts's `session`): the sleep scheduler's per-pass budget (SMD-2679). Refused beside `sql`, a caller's client, which it would not reach. */
   session?: SessionSettings;
-  /** False leaves out the start's banner — the job, model and egress lines and the agent line or the no-key warning — for a pass a scheduler drives, which says them once (SMD-2752). */
+  /** False leaves out the start's banner — the job, model and egress lines, the agent line or the no-key warning, and the workers line — for a pass a scheduler drives, which says them once (SMD-2752). */
   banner?: boolean;
   /**
    * False leaves out the end-of-run summary — the counts, the failed rows and the still-leased and still-pending
@@ -226,11 +248,23 @@ export interface RetagOptions {
   summary?: boolean;
   /** How the start went (worker-bootstrap.ts's StartResult), called once: a refusal by its kind, or through (SMD-2752). */
   onStart?: (r: StartResult) => void;
+  /**
+   * --follow [SECONDS] (SMD-2298 PR 4a-2): after the first pass, pool again and re-tag every SECONDS (15 bare) until a
+   * stop (a signal, the caller's), --limit or a refusal. The pool has no capture trigger — rebuild_derived's requeue
+   * (150) feeds it, and a raw move or a capture that fell back does not — so each pass pools the backlog again, as
+   * re-embed's follower does. A follower probes the model before it writes, waits out a provider that does not answer
+   * and a database that does not (followedPass, waitOutProvider: SMD-2636's helpers), and stamps heartbeat:retag:<job>.
+   */
+  follow?: number;
+  /** A follower's heartbeat in place of its own heartbeat:retag:<job> row (db/pass-stamp.ts): the sleep scheduler's. Null stamps nothing. Unused by a one-shot run. */
+  stamper?: PassStamper | null;
+  /** A follower's start alone (SMD-2752): the banner, the gates, the tables, the model's probe, the worker key — then 0, before the pass's first write, or the start's refusal (2). Needs `follow`. */
+  check?: boolean;
   /** The pauses before a failing provider is an outage (TRANSIENT_PAUSES_MS): a suite's own, to run them without the wall clock. */
   pausesMs?: readonly number[];
 }
 
-type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number | null; limit: number };
+type Numbers = { workers: number; batch: number; ttl: number; heartbeat: number; timeout: number | null; limit: number; follow: number };
 
 /** The run's numbers from its options, or the refusal of the first that breaks its flag's rule, in the CLI's order. */
 function numbers(opts: RetagOptions): Numbers | string {
@@ -249,7 +283,9 @@ function numbers(opts: RetagOptions): Numbers | string {
   if (lease) return lease;
   const limit = read("--limit", opts.limit, 0);
   if (typeof limit === "string") return limit;
-  return { workers, batch, ttl, heartbeat, timeout, limit };
+  const follow = read("--follow", opts.follow, 0);
+  if (typeof follow === "string") return follow;
+  return { workers, batch, ttl, heartbeat, timeout, limit, follow };
 }
 
 /** The re-tag pass, callable: the CLI's run, returning the code the CLI exits with. Nothing happens at import. */
@@ -295,6 +331,7 @@ async function runPass(opts: RetagOptions): Promise<number> {
       return usage("retag.ts resolves OB1_WORKER_KEY on a connection of its own (db/worker-bootstrap.ts): pass url beside sql, or run without the key.");
     }
   }
+  if (opts.check && (!settled.follow || opts.status || opts.dryRun)) return usage("retag.ts: check is a follower run's start — pass follow beside it, and no --status or --dry-run.");
   if (opts.session != null && opts.sql != null) return usage("retag.ts: session settings reach the run's own client only: pass url without sql beside them.");
   if (opts.signal?.aborted && !opts.status && !opts.dryRun) {
     err(STOPPED_EARLY);
@@ -302,8 +339,17 @@ async function runPass(opts: RetagOptions): Promise<number> {
   }
   const sql = opts.sql ?? openSql(opts.url as string, { max: settled.workers + 1, ...(opts.session ? { session: opts.session } : {}) });
   const detach = new AbortController();
+  // The start's refusal ends a follower's own row with its kind, as the other followers' run() does (SMD-3214); never a
+  // caller's stamper's.
+  let refusedAt: StartRefusal | null = null;
+  const heard: RetagOptions = { ...opts, onStart: (r) => { if (!r.ok) refusedAt = r.refused; opts.onStart?.(r); } };
   try {
-    return await retagWith(sql, opts, settled, detach.signal);
+    const code = await retagWith(sql, heard, settled, detach.signal);
+    if (code === 2 && refusedAt !== null && settled.follow && opts.stamper === undefined && !opts.check && !opts.status && !opts.dryRun) {
+      const job = opts.job ?? retagKey(resolveEmbedConfig((opts.env ?? process.env) as EmbedEnv).metadataModel, METADATA_PROMPT_VERSION);
+      await endOnRefusal({ sql, worker: "retag", job, intervalS: settled.follow, kind: refusedAt, onError: (e) => err(`  heartbeat ${stampKey("retag", job)} not ended on the refusal: ${e.message.split("\n")[0]}`) });
+    }
+    return code;
   } finally {
     detach.abort();
     if (opts.sql == null) await sql.close().catch(() => {});
@@ -335,7 +381,8 @@ type Backlog = { missing: number; marked: number; stale: number; recipe: number;
 
 async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach: AbortSignal): Promise<number> {
   const { out, err } = opts.writer ?? consoleWriter;
-  const { workers: WORKERS, batch: BATCH, ttl: TTL, heartbeat: HEARTBEAT, limit: LIMIT } = settled;
+  const { workers: WORKERS, batch: BATCH, ttl: TTL, heartbeat: HEARTBEAT, limit: LIMIT, follow: FOLLOW } = settled;
+  const CHECK = opts.check === true;
   const env = opts.env ?? process.env;
   const STATUS_ONLY = opts.status === true;
   const DRY_RUN = opts.dryRun === true;
@@ -388,6 +435,35 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     return refuse("tables", `\n  ${!schema.claims ? "The lease table (migration 015) is missing" : !schema.marks ? "The lineage table's mark (migration 063) is missing" : "update_thought is older than migration 148: a re-tag that came out the same would leave its row marked"}. Apply the migrations first:\n    cd db && bun migrate.ts --url …`);
   }
 
+  // ── The follower's start probe ──────────────────────────────────────────────
+
+  /** A one-token call to the tags' model (probeChat), bounded by the call's timeout, at most a minute. */
+  const probe = (wake?: AbortSignal): Promise<Probe> => probeChat(cfg.chat, cfg.metadataModel, Math.min(cfg.timeoutMs, 60_000), wake);
+  /** The start's refusal of what a probe found — the model unserved, or the endpoint refusing — or null (the other followers' words, SMD-2599). */
+  function startRefusal(p: Probe): string | null {
+    if (p.state === "missing") {
+      return `\n  ${cfg.chat.base} does not serve ${cfg.metadataModel} at start (${p.why.slice(0, 300)}).\n` +
+        "  A --follow worker refuses this before it claims anything (SMD-2599): pull the model, or set OB1_METADATA_MODEL to one the provider serves. Once running, a model that goes missing is waited for.";
+    }
+    if (p.state === "refused") {
+      return `\n  ${cfg.chat.base} refuses a one-token call at start (${p.why.slice(0, 300)}).\n` +
+        "  A --follow worker refuses this before it claims anything (SMD-2599): check the chat endpoint's key (OB1_CHAT_API_KEY, else OB1_LLM_API_KEY) and its base URL (OB1_CHAT_BASE_URL, else OB1_LLM_BASE_URL — an OpenAI-compatible one ends in /v1).";
+    }
+    return null;
+  }
+  const refusalAtStart = async (p: Probe): Promise<FollowerRefusal | null> => {
+    const line = startRefusal(p);
+    return line ? { kind: probeRefusal(p), line } : null;
+  };
+  /** Why the provider did not answer at start, when it did not: waited for as the run's first step, before the pool. */
+  let startOut: string | null = null;
+  if (FOLLOW && !READ_ONLY) {
+    if (stoppedEarly()) return 130;
+    const first = await probeAtStart({ probe, refusal: refusalAtStart, wake: opts.signal });
+    if ("refused" in first) return refuse(first.refused.kind, first.refused.line);
+    startOut = first.out;
+  }
+
   // ── Identity ────────────────────────────────────────────────────────────────
 
   let agentId: string | null = null;
@@ -400,6 +476,8 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       noKeyWarning: opts.banner === false ? "" : "  ⚠  OB1_WORKER_KEY is not set: the re-tags carry the actor `retag` and no agent id. Mint one with server-portable/keygen.ts and add its hash to MCP_ACCESS_KEYS.",
       write: say,
       warn: (l) => { if (l) err(l); },
+      // A follower's lookup outlasts the database going away, as the other followers' does (SMD-2752).
+      outage: FOLLOW ? lookupOutage : undefined,
     });
     if (!id.ok) return refuse("identity", id.message);
     agentId = id.identity.agentId;
@@ -474,6 +552,14 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     out(`  ob1_config.${RETAG_CONFIG_KEY} is not set: ${READ_ONLY ? "a run sets it" : "this run sets it"}, and finds ${asWords}`);
   }
 
+  // The check ends here, before the pass's first write — the key's record, --retry-failed's, the pool's — and without
+  // waiting for a provider that does not answer: each pass waits for it at its own start (SMD-2752).
+  if (CHECK) {
+    if (startOut !== null) err(`  the provider is not answering at start (${startOut.slice(0, 200)}) — each pass waits for it at its own start`);
+    opts.onStart?.({ ok: true, provider: startOut === null ? "up" : "out" });
+    return 0;
+  }
+
   if (READ_ONLY) {
     const c = await counts();
     // Under another key than the recorded one, the backlog as recording it finds it: what the run would take.
@@ -505,6 +591,25 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   // ── The run ─────────────────────────────────────────────────────────────────
 
   if (stoppedEarly()) return 130;
+  if (startOut !== null) {
+    // A follower whose first probe got no answer waits for the provider here, before it writes the key, the failed rows'
+    // return or the pool; said through a caller's stamper while it lasts (the sleep scheduler's, SMD-2752).
+    const waited = await waitAtStart({
+      who: "the provider",
+      why: startOut,
+      meanwhile: `claims nothing until it does; it calls ${cfg.metadataModel} at ${cfg.chat.base} for one token`,
+      probe,
+      refusal: refusalAtStart,
+      wake: opts.signal ?? new AbortController().signal,
+      writer: { out, err },
+      stamper: opts.stamper ?? null,
+    });
+    if (waited === null) {
+      err(STOPPED_EARLY);
+      return 130;
+    }
+    if (waited !== "up") return refuse(waited.refused.kind, waited.refused.line);
+  }
   if (recordedKey !== JOB) {
     await sql`INSERT INTO ob1_config (key, value) VALUES (${RETAG_CONFIG_KEY}, ${JOB})
               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`;
@@ -520,38 +625,40 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     out(`  --retry-failed: ${n} failed row(s) returned to the pool`);
   }
   if (stoppedEarly()) return 130;
-  // The admit gate before the pool's writes, as the other claim workers' passes take it (SMD-3379 PR 1b): a stop while
-  // it waits ends the run with nothing pooled (SMD-2298 PR 4a-1).
-  if (ADMIT && !(await admitted(ADMIT, opts.signal ?? new AbortController().signal))) {
-    err(STOPPED_EARLY);
-    return 130;
-  }
-  // The pool, every run, beside rebuild_derived's requeue (150): the backlog not pooled, and a re-tagged one due again.
-  const [{ added }] = (await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(${backlogIds()})) AS added`) as { added: number }[];
-  // requeue_thought_work's reset, guarded: the UPDATE checks `succeeded` again on the row it locks (READ COMMITTED's
-  // recheck), so a thought another run requeued and claimed since this statement began keeps its lease (review pass 1:
-  // requeue_thought_work resets whatever the state, a live lease included).
-  const requeued = ((await sql`
-    UPDATE thought_work_claims c
-       SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL, finished_at = NULL, enqueued_at = now(), worker_id = NULL
-     WHERE c.work_type = ${JOB} AND c.status = 'succeeded' AND c.thought_id IN (${backlogIds()})
-    RETURNING 1`) as unknown[]).length;
-  out(`  pool: ${Number(added)} thought(s) added, ${requeued} re-tagged before and put back`);
-  const before = await counts();
-  printCounts(before, "before");
-  const total = before.pending + before.claimed;
 
   let stopping = false;
   let hardStopped = false;
   let hardRelease: Promise<unknown> | null = null;
   const onStop = new AbortController();
-  /** Wakes a worker pausing on the provider, or waiting at the admit gate: the run stopping (the first stop, the provider's refusal, the shape streak, a throw). */
-  const halt = new AbortController();
+  /**
+   * Wakes a worker pausing on the provider, or waiting at the admit gate: the run stopping (the first stop, the
+   * provider's refusal, the shape streak, a throw), or under --follow a worker's outage ending the pass. Made again at
+   * each pass, as consolidate's is (PR 4a-1 review pass 2): an outage's abort would otherwise end every later pass's gate.
+   */
+  let halt = new AbortController();
+  /** A pass's end of its own — a worker's fatal refusal or its throw — beside the run's stop and halt, for the gate. */
+  let passEnds = new AbortController();
+  /** The admit gate's signal for the pass (made with halt). */
+  let gate: AbortSignal = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
+  /** Thoughts pooled across the passes, for the progress line. */
+  let total = 0;
+  /** Workers that stopped on the provider still failing after its pauses: a pass with one is "failed" on the heartbeat. */
+  let providerStops = 0;
+  /** The last outage's suspects are retried one at a time, one worker (SMD-2641), as the other followers'. */
+  let isolated = false;
+  /** The provider answered after a wait: the next pass runs at once, not after an interval (re-embed's rule, SMD-2636 PR 2). */
+  let pollNow = false;
+  /** The first pass's counts, which the closing remedy reads. */
+  let before0: Counts = { pending: 0, claimed: 0, succeeded: 0, failed: 0 };
   let retagged = 0, changedTags = 0, current = 0, failed = 0, refused = 0, changedMeanwhile = 0, vanished = 0, lost = 0, beats = 0, calls = 0;
   let configError = null as string | null;
-  /** 400s and 422s to thoughts in a row, none answered between; at SHAPE_STREAK the run stops (configError). */
+  /** 400s and 422s to thoughts in a row, none answered between; at SHAPE_STREAK the run stops (configError), a follower once its shape check agrees (shapeOf). */
   let shapeStreak = 0;
   let shapeStopped = false;
+  /** A follower's shape check in flight, which every worker reaching the streak meanwhile awaits (review pass 1). */
+  let shapeCheck: Promise<ShapeVerdict> | null = null;
+  /** A one-shot run stopped at the admit gate before its pass: it ends as it did before the gate joined the pass. */
+  let gateStopped = false;
   const activeWorkers = new Set<string>();
   const taken = new Set<string>();
   const claiming = { n: 0 };
@@ -584,6 +691,41 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     lastReport.at = now;
     lastReport.line = line;
     out(line);
+  }
+
+  /**
+   * The shape check (SHAPE_NOTE), read three ways (review pass 2: one way, anything but tags read as the shape, so an
+   * outage, an abort or the gate stopped the follower):
+   * - "refused": the note met a 400 or 422, as the thoughts did — the request's shape;
+   * - "taken": it was answered at all — tags, or prose, as a thought's prose answer resets the streak;
+   * - "unknown": anything else — an outage, a timeout, another status, a throw, an abort (a stop, or another worker's
+   *   outage halting the pass) — which stops nothing and leaves the streak, so the next refusal asks again. It is
+   *   said, and the pass stamped failed: a follower whose every note goes unanswered fails each refused thought, and
+   *   its row says so (review pass 3).
+   * The gate judges it as the call it stands for — the thought's subject, its text included, which a `marker:` term
+   * reads (review pass 3: under the note's own text such an allow list refused every note, and the follower never
+   * stopped); only the note's own text is sent.
+   */
+  async function shapeOf(row: Row): Promise<ShapeVerdict> {
+    const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata: row.metadata as Record<string, unknown>, content: row.content };
+    const unknown = (why: string): ShapeVerdict => {
+      // A stop that aborted the note is the stop's: nothing to say, no pass to mark (review pass 4).
+      if (!stopping) {
+        providerStops++;
+        err(`  the shape check's note was not answered (${why}): nothing known, so nothing stops — the next refusal asks again`);
+      }
+      return "unknown";
+    };
+    // The gate first, as a thought's call meets it: a note it refuses is no model call.
+    const gate = mayLeaveBox(subject, cfg.chat, cfg.egress);
+    if (!gate.allowed) return unknown(`the egress policy refused it: ${gate.reason}`);
+    calls++;
+    const answer = await extractMetadata(SHAPE_NOTE, subject, cfg, halt.signal).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+    if (answer instanceof Error) return unknown(answer.message.split("\n")[0]);
+    const mark = answer.metadata_extraction_failed;
+    if (typeof mark !== "string") return "taken";
+    if (mark === "provider_400" || mark === "provider_422") return "refused";
+    return mark.startsWith("provider_") || mark === REFUSED_MARK ? unknown(mark) : "taken";
   }
 
   /** One attempt at a thought: the call, then the write. A provider's error is thrown, for thoughtFault to read; a call aborted in hand, as AbortedInHand. */
@@ -621,17 +763,27 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
       if (mark === REFUSED_MARK) return { outcome: "failed", refused: true, error: "the egress gate refused the call; --retry-failed revisits it" };
       if (mark === "provider_timeout") throw new ProviderError(`the tags' call timed out after ${cfg.timeoutMs / 1000} s (--timeout, else OB1_LLM_TIMEOUT)`, "timeout");
       const status = /^provider_(\d{3})$/.exec(mark);
+      const noTags: Outcome = { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
       // Any other marker is an answer (prose, a shape that is no tags): the request's shape was taken (review pass 3).
       if (!status) shapeStreak = 0;
       // A 400, 413 or 422 is this thought's (its length, a filter); any other status the claim workers' rule reads.
       if (status && !THOUGHT_STATUSES.has(status[1])) throw new ProviderError(`the tags' call answered ${status[1]}`, "http", Number(status[1]));
       if (status && status[1] !== "413" && ++shapeStreak >= SHAPE_STREAK && !configError) {
+        // A follower asks the shape first (SHAPE_NOTE): three long thoughts in a row are no reason to hold it down. A
+        // one-shot run stops, as before: the operator re-runs it (review pass 1).
+        if (FOLLOW) {
+          const verdict = await (shapeCheck ??= shapeOf(row).finally(() => { shapeCheck = null; }));
+          if (verdict === "taken") shapeStreak = 0;
+          // Stopped only where the note was refused as the thoughts were and the streak still stands when it comes back:
+          // a thought answered meanwhile reset it (review pass 2), and a stop or another worker's stop reads first.
+          if (verdict !== "refused" || shapeStreak < SHAPE_STREAK || stopping || configError) return noTags;
+        }
         configError = `the provider answered ${status[1]} to ${SHAPE_STREAK} thoughts in a row, none answered between — the request's shape, not the thoughts' (often a field the server refuses: reasoning_effort, which OB1_METADATA_REASONING sets, or response_format)`;
         shapeStopped = true;
         stopping = true;
         halt.abort();
       }
-      return { outcome: "failed", error: `the answer was no tags (${mark}); nothing was written, the tags the thought had stand — --retry-failed revisits it` };
+      return noTags;
     }
     if (hardStopped) return { outcome: "abandoned" };
     const recipe = metadataRecipe(cfg, answer);
@@ -684,10 +836,17 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
 
   async function worker(n: number): Promise<void> {
     const faults: FaultHost & ReleaseHost = {
-      sql, job: JOB, follow: false, err, outage, inCall, halt: () => halt, limit: LIMIT, taken, progress,
+      sql, job: JOB, follow: !!FOLLOW, err, outage, inCall, halt: () => halt, limit: LIMIT, taken, progress,
       stopping: () => stopping, hardStopped: () => hardStopped,
-      // A one-shot run's rules (classifyError): paused for, the thought's, or the request's.
+      // Under --follow, worker-bootstrap.ts's `fault`, as the other followers read it (SMD-2636 PR 3a): paused for, then an
+      // outage; an outage at once (the model missing); the probe's to decide; the thought's; or the request's. A
+      // one-shot run keeps classifyError's rules: paused for, the thought's, or the request's.
       read: (e) => {
+        // A 402 is the account's: fatal, as classifyError reads it. fault() reads one so only by the provider's words
+        // ("can only afford"), which the marker extractMetadata answers with does not carry — it would ask the probe,
+        // which one token affords, and fail every thought row by row (review pass 1).
+        if (e instanceof ProviderError && e.kind === "http" && e.status === 402) return { act: "fatal", suspect: true };
+        if (FOLLOW) return fault(e);
         // A 408 is the provider's moment, as providerDown reads it, not the request's (classifyError's 4xx): paused
         // for, like a 429 (review pass 1: it stopped the run, exit 2).
         if (e instanceof ProviderError && e.kind === "http" && e.status === 408) return { act: "pause", suspect: true };
@@ -695,22 +854,23 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
         return { act: kind === "transient" ? "pause" : kind, suspect: true };
       },
       ...(opts.pausesMs ? { pausesMs: opts.pausesMs } : {}),
-      probe: () => probeChat(cfg.chat, cfg.metadataModel, Math.min(cfg.timeoutMs, 60_000), halt.signal),
+      probe: () => probe(halt.signal),
       fatal: (_e, why) => {
         // The first refusal names the cause; a later one, after the run began to stop, does not overwrite it (review pass 3).
         if (!configError) configError = why;
         stopping = true;
         halt.abort();
+        passEnds.abort();
       },
-      count: { providerStop: () => {}, failed: () => { failed++; }, lost: () => { lost++; }, vanished: () => { vanished++; } },
+      count: { providerStop: () => { providerStops++; }, failed: () => { failed++; }, lost: () => { lost++; }, vanished: () => { vanished++; } },
     };
     await claimWorker<Row>({
-      sql, job: JOB, prefix: "retag", n, ttlS: TTL, heartbeatS: HEARTBEAT, batch: BATCH, limit: LIMIT, follow: false, admit: ADMIT,
-      // A worker waiting at the admit gate is woken by the run stopping for a reason of its own — another worker's
-      // fatal refusal, the shape streak, a throw — which abort halt beside setting stopping, not onStop (review pass 1:
-      // it waited for the gate to open, and the run with it).
-      gate: () => AbortSignal.any([onStop.signal, halt.signal]), err, errAside, outage, taken, claiming, limitReached, activeWorkers, unreturned, inCall,
-      stopping: () => stopping, hardStopped: () => hardStopped, isolated: () => false, pollNow: () => {},
+      sql, job: JOB, prefix: "retag", n, ttlS: TTL, heartbeatS: HEARTBEAT, batch: BATCH, limit: LIMIT, follow: !!FOLLOW, admit: ADMIT,
+      // The pass's gate (onStop, halt, passEnds): a worker waiting at the admit gate is woken by the run stopping for a
+      // reason of its own — another worker's fatal refusal, the shape streak, a throw — not only a stop from outside
+      // (PR 4a-1 review pass 1: it waited for the gate to open, and the run with it).
+      gate: () => gate, err, errAside, outage, taken, claiming, limitReached, activeWorkers, unreturned, inCall,
+      stopping: () => stopping, hardStopped: () => hardStopped, isolated: () => isolated, pollNow: () => { pollNow = true; },
       count: { lost: () => { lost++; }, vanished: () => { vanished++; }, beats: (k) => { beats += k; } },
       readRows: async (ids) => (await sql`
         SELECT t.id, t.content, t.metadata, COALESCE(t.updated_at, t.created_at) AS stamp, ${due()} AS due
@@ -836,18 +996,158 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   opts.onPass?.(stop, inCall.abortInHand);
   opts.onStart?.({ ok: true, provider: "up" });
 
-  if (total > 0) {
-    out(`\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s${LIMIT ? `, stopping after ${LIMIT}` : ""}\n`);
-    const ends = await Promise.allSettled(Array.from({ length: WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
+  // A follower's heartbeat (db/pass-stamp.ts, SMD-2261): stamped after every pass and re-stamped while one runs. A
+  // one-shot run stamps nothing. A caller's stamper stands in for the row (the sleep scheduler's).
+  const stamper = opts.stamper !== undefined ? (FOLLOW ? opts.stamper : null) : FOLLOW
+    ? passStamper({
+        sql, worker: "retag", job: JOB, intervalS: FOLLOW,
+        // The database gone is said as such, as reembed.ts says it (review pass 2, walkthrough: a grant was blamed).
+        onError: (e) => err(`  heartbeat ${stampKey("retag", JOB)} not written: ${e.message.split("\n")[0]} — ${databaseUnavailable(e) ? "the database is not answering" : "a role needs the worker grant group (INSERT, UPDATE on ob1_config)"}${stopping || limitReached() ? "" : "; the follower goes on"}`),
+      })
+    : null;
+  /**
+   * Probe until the provider answers (waitOutProvider, SMD-2636 PR 2), said on the row it stamps. The schedule carries
+   * on waitOutProvider's rules, counting thoughts settled — re-tagged, already current (no call), failed; an answer
+   * polls again at once; a refusal ends the follower, exit 2.
+   */
+  async function waitForProvider(wake: AbortSignal): Promise<void> {
+    const back = await waitOutProvider({
+      who: "the provider",
+      calls: `${cfg.metadataModel} at ${cfg.chat.base} for one token`,
+      outage,
+      probe,
+      settled: () => retagged + current + failed,
+      pollS: FOLLOW,
+      pausesBefore: true,
+      wake,
+      writer: { out, err },
+      stamper,
+    });
+    if (back === "answered") pollNow = true;
+    else if (back !== null) {
+      if (!configError) configError = back.refused;
+      stopping = true;
+    }
+  }
+
+  let firstPass = true;
+  /** A poll that found nothing to do keeps the last pass's word on the heartbeat. */
+  let lastPassIdle = false;
+  const workersLine = `\n  ${WORKERS} worker(s), ${BATCH} per claim, ${TTL} s leases renewed every ${HEARTBEAT} s${LIMIT ? `, stopping after ${LIMIT}` : ""}${FOLLOW ? `, then polling every ${FOLLOW} s` : ""}\n`;
+  /**
+   * One pass: the leases a worker could not return, the admit gate, the pool — every pass, the backlog having no
+   * capture trigger (the header) — and the workers until the pool is empty, a stop or --limit.
+   */
+  async function pass(): Promise<Counts> {
+    halt = new AbortController();
+    passEnds = new AbortController();
+    gate = AbortSignal.any([onStop.signal, halt.signal, passEnds.signal]);
+    await unreturned.returnAll();
+    // The admit gate before the pool's writes, as the other claim workers' passes take it (SMD-3379 PR 1b).
+    if (ADMIT && !(await admitted(ADMIT, gate))) {
+      // A stop while it waits (SMD-2298 PR 4a-1): a one-shot run's ends it with nothing pooled, as before the gate
+      // joined the pass — the stop's line, 130, no summary (review pass 1); a follower's ends its loop, and its summary
+      // is read as at any stop.
+      if (!FOLLOW) {
+        gateStopped = true;
+        return before0;
+      }
+      return SUMMARY ? counts() : before0;
+    }
+    // The pool, every pass, beside rebuild_derived's requeue (150): the backlog not pooled, and a re-tagged one due again.
+    const [{ added }] = (await sql`SELECT enqueue_thoughts(${JOB}, ARRAY(${backlogIds()})) AS added`) as { added: number }[];
+    // requeue_thought_work's reset, guarded: the UPDATE checks `succeeded` again on the row it locks (READ COMMITTED's
+    // recheck), so a thought another run requeued and claimed since this statement began keeps its lease (review pass 1:
+    // requeue_thought_work resets whatever the state, a live lease included).
+    const requeued = ((await sql`
+      UPDATE thought_work_claims c
+         SET status = 'pending', ttl_expires_at = NULL, attempt_count = 0, last_error = NULL, finished_at = NULL, enqueued_at = now(), worker_id = NULL
+       WHERE c.work_type = ${JOB} AND c.status = 'succeeded' AND c.thought_id IN (${backlogIds()})
+      RETURNING 1`) as unknown[]).length;
+    const before = await counts();
+    if (firstPass) before0 = before;
+    if (!FOLLOW || Number(added) > 0 || requeued > 0) {
+      out(`  pool: ${Number(added)} thought(s) added, ${requeued} re-tagged before and put back`);
+      printCounts(before, "before");
+    }
+    total += before.pending + before.claimed;
+    lastPassIdle = before.pending + before.claimed === 0;
+    isolated = !!FOLLOW && outage.isolating();
+    if (lastPassIdle) {
+      firstPass = false;
+      return before;
+    }
+    if (firstPass && !FOLLOW) say(workersLine);
+    firstPass = false;
+    if (isolated) err(`  retrying the last outage's ${outage.suspected} suspect thought(s) one at a time${WORKERS > 1 ? `, one worker, before the pass goes back to ${WORKERS}` : ""}; one that errs again alone is blamed only on a one-token call made at once`);
+    // A worker that throws stops the rest after the thought in hand, and the pass rejects with its error once they have
+    // stopped, not while they still hold rows and the client.
+    const ends = await Promise.allSettled(Array.from({ length: isolated ? 1 : WORKERS }, (_, i) => worker(i).catch((e: unknown) => {
       stopping = true;
       halt.abort();
+      passEnds.abort();
       throw e;
     })));
     const thrown = ends.find((r): r is PromiseRejectedResult => r.status === "rejected");
     if (thrown) throw thrown.reason;
     progress(true);
+    return stopping && !SUMMARY ? before : counts();
   }
-  await unreturned.returnAtEnd(TTL, { err });
+  // A pass that throws ends the run; its heartbeat says so first, as the worker's end. A pass is "failed" when a worker
+  // stopped on the provider still failing after its pauses; one with work "ok" otherwise; an idle poll keeps the word.
+  let passOutcome: "ok" | "failed" = "ok";
+  const stampedPass = async (): Promise<Counts> => {
+    const at = providerStops;
+    try {
+      const counted = await (stamper ? stamper.during(pass()) : pass());
+      if (providerStops > at) passOutcome = "failed";
+      else if (!lastPassIdle) passOutcome = "ok";
+      return counted;
+    } catch (e) {
+      // A database outage is no end under --follow: followedPass waits it out (SMD-2599).
+      if (!(FOLLOW && databaseUnavailable(e))) await stamper?.end("failed");
+      throw e;
+    }
+  };
+  /** A pass a database outage does not end (followedPass, SMD-2599): the counts, or null when a stop ended its wait. */
+  const followed = () => followedPass({
+    pass: stampedPass,
+    // A worker found the provider not answering and ended the pass: the heartbeat says so, and stays a running
+    // follower's while it probes (SMD-2261).
+    afterPass: async () => {
+      if (outage.reason === null || stopping) return;
+      await stamper?.stamp("failed");
+      await (stamper ? stamper.during(waitForProvider(onStop.signal)) : waitForProvider(onStop.signal));
+    },
+    follow: !!FOLLOW,
+    check: () => sql`SELECT 1`,
+    wake: onStop.signal,
+    writer: { out, err },
+  });
+
+  // A follower says its workers and its polling once, before a first pass that may find nothing (review pass 2,
+  // walkthrough: on a brain caught up it never said it was polling); a one-shot run, before the workers start.
+  if (FOLLOW) say(workersLine);
+  let passed = await followed();
+  if (gateStopped) {
+    err(STOPPED_EARLY);
+    return 130;
+  }
+  if (FOLLOW) {
+    await stamper?.stamp(passOutcome);
+    while (!stopping && !limitReached()) {
+      if (!pollNow) await sleepUnless(FOLLOW * 1000, onStop.signal);
+      pollNow = false;
+      if (stopping) break;
+      passed = await followed();
+      await stamper?.stamp(passOutcome);
+    }
+    // The follower ends — a signal, its --limit, or the provider refusing the request itself — and the row says so.
+    if (configError && opts.stamper === undefined) stamper?.refused?.("provider");
+    await stamper?.end(configError ? "failed" : "stopped");
+  }
+  // Leases a worker could not return as it ended, returned before the run ends where the database answers.
+  if (passed !== null) await unreturned.returnAtEnd(TTL, { err });
 
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
   // The summary's lines, which a pass a scheduler drives leaves out; its counts are read all the same, for the code.
@@ -856,7 +1156,18 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
   tell(`\n  ${retagged} re-tagged (${changedTags} with the tags changed, ${retagged - changedTags} the same — the row settled), ${current} already current, ` +
     `${failed} failed${refused ? ` (${refused} refused by the egress policy, nothing sent)` : ""}, ${changedMeanwhile} changed while re-tagged and re-queued, ${vanished} deleted mid-pass` +
     `${lost ? `, ${lost} no longer this worker's when checked` : ""}, in ${elapsed}s (${calls} model call(s), ${beats} heartbeat(s))`);
-  const after = await counts();
+  // A follower stopped while it waited for the database: the counts cannot be read, and are not guessed (SMD-2599). One
+  // stopped as it slept between polls holds the last pass's counts, not a database that still answers: one gone
+  // meanwhile reads as a stop while it waited (review pass 1: the read threw, exit 1 with a stack).
+  const after = passed === null ? null : await counts().catch((e: unknown) => {
+    if (FOLLOW && databaseUnavailable(e)) return null;
+    throw e;
+  });
+  if (after === null) {
+    if (SUMMARY) err(`\n  stopped while the database was not answering: the pool's counts are not read — --status reads them once it answers`);
+    if (configError) err(`\n  The provider refused the request itself: ${configError.slice(0, 300)}`);
+    return configError ? 2 : hardStopped ? 130 : 0;
+  }
   if (SUMMARY) printCounts(after, "after");
   if (after.failed > 0 && SUMMARY) {
     err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}) — fix the cause and re-run with --retry-failed:`);
@@ -869,17 +1180,17 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     tellErr(`\n  ${after.pending} row(s) are still pending: every worker stopped before the pool was empty. Re-run.`);
   }
   if (configError) {
-    if (!SUMMARY && after.failed > before.failed) {
+    if (!SUMMARY && after.failed > before0.failed) {
       err(`\n  failed rows (${Math.min(after.failed, 10)} of ${after.failed}):`);
       await printFailures();
     }
     err(`\n  The provider refused the request itself: ${configError.slice(0, 400)}\n` +
       "  Check the chat endpoint (OB1_CHAT_BASE_URL and OB1_CHAT_API_KEY, or OB1_LLM_BASE_URL and OB1_LLM_API_KEY when those are unset) and OB1_METADATA_MODEL against the provider. " +
       (shapeStopped ? "The thoughts it answered so are failed (listed above): once it is fixed, re-run with --retry-failed."
-        : after.failed > before.failed ? "The rows failed before it are listed above." : "Nothing was marked failed."));
+        : after.failed > before0.failed ? "The rows failed before it are listed above." : "Nothing was marked failed."));
     return 2;
   }
-  if (stopping) return 130;
+  if (stopping) return FOLLOW && !hardStopped ? 0 : 130;
   const incomplete = after.failed > 0 || after.claimed > 0 || (after.pending > 0 && !limitReached());
   return incomplete ? 1 : 0;
 }
@@ -900,11 +1211,12 @@ if (import.meta.main) {
     process.exit(2);
   }
   const limit = cli.has("limit") ? cli.int("limit", { absent: 0, min: 1 }) : undefined;
+  const follow = cli.has("follow") ? cli.int("follow", { absent: 0, bare: 15, min: 1 }) : undefined;
   const sql = openSql(url, { max: workers + 1 });
   let uninstall = () => {};
   await closeThenExit(sql, async () => {
     return run({
-      sql, url, workers, batch, ttl, heartbeat, timeout, limit,
+      sql, url, workers, batch, ttl, heartbeat, timeout, limit, follow,
       job: cli.value("job"),
       status: cli.has("status"),
       dryRun: cli.has("dry-run"),
