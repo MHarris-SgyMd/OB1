@@ -6459,9 +6459,11 @@ once for a model gone missing or a call no probe answers): "working,
 consolidate waiting for the provider mid-pass", a warning naming the
 provider, where it read "its passes running" and "its log says which". The
 provider answering clears it, and so does a period's end. A follower's own row
-(`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`, `heartbeat:retag:…`) carries the word with its
-own name while it waits, and the `workers` row and the follower's own pass
-row (`consolidate pass`, `re-embed pass`, `retag pass`) say it. A follower's start wait stays unsaid: its row does not exist until its
+(`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`,
+`heartbeat:retag:…`) carries the word with its own name while it waits, and
+the `workers` row and the follower's own pass row (`consolidate pass`,
+`re-embed pass`, `retag pass`) say it. A follower's start wait stays unsaid:
+its row does not exist until its
 first pass begins. Since SMD-4254 the sleep's row carries, beside
 `waitingMidPass` naming `reembed`, `reembedWait` while the scheduler leaves
 re-embed waiting on an outage that made a thought a suspect: `since`, the
@@ -6849,10 +6851,11 @@ is failed naming the rule, nothing sent; an answer that is not tags, or a 400,
 413 or 422, is failed and nothing written (but a 400 or 422 to three thoughts
 in a row, none answered between, is the request's shape and stops the run,
 exit 2 — a follower first sends a short note in the same shape, and stops
-only if it is refused too), as is a thought whose metadata is null or no JSON object, before any
-call; a tag key the row holds and the answer leaves out is cleared (a list to
-`[]`, the type keys to null); a provider error is read by `claim-loop.ts`'s rule; an
-edit meanwhile (`STALE_READ`) puts the thought back in the pool. The recorded
+only if it is refused too), as is a thought whose metadata is null or no JSON
+object, before any call; a tag key the row holds and the answer leaves out is
+cleared (a list to `[]`, the type keys to null); a provider error is read by
+`claim-loop.ts`'s rule; an edit meanwhile (`STALE_READ`) puts the thought back
+in the pool. The recorded
 key is the tags' target recipe (PR 3b, every run, as re-embed's model is): a
 tags row made under another model or prompt version is behind it, so a first
 run, or a `--switch-key` to a new model or prompt version, re-tags the corpus
@@ -8188,8 +8191,8 @@ an audit.
 
 One `ob1_config` row per worker and job — `heartbeat:board-sync`,
 `heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3`,
-`heartbeat:reembed:qwen3-embedding:4b@1024`, `heartbeat:retag:qwen2.5:7b@p1` — whose
-value names the `job` (a claim worker's, as given — the restart works that
+`heartbeat:reembed:qwen3-embedding:4b@1024`, `heartbeat:retag:qwen2.5:7b@p1` —
+whose value names the `job` (a claim worker's, as given — the restart works that
 pool), `every_s` (the worker's interval, at least a minute), whether a pass is
 `running`, the last pass's `outcome`, whether the worker has `ended`, and, for
 extraction, the last judged block's malformed answers and whether they passed

@@ -2442,9 +2442,10 @@ else {
    * follower's fresh heartbeat for the key (PR 4a-2), is a run going, unless
    * the key's follower row is stale or ended (a follower gone); no sleep
    * pass runs it yet (PR 4b), so otherwise pending rows wait for a run, one
-   * that stopped or a rebuild's requeue; an earlier key's pool is no worker's.
-   * With nothing unfinished, a backlog waiting is said, with the follower that
-   * takes it where one is stamped.
+   * that stopped or a rebuild's requeue; an earlier key's pool with no live
+   * lease and no follower running it is no worker's. With nothing unfinished, a
+   * backlog waiting is said, with the follower that takes it where one is
+   * stamped.
    */
   const TAG_MODEL = "tag-model";
   const RENV = { ...SQL_ENV, OB1_METADATA_MODEL: TAG_MODEL };
@@ -2478,10 +2479,11 @@ else {
   assert(/Finish it: cd db && OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL; OB1_METADATA_MODEL=tag-model bun retag\.ts --url \$DATABASE_URL --status/.test(fix(rtOther.out, "retag pass")),
          `…under the key's own model where the server's knob names another, since a run under that one is refused (${fix(rtOther.out, "retag pass").trim()})`);
   // A follower of the key (SMD-2298 PR 4a-2): its fresh heartbeat reads running between its polls, ok, with no remedy;
-  // ended, the row's restart, not a one-shot run beside where it would be a second worker.
-  const rtBeat = (extra: Record<string, unknown>, age = "10 seconds") =>
-    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${RT}`}, ${JSON.stringify({ v: 1, job: RT, every_s: 60, running: false, outcome: "ok", ...extra })}, now() - ${age}::interval)
+  // ended, its restart as the workers row says, not a one-shot run beside it, which would be a second worker.
+  const retagBeat = (job: string) => (extra: Record<string, unknown>, age = "10 seconds") =>
+    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${job}`}, ${JSON.stringify({ v: 1, job, every_s: 60, running: false, outcome: "ok", ...extra })}, now() - ${age}::interval)
            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  const rtBeat = retagBeat(RT);
   await rtBeat({});
   const rtFollowed = await run(RENV);
   await rtBeat({ ended: true, outcome: "stopped" });
@@ -2540,9 +2542,7 @@ else {
   // Its follower gone with a lease live (review pass 5): no start here runs that key again — the leases lapse, or are
   // returned, no restart; a follower still running it: a warning, stop it; K's pool beside a stopped follower of
   // another key: the workers row's start, not a one-shot run as well.
-  const oldBeat = (extra: Record<string, unknown>, age = "10 seconds") =>
-    claims`INSERT INTO ob1_config (key, value, updated_at) VALUES (${`heartbeat:${RT_OLD}`}, ${JSON.stringify({ v: 1, job: RT_OLD, every_s: 60, running: false, outcome: "ok", ...extra })}, now() - ${age}::interval)
-           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`;
+  const oldBeat = retagBeat(RT_OLD);
   await claims`SELECT claim_thoughts(${RT_OLD}, 'preflight-old', 1)`;
   await oldBeat({ ended: true, outcome: "stopped" });
   const rtOldLeases = await run(RENV);

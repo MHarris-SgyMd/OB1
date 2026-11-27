@@ -532,7 +532,8 @@ export function restartCommand(worker, job) {
  * preflight's `sleep` row gives it for every kind, where "start it again"
  * would only refuse again (SMD-2752). `worker`, the follower's, where a
  * kind's remedy is another for it: a re-embed follower's model and provider
- * are the embedding endpoint's (SMD-2679).
+ * are the embedding endpoint's (SMD-2679), and a re-tag follower's key and
+ * model are retag.ts's to switch (SMD-2298).
  */
 export function startRefusalRemedy(kind, worker) {
   if (worker === "reembed" && kind === "model") return "pull the embedding model its log names (OB1_EMBEDDING_MODEL), or set OB1_EMBEDDING_MODEL to one the provider serves — the model ob1_config records, since a follower never switches it";

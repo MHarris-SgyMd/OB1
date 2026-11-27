@@ -5231,16 +5231,16 @@ if (configFailed) {
          * lease, or a follower's fresh heartbeat for the key (PR 4a-2), is a
          * run in progress — but a live lease beside the key's follower row
          * stale or ended is a follower gone, its leases named for release; no
-         * sleep pass runs it yet (PR 4b), so otherwise
-         * pending rows wait for a run: one that
-         * stopped, or a text move's rebuild requeued them (150), which nothing
-         * here tells apart. An earlier key's pool is no worker's and counts as
-         * nothing unfinished. With nothing unfinished, a backlog waiting for a
-         * run is said beside "none unfinished": the lineage row counts its
-         * kinds (review pass 1: an earlier pool hid it for good, and every
-         * pending row read as a run that stopped). Since PR 3b the recorded key
-         * is the tags' target recipe, and a row under another recipe is behind
-         * it: where this server tags captures under another key than the one
+         * sleep pass runs it yet (PR 4b), so otherwise pending rows wait for a
+         * run: one that stopped, or a text move's rebuild requeued them (150),
+         * which nothing here tells apart. An earlier key's pool with no live
+         * lease and no follower running it is no worker's and counts as nothing
+         * unfinished. With nothing unfinished, a backlog waiting for a run is
+         * said beside "none unfinished": the lineage row counts its kinds
+         * (review pass 1: an earlier pool hid it for good, and every pending
+         * row read as a run that stopped). Since PR 3b the recorded key is the
+         * tags' target recipe, and a row under another recipe is behind it:
+         * where this server tags captures under another key than the one
          * recorded, a line says what follows (each capture behind it; a plain
          * run here refused, the switch the way forward; or the tree that
          * recorded the key named).
@@ -5322,7 +5322,7 @@ if (configFailed) {
               // none. One killed outright leaves its claims' leases live while its row goes stale: the row is the
               // fresher word, so the follower reads gone, not running.
               const beat = facts.workers?.heartbeats.find((h) => h.worker === "retag" && h.job === key);
-              const follower = beat && !beat.stale && !beat.ended ? beat : undefined;
+              const follower = beat && freshBeat(beat) ? beat : undefined;
               if (beat && !follower && l.live > 0) {
                 unfinished++;
                 // Under another key than K no start here runs this pool again (review pass 5): its leases lapse, or are
