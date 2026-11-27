@@ -4,7 +4,7 @@
 // index.ts), so their assertions hold the MCP server as a REST client to what
 // server-portable answers. Import it after the suite has set its
 // environment: it adds a forwarder key of its own to MCP_ACCESS_KEYS — a
-// forward-scope key, which grants nothing — before the REST core reads it.
+// forward-scope key, which is no caller's — before the REST core reads it.
 
 import { randomBytes } from "node:crypto";
 import { hashKey, routable } from "../server-portable/auth.ts";

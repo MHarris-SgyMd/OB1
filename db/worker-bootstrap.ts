@@ -140,14 +140,14 @@ export async function workerIdentity(
   }
   const hash = hashKey(rawKey);
   // As the server picks (auth.ts authenticate): the first record of the digest
-  // whose scope it admits as a caller's. A forwarder grants nothing and names
+  // whose scope it admits as a caller's. A forwarder is no caller's key and names
   // who carried another key's request (SMD-2284): every server refuses it as a
   // caller, and its scope is one the registry's CHECK does not hold (agents.ts,
   // recordedScope).
   const matching = parseKeyRecords(env.MCP_ACCESS_KEYS).keys.filter((k) => k.sha256 === hash);
   const record = matching.find((k) => CLIENT_SCOPES.includes(k.scope));
   if (!record && matching.length) {
-    return { ok: false, message: `\n  OB1_WORKER_KEY is "${matching[0].name}", a ${matching[0].scope}-scope key — it grants nothing and names no worker; the server refuses it as a caller, and so does this. Give the worker a key of its own: cd server-portable && bun keygen.ts --name <worker> --scope capture (or write).` };
+    return { ok: false, message: `\n  OB1_WORKER_KEY is "${matching[0].name}", a ${matching[0].scope}-scope key — it is no caller's and names no worker; the server refuses it as a caller, and so does this. Give the worker a key of its own: cd server-portable && bun keygen.ts --name <worker> --scope capture (or write).` };
   }
   if (!record) {
     return { ok: false, message: "\n  OB1_WORKER_KEY is not one of the keys in MCP_ACCESS_KEYS. The server would refuse it; so does this." };

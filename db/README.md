@@ -444,7 +444,7 @@ read tool, no update, no delete; `recipes/session-capture-hook`). The column is
 010's record of the scope a key last presented, not a gate; without the widening
 `resolve_agent()` would have refused the row and every capture through such a
 key would have landed without its agent id. Named by ticket for the same reason
-as 044 (SMD-1298). The fourth scope, `forward` (SMD-2284: grants nothing; the MCP
+as 044 (SMD-1298). The fourth scope, `forward` (SMD-2284: no caller's; the MCP
 server's key when it forwards a client's to the REST core), is not added to the
 CHECK: `migrate.ts --reapply` runs 049 again, whose `ADD CONSTRAINT` would then
 fail on a `forward` row. `agents.ts` sends a forwarder's scope as none, so

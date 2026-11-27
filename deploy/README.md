@@ -1346,8 +1346,13 @@ a stack with the `auth` profile also carries the authorization server's tokens:
 "Tokens at the REST core", SMD-2286), never from `?key=`, so a client of `/api` needs a header; a URL-only connector stays
 on `/mcp`. The proxy deletes `x-brain-forwarder` on the way in: a request's
 carrier (SMD-2284) is named only from inside the stack, where the MCP server
-names itself when it forwards a key (SMD-2287's `mcp-server/`). Its writes record their door as
-`open-brain-api`
+names itself when it forwards a key (SMD-2287's `mcp-server/`). For the same
+reason the one route a forwarder's key reaches alone,
+`POST /v1/callers/standing` (SMD-4493), is not reached through `/api`: it
+reads that header. Inside the stack whoever holds the forwarder's key can ask
+it of any key's digest whether that key is revoked or still listed, so the
+forwarder's key is guarded as the stack's env file is. The REST core's writes
+record their door as `open-brain-api`
 (`thought_audit.origin`), the MCP server's at `/mcp` among them, carried by it,
 and the jobs it
 starts are its own (migration 078): its start marks its own unfinished jobs
@@ -2996,8 +3001,8 @@ them with the rest: the coordinator is one of the stack's default services.
   a thought still held is not lost: its lease lapses after 900 s and the next
   run takes it (a thought whose lease lapses three times is recorded failed).
 - **Refusals.** A configuration refusal exits 2: no key, a key
-  `MCP_ACCESS_KEYS` does not hold, a revoked key or one whose scope grants
-  nothing (`forward`), a setting that is not a number the CLI takes, an egress
+  `MCP_ACCESS_KEYS` does not hold, a revoked key or one whose scope is no
+  caller's (`forward`), a setting that is not a number the CLI takes, an egress
   policy that would refuse every call (`OB1_LLM_LOCAL` unset against a host
   Ollama), or (`extract`) a model or prompt version other than the one the
   brain's extraction key records. So does a provider that refuses the
