@@ -239,6 +239,8 @@ export function parseReembedKey(key: string): { model: string; dim: number } | n
 export function poolModelFor(key: string): string | null;
 /** How preflight attributes a claim-table key to db/consolidate.ts (029): `consolidate:<model>@p<version>`. */
 export const CONSOLIDATE_KEY_PREFIX: "consolidate:";
+/** A decide-mode pass key's ending (SMD-3115), `@p<prompt version>d<decide version>`, as a regular expression SQL's reads too. */
+export const DECIDE_KEY_TAIL_SQL: string;
 /** A re-tag pool key's prefix (SMD-2298): `retag:<metadata model>@p<prompt version>`. */
 export const RETAG_KEY_PREFIX: "retag:";
 /** `retag:<model>@p<promptVersion>` — db/retag.ts's pool for the tags' extractor at a prompt version. */

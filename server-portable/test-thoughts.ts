@@ -25,8 +25,8 @@ import { MEND_BATCH, MEND_SCAN, MENDER_ACTOR, mendIntervalFrom, mendOnce, newMen
 import { API_DOOR } from "./api.ts";
 import { DEFAULT_PG_POOL, poolSizeFrom } from "./store-sql.ts";
 import { buildMessages, describeExtractWindow, documentHeader, ENTITY_EXTRACTION_PROMPT, HEADER_CHARS, mergeExtractions, parseExtraction, reasoningOn, RunawayDetector, RUNAWAY_REPEATS, windowingFor, wrapContent, type ExtractionWindow } from "./entities.ts";
-import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type TokenLogprob } from "./consolidate.ts";
-import { capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
+import { actorKindOf, buildJudgeMessages, cleanForDisplay, consolidateKey, CONSOLIDATE_PROMPT, CONSOLIDATE_PROMPT_VERSION, CONTENT_LIMIT_CHARS, DEFAULT_MIN_CONFIDENCE, evidenceIn, judgedRecipe, outdatesConfidence, ownWords, parseJudgement, proposalConfidence, proposalVerdict, REASON_MAX, relationConfidence, relationVerdict, staleStandingOf, staleStandings, staleStandingsText, staleStandingText, valueDistribution, VERDICTS, withoutMarkdown, wrapSide, type Judgement, type StaleStandingRow, type TokenLogprob } from "./consolidate.ts";
+import { asidesOf, capJudgement, checkParts, consolidatePassKey, decideJudgement, decideKey, decidePair, DECIDE_PROMPT, DECIDE_VERSION, foldEvolves, LINK_ANSWER, LINK_HEAD, linkMessages, MEDIATED_TEST, movedWords, onlyQuoted, parseLink, parseParts, partAnswer, isDecideKey, decideKeyModels, DECIDE_KEY_TAIL_SQL, partsClaimsFor, partsStanding, partsStandingSql, partsWaitWords, repooled, settleAnswer, settleRefusal, unsettledWords, PART_RULE, PART_WORDS, partJudged, partWriteFault, PARTS_HEAD, PARTS_MAX, PARTS_RULES, PARTS_RULES_SHA256, partsJudgement, partsMessages, partsNote, partStands, partsToRecord, PASS_WRITER, PutBacks, quoteIn, RECORD_RULE, refusedWords, stands, verdictDistribution, wholeOf, WRITER_HEAD, writerMessages, writerRules } from "./consolidate-decide.ts";
 import { resolveJevConfig } from "./jev.ts";
 import { promptHash, proposalRecipe, subjectRecipe } from "./lineage.ts";
 import { askOwnSubject, heldAs, HOOK_NOT_TICKETS, isTicket, metadataTicket, type NamedIn, OWN_ANSWER, OWN_HEAD, OWN_RULES, ownSubjectMessages, ownSubjectsOf, ruleSubject, sessionHeaderTickets, SUBJECT_ANSWERS_READ, SUBJECT_PROMPT_VERSION, SUBJECT_SET_MAX, subjectCurrent, subjectKey, subjectKeyValid, subjectModelKey, subjectPoolKey, subjectPrompt, subjectReasoning, subjectReasoningOn, subjectRuleKey, TICKETS_FROM, unscopedKey } from "./subject.ts";
@@ -2190,6 +2190,19 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   const shapes = parseParts(ans([part, { ...part, in: "C" }, { ...part, word: "outdates" }, { ...part, stale: "" }, { ...part, shown_by: 7 }, { ...part, reason: "  " }, "a string", null, [part]]));
   assert(shapes.parts.length === 1 && shapes.dropped === 8 && !shapes.malformed,
     `an item with no side, a word outside the eight, a quote or the reason missing, or no object at all is dropped and counted, and the rest stand (${shapes.parts.length} kept, ${shapes.dropped} dropped)`);
+  // Review pass 4: the statement each dropped or over item quotes is kept, with the thought the item says holds it,
+  // for the pass's test of each part that waits (PartAside): is its statement named again in an item that makes no
+  // row? An item that quotes no statement names none, and is not among them (one filler item kept every waiting part
+  // of its pair and failed the claim at each retry, while the rule was a count of the answer's items).
+  const fillers = parseParts(ans([{}, "none", null, { in: "A", stale: "", shown_by: "", word: "", reason: "" }, { in: "A", stale: "   ", shown_by: part.shown_by, word: "implements", reason: "r" }, { ...part, word: "fixes" }, { ...part, in: "C" }]));
+  const pastTheCap = parseParts(ans([...Array.from({ length: 12 }, (_, i) => ({ ...part, stale: `statement ${i}` })), {}, { ...part, stale: "a thirteenth" }]));
+  const manyAside = parseParts(ans([...Array.from({ length: 12 }, (_, i) => ({ ...part, stale: `statement ${i}` })), ...Array.from({ length: 14 }, (_, i) => ({ ...part, stale: `past the cap ${i}` }))]));
+  assert(fillers.parts.length === 0 && fillers.dropped === 7 && JSON.stringify(fillers.aside) === JSON.stringify([{ holder: "older", statement: part.stale }, { holder: null, statement: part.stale }]) && fillers.asideMore === 0
+      && JSON.stringify(shapes.aside.map((a) => a.holder)) === '[null,"older","older","older"]' && shapes.aside.every((a) => a.statement === part.stale)
+      && one.aside.length === 0 && one.asideMore === 0 && parseParts("not json").aside.length === 0
+      && pastTheCap.parts.length === 12 && pastTheCap.over === 2 && JSON.stringify(pastTheCap.aside) === '[{"holder":"older","statement":"a thirteenth"}]'
+      && manyAside.over === 14 && manyAside.aside.length === PARTS_MAX && manyAside.aside[11].statement === "past the cap 11" && manyAside.asideMore === 2,
+    `…and the statement each item that makes no part quotes is kept beside the thought it names, null where the item names no side: of a dropped item and of one past the twelve read, twelve of them at most and the rest counted; an empty object, a bare word, a null and an item whose statement is empty or blank quote none (${JSON.stringify(fillers.aside)}; ${shapes.aside.length} of ${shapes.dropped} dropped; past the cap ${JSON.stringify(pastTheCap.aside)}; ${manyAside.aside.length} kept and ${manyAside.asideMore} more)`);
   assert(parseParts(ans([part], "yes")).falls === "older" && parseParts(ans([part], "no", " YES ")).falls === "newer" && parseParts(ans([])).falls === null && parseParts(ans([])).parts.length === 0 && !parseParts(ans([])).malformed,
     "the thought it says falls whole: A the older, B the newer, or neither; an empty list is an answer");
   const unread = ["not json", "{}", "[]", ans("none"), ans([part], "yes", "yes"), ans([part], true, false), ans([part], "maybe"), JSON.stringify({ parts: [part], a_falls: "no" })].map((raw) => parseParts(raw));
@@ -2437,21 +2450,21 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
       && failedFirst[0].shown_found === false && failedFirst[0].shown === null && failedFirst[1].repeated === false && partsToRecord(failedFirst).map((r) => r.index).join() === "1",
     "…a quote that failed the check is not read back, its words in the thought or not, and its naming does not make the statement seen");
   const pp = { unrelated: 0.02, related: 0.2, evolves: 0.08, duplicate: 0, outdates: 0.7 };
-  const pj = partsJudgement(pp, named, chk);
+  const pj = partsJudgement(pp, named, chk, mdOlder, mdNewer);
   assert(pj.verdict === "related" && pj.confidence === 0.28 && pj.foldedEvolves === true && pj.supersedes === "unknown" && proposalVerdict(pj) === null && relationVerdict(pj) === "related" && pj.parts?.length === 3 && !pj.malformed
       && pj.reason === "the writer named 3 settled parts, and neither thought falls whole" && pj.probabilities?.verdict?.p.outdates === 0.7,
     "parts and no whole: H2O's best verdict that proposes nothing, evolves folded in, its relation under the same floor, and the parts the judgement's to record");
   // The showing words typed in small letters, where the thought has a capital: the proposal's evidence is the typing, as a proposal's quote always was, and the row's is the thought's own run.
   const A1typed = { ...A1, shown_by: "cutover done on thursday" };
-  const fallsA = parseParts(ans([A1typed, A2], "yes")), wj = partsJudgement(pp, fallsA, checkParts(fallsA, mdOlder, mdNewer));
+  const fallsA = parseParts(ans([A1typed, A2], "yes")), wj = partsJudgement(pp, fallsA, checkParts(fallsA, mdOlder, mdNewer), mdOlder, mdNewer);
   assert(wj.verdict === "outdates" && wj.supersedes === "newer" && wj.confidence === 0.7 && wj.evidence === "cutover done on thursday" && wj.evidenceFound === true && proposalVerdict(wj) === "newer_supersedes_older"
       && wj.reason === `the writer says the older thought falls whole; a part that shows it: ${A1.reason}` && proposalConfidence(wj).confidence === 0.7 && wj.parts?.length === 2 && wj.parts[0].shown_by === "Cutover done on Thursday",
     "a thought the writer says falls whole, shown by a part in it: an outdates with the other thought current, that part's showing words as typed its evidence, its reason said to be one part's, and its parts recorded beside the proposal");
-  const longReason = partsJudgement(pp, parseParts(ans([{ ...A1, reason: "r".repeat(390) }], "yes")), checkParts(parseParts(ans([{ ...A1, reason: "r".repeat(390) }], "yes")), mdOlder, mdNewer));
+  const longReason = partsJudgement(pp, parseParts(ans([{ ...A1, reason: "r".repeat(390) }], "yes")), checkParts(parseParts(ans([{ ...A1, reason: "r".repeat(390) }], "yes")), mdOlder, mdNewer), mdOlder, mdNewer);
   assert([...longReason.reason].length === REASON_MAX && longReason.reason.startsWith("the writer says the older thought falls whole; a part that shows it: rrr"), "…cut to the bound a reason is kept to");
-  const fallsB = parseParts(ans([B1], "no", "yes")), wb = partsJudgement(pp, fallsB, checkParts(fallsB, mdOlder, mdNewer));
+  const fallsB = parseParts(ans([B1], "no", "yes")), wb = partsJudgement(pp, fallsB, checkParts(fallsB, mdOlder, mdNewer), mdOlder, mdNewer);
   assert(wb.verdict === "outdates" && wb.supersedes === "older" && proposalVerdict(wb) === "older_supersedes_newer" && wb.evidence === "pending review", "…the newer thought falling: the older current");
-  const wrongSide = parseParts(ans([A1], "no", "yes")), noShow = partsJudgement(pp, wrongSide, checkParts(wrongSide, mdOlder, mdNewer));
+  const wrongSide = parseParts(ans([A1], "no", "yes")), noShow = partsJudgement(pp, wrongSide, checkParts(wrongSide, mdOlder, mdNewer), mdOlder, mdNewer);
   assert(noShow.verdict === "related" && proposalVerdict(noShow) === null && noShow.parts?.length === 1 && noShow.reason === "the writer said the newer thought falls whole, and no part in it stands",
     "a whole said of a thought no standing part is in proposes nothing, as a proposal whose quotes failed did, and the part that stands is still recorded");
   // A whole against a part that stands the other way (review pass 4; the maintainer's decision, 2026-11-22). A
@@ -2459,8 +2472,8 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   // held back, whichever thought it was said of, and both parts are still recorded. A part of the other thought that
   // does not stand holds nothing back; nor does a second part in the thought said to fall (fallsA, above).
   const againstA = parseParts(ans([A1, B1], "yes")), againstB = parseParts(ans([A1, B1], "no", "yes"));
-  const heldA = partsJudgement(pp, againstA, checkParts(againstA, mdOlder, mdNewer)), heldB = partsJudgement(pp, againstB, checkParts(againstB, mdOlder, mdNewer));
-  const otherFails = parseParts(ans([A1, { ...B1, shown_by: "never written there" }], "yes")), stillWhole = partsJudgement(pp, otherFails, checkParts(otherFails, mdOlder, mdNewer));
+  const heldA = partsJudgement(pp, againstA, checkParts(againstA, mdOlder, mdNewer), mdOlder, mdNewer), heldB = partsJudgement(pp, againstB, checkParts(againstB, mdOlder, mdNewer), mdOlder, mdNewer);
+  const otherFails = parseParts(ans([A1, { ...B1, shown_by: "never written there" }], "yes")), stillWhole = partsJudgement(pp, otherFails, checkParts(otherFails, mdOlder, mdNewer), mdOlder, mdNewer);
   assert(heldA.verdict === "related" && proposalVerdict(heldA) === null && heldA.parts?.length === 2 && heldA.reason === "the writer said the older thought falls whole, and a part in the other thought stands against it"
       && heldB.verdict === "related" && proposalVerdict(heldB) === null && heldB.parts?.length === 2 && heldB.reason === "the writer said the newer thought falls whole, and a part in the other thought stands against it"
       && stillWhole.verdict === "outdates" && stillWhole.supersedes === "newer" && stillWhole.parts?.length === 1,
@@ -2469,21 +2482,70 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   assert(wholes[0]?.shows?.stale === A1typed.stale && wholes[0].held === undefined && wholes[1]?.held === "no part" && wholes[1].shows === undefined && wholes[2]?.held === "against" && wholes[2].shows === undefined
       && wholes[3]?.held === "against" && wholes[4] === null,
     `what a whole the writer said comes to: the part that shows it, no part in it, a part against it, and nothing where it said none (${wholes.map((w) => (w === null ? "none" : w.held ?? "shown")).join()})`);
-  const noneNamed = partsJudgement(pp, parseParts(ans([])), []), failed = parseParts(ans([{ ...A1, stale: "never written there" }])), noneStand = partsJudgement(pp, failed, checkParts(failed, mdOlder, mdNewer));
-  const garbled = partsJudgement(pp, parseParts("nope"), []);
+  const noneNamed = partsJudgement(pp, parseParts(ans([])), [], mdOlder, mdNewer), failed = parseParts(ans([{ ...A1, stale: "never written there" }])), noneStand = partsJudgement(pp, failed, checkParts(failed, mdOlder, mdNewer), mdOlder, mdNewer);
+  // Review pass 4: the statements the answer quotes in items that make no row, on the judgement (`aside`), for the
+  // pass's test of each part that waits. Review pass 5: each read back in its thought's own characters, as a
+  // recorded part's statement is, which is what the store holds and compares (asidesOf). A read item that does not
+  // stand, a dropped one, one that names no side (read in each thought). Not a part that stands, nor a repeat of
+  // one; not a statement that is in neither thought; one statement once; nothing where every item stands.
+  const asideAnswer = parseParts(ans([A1, { ...B1, shown_by: "never written there" }, { ...A1, shown_by: "never written there" }, { ...A2, stale: "never written there" }, { ...A1, word: "fixes" }, { stale: A2.stale, shown_by: A2.shown_by, word: "updates", reason: "no side" }, {}, A1]));
+  const A1own = ownWords(A1.stale, mdOlder);
+  const asideJ = partsJudgement(pp, asideAnswer, checkParts(asideAnswer, mdOlder, mdNewer), mdOlder, mdNewer);
+  const A2own = ownWords(A2.stale, mdOlder);
+  const asideMany = parseParts(ans([...Array.from({ length: 12 }, () => A1), ...Array.from({ length: 13 }, (_, i) => ({ ...A2, stale: `past the cap ${i}` }))]));
+  assert(A1own !== null && A1own !== A1.stale
+      && A2own !== null && A2own !== A2.stale
+      && JSON.stringify(asideJ.aside) === JSON.stringify([{ holder: "newer", statement: "the review passed" }, { holder: "older", statement: A1own }, { holder: "older", statement: A2own }])
+      && asideJ.asideUnread === undefined && asideJ.asideMore === undefined && asideJ.parts?.length === 1 && noneNamed.aside === undefined && noneNamed.asideMore === undefined
+      && partsJudgement(pp, named, chk, mdOlder, mdNewer).aside?.length === 1
+      && partsJudgement(pp, asideMany, checkParts(asideMany, mdOlder, mdNewer), mdOlder, mdNewer).asideMore === 1 && partsJudgement(pp, asideMany, checkParts(asideMany, mdOlder, mdNewer), mdOlder, mdNewer).aside === undefined,
+    `the judgement carries the statements its answer quotes in items that make no row, each in its thought's own characters: a read item whose showing words fail; a dropped item's, typed in the writer's own marks, once with the read item that names the same statement; one with no side, read in the thought that holds it; none for a statement that is in neither thought, no part that stands, no repeat of one, and how many more there were than are kept (${JSON.stringify(asideJ.aside)})`);
+  // Review pass 5, the typings the fifth review tried. The store compares a statement by case and white space alone,
+  // so the aside must be the run a recorded part's statement would be: a closing full stop, other capitals, straight
+  // quotes for the thought's curly ones and no markdown all read back as the one run. A statement given as the OTHER
+  // thought's is in no thought it names. One whose quote is in both thoughts fails the check and is still read back
+  // in the thought it names. (Compared as typed, the first four were each another statement, and the part was removed.)
+  const typings = ['the cutover is planned for "Friday" - pending review.', 'THE CUTOVER is planned for "Friday" - pending review', "The cutover is planned for “Friday” — pending review", "the **cutover** is planned for \"Friday\" - pending review"];
+  const typed5 = typings.map((t) => asidesOf(parseParts(ans([{ ...A1, stale: t, word: "fixes" }])), [], mdOlder, mdNewer));
+  const otherSide = asidesOf(parseParts(ans([{ ...A1, in: "B", word: "fixes" }])), [], mdOlder, mdNewer);
+  const bothAnswer = parseParts(ans([{ ...A1, stale: "Latency p95 is" }]));
+  const inBoth5 = asidesOf(bothAnswer, checkParts(bothAnswer, mdOlder, mdNewer), mdOlder, mdNewer);
+  assert(typed5.every((a) => JSON.stringify(a) === JSON.stringify({ aside: [{ holder: "older", statement: A1own }], unread: [], more: 0 }))
+      && JSON.stringify(otherSide) === '{"aside":[],"unread":[],"more":0}'
+      && JSON.stringify(inBoth5) === JSON.stringify({ aside: [{ holder: "older", statement: ownWords("Latency p95 is", mdOlder) }], unread: [], more: 0 }),
+    `a statement quoted in an item that makes no row is read back as a recorded part's is: a closing full stop, other capitals, the thought's own curly quotes and its markdown each give the one run; given as the other thought's it names none; and one that fails the check for being in both thoughts is still read back in its own (${typed5.map((a) => a.aside.map((x) => x.statement).join("|")).join(" ; ")})`);
+  // …and one that is in its thought and cannot be read back: the pass cannot say which statement it names, so the
+  // thought is given as unread (`foreign`, above: a link's target and struck words of the writer's own, and a
+  // number the thought never wrote). Read whole or dropped for its word, the same.
+  const notBack = asidesOf(foreignAnswer("no"), foreign, splitFirst, newer.content);
+  const notBackDropped = asidesOf(parseParts(ans([{ ...part, stale: "blocked on the export, at 106", shown_by: "shipped on Monday", word: "fixes" }])), [], splitFirst, newer.content);
+  const unreadJ = partsJudgement(pp, foreignAnswer("no"), foreign, splitFirst, newer.content);
+  assert(JSON.stringify(notBack) === '{"aside":[],"unread":["older"],"more":0}' && JSON.stringify(notBackDropped) === '{"aside":[],"unread":["older"],"more":0}'
+      && JSON.stringify(unreadJ.asideUnread) === '["older"]' && unreadJ.aside === undefined,
+    `a statement that is in its thought and is not read back names none the pass can tell: its thought is given as unread, for a read item and a dropped one, and the judgement carries it (${JSON.stringify(notBack)})`);
+  // …and beside a whole as beside none: the judgement that proposes a whole carries them too (the fifth review:
+  // with the whole's return left without them every row passed, and a part named again beside a whole was removed).
+  const wholeAside = parseParts(ans([A1typed, { ...A2, word: "fixes" }, { ...part, stale: "blocked on the export, at 106", in: "A", word: "fixes" }], "yes"));
+  const wholeJ = partsJudgement(pp, wholeAside, checkParts(wholeAside, mdOlder, mdNewer), mdOlder, mdNewer);
+  const wholeUnreadAnswer = parseParts(ans([{ ...part, stale: "blocked on the export", shown_by: "shipped on Monday" }, { ...part, stale: "blocked on the export, at 106", shown_by: "shipped on Monday", word: "fixes" }], "yes"));
+  const wholeUnreadJ = partsJudgement(pp, wholeUnreadAnswer, checkParts(wholeUnreadAnswer, splitFirst, newer.content), splitFirst, newer.content);
+  assert(wholeJ.verdict === "outdates" && JSON.stringify(wholeJ.aside) === JSON.stringify([{ holder: "older", statement: A2own }]) && wholeJ.asideUnread === undefined
+      && wholeUnreadJ.verdict === "outdates" && JSON.stringify(wholeUnreadJ.asideUnread) === '["older"]',
+    `…and a judgement that proposes a whole carries them as one that proposes none does (${wholeJ.verdict}; ${JSON.stringify(wholeJ.aside)}; ${wholeUnreadJ.verdict}, unread ${JSON.stringify(wholeUnreadJ.asideUnread)})`);
+  const garbled = partsJudgement(pp, parseParts("nope"), [], mdOlder, mdNewer);
   assert(noneNamed.verdict === "related" && noneNamed.parts === undefined && noneNamed.reason === "the writer named no settled part" && noneStand.parts === undefined && noneStand.reason === "the writer's quotes did not check out"
       && garbled.verdict === "related" && !garbled.malformed && garbled.reason === "the writer's answer was not JSON of the expected shape",
     "no part named, no quote that checks, or an answer not read: nothing to record, said, and H2O's verdict stands");
   // A part that passes its quotes and is not read back stands for nothing: it is not recorded, and it shows no whole.
-  const unreadBack = partsJudgement(pp, foreignAnswer("no"), foreign), unreadWhole = partsJudgement(pp, foreignAnswer("yes"), checkParts(foreignAnswer("yes"), splitFirst, newer.content));
+  const unreadBack = partsJudgement(pp, foreignAnswer("no"), foreign, splitFirst, newer.content), unreadWhole = partsJudgement(pp, foreignAnswer("yes"), checkParts(foreignAnswer("yes"), splitFirst, newer.content), splitFirst, newer.content);
   assert(unreadBack.verdict === "related" && unreadBack.parts === undefined && unreadBack.reason === "no part the writer named was read back in its thought's own characters"
       && unreadWhole.verdict === "related" && proposalVerdict(unreadWhole) === null && unreadWhole.parts === undefined && unreadWhole.reason === "the writer said the older thought falls whole, and no part in it stands",
     "…parts that pass their quotes and are not read back in their thoughts' own characters: nothing to record, said so, and no whole is shown by one");
   // What the answer held that was not read as a part goes with the judgement, for the dump: a whole's as any other's.
-  const wholeUnread = parseParts(ans([A1typed, { in: "C", stale: "x" }], "yes")), wu = partsJudgement(pp, wholeUnread, checkParts(wholeUnread, mdOlder, mdNewer));
+  const wholeUnread = parseParts(ans([A1typed, { in: "C", stale: "x" }], "yes")), wu = partsJudgement(pp, wholeUnread, checkParts(wholeUnread, mdOlder, mdNewer), mdOlder, mdNewer);
   assert(wu.verdict === "outdates" && wu.unread?.length === 1 && wu.unread[0].includes('"in":"C"') && wj.unread === undefined && pj.unread === undefined && garbled.unread?.length === 1 && garbled.unread[0] === "nope",
     "what was not read as a part is the judgement's to dump, where a whole stands as where none does, and absent where every item was read");
-  const threadedParts = partsJudgement({ unrelated: 0.05, related: 0.1, evolves: 0.3, duplicate: 0, outdates: 0.55 }, parseParts(ans([])), []);
+  const threadedParts = partsJudgement({ unrelated: 0.05, related: 0.1, evolves: 0.3, duplicate: 0, outdates: 0.55 }, parseParts(ans([])), [], mdOlder, mdNewer);
   assert(threadedParts.verdict === "related" && threadedParts.confidence === 0.4 && threadedParts.reason === "the writer named no settled part; evolves comes from the work threads (SMD-3306), so the pair is related",
     "…with the threads' words after the writer's where the fold moved the verdict, as before");
   // The note a recipe keeps (partsNote), and one part's own (partJudged).
@@ -2588,6 +2650,149 @@ console.log("\n[15] Decide mode (SMD-3115): the tier's verdict; on its outdates 
   assert(refusedWords("OLD", ["record_settled_part: first"]) === "pair with OLD: a settled part was refused — record_settled_part: first"
       && refusedWords("OLD", ["record_settled_part: first", "record_settled_part: second", "record_settled_part: third"]) === "pair with OLD: 3 settled parts were refused — record_settled_part: first",
     "a pair's refused parts are one problem on the claim: how many, and the store's words for the first");
+  // The settle of a stale part (SMD-4446 PR 2b-2). What the store answered, as the pass knows its five answers
+  // (settleAnswer): anything else is unknown, with the word cut as a write's is. What a call that threw was
+  // (settleRefusal): the store's own refusal by its name, its words kept and cut to 200, and null for anything else,
+  // a part write's refusal among them. And the clause a thought's claim carries for the parts not removed.
+  const settled = [{ ok: true, action: "removed", id: "x", was: "stale" }, { ok: false, error: "NOT_FOUND", id: "x" }, { ok: false, error: "DECIDED", id: "x", status: "rejected" },
+    { ok: false, error: "EDITED_SINCE", older_edited: true, newer_edited: false }, { ok: false, error: "NOT_STALE", id: "x" }].map((r) => JSON.stringify(settleAnswer(r)));
+  const unsettledAnswers = [{ ok: false, error: 'HELD "by" a later store' }, { ok: true, action: "archived" }, { ok: false, action: "removed" }, { ok: true, error: "DECIDED" }, { ok: true, action: "recorded" }, { ok: true }, {}, null, undefined, "removed", 7,
+    { ok: "true", action: "removed" }, { ok: false, error: "LATER_" + "y".repeat(60) }].map((r) => (settleAnswer(r) as { unknown?: string }).unknown);
+  assert(settled.join() === '{"known":"removed"},{"known":"NOT_FOUND"},{"known":"DECIDED"},{"known":"EDITED_SINCE"},{"known":"NOT_STALE"}'
+      && unsettledAnswers.join("|") === `HELDbyalaterstore|archived|removed|DECIDED|recorded|no word|no word|no word|no word|no word|no word|removed|LATER_${"y".repeat(34)}`,
+    `the settle's five answers are known by their word and their ok together; any other is unknown, said with the word it gave, cut as a write's is (${unsettledAnswers.join("|")})`);
+  const settleIsolation = settleRefusal(pgError("0A000", "settle_stale_part must run under READ COMMITTED; this transaction is REPEATABLE READ"));
+  assert(settleIsolation === "settle_stale_part must run under READ COMMITTED; this transaction is REPEATABLE READ"
+      && settleRefusal(pgError("22023", "settle_stale_part: " + "x".repeat(500)))?.length === 200
+      && settleRefusal(pgError("0A000", "record_settled_part must run under READ COMMITTED; this transaction is SERIALIZABLE")) === null && settleRefusal(pgError("42883", "function settle_stale_part(uuid, text, text) does not exist")) === null
+      && settleRefusal(pgError("42501", "permission denied for table settled_parts")) === null && settleRefusal(pgError("40P01", "deadlock detected")) === null && settleRefusal(pgError("0A000", "settle_stale_parts_later must run elsewhere")) === null
+      && settleRefusal(new Error("Connection closed")) === null && settleRefusal("settle_stale_part: a string") === null && settleRefusal(null) === null,
+    "a settle that threw is the store's own refusal where its words begin with the function's name, kept and cut to 200; a missing function or grant, a deadlock, another function's refusal, a lost connection and a value that is no error are none");
+  assert(unsettledWords([]) === "" && unsettledWords(["settle_stale_part: first"]) === "a settled part of a moved text was not removed — settle_stale_part: first"
+      && unsettledWords(["settle_stale_part: first", "the answer could not be read"]) === "2 settled parts of a moved text were not removed — settle_stale_part: first",
+    "a thought's waiting parts that were not removed are one clause of its claim's error: how many, and why for the first; none is no clause");
+  // Where the parts that wait stand, in the status lines' words (partsWaitWords, review pass 1): how many a
+  // decide-mode run takes up, then those that wait for something else, each with what it waits for; nothing where
+  // none waits. A run judges the pair of a part it takes up, or removes the part where nothing will judge its pair,
+  // and the words say both (review pass 2: "judges the pair of 0 again", and "judges" of a part removed unjudged).
+  const RUN = "a decide-mode run of the pass (bun db/consolidate.ts)";
+  const KEYED = { under: "$1" } as const;
+  const NONE = { stale: 0, moved: 0, vector: 0, held: 0, failed: 0 };
+  const waitsAll = partsWaitWords({ stale: 2, moved: 5, vector: 1, held: 2, failed: 3 }, KEYED);
+  assert(partsWaitWords(NONE, "any") === "" && partsWaitWords(NONE, "unread") === "" && partsWaitWords(NONE, KEYED) === ""
+      && partsWaitWords({ stale: 0, moved: 4, vector: 0, held: 0, failed: 0 }, "any") === `${RUN} takes up 4, the pair judged again or, where nothing will judge it again, the part removed`
+      && partsWaitWords({ stale: 1, moved: 0, vector: 1, held: 0, failed: 0 }, "any") === `${RUN} takes up none as things stand; 1 wait for a vector`
+      && waitsAll === `${RUN} takes up 1, the pair judged again or, where nothing will judge it again, the part removed; 1 wait for a vector; 2 wait for a rebuild, their pair holding a proposal at a moved text that none has set stale; 3 wait for --retry-failed, their thought's claim under the pass's key having failed`,
+    `the parts that wait are placed in words: those a run takes up, its pair judged again or the part removed, then those waiting for a vector, a rebuild or --retry-failed, and nothing where none waits (${waitsAll})`);
+  // A failed claim by how the read read it (review pass 2): under the pass's key; under any decide-mode key, the
+  // keys named, for a reader that knows none; or not read at all, said so, for a role that may not read the claims.
+  const waitsAny = partsWaitWords({ stale: 0, moved: 3, vector: 0, held: 0, failed: 2, failed_keys: ["consolidate:a@p4d5", "consolidate:b@p4d6"] }, "any");
+  const waitsUnread = partsWaitWords({ stale: 0, moved: 3, vector: 1, held: 0, failed: 0, failed_keys: [] }, "unread");
+  assert(waitsAny === `${RUN} takes up 1, the pair judged again or, where nothing will judge it again, the part removed; 2 wait behind a claim of their thought that failed in a pass under consolidate:a@p4d5, consolidate:b@p4d6 (bun db/consolidate.ts --retry-failed, in decide mode with that key's decider and writer: a judge-mode run returns no such claim)`
+      && waitsUnread === `${RUN} takes up 2, the pair judged again or, where nothing will judge it again, the part removed; 1 wait for a vector; a claim that failed is not read (this role holds no SELECT on thought_work_claims), and a part behind one is counted the run's`,
+    `…a failed claim read under any key names the keys and says the retry is a decide-mode run's, the keys being decide mode's alone, and one not read is said to be not read (${waitsAny} | ${waitsUnread})`);
+  // …and the read itself: under the pass's key it compares the key given; under any it reads the pass's decide-mode
+  // keys, by the prefix and the ending, and gathers them; and unread it names no claims table at all, so a role
+  // without SELECT there can run it.
+  const [standKey, standAny, standUnread] = [partsStandingSql(undefined, KEYED), partsStandingSql(undefined, "any"), partsStandingSql(5, "unread")];
+  const ANY_KEY = "c.work_type LIKE 'consolidate:%' AND c.work_type ~ '@p[0-9]+d[0-9]+$' AND c.status = 'failed'";
+  assert(/c\.work_type = \$1 AND c\.status = 'failed'/.test(standKey) && !/LIKE 'consolidate:%'/.test(standKey) && /ARRAY\[\]::text\[\] AS failed_keys/.test(standKey)
+      && standAny.split(ANY_KEY).length === 3 && /array_agg\(DISTINCT c\.work_type ORDER BY c\.work_type\)/.test(standAny)
+      && !/thought_work_claims/.test(standUnread) && !/THEN 'failed'/.test(standUnread) && /THEN 'failed'/.test(standKey) && /THEN 'failed'/.test(standAny) && /ELSE 'next' END AS standing/.test(standUnread) && /LIMIT 5\b/.test(standUnread),
+    "the standing read places a part behind a failed claim under the key it is given, or under any decide-mode key of the pass with the keys gathered, or reads no claim, naming no claims table");
+  // Review pass 3. The keyless read's pattern for a decide-mode key is isDecideKey's own: a judge-mode key's failed
+  // claim keeps no part from a decide run, and the read took one for a claim that does. The pattern holds no
+  // backslash, which a template literal would eat on its way to the server.
+  const tail = new RegExp(DECIDE_KEY_TAIL_SQL);
+  const keysTried = [decideKey("h2o", "writer"), consolidateKey("judge"), `${decideKey("h2o", "writer")}x`, "consolidate:m@p4d", "consolidate:m@pd6", "consolidate:m@p12d345", "consolidate:m@p4"];
+  assert(keysTried.every((k) => tail.test(k) === isDecideKey(k)) && tail.test(keysTried[0]) && !tail.test(keysTried[1]) && tail.test(keysTried[5]) && !DECIDE_KEY_TAIL_SQL.includes("\\")
+      && standAny.includes(`c.work_type ~ '${DECIDE_KEY_TAIL_SQL}'`),
+    `the keyless read knows a decide-mode key by isDecideKey's own ending, on a decide key, a judge key and five near misses, with no backslash in it (${keysTried.map((k) => `${k} ${tail.test(k)}`).join(", ")})`);
+  // A reader that knows the pass's key reads a failed claim under it where the key is decide mode's, and as one that
+  // knows none where it is judge mode's: the pass's own status and preflight both run in judge mode too.
+  const [forDecide, forJudge] = [partsClaimsFor(decideKey("h2o", "writer"), "$7"), partsClaimsFor(consolidateKey("judge"), "$7")];
+  assert(JSON.stringify(forDecide) === '{"under":"$7"}' && forJudge === "any",
+    `a reader with a decide-mode key reads a failed claim under it, by the SQL it gives for the key, and one with a judge-mode key reads as a reader with none (${JSON.stringify(forDecide)}, ${JSON.stringify(forJudge)})`);
+  // The read and its words from one value (partsStanding): given apart, a caller out of step printed "under" and no key.
+  const P3 = { stale: 0, moved: 3, vector: 0, held: 0, failed: 2, failed_keys: ["consolidate:a@p4d5"] };
+  const readers = [KEYED, "any", "unread"] as const;
+  assert(readers.every((c) => partsStanding(c).sql === partsStandingSql(undefined, c) && partsStanding(c).words(P3) === partsWaitWords(P3, c)) && partsStanding("unread", 5).sql === standUnread
+      && new Set(readers.map((c) => partsStanding(c).sql)).size === 3 && new Set(readers.map((c) => partsStanding(c).words(P3))).size === 3,
+    "the read and its words come from one value, each of the three readers' its own");
+  // The bounded read, preflight's: the pending parts tested for a moved text come from one bounded read of them,
+  // which the count beside it reads too, and `cut` says whether that bound or the bound on the parts placed was
+  // reached. A read with no bound has no such source and says false. `placed` is materialized in each.
+  const standBound = partsStandingSql(7, KEYED);
+  assert(/pend AS MATERIALIZED \(SELECT id, older_id, newer_id, status, older_fingerprint, newer_fingerprint FROM public\.settled_parts WHERE status = 'pending' LIMIT 7\)/.test(standBound)
+      && /SELECT s\.id FROM pend s JOIN/.test(standBound) && standBound.includes("((SELECT count(*) FROM pend) >= 7 OR (SELECT count(*) FROM w) >= 7) AS cut") && /\) x LIMIT 7\)/.test(standBound)
+      && standKey.includes(", false AS cut") && !/\bpend\b/.test(standKey) && /SELECT s\.id FROM public\.settled_parts s JOIN/.test(standKey)
+      && [standKey, standAny, standUnread, standBound].every((q) => q.includes("placed AS MATERIALIZED ("))
+      && partsStanding(KEYED, 7).sql === standBound && partsStanding("any", 7).sql === partsStandingSql(7, "any") && /LIMIT 7\)/.test(partsStanding("any", 7).sql) && !/LIMIT/.test(partsStanding(KEYED).sql),
+    "the bounded read tests the pending parts of one bounded source, counts that source and the parts placed against the bound, and says whether either was reached; a read with no bound says false; the placed parts are materialized; and the bound given with the reader reaches the read whichever reader it is");
+  // A decide key by its shape (isDecideKey): the sleep scheduler reads the parts' work under such a key alone.
+  assert(isDecideKey(decideKey("h2o", "writer")) && !isDecideKey(consolidateKey("judge")) && !isDecideKey(`extract:m@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION}`) && !isDecideKey(`${decideKey("h2o", "writer")}x`) && !isDecideKey(""),
+    "a decide-mode key is known by its prefix and its two versions, and no judge key, other pass's key or longer key is one");
+  // Review pass 4: the key's two models, for the command that runs under it (db/rebuild.ts, preflight). The last
+  // `+` parts them, as preflight has read it; any other key names none. Review pass 5: and what the key's own text
+  // leaves open. `sure` is false where the names hold a second plus sign, since the key is one string however they
+  // are parted; `current` is false for a key of another prompt or decide version, under which no run of this
+  // release judges; and a name that holds a line break is read (the key is text from the store: with none read,
+  // a decide key by isDecideKey named no models, and its command was printed bare).
+  const NOW6 = `@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION}`;
+  const models = [decideKey("h2o", "writer"), `consolidate:a+b+c${NOW6}`, consolidateKey("judge"), `extract:a+b${NOW6}`, `${decideKey("h2o", "writer")}x`, `consolidate:+w${NOW6}`, "",
+    `consolidate:h2o+writer@p${CONSOLIDATE_PROMPT_VERSION}d${DECIDE_VERSION - 1}`, decideKey("h2o", "two\nlines")].map((k) => decideKeyModels(k));
+  assert(JSON.stringify(models) === JSON.stringify([{ decider: "h2o", writer: "writer", current: true, sure: true }, { decider: "a+b", writer: "c", current: true, sure: false }, null, null, null, null, null,
+        { decider: "h2o", writer: "writer", current: false, sure: true }, { decider: "h2o", writer: "two\nlines", current: true, sure: true }])
+      && isDecideKey(decideKey("h2o", "two\nlines")),
+    `a decide-mode key names its decider and its writer, parted at the last plus sign, and no other key names any; it says where the parting is not sure and where its versions are not this release's, and reads a name over a line break (${JSON.stringify(models)})`);
+  // Review pass 5: a stale proposal on a pair a judge-mode pass leaves, as its reader marks one (`left`). It waits for
+  // a decide-mode run whatever claim its thought holds under the pass's key, since the pass will not judge the pair;
+  // only a missing vector comes first, which keeps every pass from it. A row not marked stands as before, and a
+  // reader with no key marks none. The mark holds the decide-mode keys under which the thought's claim failed: with
+  // one, a decide-mode run does not pool the thought either, and the row waits for that claim's retry in decide
+  // mode (the fifth review: "waiting for a decide-mode run" named a run that pooled nothing).
+  const K5 = consolidateKey("judge"), D5 = decideKey("h2o", "writer");
+  const row5 = (o: Partial<StaleStandingRow>): StaleStandingRow => ({ id: "x", vectorless: false, failed_keys: [], live_keys: [], ...o });
+  const ranks5 = [row5({ left: [] }), row5({ left: [], failed_keys: [K5] }), row5({ left: [], live_keys: [K5] }), row5({ left: [], vectorless: true }), row5({ left: [D5], failed_keys: [D5, K5] }), row5({ left: [D5], vectorless: true }),
+    row5({ failed_keys: [K5] }), row5({ live_keys: [K5] }), row5({})].map((r) => staleStandingOf(r, K5).s);
+  const counted5 = staleStandings([row5({ id: "a", left: [] }), row5({ id: "b", left: [], failed_keys: [K5] }), row5({ id: "c" }), row5({ id: "d", left: [D5], failed_keys: [D5] })], K5);
+  assert(JSON.stringify(ranks5) === JSON.stringify(["decide", "decide", "decide", "vector", "decideFailed", "vector", "failed", "pooled", "waiting"])
+      && staleStandingsText(counted5, K5) === `2 waiting for a decide-mode run, their pair holding an undecided settled part, 1 left to decide mode behind a claim of their thought that failed under ${D5} — --retry-failed in decide mode with that key's decider and writer, 1 waiting for the next run`
+      && staleStandingText(counted5.byId.get("b")!, K5) === "waiting for a decide-mode run: its pair holds an undecided settled part, and a judge-mode pass judges no such pair"
+      && staleStandingText(counted5.byId.get("d")!, K5) === `left to decide mode, where its thought's claim failed under ${D5} — --retry-failed in decide mode with that key's decider and writer`
+      && staleStandingText(counted5.byId.get("c")!, K5) === "waiting for the next run to re-pool it" && staleStandingOf(row5({ failed_keys: [K5] }), null).s === "failed",
+    `a stale proposal on a pair a judge-mode pass leaves stands as waiting for a decide-mode run, whatever claim its thought holds under the pass's key and behind a missing vector alone, or, where its thought's claim failed under a decide-mode key, as left behind that claim's retry; each is counted and worded so, and a row not marked stands as before (${ranks5.join(", ")}; ${staleStandingsText(counted5, K5)})`);
+  // …and a reader with no key, of a claim that failed: a judge key's retry is with that judge's model, a decide-mode
+  // key's is in decide mode, each named where both kinds are among the keys (the fifth review: every key got "with
+  // that judge's model", and that retry, for a decide-mode key, is a judge-mode run that returns no such claim).
+  const keyless5 = (keys: string[]) => staleStandingsText(staleStandings([row5({ failed_keys: keys })], null), null, "bun db/consolidate.ts --retry-failed");
+  assert(keyless5([K5]) === `1 failed in a pass under ${K5} — bun db/consolidate.ts --retry-failed with that judge's model`
+      && keyless5([D5]) === `1 failed in a pass under ${D5} — bun db/consolidate.ts --retry-failed in decide mode with that key's decider and writer: a judge-mode run returns no such claim`
+      && keyless5([D5, K5]) === `1 failed in a pass under ${D5}, ${K5} — bun db/consolidate.ts --retry-failed with that judge's model (${K5}); bun db/consolidate.ts --retry-failed in decide mode with that key's decider and writer (${D5}): a judge-mode run returns no such claim`
+      && staleStandingText(staleStandingOf(row5({ failed_keys: [D5] }), null), null) === `failed in a pass under ${D5} — --retry-failed in decide mode with that key's decider and writer: a judge-mode run returns no such claim`,
+    `a reader with no key names a failed claim's retry by its key: with that judge's model for a judge key, in decide mode for a decide-mode key (${keyless5([D5, K5])})`);
+  // A re-pool statement tried again for a thought deleted under it or a deadlock, three tries in all, and thrown on at
+  // once for anything else (repooled, review pass 1).
+  const tried: string[] = [];
+  const failing = (codes: string[], via: "errno" | "code" = "errno") => {
+    let i = 0;
+    return async () => {
+      const state = codes[i++];
+      tried.push(state ?? "ok");
+      if (state !== undefined) throw Object.assign(new Error(`state ${state}`), { [via]: state });
+      return i;
+    };
+  };
+  const ended = (p: Promise<number>) => p.then((v) => `returned ${v}`, (e: Error) => e.message);
+  const [poolTwice, poolThrice, otherState, byCode, bare, once2] = [await ended(repooled(failing(["23503", "40P01"]))), await ended(repooled(failing(["23503", "23503", "40P01"]))), await ended(repooled(failing(["42501"]))),
+    await ended(repooled(failing(["40P01"], "code"))), await ended(repooled(async () => { throw new Error("no state"); })), await ended(repooled(failing(["23503"]), 1))];
+  // The states beside the two (review pass 4: with every class 23 or 40 state tried again, or a lock's timeout,
+  // every row passed): a serialization failure, a unique violation, a lock not available, each thrown at once.
+  const near = [await ended(repooled(failing(["40001"]))), await ended(repooled(failing(["23505"]))), await ended(repooled(failing(["55P03"]))), await ended(repooled(failing(["23502"], "code")))];
+  assert(poolTwice === "returned 3" && poolThrice === "state 40P01" && otherState === "state 42501" && byCode === "returned 2" && bare === "no state" && once2 === "state 23503"
+      && near.join() === "state 40001,state 23505,state 55P03,state 23502"
+      && tried.join() === "23503,40P01,ok,23503,23503,40P01,42501,40P01,ok,23503,40001,23505,55P03,23502",
+    `a re-pool statement is tried again for a deleted thought (23503) or a deadlock (40P01), three tries in all, its state read from errno or code, and any other error is thrown at once (${[poolTwice, poolThrice, otherState, byCode, bare, once2].join(" | ")}; tried ${tried.join()})`);
 
   // decidePair end to end, against an in-process tier and writer.
   const MODEL = { name: "h2o-test", source: "stub", revision: "r1", weights_sha256: "w1", calibrator_sha256: "c1", rules: "x1" };
