@@ -6714,9 +6714,11 @@ once for a model gone missing or a call no probe answers): "working,
 consolidate waiting for the provider mid-pass", a warning naming the
 provider, where it read "its passes running" and "its log says which". The
 provider answering clears it, and so does a period's end. A follower's own row
-(`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`) carries the word with its
-own name while it waits, and the `workers` and `consolidate pass` rows say
-it. A follower's start wait stays unsaid: its row does not exist until its
+(`heartbeat:extract:…`, `heartbeat:consolidate:…`, `heartbeat:reembed:…`,
+`heartbeat:retag:…`) carries the word with its own name while it waits, and
+the `workers` row and the follower's own pass row (`consolidate pass`,
+`re-embed pass`, `retag pass`) say it. A follower's start wait stays unsaid:
+its row does not exist until its
 first pass begins. Since SMD-4254 the sleep's row carries, beside
 `waitingMidPass` naming `reembed`, `reembedWait` while the scheduler leaves
 re-embed waiting on an outage that made a thought a suspect: `since`, the
@@ -7071,8 +7073,9 @@ bun retag.ts --url … --dry-run          # what a run would do; writes nothing
 bun retag.ts --url … --limit 25         # a trial
 bun retag.ts --url … --retry-failed     # failed rows back into the pool first
 bun retag.ts --url … --switch-key       # a model or prompt version other than ob1_config.retag_key's
+bun retag.ts --url … --follow [SECONDS] # then poll every SECONDS (15 bare), pooling again at each, until a signal
 #   --workers N (1)   --batch N (1)   --ttl SECONDS (900)   --heartbeat SECONDS (60, or a third of the lease)   --timeout SECONDS (OB1_LLM_TIMEOUT's)   --job <retag:model@pN>
-#   exits 0 clean · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal
+#   exits 0 clean (a follower stopped by a signal too, once past its start wait) · 1 rows failed, leased or pending · 2 usage, configuration or the provider's refusal · 130 a signal (a second, at once)
 ```
 
 The tags' re-run path (SMD-2298), the last of the lineage kinds to get one. The
@@ -7102,10 +7105,12 @@ tags row at the text, the mark cleared, even when the tags came out the same
 is failed naming the rule, nothing sent; an answer that is not tags, or a 400,
 413 or 422, is failed and nothing written (but a 400 or 422 to three thoughts
 in a row, none answered between, is the request's shape and stops the run,
-exit 2), as is a thought whose metadata is null or no JSON object, before any
-call; a tag key the row holds and the answer leaves out is cleared (a list to
-`[]`, the type keys to null); a provider error is read by `claim-loop.ts`'s rule; an
-edit meanwhile (`STALE_READ`) puts the thought back in the pool. The recorded
+exit 2 — a follower first sends a short note in the same shape, and stops
+only if it is refused too), as is a thought whose metadata is null or no JSON
+object, before any call; a tag key the row holds and the answer leaves out is
+cleared (a list to `[]`, the type keys to null); a provider error is read by
+`claim-loop.ts`'s rule; an edit meanwhile (`STALE_READ`) puts the thought back
+in the pool. The recorded
 key is the tags' target recipe (PR 3b, every run, as re-embed's model is): a
 tags row made under another model or prompt version is behind it, so a first
 run, or a `--switch-key` to a new model or prompt version, re-tags the corpus
@@ -7123,8 +7128,14 @@ passes (PR 4a-1): an `onPass` that also hands over the abort of each worker's
 tags call in hand (the thought set back to the queue, nothing written), the
 admit gate before the pool and each claim, session settings for its own
 connections, `banner` and `summary` false, and `onStart`, told the start went
-through or a refusal by its kind. Not yet: `--follow` (PR 4a-2) and the sleep
-pass (PR 4b). test-live [29] drives it against a stub chat endpoint.
+through or a refusal by its kind. `--follow [SECONDS]` (PR 4a-2) polls after
+the first pass, on the shared follower helpers (SMD-2636): the model probed
+before any write, a provider that does not answer at start waited for, a
+database outage waited out, an outage mid-pass waited out on its heartbeat
+(`heartbeat:retag:<job>`, which preflight's workers and `retag pass` rows
+read), and the backlog pooled again at every pass — no capture trigger feeds
+the pool. Not yet: the sleep pass (PR 4b). test-live [29] drives it against a
+stub chat endpoint.
 
 ## Extensions
 
@@ -8427,7 +8438,7 @@ too — so each long-running worker stamps a **heartbeat** after every pass,
 whether or not the pass found work (`db/pass-stamp.ts`): `sync-linear.ts --trigger`,
 a pass at its start and at each of the coordinator's triggers (SMD-3476),
 and the `--follow` of `extract-entities.ts`, `consolidate.ts` and
-`reembed.ts` (SMD-2679) — and
+`reembed.ts` (SMD-2679), and of `retag.ts` (SMD-2298) — and
 `sleep.ts --follow`, as `heartbeat:sleep`, at least every minute whether
 asleep or awake, its followers stamping through it (SMD-1794). A one-shot run
 stamps nothing, so it leaves no row to go stale, and neither does a dry run or
@@ -8435,8 +8446,8 @@ an audit.
 
 One `ob1_config` row per worker and job — `heartbeat:board-sync`,
 `heartbeat:extract:qwen2.5:7b@p2`, `heartbeat:consolidate:qwen2.5:7b@p3`,
-`heartbeat:reembed:qwen3-embedding:4b@1024` — whose
-value names the `job` (a claim worker's, as given — the restart works that
+`heartbeat:reembed:qwen3-embedding:4b@1024`, `heartbeat:retag:qwen2.5:7b@p1` —
+whose value names the `job` (a claim worker's, as given — the restart works that
 pool), `every_s` (the worker's interval, at least a minute), whether a pass is
 `running`, the last pass's `outcome`, whether the worker has `ended`, and, for
 extraction, the last judged block's malformed answers and whether they passed

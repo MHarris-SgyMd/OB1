@@ -517,6 +517,9 @@ export function restartCommand(worker, job) {
   // would be refused once the model is switched (review pass 1); a backfill
   // key is given as it was.
   if (worker === "reembed") return `cd db && bun reembed.ts --url $DATABASE_URL --follow${job && poolModelFor(job) === null ? ` --job ${job}` : ""}`;
+  // No compose service runs a re-tag follower (SMD-2298 PR 4a-2): its key follows OB1_METADATA_MODEL and the prompt
+  // version, so the job is named beside it, never pinned (a writing run under another recipe is refused).
+  if (worker === "retag") return `cd db && bun retag.ts --url $DATABASE_URL --follow${job ? ` (its job, ${job}, follows OB1_METADATA_MODEL and the prompt version)` : ""}`;
   if (worker === "extract") return `${service}cd db && bun extract-entities.ts --url $DATABASE_URL --follow${job ? ` --job ${job} (drop --job when OB1_METADATA_MODEL or the prompt version has changed since)` : ""}`;
   // A decide-mode job names a decider and a writer: started without OB1_CONSOLIDATE_DECIDER the follower runs judge
   // mode, under another key (SMD-4446 PR 2b-2, review pass 5: the words gave the judge's knobs for every job).
@@ -535,10 +538,15 @@ export function restartCommand(worker, job) {
  * preflight's `sleep` row gives it for every kind, where "start it again"
  * would only refuse again (SMD-2752). `worker`, the follower's, where a
  * kind's remedy is another for it: a re-embed follower's model and provider
- * are the embedding endpoint's (SMD-2679).
+ * are the embedding endpoint's (SMD-2679), and a re-tag follower's key and
+ * model are retag.ts's to switch (SMD-2298).
  */
 export function startRefusalRemedy(kind, worker) {
   if (worker === "reembed" && kind === "model") return "pull the embedding model its log names (OB1_EMBEDDING_MODEL), or set OB1_EMBEDDING_MODEL to one the provider serves — the model ob1_config records, since a follower never switches it";
+  // A re-tag follower's key and model are OB1_METADATA_MODEL's and the tree's tag prompt version, retag.ts's to switch:
+  // not the extraction key's words, which the switch below gave it (SMD-2298 PR 4a-2 review pass 1).
+  if (worker === "retag" && kind === "key") return "the re-tag key is retag.ts's to switch: cd db && bun retag.ts --url $DATABASE_URL --switch-key records the key this server's OB1_METADATA_MODEL and tag prompt version make, and re-tags the corpus under it (a --dry-run first says how many); or, where only the model differs, set OB1_METADATA_MODEL back to the recorded key's model";
+  if (worker === "retag" && kind === "model") return "pull the model its log names (OB1_METADATA_MODEL), or set OB1_METADATA_MODEL to one the provider serves — the model names the re-tag key, so another one there is the key's switch too (cd db && bun retag.ts --url $DATABASE_URL --switch-key)";
   if (worker === "reembed" && kind === "provider") return "the provider refused the embedding request: check the embedding endpoint's key and base URL (OB1_LLM_API_KEY and OB1_LLM_BASE_URL), the account's credit where it answered 402, and, where its log names a field the request sends (dimensions), OB1_EMBEDDING_DIMENSIONS or OB1_EMBEDDING_MODEL";
   switch (kind) {
     // The subject sweep's beside the extraction pass's: the sleep row carries the kind alone (SMD-3306 PR 6b-1's review
