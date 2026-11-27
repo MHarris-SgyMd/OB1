@@ -40,7 +40,7 @@
 import { refuseEgress, refuseRedirect, type EmbedConfig } from "./embed.ts";
 import { mayLeaveBox } from "./egress.ts";
 import { modelCall } from "./model-call.ts";
-import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, evidenceIn, oneLine, outdatesConfidence, ownWords, REASON_MAX, VERDICTS, type Judgement, type PairSide, type PartToRecord, type Verdict } from "./consolidate.ts";
+import { buildJudgeMessages, consolidateKey, CONSOLIDATE_PROMPT_VERSION, cutByCodePoint, DECIDE_KEY_TAIL_SQL, evidenceIn, isDecideKey, oneLine, outdatesConfidence, ownWords, PASS_SETTLED_PREFIX, REASON_MAX, VERDICTS, type Judgement, type PairSide, type PartToRecord, type Verdict } from "./consolidate.ts";
 import { jevChoose, type JevConfig, type JevModelInfo, type JevOption } from "./jev.ts";
 import { CONSOLIDATE_KEY_PREFIX } from "../db/config.mjs";
 
@@ -326,12 +326,33 @@ export const UNREAD_MAX = 600;
 /**
  * The writer's parts answer. `falls` names the thought it says falls whole, null for neither. `dropped` counts the
  * items of its list that were not a part of the asked shape (no side, a quote or the reason missing, a word outside
- * the eight), and `over` the items that came once PARTS_MAX parts had been read, whatever their shape. `malformed`:
+ * the eight), and `over` the items that came once PARTS_MAX parts had been read, whatever their shape. `aside`:
+ * the statement each dropped or over item quotes, with the thought it was said to be in (null where the item gave no
+ * side), up to PARTS_MAX of them, and `asideMore` how many more there were. An item that quotes no statement (an
+ * empty object, a bare string, an item whose `stale` is empty) is in neither: it names none. `malformed`:
  * the answer was not the JSON asked for. `unread`: what was not read as a part, for the dump, which carries every
  * answer kept or not: the answer itself when it is malformed, else each item dropped or over, as JSON on one line,
  * each cut to UNREAD_MAX and at most PARTS_MAX of them.
  */
-export type PartsAnswer = { parts: NamedPart[]; dropped: number; over: number; falls: "older" | "newer" | null; malformed: boolean; unread: string[] };
+export type PartsAnswer = { parts: NamedPart[]; dropped: number; over: number; aside: PartAside[]; asideMore: number; falls: "older" | "newer" | null; malformed: boolean; unread: string[] };
+
+/**
+ * A statement the writer's answer quotes in an item that is no part or came past the cap (decide version 6, SMD-4446
+ * PR 2b-2), as the writer typed it, and the thought the item says holds it, null where it gave no side. The pass
+ * tests each settled part that waits on the pair against these and against the read items that do not stand
+ * (review pass 4), each read back first (asidesOf): one whose statement such an item names again is kept, since the
+ * writer still names it and the pass cannot record what it said, and a removal is for good; one that no item names
+ * is removed. The rule was two counts of the whole answer, so an item that quoted nothing, or another statement,
+ * kept every waiting part of the pair, while a statement named again with a quote that failed lost its part.
+ */
+export type PartAside = { holder: "older" | "newer" | null; statement: string };
+
+/**
+ * An answer's statements in items that make no row, as the pass tests them (asidesOf). `aside`: each read back in
+ * its thought's own characters, with that thought. `unread`: the thoughts in which such an item quotes a statement
+ * that is there and was not read back. `more`: how many such items the answer held beyond those it kept.
+ */
+export type PartAsides = { aside: { holder: "older" | "newer"; statement: string }[]; unread: ("older" | "newer")[]; more: number };
 
 /**
  * The parts answer, read as SMD-3340 read it: lenient about wrapping (jsonObject), strict about the keys and the
@@ -348,7 +369,7 @@ export function parseParts(raw: string): PartsAnswer {
     try { said = typeof v === "string" ? v : JSON.stringify(v) ?? String(v); } catch { said = "an item that could not be printed"; }
     return cutByCodePoint(wellFormed(oneLine(said)), UNREAD_MAX);
   };
-  const bad: PartsAnswer = { parts: [], dropped: 0, over: 0, falls: null, malformed: true, unread: [kept(raw)] };
+  const bad: PartsAnswer = { parts: [], dropped: 0, over: 0, aside: [], asideMore: 0, falls: null, malformed: true, unread: [kept(raw)] };
   const o = jsonObject(raw);
   if (!o || Array.isArray(o) || !Array.isArray(o.parts)) return bad;
   const yn = (v: unknown) => { const s = typeof v === "string" ? v.trim().toLowerCase() : ""; return s === "yes" ? true : s === "no" ? false : null; };
@@ -356,7 +377,8 @@ export function parseParts(raw: string): PartsAnswer {
   if (a === null || b === null || (a && b)) return bad;
   const parts: NamedPart[] = [];
   const unread: string[] = [];
-  let dropped = 0, over = 0;
+  const aside: PartAside[] = [];
+  let dropped = 0, over = 0, asideMore = 0;
   for (const item of o.parts as unknown[]) {
     // Once PARTS_MAX parts are read, every further item is over the cap, whatever its shape.
     const full = parts.length >= PARTS_MAX;
@@ -373,12 +395,17 @@ export function parseParts(raw: string): PartsAnswer {
     if (full || holder === null || !(PART_WORDS as readonly string[]).includes(word) || !stale || !shown_by || !reason || !whole(p?.stale) || !whole(p?.shown_by)) {
       if (full) over++;
       else dropped++;
+      // The statement it quotes, for the pass's test of each part that waits (PartAside): none where it quotes none.
+      if (stale) {
+        if (aside.length < PARTS_MAX) aside.push({ holder, statement: stale });
+        else asideMore++;
+      }
       if (unread.length < PARTS_MAX) unread.push(kept(item));
       continue;
     }
     parts.push({ holder, stale, shown_by, word: word as PartWord, reason });
   }
-  return { parts, dropped, over, falls: a ? "older" : b ? "newer" : null, malformed: false, unread };
+  return { parts, dropped, over, aside, asideMore, falls: a ? "older" : b ? "newer" : null, malformed: false, unread };
 }
 
 /**
@@ -413,6 +440,49 @@ export function checkParts(answer: PartsAnswer, older: string, newer: string): C
     if (key !== null) seen.add(key);
     return { ...part, stale_found, shown_found, statement, shown, repeated };
   });
+}
+
+/**
+ * The statements an answer quotes in items that make no row, read as a recorded part's statement is read (review
+ * pass 5): each in its thought's own characters (ownWords), which is what a part's row holds and what the store
+ * compares. The items: a read one that does not stand and is no repeat (a quote fails the check, or is not read
+ * back), one that is no part by its shape, one past the PARTS_MAX read. For each, in the thought it names, or in
+ * each of the two where it names none:
+ *   read back there: the run, with that thought (`aside`). The pass asks the store which waiting part it is.
+ *   in that thought as the quote check reads one (evidenceIn), and not read back: the pass cannot say which
+ *   statement of the thought it names (`unread`, that thought), and keeps every part of that thought that waits on
+ *   the pair and is not recorded again.
+ *   not in that thought: it names no statement of it. (An item that gives the other thought as the statement's
+ *   names another statement, whatever its words.)
+ * A repeat is left out: the part it repeats stands, and names the statement by a row.
+ *
+ * Pass 4 compared the statement as the writer TYPED it with the row's, which is its thought's own run, by case and
+ * white space alone. The same quote with its closing full stop, in straight quotes for the thought's curly ones or
+ * without its markdown then read as another statement, and its part was removed for good with the claim succeeded
+ * (the fifth review: 15 of 45 typings and kinds of item, each kept before that pass). One that was not read back
+ * was removed the same way, where the header and the claim's own words list it among what keeps a part.
+ */
+export function asidesOf(answer: PartsAnswer, checked: CheckedPart[], older: string, newer: string): PartAsides {
+  const aside: PartAsides["aside"] = [];
+  const unread = new Set<"older" | "newer">();
+  const seen = new Set<string>();
+  const take = (holder: "older" | "newer" | null, typed: string, own: string | null): void => {
+    for (const side of holder ? [holder] : (["older", "newer"] as const)) {
+      const text = side === "older" ? older : newer;
+      const run = own ?? ownWords(typed, text);
+      if (run === null) {
+        if (evidenceIn(typed, text)) unread.add(side);
+        continue;
+      }
+      const key = `${side}\n${run}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      aside.push({ holder: side, statement: run });
+    }
+  };
+  for (const c of checked) if (!partStands(c) && !c.repeated) take(c.holder, c.stale, c.statement);
+  for (const a of answer.aside) take(a.holder, a.statement, null);
+  return { aside, unread: [...unread], more: answer.asideMore };
 }
 
 /**
@@ -704,11 +774,18 @@ export function wholeOf(answer: PartsAnswer, checked: CheckedPart[]): { shows: C
  * evolves folded into related (version 5), so the pair's relation is recorded under the same floor as before, and
  * its parts beside it.
  */
-export function partsJudgement(p: Record<Verdict, number>, answer: PartsAnswer, checked: CheckedPart[]): Judgement {
+export function partsJudgement(p: Record<Verdict, number>, answer: PartsAnswer, checked: CheckedPart[], older: string, newer: string): Judgement {
   const standing = checked.filter(partStands);
   const parts = partsToRecord(checked);
   // What the answer held that was not read as a part, for the dump and for a scorer: not for a recipe.
-  const unread = answer.unread.length ? { unread: answer.unread } : {};
+  // And the statements it quotes in items that make no row, each read back in its thought (asidesOf), for the
+  // pass's test of each part that waits on the pair. On every return below, a whole's among them: a part named
+  // again beside a whole is kept as beside none.
+  const asides = asidesOf(answer, checked, older, newer);
+  const unread = {
+    ...(answer.unread.length ? { unread: answer.unread } : {}), ...(asides.aside.length ? { aside: asides.aside } : {}),
+    ...(asides.unread.length ? { asideUnread: asides.unread } : {}), ...(asides.more ? { asideMore: asides.more } : {}),
+  };
   const whole = wholeOf(answer, checked);
   const shows = whole?.shows;
   if (answer.falls && shows) {
@@ -812,7 +889,8 @@ export function partWriteError(e: unknown, sqlstate: string): Error {
 
 /**
  * The count of put-backs running, by thought (decide version 6): how many attempts in a row ended with the thought put
- * back because a text of one of its pairs moved while the pair was judged. One object for one run of the pass.
+ * back because a text of one of its pairs moved while the thought was in hand (found by a part's write, by a waiting
+ * part's removal, or as the thought was read again before a pair). One object for one run of the pass.
  * `attempt` wraps a worker's whole handling of one claimed thought, and the count ends with every end of an attempt
  * but a put-back: a judgement, a failure, a claim lost, a stop of the worker, a throw. So a follower that runs for days
  * counts no edit of last week against one of today. The bookkeeping is in this one place whatever the attempt's
@@ -836,7 +914,7 @@ export class PutBacks {
 }
 
 /**
- * Which text moved while a pair was judged, in the words of the two lines that say so (decide version 6): the line a
+ * Which text moved while the thought was in hand, in the words of the two lines that say so (decide version 6): the line a
  * worker prints as it puts the thought back, and the failed claim's error past the bound. `olderId` is the pair's
  * older thought. The write's answer names the side; neither named reads as the thought's own.
  */
@@ -849,6 +927,351 @@ export function movedWords(moved: { older: boolean; newer: boolean }, olderId: s
 /** A pair's refused parts as one problem on its thought's claim (decide version 6): how many, and the store's own words for the first, which echo no argument. */
 export function refusedWords(olderId: string, refusals: string[]): string {
   return `pair with ${olderId}: ${refusals.length === 1 ? "a settled part was" : `${refusals.length} settled parts were`} refused — ${refusals[0]}`;
+}
+
+/**
+ * Decide version 6 (SMD-4446 PR 2b-2): the pending settled parts whose text has moved since they were judged. Nothing
+ * runs a rebuild after an edit, so such a part is still `pending`: at fingerprints that are no longer its texts',
+ * which an accept refuses unless forced. A decide-mode run of the pass pools its thought, and judges its pair again
+ * or, where nothing will judge it again, removes the part. Columns: `id`, the part's, and `newer_id`, the thought the
+ * pass judges its pair from.
+ *
+ * Two tests, the cheap one first. The part's fingerprints against the ones the thoughts store
+ * (thoughts.content_fingerprint): equal, the text has not moved, and no text is hashed (6 to 11 ms for 3,000 parts,
+ * where hashing both texts of each took 579 to 984: SMD-4446 PR 1's review pass 4). Then, for the parts that differ,
+ * against each text's own (content_fingerprint_of), which is what the part's write and its accept compare: the stored
+ * key is NULL on a thought whose text another holds too (023), and is left behind by a raw UPDATE of the text (018).
+ * Without the second test a part of such a thought would be pooled at every run, though its texts stand, and its
+ * thought judged again each time. Such a part's two texts are hashed at every read, which is each poll of a follower.
+ *
+ * Not seen: a text moved by a raw UPDATE that left the stored key as the part has it. An accept still refuses that
+ * part. A rebuild does not see it either, short of its force: rebuild_derived and the validity read take the stored
+ * key where there is one (review pass 1: this said a rebuild sets such a part stale).
+ *
+ * `pending` is where the pending parts are read from: the table, or a bounded read of it that the caller names
+ * (partsStandingSql's `pend`, for preflight). Its names are schema-qualified: preflight reads it too, and qualifies
+ * every name of its own.
+ */
+export function movedPartsSql(pending = "public.settled_parts"): string {
+  return `WITH differs AS MATERIALIZED (
+    SELECT s.id FROM ${pending} s JOIN public.thoughts o ON o.id = s.older_id JOIN public.thoughts n ON n.id = s.newer_id
+     WHERE s.status = 'pending'
+       AND (s.older_fingerprint IS DISTINCT FROM o.content_fingerprint OR s.newer_fingerprint IS DISTINCT FROM n.content_fingerprint))
+  SELECT s.id, s.newer_id FROM differs d JOIN public.settled_parts s ON s.id = d.id JOIN public.thoughts o ON o.id = s.older_id JOIN public.thoughts n ON n.id = s.newer_id
+   WHERE s.status = 'pending'
+     AND (s.older_fingerprint <> public.content_fingerprint_of(o.content) OR s.newer_fingerprint <> public.content_fingerprint_of(n.content))`;
+}
+
+/**
+ * Whether a part's pair holds a proposal that waits for a rebuild as the part does (review pass 1). Over the part
+ * `part`, its older thought `older` and its newer one `newer`, each an alias of the query it is written into.
+ *
+ * A proposal that is not stale closes its pair to the candidate rule, so the pass cannot judge the pair again. Where
+ * that proposal is one a rebuild would set stale (151's rebuild_derived: a pending one, or one the pass itself
+ * rejected, by PASS_SETTLED_PREFIX) and is itself a judgement of a text that has moved, the pair is judged again
+ * once a rebuild has run, the proposal and the part both stale by then. Until it has, the part is left as it is: not
+ * pooled for, and not removed. Version 6 writes every whole beside the part that shows it, so removing a part of a
+ * closed pair whatever closed it took the evidence part of a pending whole at any edit of either thought.
+ *
+ * Not held: a part beside a proposal a person decided, which closes its pair for good; and one beside a proposal
+ * at the texts as they stand, a judgement of these very texts that did not name the part.
+ *
+ * Which texts the proposal is a judgement of is read from its lineage row (derivations), as rebuild_derived reads
+ * it, and not from the proposal row's own two fingerprints (review pass 2). A rejection the pass made keeps in its
+ * row the fingerprints it was first proposed at, and its settle records the texts it was judged at in its lineage
+ * row alone (067). Read from the row, every such rejection read as a judgement of a moved text: a part beside one
+ * settled at the texts as they stand was held for a rebuild that reopens nothing, and one beside a rejection whose
+ * text had been put back as first proposed was removed though a rebuild reopens its pair. Each text's own
+ * fingerprint is the one compared, as for the part itself: where a raw UPDATE left a thought's stored key behind, a
+ * rebuild short of its force does not see the move, and the part is kept all the same. A proposal with no lineage
+ * row is reached by no rebuild, and holds no part.
+ */
+export function partHeldSql(part: string, older: string, newer: string): string {
+  return `EXISTS (SELECT 1 FROM public.supersession_proposals held
+           WHERE held.older_id = ${part}.older_id AND held.newer_id = ${part}.newer_id
+             AND (held.status = 'pending' OR (held.status = 'rejected' AND held.review_note LIKE '${PASS_SETTLED_PREFIX}%'))
+             AND EXISTS (SELECT 1 FROM public.derivations d
+                          WHERE d.artifact_kind = 'proposal' AND d.artifact_id = held.id
+                            AND (d.input_fingerprints[array_position(d.input_ids, ${part}.older_id)] IS DISTINCT FROM public.content_fingerprint_of(${older}.content)
+                              OR d.input_fingerprints[array_position(d.input_ids, ${part}.newer_id)] IS DISTINCT FROM public.content_fingerprint_of(${newer}.content))))`;
+}
+
+/**
+ * Whether a part waits, as a decide-mode pass reads the parts of a thought it has in hand: undecided, and no longer
+ * a judgement of its texts. Stale, a rebuild's mark, or pending at other fingerprints than its texts' own as they
+ * stand, each text hashed. Over the part `part`, its older thought `older` and its newer one `newer`, each an alias
+ * of the query it is written into.
+ *
+ * Not the read of the whole store (waitingPartsSql, for the pool step, the scheduler and the status lines), which
+ * tests the thoughts' STORED fingerprints first and hashes a text only where one differs (movedPartsSql). The two
+ * differ for one state, which movedPartsSql names as not seen: a text moved by a raw UPDATE that left the stored
+ * key as the part has it. No run pools for such a part; a thought in hand for another reason reads it here, and a
+ * decide-mode pass settles it then.
+ */
+export function partWaitsSql(part: string, older: string, newer: string): string {
+  return `(${part}.status = 'stale' OR (${part}.status = 'pending'
+          AND (${part}.older_fingerprint <> public.content_fingerprint_of(${older}.content) OR ${part}.newer_fingerprint <> public.content_fingerprint_of(${newer}.content))))`;
+}
+
+/** A part no reviewer has decided, `part` its alias: pending, or stale by a rebuild's mark. What a judge-mode pass leaves alone (pairHoldsPartSql). */
+export const partUndecidedSql = (part: string): string => `${part}.status IN ('pending', 'stale')`;
+
+/**
+ * Whether the pair of the proposal `proposal`, an alias of the query this is written into, holds an undecided
+ * settled part. A judge-mode pass leaves such a pair to a decide-mode one, and reads its stale proposal by this
+ * (review pass 5): not pooled for, and placed as left to decide mode. The pair is one term, a row of two ids: a part
+ * on another pair of either thought says nothing of this one. For a brain that has the parts' store, and a role that
+ * reads it: the caller looks first (PARTS_STORE_SQL).
+ *
+ * Any undecided part, whatever its texts (the fifth review). The first cut left a pair whose part WAITED, read once
+ * as the thought was taken in hand: an edit of the older text before that pair was asked, which the scheduler's
+ * gate waits out and re-reads, had the pair judged at the new text and closed, and the next decide-mode run removed
+ * the part with no judgement of it. So did an edit after a reviewer had decided the judge-mode proposal on a pair
+ * whose part stood at its texts. A pair that holds an undecided part was judged by a decide-mode pass, and is that
+ * mode's to judge again.
+ */
+export function pairHoldsPartSql(proposal: string): string {
+  return `EXISTS (SELECT 1 FROM public.settled_parts held_part
+           WHERE (held_part.older_id, held_part.newer_id) = (${proposal}.older_id, ${proposal}.newer_id) AND ${partUndecidedSql("held_part")})`;
+}
+
+/**
+ * The settled parts that wait: every undecided part that is no longer a judgement of its texts. `stale`, a rebuild's
+ * mark, or pending at a text that has moved (movedPartsSql). The pass writes no status of its own to say so (review
+ * pass 1: it set such a part stale at each pass's start, under the supersession advisory lock, and three findings
+ * were seams of that one write): it reads the fact where it needs it. Columns: `id`, `older_id`, `newer_id`,
+ * `status`, `vectorless` (a side of the pair has no vector) and `held` (partHeldSql). `pending`: movedPartsSql's.
+ * Every part's row is read to find the stale ones, whatever `pending` is: no index serves the status (SMD-4560).
+ */
+export function waitingPartsSql(pending?: string): string {
+  return `SELECT s.id, s.older_id, s.newer_id, s.status, (o.embedding IS NULL OR n.embedding IS NULL) AS vectorless, ${partHeldSql("s", "o", "n")} AS held
+    FROM public.settled_parts s JOIN public.thoughts o ON o.id = s.older_id JOIN public.thoughts n ON n.id = s.newer_id
+   WHERE s.status = 'stale' OR s.id IN (SELECT m.id FROM (${movedPartsSql(pending)}) m)`;
+}
+
+/**
+ * The thoughts a decide-mode pass pools again for a part that waits, `$1` its key (a function, not a constant: the
+ * text reads names of ./consolidate.ts, which loads beside this module): the newer thought of each such
+ * part, where both sides have a vector, no proposal holds the part, and the thought's claim under the key is finished
+ * or absent (a failed claim is --retry-failed's, as for a stale proposal). One definition for the pass's pool step,
+ * its dry run and its tickets line, and for the sleep scheduler's read of consolidation's work (db/sleep.ts): what
+ * the pool step would pool for a part is work the scheduler must see, or no period begins for it and one ends
+ * before the pass has pooled it (review pass 1). A thought the same step pools again for a stale proposal judged
+ * under another key is not read here, and the scheduler does not see it (SMD-4561).
+ */
+export function partsToPoolSql(): string {
+  return `SELECT DISTINCT w.newer_id AS id FROM (${waitingPartsSql()}) w
+    LEFT JOIN public.thought_work_claims c ON c.thought_id = w.newer_id AND c.work_type = $1
+   WHERE NOT w.vectorless AND NOT w.held AND (c.thought_id IS NULL OR c.status = 'succeeded')`;
+}
+
+/**
+ * Where the parts that wait stand: `stale` and `moved` (pending at a moved text) count them; `vector`, `held` and
+ * `failed` count those a decide-mode run does not take up as things are. `failed_keys`: the pass's decide-mode keys
+ * under which a failed claim placed a part, for a read that knows no key (PartsClaims "any"); empty otherwise. `cut`: a
+ * bounded read reached one of its two bounds, so its counts may leave parts out; false for a read with no bound.
+ */
+export type PartsStanding = { stale: number; moved: number; vector: number; held: number; failed: number; failed_keys?: string[] | null; cut?: boolean };
+
+/**
+ * Which claim places a waiting part `failed` (review pass 2). `{ under }`: a failed claim of its thought under the
+ * pass's key alone, given as the SQL that names the key (`$1`): the claim the pool step skips and --retry-failed
+ * returns. "any": one under any decide-mode key of the pass, for a reader that knows no such key (db/rebuild.ts, and
+ * a judge-mode pass or server: partsClaimsFor), the keys named. "unread": no claim is read, for a role that may not
+ * read thought_work_claims (a server's, where neither extraction nor the subject pool is on): no part is placed
+ * `failed` then, and the words say so. As the stale proposals' standing reads a claim (staleStandingOf, 067's second
+ * review pass). Read under any key by every reader, a claim that had failed under a retired key placed its part
+ * behind a --retry-failed that returns nothing, while the run pooled its thought (run: "judges the pair of 0 again;
+ * 1 wait for --retry-failed" beside a dry run's "re-pool 1").
+ *
+ * Only a decide-mode run takes a part up, so only a decide-mode key's failed claim keeps one from it (review pass 3).
+ * A judge-mode reader that read under its own key was wrong both ways: it missed the decide pass's failed claim
+ * ("takes up 1" where a decide run pools none), and placed a part behind a judge-mode claim that no decide run
+ * skips. The keyless read took a judge-mode key's failed claim the same way.
+ */
+export type PartsClaims = { under: string } | "any" | "unread";
+
+// A decide-mode key's ending and the test of one (DECIDE_KEY_TAIL_SQL, isDecideKey) are ./consolidate.ts's, where
+// the stale proposals' standing reads them too; given on from here, as every reader of a decide key imports them.
+export { DECIDE_KEY_TAIL_SQL, isDecideKey };
+
+/**
+ * How a reader that knows the pass's key reads a failed claim (PartsClaims): under that key where it is decide
+ * mode's, `param` the SQL that names it; else as a reader that knows none, since a judge-mode key's claims say
+ * nothing of a part. For the pass's own status and preflight's census, which a judge-mode process runs too.
+ */
+export function partsClaimsFor(key: string, param: string): PartsClaims {
+  return isDecideKey(key) ? { under: param } : "any";
+}
+
+/**
+ * The parts that wait, counted and placed, for the pass's --status, db/rebuild.ts --status and preflight's lineage
+ * census: one read. Each waiting part is placed once: waiting for a vector; else held by its pair's proposal
+ * (partHeldSql); else behind a failed claim of its thought (`claims`: under the pass's key, which a decide-mode pass
+ * and server know, or under any decide-mode key with the keys named, for db/rebuild.ts and a judge-mode reader); else
+ * a decide-mode run's.
+ * For a brain that has the parts' store (151): the caller looks first (PARTS_STORE_SQL).
+ *
+ * `limit`, for preflight, bounds two things and not the read: the pending parts tested for a moved text (`pend`),
+ * and the waiting parts placed. Every part's row is still read once to find the stale ones (waitingPartsSql). `cut`
+ * says whether either bound was reached: the counts are then of the parts read, in no order, and preflight says so.
+ * (Review pass 3: preflight said so wherever the store held the bound's number of parts of any status, over exact
+ * counts, and this said the read itself was bounded.)
+ *
+ * `placed` is materialized: read by one aggregate, it was written into each of them, the claims probed three times
+ * a row, and on PostgreSQL 16 the planner's cost for that carried the census past the point where it compiles the
+ * query at every server start (review pass 3; the read's cost at scale is SMD-4560).
+ */
+export function partsStandingSql(limit: number | undefined, claims: PartsClaims): string {
+  const columns = "x.newer_id, x.status, x.vectorless, x.held";
+  const bound = limit === undefined ? null : Math.trunc(limit);
+  const pend = bound === null ? "" : `pend AS MATERIALIZED (SELECT id, older_id, newer_id, status, older_fingerprint, newer_fingerprint FROM public.settled_parts WHERE status = 'pending' LIMIT ${bound}),
+       `;
+  const w = bound === null ? `SELECT ${columns} FROM (${waitingPartsSql()}) x` : `SELECT ${columns} FROM (${waitingPartsSql("pend")}) x LIMIT ${bound}`;
+  const under = claims === "unread" ? null : claims === "any" ? `c.work_type LIKE '${CONSOLIDATE_KEY_PREFIX}%' AND c.work_type ~ '${DECIDE_KEY_TAIL_SQL}'` : `c.work_type = ${claims.under}`;
+  const cut = bound === null ? "false" : `((SELECT count(*) FROM pend) >= ${bound} OR (SELECT count(*) FROM w) >= ${bound})`;
+  const failed = under === null ? "" : `
+                     WHEN EXISTS (SELECT 1 FROM public.thought_work_claims c
+                                   WHERE c.thought_id = w.newer_id AND ${under} AND c.status = 'failed') THEN 'failed'`;
+  const keys = claims !== "any" ? "ARRAY[]::text[]" : `COALESCE((SELECT array_agg(DISTINCT c.work_type ORDER BY c.work_type)
+                     FROM placed p JOIN public.thought_work_claims c ON c.thought_id = p.newer_id AND ${under} AND c.status = 'failed'
+                    WHERE p.standing = 'failed'), ARRAY[]::text[])`;
+  return `WITH ${pend}w AS MATERIALIZED (${w}),
+       placed AS MATERIALIZED (
+         SELECT w.status, w.newer_id,
+                CASE WHEN w.vectorless THEN 'vector' WHEN w.held THEN 'held'${failed}
+                     ELSE 'next' END AS standing
+           FROM w)
+  SELECT count(*) FILTER (WHERE status = 'stale')::int AS stale, count(*) FILTER (WHERE status = 'pending')::int AS moved,
+         count(*) FILTER (WHERE standing = 'vector')::int AS vector, count(*) FILTER (WHERE standing = 'held')::int AS held,
+         count(*) FILTER (WHERE standing = 'failed')::int AS failed, ${keys} AS failed_keys, ${cut} AS cut
+    FROM placed`;
+}
+
+/**
+ * What becomes of the parts that wait, in the words every status line gives: how many a decide-mode run takes up,
+ * and how many wait for something else, each with what it waits for. Empty where none waits. `claims` is how the
+ * read placed a failed claim, the value the read was built with (PartsClaims; partsStanding gives both from one):
+ * under the pass's key, under any with the keys named, or unread where the role may not read the claims. (Review
+ * pass 1: the lines said of every stale part that a run judges its pair again, and a run then pooled nothing for
+ * one behind a failed claim or without a vector. Review pass 2: "judges the pair again" was said of the parts a run
+ * removes with no judgement, their pair closed for good, and read "judges the pair of 0 again" where a run takes up
+ * none.)
+ */
+export function partsWaitWords(p: PartsStanding, claims: PartsClaims): string {
+  const waiting = Number(p.stale) + Number(p.moved);
+  if (waiting === 0) return "";
+  const next = waiting - Number(p.vector) - Number(p.held) - Number(p.failed);
+  const rest = [
+    Number(p.vector) ? `${p.vector} wait for a vector` : "",
+    Number(p.held) ? `${p.held} wait for a rebuild, their pair holding a proposal at a moved text that none has set stale` : "",
+    !Number(p.failed) ? ""
+      : claims === "any" ? `${p.failed} wait behind a claim of their thought that failed in a pass under ${(p.failed_keys ?? []).join(", ")} (bun db/consolidate.ts --retry-failed, in decide mode with that key's decider and writer: a judge-mode run returns no such claim)`
+      : `${p.failed} wait for --retry-failed, their thought's claim under the pass's key having failed`,
+    claims === "unread" ? "a claim that failed is not read (this role holds no SELECT on thought_work_claims), and a part behind one is counted the run's" : "",
+  ].filter(Boolean);
+  const run = next > 0 ? `takes up ${next}, the pair judged again or, where nothing will judge it again, the part removed` : "takes up none as things stand";
+  return `a decide-mode run of the pass (bun db/consolidate.ts) ${run}${rest.length ? `; ${rest.join("; ")}` : ""}`;
+}
+
+/**
+ * The read and its words together, for a status line: one value says how a failed claim is read, to both (review
+ * pass 3: given to each apart, in two encodings that each defaulted to "any", a caller out of step compiled and
+ * printed "failed in a pass under" with no key named).
+ */
+export function partsStanding(claims: PartsClaims, limit?: number): { sql: string; words: (p: PartsStanding) => string } {
+  return { sql: partsStandingSql(limit, claims), words: (p) => partsWaitWords(p, claims) };
+}
+
+/**
+ * A decide key's decider and writer, with the tail's one spelling; the last `+` parts them, as preflight has read it.
+ * A name may hold a line break, the key being text read from the store: `.` takes one (review pass 5: such a key was
+ * a decide key by isDecideKey and named no models here, so its command was printed bare).
+ */
+const DECIDE_KEY_MODELS = new RegExp(`^(.+)\\+(.+)${DECIDE_KEY_TAIL_SQL}`, "s");
+
+/**
+ * The decider and the writer a decide-mode pass key names (`consolidate:<decider>+<writer>@p<n>d<m>`), null for any
+ * other key. For the command that runs under such a key: a run without the decider's knobs is judge mode, pools
+ * under another key and names no part (review pass 4: db/rebuild.ts printed the bare command for a decide key).
+ * And what the key's own text leaves open (review pass 5):
+ *   `current`: its two versions are this release's, so a run with the two knobs judges under this very key. A key
+ *   of an earlier prompt or decide version names a pool that no run of this release drains: the knobs give a run
+ *   under another key.
+ *   `sure`: the two names hold one plus sign between them. With more, the key is the same string wherever they are
+ *   parted, and its text does not say which part is the decider's; the last plus is taken.
+ */
+export function decideKeyModels(key: string): { decider: string; writer: string; current: boolean; sure: boolean } | null {
+  if (!key.startsWith(CONSOLIDATE_KEY_PREFIX)) return null;
+  const m = DECIDE_KEY_MODELS.exec(key.slice(CONSOLIDATE_KEY_PREFIX.length));
+  return m ? { decider: m[1], writer: m[2], current: key === decideKey(m[1], m[2]), sure: !m[1].includes("+") } : null;
+}
+
+/**
+ * Whether a brain has the parts' store, and whether the role asking may read it: `has`, `reads`. The server group and
+ * the worker group hold SELECT on settled_parts since 151 (db/config.mjs); a role that reads the proposals through
+ * another group does not, and a status that read the parts unasked would fail where it ran before.
+ */
+export const PARTS_STORE_SQL = `SELECT to_regclass('public.settled_parts') IS NOT NULL AS has,
+       COALESCE(has_table_privilege(to_regclass('public.settled_parts'), 'SELECT'), false) AS reads`;
+/** The line a status prints for the parts where the role may not read them. */
+export const PARTS_UNREAD = "not read — this role holds no SELECT on settled_parts (the server group's and the worker group's since 151)";
+
+/**
+ * What a settle_stale_part call answered, as this pass knows the store's five answers (the stale parts' migration):
+ * `removed`, with `ok` true, and NOT_FOUND, DECIDED, EDITED_SINCE or NOT_STALE, each with `ok` false. Anything else is
+ * `unknown`, with the word the store gave, cut as partAnswer cuts a write's: an answer a later store might give, one
+ * that is no object, or none at all.
+ */
+export function settleAnswer(r: unknown): { known: "removed" | "NOT_FOUND" | "DECIDED" | "EDITED_SINCE" | "NOT_STALE" } | { unknown: string } {
+  const o = r as { ok?: unknown; action?: unknown; error?: unknown } | null | undefined;
+  if (o?.ok === true && o.action === "removed") return { known: "removed" };
+  if (o?.ok === false && (o.error === "NOT_FOUND" || o.error === "DECIDED" || o.error === "EDITED_SINCE" || o.error === "NOT_STALE")) return { known: o.error };
+  const word = [o?.error, o?.action].find((w): w is string => typeof w === "string" && w !== "");
+  return { unknown: (word ?? "").replace(/[^A-Za-z0-9_]/g, "").slice(0, 40) || "no word" };
+}
+
+/**
+ * The store's own refusal of a settle_stale_part call that threw: its words, which begin with the function's name
+ * and echo no argument (an id and two fingerprints are all it is given). Null for any other throw, which is the
+ * caller's to rethrow as it came. Read by name as a part's write is (partWriteFault): the refusal's SQLSTATE under a
+ * session that defaults above READ COMMITTED is one a follower ends on (worker-bootstrap.ts's followClassify), where
+ * the same default only fails the thoughts whose parts it refuses.
+ */
+export function settleRefusal(e: unknown): string | null {
+  const message = e instanceof Error ? e.message : "";
+  return /^settle_stale_part\b/.test(message) ? message.slice(0, 200) : null;
+}
+
+/**
+ * A thought's waiting parts that were not removed and will not be by a run as things are, as one clause of its
+ * claim's error: how many, and why for the first. The store would not remove it (its own words, or an answer the
+ * pass does not know), the pair's answer could not be read or was not read whole, the answer names its statement
+ * again in an item that is not recorded or quotes one of its thought's that was not read back, or a text moved
+ * under the removal with the thought past its bound on put-backs. Empty for none.
+ */
+export function unsettledWords(reasons: string[]): string {
+  if (reasons.length === 0) return "";
+  return `${reasons.length === 1 ? "a settled part of a moved text was" : `${reasons.length} settled parts of a moved text were`} not removed — ${reasons[0]}`;
+}
+
+/**
+ * A re-pool statement of the pass, tried again where a thought was deleted under it or the server broke a deadlock.
+ * Such a statement queues several thoughts at once: a thought deleted after its snapshot fails the claim's foreign
+ * key (23503), and a rebuild queueing the same claims in another order is a deadlock one of the two loses (40P01).
+ * Neither is the pass's end: `tries` in all, three as the subject sweep's pooling makes, and any other error at
+ * once (review pass 1: thrown on, either ended a run at its pool step, a follower's among them).
+ */
+export async function repooled<T>(run: () => Promise<T>, tries = 3): Promise<T> {
+  for (let tried = 1; ; tried++) {
+    try {
+      return await run();
+    } catch (e) {
+      const state = (e as { errno?: unknown } | null)?.errno ?? (e as { code?: unknown } | null)?.code;
+      if ((state === "23503" || state === "40P01") && tried < tries) continue;
+      throw e;
+    }
+  }
 }
 
 /**
@@ -975,7 +1398,7 @@ export async function decidePair(older: PairSide, newer: PairSide, cfg: EmbedCon
     const answer = parseParts(await askWriter(cfg, partsMessages({ older, newer }), signal));
     const checked = checkParts(answer, older.content, newer.content);
     note.writer = partsNote(cfg.judgeModel, answer, checked);
-    return marked(partsJudgement(p, answer, checked));
+    return marked(partsJudgement(p, answer, checked, older.content, newer.content));
   }
   // Under the floor a standing proposal would record nothing and close the pair's relation (SMD-3151 review pass 3),
   // so the writer is not asked: the pair takes H2O's best verdict that proposes nothing, as a quote that fails does.

@@ -32,7 +32,7 @@ import { EGRESS_UNITS, KEYED_UNITS, hostOf, localKnob, type EgressTerm, type Egr
 import { statusType, withProviderSpan } from "./spans.ts";
 import { modelCall } from "./model-call.ts";
 import { jevDecide, jevInfo, resolveDecideTier, resolveJevConfig, type JevConfig } from "./jev.ts";
-import { consolidatePassKey } from "./consolidate-decide.ts";
+import { consolidatePassKey, decideKeyModels, pairHoldsPartSql, PARTS_STORE_SQL, partsClaimsFor, partsStanding, type PartsStanding } from "./consolidate-decide.ts";
 import { ago, budgetWords, deniedObject, heartbeatState, heldWords, holdWords, ledgerStatus, PRIORITY_GRANT_FIX, priorityFindingsRow, limitByWords, pad3, readDatabaseFacts, freshBeat, reembedKeyModel, reembedKeyUnfit, reembedRunner, RESTART_OVERDUE_S, secondsSince, shellWord, SLEEP_STALLED_JOIN, handFollowersOf, sleepBeatOf, switchNow, TASK_OK, taskStates, threadsRow, type ReembedBackoff, type ReembedDown, type ReembedThoughtWait, type SleepHold, type WorkerHeartbeat } from "./brain-info.ts";
 import { pathFix, quoteIdent, searchPathSchemas } from "./search-path.ts";
 import { LATEST_MIGRATION } from "./version.ts";
@@ -2696,6 +2696,13 @@ if (configFailed) {
                      (SELECT w.prosrc LIKE '%ob1:pass-settled-is-the-pass-to-reopen%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.rebuild_derived(uuid, text, boolean, text[], boolean, boolean)')) AS reopens_settled,
                      -- The settled parts' table (SMD-4446), where its file is applied: that file last defines rebuild_derived, so 067's remedy names it there.
                      to_regclass('public.settled_parts') IS NOT NULL AS has_parts,
+                     -- …and whether this role may read it: the server group's and the worker group's since 151. The census
+                     -- reads the parts only then, and says so otherwise: unasked, a role without it lost the whole check.
+                     COALESCE(has_table_privilege(to_regclass('public.settled_parts'), 'SELECT'), false) AS reads_parts,
+                     -- …and the work claims, which place a waiting part behind a failed one. A server's role holds no SELECT
+                     -- there unless extraction or the subject pool is on (EXTRACTION_TRIGGER_WRITES): read unasked, the
+                     -- whole check was skipped for it, naming a grant the role is not due (review pass 2).
+                     COALESCE(has_table_privilege(to_regclass('public.thought_work_claims'), 'SELECT'), false) AS reads_claims,
                      (SELECT w.prosrc LIKE '%ob1:lineage-excludes-the-pair%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_lineage,
                      -- 079 (SMD-2448): the candidate body leaves out two tickets Linear links (its sentinel); 063 or 066 re-applied by hand puts one back that does not.
                      (SELECT w.prosrc LIKE '%ob1:linked-tickets-not-paired%' FROM pg_proc w WHERE w.oid = to_regprocedure('public.consolidation_candidates(uuid, int, float)')) AS excludes_tickets,
@@ -2711,11 +2718,19 @@ if (configFailed) {
                 FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
                WHERE ns.nspname = 'public'
                  AND (p.proname IN ('update_thought', 'record_thought_entities', 'record_supersession_proposal', 'ob1_record_vector_lineage')
-                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
+                      OR (p.proname = 'upsert_thought' AND p.pronargs >= 3))`) as { records: boolean | null; n: number; trigger_on: boolean; has_063: boolean; marks_clear: boolean | null; replaces_stale: boolean | null; yields_stale: boolean | null; has_067: boolean; reopens_settled: boolean | null; has_parts: boolean; reads_parts: boolean; reads_claims: boolean; excludes_lineage: boolean | null; excludes_tickets: boolean | null; lists_current: boolean | null; has_current_form: boolean; listing_forms: number }[];
             const producersCurrent = bodies.records === true && Number(bodies.n) === 6 && bodies.trigger_on === true;
             const rebuildOlder = bodies.has_063 && [["ob1_record_derivation", bodies.marks_clear], ["record_supersession_proposal", bodies.replaces_stale], ["consolidation_candidates", bodies.yields_stale]].filter(([, ok]) => ok !== true).map(([name]) => name as string);
             const reopenOlder = bodies.has_067 && bodies.reopens_settled !== true;
-            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; thread_edges: number; thread_edge_ids: string[] | null; subjects: number; subject_ids: string[] | null; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; te_read: number; sj_read: number };
+            const readsParts = bodies.has_parts && bodies.reads_parts;
+            // Where the parts stand is read against the pass's key as this server's settings give it, the key the
+            // consolidate pass row calls current, where that key is decide mode's: a judge-mode server reads as one
+            // that knows no key, since no decide run skips a thought for a judge-mode claim (partsClaimsFor, review
+            // pass 3). And with no claim read where this role may read none.
+            const passKey = consolidatePassKey(resolvedEmbed);
+            const partsClaims = bodies.reads_claims ? partsClaimsFor(passKey, "$1") : "unread" as const;
+            const partsRead = partsStanding(partsClaims, BOUND);
+            type Census = { chunks: number; chunk_ids: string[] | null; vectors: number; vector_ids: string[] | null; entities: number; entity_ids: string[] | null; proposals: number; proposal_ids: string[] | null; sections: number; section_ids: string[] | null; relations: number; relation_ids: string[] | null; thread_edges: number; thread_edge_ids: string[] | null; subjects: number; subject_ids: string[] | null; parts: number; part_ids: string[] | null; parts_wait: PartsStanding; stale_pages: number; stale_page_ids: string[] | null; lineage_pairs: number; lineage_pair_ids: string[] | null; untagged: number; stale: number; marked: number; orphans: number; orphan_ids: string[] | null; rows: number; legacy: number; undeclared: number; ch_read: number; vc_read: number; en_read: number; pr_read: number; md_read: number; se_read: number; pg_read: number; lp_read: number; re_read: number; te_read: number; sj_read: number; pa_read: number };
             // 064's sections join the census where the store is applied; a brain at
             // 062 has no page_sections, so the CTE is written only then (the text is
             // built here — BOUND is a constant — and run as one statement).
@@ -2755,6 +2770,22 @@ if (configFailed) {
                    sj_s AS (SELECT id FROM public.thought_facets WHERE kind = 'subject' AND valid_until IS NULL LIMIT ${BOUND}),
                    sj AS (SELECT s.id FROM sj_s s
                            WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'subject' AND d.artifact_id = s.id)),
+                   -- 151 (SMD-4446): a settled part and its lineage row, written with it by record_settled_part: the validity
+                   -- read takes a part by that row, so a part without one stands unseen. And the parts that wait
+                   -- (partsStanding, the pass's own read): the stale ones, the pending ones at a text that has moved
+                   -- with no rebuild since, which no lineage row marks, and how many of them a decide-mode run does
+                   -- not take up as things are. Not bounded as this census is: it reads every part's row once, no
+                   -- index serving the status (SMD-4560), and bounds the pending parts it tests for a moved text and
+                   -- the waiting parts it places; its cut column says whether either bound was reached. Where the store
+                   -- stands and this role may read it.
+                   ${readsParts
+                     ? `pa_s AS (SELECT id FROM public.settled_parts LIMIT ${BOUND}),
+                   pa AS (SELECT s.id FROM pa_s s
+                           WHERE NOT EXISTS (SELECT 1 FROM public.derivations d WHERE d.artifact_kind = 'part' AND d.artifact_id = s.id)),
+                   pw AS (${partsRead.sql}),`
+                     : `pa_s AS (SELECT NULL::uuid AS id WHERE false),
+                   pa AS (SELECT NULL::uuid AS id WHERE false),
+                   pw AS (SELECT 0 AS stale, 0 AS moved, 0 AS vector, 0 AS held, 0 AS failed, ARRAY[]::text[] AS failed_keys, false AS cut),`}
                    md_s AS (SELECT t.id FROM public.thoughts t
                              WHERE (t.metadata ? 'type' OR t.metadata ? 'topics') AND t.metadata->>'metadata_extraction_failed' IS NULL LIMIT ${BOUND}),
                    md AS (SELECT s.id FROM md_s s
@@ -2779,8 +2810,8 @@ if (configFailed) {
                            -- 111: a subject off its text is the subject pass's to find again — its pool reads the fingerprint —
                            -- until rebuild_derived gains its arm (SMD-3306).
                            -- 151: a settled part's row is left out, as a proposal's is. Once a rebuild has run its status is
-                           -- its mark, and a decided part keeps the fingerprints it was judged at for good. (A pending part at
-                           -- a moved text with no rebuild since is so far counted nowhere: SMD-4446's later cuts.)
+                           -- its mark, and a decided part keeps the fingerprints it was judged at for good. A pending part at
+                           -- a moved text with no rebuild since is counted with the stale ones (pw, above).
                            WHERE d.artifact_kind NOT IN ('proposal', 'part', 'relation', 'subject')
                              AND d.input_fingerprints[1] IS DISTINCT FROM COALESCE(t.content_fingerprint, public.content_fingerprint_of(t.content))),
                    orph AS (SELECT d.id, d.artifact_kind FROM al d
@@ -2797,6 +2828,9 @@ if (configFailed) {
                      (SELECT count(*)::int FROM re) AS relations, (SELECT array_agg(id::text) FROM (SELECT id FROM re LIMIT 3) s) AS relation_ids,
                      (SELECT count(*)::int FROM te) AS thread_edges, (SELECT array_agg(id::text || ' under ' || key) FROM (SELECT id, key FROM te LIMIT 3) s) AS thread_edge_ids,
                      (SELECT count(*)::int FROM sj) AS subjects,  (SELECT array_agg(id::text) FROM (SELECT id FROM sj LIMIT 3) s) AS subject_ids,
+                     (SELECT count(*)::int FROM pa) AS parts,     (SELECT array_agg(id::text) FROM (SELECT id FROM pa LIMIT 3) s) AS part_ids,
+                     -- The read's row whole, as the pass's --status takes it: no count is carried by hand.
+                     (SELECT to_jsonb(pw) FROM pw) AS parts_wait,
                      (SELECT count(*)::int FROM pg) AS stale_pages, (SELECT array_agg(id::text) FROM (SELECT id FROM pg LIMIT 3) s) AS stale_page_ids,
                      (SELECT count(*)::int FROM lp) AS lineage_pairs, (SELECT array_agg(id::text) FROM (SELECT id FROM lp LIMIT 3) s) AS lineage_pair_ids,
                      (SELECT count(*)::int FROM md) AS untagged,
@@ -2810,7 +2844,8 @@ if (configFailed) {
                      (SELECT count(*)::int FROM pr_s) AS pr_read, (SELECT count(*)::int FROM md_s) AS md_read,
                      (SELECT count(*)::int FROM se_s) AS se_read, (SELECT count(*)::int FROM pg_s) AS pg_read,
                      (SELECT count(*)::int FROM lp_s) AS lp_read, (SELECT count(*)::int FROM re_s) AS re_read, (SELECT count(*)::int FROM te_s) AS te_read,
-                     (SELECT count(*)::int FROM sj_s) AS sj_read`)) as Census[];
+                     (SELECT count(*)::int FROM sj_s) AS sj_read, (SELECT count(*)::int FROM pa_s) AS pa_read`,
+              readsParts && typeof partsClaims === "object" ? [passKey] : [])) as Census[];
             const n = (x: number) => (Number(x) > BOUND - 1 ? "more than 10,000" : String(x));
             // Two bounds, two facts: an ARTIFACT source that reached the bound
             // was sampled, so a missing row past it is not seen — the headline
@@ -2820,7 +2855,7 @@ if (configFailed) {
             // any artifact table, and its verdict is exact (cold read, third
             // review pass: one flag said "the rest not read" of tables read
             // whole; run-it: the capped line said the disclosure twice).
-            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read, c.te_read, c.sj_read].some((r) => Number(r) >= BOUND);
+            const capped = [c.ch_read, c.vc_read, c.en_read, c.pr_read, c.md_read, c.se_read, c.pg_read, c.re_read, c.te_read, c.sj_read, c.pa_read].some((r) => Number(r) >= BOUND);
             const missing: string[] = [];
             if (Number(c.chunks)) missing.push(`${n(c.chunks)} chunk set(s) (thought ${(c.chunk_ids ?? []).join(", ")})`);
             if (Number(c.vectors)) missing.push(`${n(c.vectors)} vector(s) (thought ${(c.vector_ids ?? []).join(", ")})`);
@@ -2830,6 +2865,7 @@ if (configFailed) {
             if (Number(c.relations)) missing.push(`${n(c.relations)} judged relation(s) (${(c.relation_ids ?? []).join(", ")})`);
             if (Number(c.thread_edges)) missing.push(`${n(c.thread_edges)} thread edge(s) (${(c.thread_edge_ids ?? []).join(", ")})`);
             if (Number(c.subjects)) missing.push(`${n(c.subjects)} own subject(s) (${(c.subject_ids ?? []).join(", ")})`);
+            if (Number(c.parts)) missing.push(`${n(c.parts)} settled part(s) (${(c.part_ids ?? []).join(", ")})`);
             // 064's kind has its own writer and no backfill: the remedy for a
             // section is that writer, said beside the general one (cold read,
             // first review pass: the general remedy named 061's backfill, which
@@ -2840,8 +2876,19 @@ if (configFailed) {
               // 120 (SMD-3306): a thread's edge and its row are thread_relink's, written together; a re-link writes a closed one again.
               + (Number(c.thread_edges) ? " A thread edge's row is written with it by 120's thread_relink: close the edge (UPDATE thought_facets SET valid_until = now() WHERE id = '<edge id>') and re-link its thread, which writes it again with its row: bun db/threads.ts --url … --key '<the key each edge is named under above>'." : "")
               // 111 (SMD-3306): a subject's row is its own writer's too, and 061's backfill knows no subject.
-              + (Number(c.subjects) ? " An own subject's row is written with it by 130's record_thought_subjects (111's record_thought_subject its set of one): close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "");
-            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)`;
+              + (Number(c.subjects) ? " An own subject's row is written with it by 130's record_thought_subjects (111's record_thought_subject its set of one): close the facet (UPDATE thought_facets SET valid_until = now() WHERE id = '<subject id>') and put the thought back in the subject pool (SELECT requeue_thought_work(value, '<thought id>') FROM ob1_config WHERE key = 'subject_pool_key' AND value <> ''), which the next --subjects run records again." : "")
+              // 151 (SMD-4446): a part's row is its own writer's too, and 061's backfill knows no part. Its fingerprints
+              // are the part's own, so the row can be written again as the part holds it.
+              + (Number(c.parts) ? " A settled part's row is written with it by 151's record_settled_part: record the row again from the part (SELECT ob1_record_derivation('part', s.id, ARRAY[s.older_id, s.newer_id], ARRAY[s.older_fingerprint, s.newer_fingerprint], s.judge_key, '{\"deterministic\": false}'::jsonb, s.canonical_agent_id) FROM settled_parts s WHERE s.id = '<part id>'), which keeps a reviewer's decision on it; the recipe it was judged under is not known again." : "");
+            // Where the parts that wait stand (review pass 1: the clause said a run judges every one's pair again).
+            const pw = c.parts_wait;
+            const partsWaits = partsRead.words(pw);
+            // The read's two bounds, said only where one was reached (review pass 3: said wherever the store held the
+            // bound's number of parts of any status, so over exact counts on any brain with that many decided parts).
+            const partsCut = pw.cut === true ? `of the settled parts, where more than 10,000 are pending or wait (${BOUND.toLocaleString("en-US")} pending ones tested for a moved text and ${BOUND.toLocaleString("en-US")} that wait placed, at most, in no order), ` : "";
+            const coverage = `${Number(c.rows) >= BOUND ? `more than 10,000 lineage rows; of the ${BOUND.toLocaleString("en-US")} read` : `${c.rows} lineage row(s)`}: ${c.legacy} backfilled by 061 at the thought's current text (legacy), ${c.undeclared} with no declared recipe (a caller from before the envelope), ${c.stale} stale (the input's text moved since — rebuild_derived re-derives or hands them to the workers: bun db/rebuild.ts --input <id>), ${c.marked} marked for a re-run by rebuild_derived (awaiting a worker's pass — the tags' is bun db/retag.ts, whose run pools a marked row and, from 150, the rebuild queues it once that worker has recorded its key — or a generated page section's own writer, which no pool reaches); ${n(c.untagged)} thought(s) carry tags with no tag lineage — a caller's own tags, or tags from before 061; nothing on the row says which model wrote them (coverage, not a failure)${
+              readsParts ? `; ${partsCut}${pw.stale} settled part(s) stale and ${pw.moved} pending at a text that has moved since${partsWaits ? ` (${partsWaits})` : ""}`
+              : bodies.has_parts ? "; the settled parts not read (this role holds no SELECT on settled_parts, the server group's since 151)" : ""}`;
             if (missing.length) {
               // The remedy by the cause the bodies show: every producer current,
               // so a raw writer (or a write skipped) — the re-apply's backfill, or
@@ -2946,7 +2993,7 @@ if (configFailed) {
             add("lineage", "skip", `not checked — this role cannot read ${denied} (${msg})`,
                 `GRANT SELECT ON ${denied} TO <the connector's role>; — ${denied === "derivations" ? "the capture group's row since 061" : "a row of the grants table"}, which migrate.ts --grant issues (db/README.md, Grants for a capturing role).`);
           } else {
-            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (064) and pg_proc.");
+            add("lineage", "warn", `could not verify: ${msg}`, "The check reads derivations, thoughts, thought_chunks, thought_entities, ob1_entity_edges, supersession_proposals, page_sections and pages (064), settled_parts (151) and pg_proc.");
           }
         }
 
@@ -5121,16 +5168,18 @@ if (configFailed) {
               // the extractor where it is. A key of this server's own models
               // needs none, whatever its versions, as before decide mode.
               const rest = key.slice(CONSOLIDATE_KEY_PREFIX.length);
-              const decided = /^(.+)\+(.+)@p\d+d\d+$/.exec(rest);
+              const decided = decideKeyModels(key);
               const judged = decided ? undefined : /^(.+)@p\d+$/.exec(rest)?.[1];
               // The key the scheduler runs now: this configuration's, whatever a
               // model name holds — the parse splits a `+` in a name wrongly
               // (review pass 2).
               const currentKey = key === consolidatePassKey(resolvedEmbed);
-              const ownKey = currentKey || (resolvedEmbed.decider ? decided?.[1] === resolvedEmbed.decider && decided[2] === judgeModel : judged === judgeModel);
+              const ownKey = currentKey || (resolvedEmbed.decider ? decided?.decider === resolvedEmbed.decider && decided.writer === judgeModel : judged === judgeModel);
+              // The names are text read from the store, each printed as one shell word (review pass 5: unquoted, a
+              // name with a space or a semicolon in it printed a command that ran something else).
               const envPrefix = ownKey ? ""
-                : decided ? `OB1_CONSOLIDATE_DECIDER=${decided[1]} OB1_JUDGE_MODEL=${decided[2]} `
-                : judged ? `${resolvedEmbed.decider ? "OB1_CONSOLIDATE_DECIDER= " : ""}OB1_JUDGE_MODEL=${judged} ` : "";
+                : decided ? `OB1_CONSOLIDATE_DECIDER=${shellWord(decided.decider)} OB1_JUDGE_MODEL=${shellWord(decided.writer)} `
+                : judged ? `${resolvedEmbed.decider ? "OB1_CONSOLIDATE_DECIDER= " : ""}OB1_JUDGE_MODEL=${shellWord(judged)} ` : "";
               const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts with entities — ");
               // Running: a worker holds a live lease, or the key's follower
               // stamped a fresh heartbeat and has not ended — between its polls
@@ -5262,7 +5311,28 @@ if (configFailed) {
             const board = bu
               ? `; board pairs not counted (${bu.reason === "refused" ? bu.message : bu.reason === "timeout" ? "not read in time" : bu.reason === "deadline" ? "not read before the deadline" : bu.message})`
               : p.boardPairs ? `; ${p.boardPairs} pair two tickets the board does not link` : "";
-            const stale = p.stale ? `; ${p.stale} stale (a text moved under the verdict; the next pass replaces one it finds in conflict again and settles one it does not)` : "";
+            // A judge-mode server's pass leaves a stale proposal on a pair that holds an undecided settled part to a
+            // decide-mode pass: it neither judges the pair, settles the proposal nor pools its thought for it
+            // (SMD-4446 PR 2b-2, review pass 5: this row said of every stale proposal that the next pass settles
+            // it, and that pass, run twice, left them). Counted where this server runs judge mode and its role may
+            // read the parts, with the bound the census reads to; a read that fails says nothing more than before.
+            let staleLeft = 0;
+            if (p.stale > 0 && !resolvedEmbed.decider) {
+              try {
+                const [store] = (await sql.unsafe(PARTS_STORE_SQL)) as { has: boolean; reads: boolean }[];
+                if (store?.has && store.reads) {
+                  const [l] = (await sql.unsafe(`SELECT count(*)::int AS n FROM (SELECT 1 FROM public.supersession_proposals p WHERE p.status = 'stale' AND ${pairHoldsPartSql("p")} LIMIT 10001) x`)) as { n: number }[];
+                  staleLeft = Math.min(Number(l.n), p.stale);
+                }
+              } catch { /* said as before */ }
+            }
+            const NEXT_PASS = "replaces one it finds in conflict again and settles one it does not";
+            const LEFT = "on a pair that holds an undecided settled part: this server's judge-mode pass leaves those to a decide-mode pass";
+            const stale = !p.stale ? ""
+              : staleLeft === 0 ? `; ${p.stale} stale (a text moved under the verdict; the next pass ${NEXT_PASS})`
+              : staleLeft === p.stale ? `; ${p.stale} stale (a text moved under the verdict, each ${LEFT}, which ${NEXT_PASS})`
+              : `; ${p.stale} stale (a text moved under the verdict; the next pass ${NEXT_PASS}, but for ${staleLeft} ${LEFT})`;
+            const settles = staleLeft === 0 ? "the next pass settles them" : staleLeft === p.stale ? "a decide-mode pass settles them" : "the next pass settles the others, and a decide-mode pass those";
             const words = p.pending === 0
               ? `none pending${stale}`
               : `${p.pending} pending review, the oldest judged ${p.oldestPendingS === null ? "at an unknown time" : `${ago(p.oldestPendingS)} ago`}${board}${stale}`;
@@ -5276,9 +5346,10 @@ if (configFailed) {
             const fixes = [boardFix, old ? backlog : null, knobFix].filter((f): f is string => f !== null);
             const detail = `${words}${old ? ` — unreviewed past ${knob.days} day(s)` : ""}${knob.problem ? `${old ? ";" : " —"} ${knob.problem}, so ${PROPOSALS_WARN_DAYS} days are used` : ""}`;
             if (fixes.length) add("proposals", "warn", detail, fixes.join(" "));
-            // Stale alone: the next pass settles them, and --list stale shows each with the decision it takes (review pass 5).
+            // Stale alone: the next pass settles them, or a decide-mode pass those this server's pass leaves
+            // (`settles`), and --list stale shows each with the decision it takes (review pass 5).
             else add("proposals", "ok", p.pending > 0 ? `${words} — review with ${review}`
-              : p.stale > 0 ? `${words} — the next pass settles them; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
+              : p.stale > 0 ? `${words} — ${settles}; to decide one sooner, cd db && bun consolidate.ts --url $DATABASE_URL --list stale shows each with its --accept --force or --reject`
               : words);
           }
         }
