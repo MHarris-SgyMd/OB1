@@ -322,6 +322,19 @@ job to every other job in the workflow, so a job left out of its `needs:` fails
 CI by name. A push straight to `main` is refused, green checks or not: GitHub
 answers with one `remote: -` line per rule it applied.
 
+**Two more rulesets fence the agent runner's GitHub App (SMD-4087 decision 13).**
+`.github/rulesets/main-merge.json` restricts updating and deleting `main` to
+the Repository admin role, which is exempt from it, so the App can't merge
+whatever approvals it holds; `.github/rulesets/tags.json` restricts creating,
+moving and deleting `v*` tags the same way, so the App can't start
+`release.yml`. They stack with `main.json`, which still binds every merge, the
+maintainer's included, to its one required check. Each is applied once with
+`gh api -X POST repos/MHarris-SgyMd/OB1/rulesets --input <file>` (the runner's
+README, "The GitHub App", has the steps and the fallback if a plain merge is
+refused). Check 20 reads `main.json` alone, and
+`scripts/agent-runner/setup.ts check-github-app` reads the live rulesets and
+checks that the two fence the App.
+
 Renaming the aggregate job changes the one context the ruleset requires, so the
 file and the ruleset move together: apply the new `main.json` with the command
 above just before the PR that renames the job merges, then merge it at once. A
@@ -346,6 +359,21 @@ reproduce a 768-only failure on its own:
 ```bash
 cd db && OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text bun test-schema.ts
 ```
+
+**Why a job ran that might have skipped (SMD-2435).** The `changes` job,
+shown as "What the change can affect", judges some jobs by the list of what
+each read on main. Where it does, its log says `changes.sh: <job> runs:
+<reason>` for each of them that runs, and its line on the run's summary page
+says `no list to go by for: <jobs>` when some lists could be used and theirs
+could not. A reason that begins `its list` is about main's list, or its
+fetch, and not about the pull request: the job runs to be safe, which costs
+time and risks nothing. Unless the list is not here or is cut short, the
+reason gives its header as main's run wrote it: `commit=` is the run to
+open, and `status=`, `sight=` and, for a job that watches what its containers
+open, `watch=` say what stood wrong there. For a `sight=` or a `watch=` that
+is not `ok`, a `reads.sh` warning among that run's annotations names the job
+by the same id and says why. Main's next green run writes new lists. A watch
+lost run after run is a fault to mend, and nothing counts the runs for you.
 
 ---
 
