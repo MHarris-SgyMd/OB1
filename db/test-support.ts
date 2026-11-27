@@ -609,6 +609,9 @@ const FUNCTIONS = [
   "review_settled_part(uuid, text, text, jsonb, boolean, text)",
   "ob1_keep_part_judgement()",
   "ob1_drop_part_derivation()",
+  // 154 (SMD-4446): the pass's removal of a part that is no longer a judgement of its texts. (154 also carries 149's
+  // thought_validity, named above.)
+  "settle_stale_part(uuid, text, text)",
 ];
 
 /**
