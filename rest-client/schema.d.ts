@@ -7173,7 +7173,7 @@ export interface operations {
                     "application/json": components["schemas"]["Refusal"];
                 };
             };
-            /** @description Retry, after Retry-After: the agent registry could not be read (STORE_UNAVAILABLE; a table held by a lock ends the read at 250 ms), or was busy on the forwarder's own lookup, which meets a held table first where the forwarder is not remembered (BUSY, `credential: "forwarder"`, after that lookup's retries, some two seconds). Neither is an answer for any caller. */
+            /** @description Retry, after Retry-After: the agent registry could not be read (STORE_UNAVAILABLE; a table held by a lock ends the read at 250 ms), or was busy on the forwarder's own lookup, which meets a held table first where the forwarder is not remembered (BUSY, `credential: "forwarder"`, after that lookup's retries, some two seconds). */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */

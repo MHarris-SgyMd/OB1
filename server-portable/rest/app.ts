@@ -571,15 +571,15 @@ export function createRestApp(deps: RestDeps): Hono<RestEnv> {
   // caller, and the asker ends nothing on it. A registry that cannot be read
   // is a 503: the read's (STORE_UNAVAILABLE; a held table ends it at its cap),
   // or the forwarder's own lookup's where that met the fault first, as it does
-  // when the forwarder is not remembered (BUSY, `credential: "forwarder"`,
+  // when the forwarder's answer is not cached (BUSY, `credential: "forwarder"`,
   // after its retries, some two seconds). A name is taken on the asker's word:
   // one that begins `oauth:` is answered as a token caller's.
   app.post("/v1/callers/standing", async (c) => {
     const named = traceOf(c.req.raw);
     if (named) named.route = c.req.routePath;
-    // A key or a bearer token in a caller's header, forwarded or not, is refused before it is checked: no caller's
-    // scope reaches this route, and what the header held is not asked of the key list, the registry or the token
-    // check. (A header that carries neither, an Authorization of another scheme among them, is not a caller's.)
+    // A key or a bearer token in a caller's header, forwarded or not, is refused before it is checked: what the
+    // header held is not asked of the key list, the registry or the token check. (A header that carries neither,
+    // an Authorization of another scheme among them, is not a caller's.)
     if (headerKeys(c.req.raw).length > 0) return refuse(c, 403, { code: "FORBIDDEN", needs: "forward" });
     const keys = deps.keys();
     const forwarded = c.req.raw.headers.get(FORWARDER_HEADER);

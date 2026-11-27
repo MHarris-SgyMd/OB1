@@ -1280,12 +1280,12 @@ a stack with the `auth` profile also carries the authorization server's tokens:
 on `/mcp`. The proxy deletes `x-brain-forwarder` on the way in: a request's
 carrier (SMD-2284) is named only from inside the stack, where the MCP server
 names itself when it forwards a key (SMD-2287's `mcp-server/`). For the same
-reason the one route a forwarder's key reaches alone, `POST
-/v1/callers/standing` (SMD-4493), is not reached through `/api`: it reads that
-header. Inside the stack whoever holds the forwarder's key can ask it of any
-key's digest whether that key is revoked or still listed, so the key is
-guarded as the stack's env file is. The REST core's writes record their door as
-`open-brain-api`
+reason the one route a forwarder's key reaches alone,
+`POST /v1/callers/standing` (SMD-4493), is not reached through `/api`: it
+reads that header. Inside the stack whoever holds the forwarder's key can ask
+it of any key's digest whether that key is revoked or still listed, so the
+forwarder's key is guarded as the stack's env file is. The REST core's writes
+record their door as `open-brain-api`
 (`thought_audit.origin`), the MCP server's at `/mcp` among them, carried by it,
 and the jobs it
 starts are its own (migration 078): its start marks its own unfinished jobs

@@ -338,8 +338,8 @@ export class AgentResolver {
    * cached answer runs out; but a lookup of it already in flight caches its
    * earlier answer again, and the read records no revocation, so a registry
    * gone by that next request serves the key by name as it serves any. Throws
-   * where the registry cannot be read: that is
-   * no answer, and nothing here turns it into one.
+   * where the registry cannot be read: that is no answer, and nothing here
+   * turns it into one.
    */
   async revoked(store: Promise<ThoughtStore>, keyHashes: readonly string[]): Promise<string[]> {
     const revoked = await (await store).revokedKeys(keyHashes);

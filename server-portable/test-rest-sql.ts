@@ -1145,7 +1145,7 @@ console.log("\n[6d] Whether callers still stand, against the real registry (SMD-
   const [fresh] = await sql`SELECT count(*)::int AS c FROM ob1_agent_keys WHERE key_hash IN (${hashKey(KEYS.fresh)}, ${tokenNew})`;
   assert((await registry()) === before && Number(fresh.c) === 0, "…and the registry is as it was: no caller asked of registered, renamed or stamped");
   const refused = await ask(asked, KEYS.forwarder, KEYS.writer);
-  assert(refused.status === 403 && refused.body.code === "FORBIDDEN" && refused.body.needs === "forward", `a write key, forwarded or not, does not reach it (${refused.status} ${JSON.stringify(refused.body)})`);
+  assert(refused.status === 403 && refused.body.code === "FORBIDDEN" && refused.body.needs === "forward", `a write key beside the forwarder's does not reach it (${refused.status} ${JSON.stringify(refused.body)})`);
   const alone = await ask(asked, null);
   assert(alone.status === 401 && alone.body.credential === "forwarder", `no forwarder slot → 401, credential forwarder (${alone.status} ${JSON.stringify(alone.body)})`);
   // The store's read under a held table: ended at its cap, a throw and no answer; and the route, the same, a 503.
@@ -1160,7 +1160,7 @@ console.log("\n[6d] Whether callers still stand, against the real registry (SMD-
     waited = performance.now() - t0;
     held = await ask(asked);
   });
-  assert(threw === "55P03" && waited < 2000, `the read of a held table ends at its lock cap, 55P03, and holds no connection for the lock (${threw}, ${Math.round(waited)} ms)`);
+  assert(threw === "55P03" && waited < 2000, `the read of a held table ends at its lock cap, 55P03, inside two seconds (${threw}, ${Math.round(waited)} ms)`);
   assert(held?.status === 503 && held?.body.code === "BUSY" && held?.body.credential === "forwarder" && !("callers" in (held?.body ?? {})) && held?.headers.get("retry-after") !== null,
     `…and the route answers 503 with a Retry-After, for no caller: the forwarder's own lookup met the held table first, and is BUSY after its retries (${held?.status} ${JSON.stringify(held?.body)})`);
   const again = await ask(asked);
