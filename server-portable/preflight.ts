@@ -45,7 +45,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pluginForeignOwned, pluginIdents, pluginLoginUrl, SHARED_PLUGIN_LOGIN } from "../db/config.mjs";
 import { migrationSha } from "../db/version.mjs";
-import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, reembedKey, restartCommand, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
+import { MIGRATION_EXIT, ROLE_GRANTS, parseReembedKey, parseRetagKey, reembedKey, restartCommand, retagKey, startRefusalRemedy, tierProblem, trimmedEnv } from "../db/config.mjs"; // static: `env` below is built before the dynamic import above resolves, and the re-embed keys are read by several rows
 import type { PassCounts } from "../db/config.mjs";
 import { relayKeyProblem, slotsSettingFrom } from "./slots.ts";
 
@@ -4686,7 +4686,7 @@ if (configFailed) {
         let recorded: Record<string, string> = {};
         try {
           const cfg = await sql`
-            SELECT key, value FROM ob1_config WHERE key IN ('embedding_dim','embedding_model')`;
+            SELECT key, value FROM ob1_config WHERE key IN ('embedding_dim','embedding_model','retag_key')`;
           recorded = Object.fromEntries((cfg as { key: string; value: string }[]).map((r) => [r.key, r.value]));
         } catch (e) {
           // Never swallow this: a silent catch here previously made the whole
@@ -5362,17 +5362,20 @@ if (configFailed) {
          * stale tags row under that key (150). The re-embed and consolidate
          * rows' rule: a pass is unfinished while a row under its key is
          * pending, leased or failed. "Not yet in the pool" is the worker's own
-         * backlog, db/config.mjs's RETAG_BACKLOG_SQL, one definition. No
-         * follower or sleep pass runs it yet (SMD-2298 PR 4), so a live lease
-         * is a run in progress, and pending rows wait for a run: one that
-         * stopped, or a text move's rebuild requeued them (150), which nothing
-         * here tells apart. An earlier key's pool is no worker's and counts as
-         * nothing unfinished. With nothing unfinished, a backlog waiting for a
-         * run is said beside "none unfinished": the lineage row counts its
-         * kinds (review pass 1: an earlier pool hid it for good, and every
-         * pending row read as a run that stopped). Since PR 3b the recorded key
-         * is the tags' target recipe, and a row under another recipe is behind
-         * it: where this server tags captures under another key than the one
+         * backlog, db/config.mjs's RETAG_BACKLOG_SQL, one definition. A live
+         * lease, or a follower's fresh heartbeat for the key (PR 4a-2), is a
+         * run in progress — but a live lease beside the key's follower row
+         * stale or ended is a follower gone, its leases named for release; no
+         * sleep pass runs it yet (PR 4b), so otherwise pending rows wait for a
+         * run: one that stopped, or a text move's rebuild requeued them (150),
+         * which nothing here tells apart. An earlier key's pool with no live
+         * lease and no follower running it is no worker's and counts as nothing
+         * unfinished. With nothing unfinished, a backlog waiting for a run is
+         * said beside "none unfinished": the lineage row counts its kinds
+         * (review pass 1: an earlier pool hid it for good, and every pending
+         * row read as a run that stopped). Since PR 3b the recorded key is the
+         * tags' target recipe, and a row under another recipe is behind it:
+         * where this server tags captures under another key than the one
          * recorded, a line says what follows (each capture behind it; a plain
          * run here refused, the switch the way forward; or the tree that
          * recorded the key named).
@@ -5437,6 +5440,11 @@ if (configFailed) {
               return { prefix: parsed.model !== metaModel ? `OB1_METADATA_MODEL=${shellWord(parsed.model)} ` : "" };
             };
             let unfinished = 0;
+            // The key a follower runs here (the workers row's K, review pass 5), and a re-tag follower's row that is no
+            // longer stamping, under any key: where one is, the workers row says how the follower starts again, and a
+            // one-shot run named here as well would be a second worker.
+            const followerKey = recorded ?? serverKey;
+            const followerGone = (facts.workers?.heartbeats ?? []).some((h) => h.worker === "retag" && !freshBeat(h));
             for (const [key, c] of [...byKey].sort(([a], [b]) => a.localeCompare(b))) {
               if (!passUnfinished(c)) continue;
               c.unpooled = Number((await backlogOf(key)).unpooled);
@@ -5444,9 +5452,38 @@ if (configFailed) {
               c.thoughts = c.succeeded + c.failed + c.claimed + c.pending + c.unpooled;
               const counts = formatPassCounts(c).replace(/ thoughts — /, " thoughts pooled or behind their tags — ");
               const l = leases.get(key) ?? NO_LEASES;
-              if (l.live > 0) {
+              // A follower of this key (SMD-2298 PR 4a-2), as the consolidate row reads one (SMD-2423, SMD-2261 item 7):
+              // running while it holds a live lease or its fresh heartbeat has not ended — between its polls it holds
+              // none. One killed outright leaves its claims' leases live while its row goes stale: the row is the
+              // fresher word, so the follower reads gone, not running.
+              const beat = facts.workers?.heartbeats.find((h) => h.worker === "retag" && h.job === key);
+              const follower = beat && freshBeat(beat) ? beat : undefined;
+              if (beat && !follower && l.live > 0) {
                 unfinished++;
-                const r = runningRow(key, c, `${key}: ${counts} — ${runningWords(l, c)}`);
+                // Under another key than K no start here runs this pool again (review pass 5): its leases lapse, or are
+                // returned; under K, the follower's start reclaims them.
+                add("retag pass", "warn",
+                    `${key}: ${counts} — its follower is not running (the workers row says so), and ${l.live} claim(s) it held keep live leases until ${l.liveUntil ?? "they lapse"} UTC`,
+                    key === followerKey
+                      ? `Start it again as the workers row says: it reclaims them once their leases lapse; the release_stale_leases tool (work_type ${key}, include_live with the worker_id worker_status names) returns them now.`
+                      : `${key} is an earlier key than ${followerKey}, which no start here runs again: the leases lapse on their own, or the release_stale_leases tool (work_type ${key}, include_live with the worker_id worker_status names) returns them now.`);
+                continue;
+              }
+              // A follower still running an earlier key than K — started before a --switch-key elsewhere: it reads the
+              // recorded key only at its start, so it goes on tagging what stands behind K (review pass 5).
+              if (follower && key !== followerKey) {
+                unfinished++;
+                add("retag pass", "warn",
+                    `${key}: ${counts} — a follower still runs ${key} (stamped ${ago(follower.ageS)} ago), not ${followerKey}, the key a follower here runs: what it tags stands behind ${followerKey}`,
+                    `Stop it (its log names it); the workers row then says how the follower under ${followerKey} starts.`);
+                continue;
+              }
+              if (l.live > 0 || follower) {
+                unfinished++;
+                const followerWords = follower
+                  ? `a follower is running this key (stamped ${ago(follower.ageS)} ago${follower.running && follower.waitingMidPass?.length ? ", waiting for the provider mid-pass" : ""}): ${c.pending} pending${follower.running ? "" : " between its polls"}${l.expired ? `, ${l.expired} left by a worker that died, which its next poll reclaims` : ""}`
+                  : "";
+                const r = runningRow(key, c, `${key}: ${counts} — ${l.live > 0 ? runningWords(l, c) : followerWords}`);
                 add("retag pass", r.status, r.detail, r.fix);
                 continue;
               }
@@ -5461,7 +5498,10 @@ if (configFailed) {
               const how = runUnder(key);
               // The flag in a sentence of its own, so the command pastes as it is (review pass 1).
               const failedNote = c.failed ? ` Once their cause is fixed, --retry-failed returns the ${c.failed} failed row(s) to the pool first.` : "";
+              // A follower of this key that stopped or went stale: the workers row names its restart, which finishes the
+              // pass — a one-shot run here as well would be a second worker (the consolidate row's rule).
               const finish = "words" in how ? how.words
+                : beat || followerGone ? `Its follower is not running: start it again as the workers row says; it finishes the pass.${failedNote}`
                 : `Finish it: cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL; ${how.prefix}bun retag.ts --url $DATABASE_URL --status shows where it stands.${failedNote}`;
               const waiting = c.pending > 0
                 ? `${c.pending} pending row(s) wait for a run under this key: one that stopped, or a text move's rebuild requeued them`
@@ -5481,8 +5521,13 @@ if (configFailed) {
               // With no key recorded the count is a first run's, this server's key the target (backlogOf), and the rows
               // behind it by their recipe alone are named (PR 3b review passes 1 and 2).
               const words = `none unfinished; ${behind} thought(s) behind their tags wait for a run${recorded === null ? ` (none has run here: ob1_config.retag_key is unset${Number(b.recipe) > 0 ? `; a first run records ${serverKey}, ${b.recipe} of them behind it by their tags' recipe alone` : ""})` : ""}`;
+              // A follower of the key takes the backlog at its next poll; one stopped, at its restart — not a one-shot run
+              // beside it, a second worker (review pass 1: the line named the run whatever the follower did).
+              const beat = facts.workers?.heartbeats.find((h) => h.worker === "retag" && h.job === key);
               if (behind === 0) add("retag pass", "ok", "none unfinished");
               else if ("words" in how) add("retag pass", "ok", `${words} — ${how.words}`);
+              else if (beat && freshBeat(beat)) add("retag pass", "ok", `${words} — the follower running this key (stamped ${ago(beat.ageS)} ago) pools them at its next poll`);
+              else if (beat || followerGone) add("retag pass", "ok", `${words} — its follower is not running: start it again as the workers row says, and it re-tags them`);
               else add("retag pass", "ok", `${words} — cd db && ${how.prefix}bun retag.ts --url $DATABASE_URL re-tags them`);
             }
             // The server's captures against the target (PR 3b): a capture's tags carry this server's key, and a row under
@@ -5762,6 +5807,7 @@ if (configFailed) {
               const unfitHere = embUnfit === "model";
               const sleepTakes = sleepBeat !== undefined && sleepBeat.reembedJob !== undefined && (sleepRuns || !unfitHere);
               const sleepHere = sleepBeat !== undefined && (sleepBeat.reembedJob !== undefined || unfitHere);
+              const { METADATA_PROMPT_VERSION: retagPromptVersion } = await import("./metadata.ts");
               const fixes = wrong.map((h) => {
                 const name = h.job ?? h.worker;
                 const key = h.key;
@@ -5798,6 +5844,34 @@ if (configFailed) {
                   return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs re-embed here instead${when}, which will not run beside a re-embed follower: it was a reembed.ts --follow run by hand — retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.${backfill}`;
                 }
                 if ((h.stale || h.ended) && sleepRuns && (h.worker === "extract" || h.worker === "consolidate")) return `${name} ${h.ended ? (h.outcome === "failed" ? "ended on a failure" : "stopped") : "stale"}, and the sleep scheduler runs here instead, which will not run beside a follower: the coordinator runs no follower beside it, so retire the row — DELETE FROM ob1_config WHERE key = '${key}' — rather than start it again.`;
+                // A re-tag follower's row, by one rule (SMD-2298 PR 4a-2 review pass 5, a definitions pass over 97 cells, after
+                // three passes patched the exceptions of the last). K is the key a follower runs here: ob1_config.retag_key,
+                // else the one this configuration makes (S), which a first run records. A row under K is the one a start here
+                // rewrites: its refusal's remedy — a refusal on the key under K itself stands no more, the key being K's — then
+                // the start, under K's model where this configuration names another. A row under any other key no start here
+                // rewrites, however it ended: retired, and the follower under K named, running or its start; where this
+                // configuration makes the row's own key, --switch-key beside it. A row a supervisor holds keeps its
+                // supervisor's words (none runs a re-tag follower before PR 4b).
+                if ((h.stale || h.ended) && h.worker === "retag" && !h.restart && h.job !== undefined) {
+                  const S = retagKey(metaModel, retagPromptVersion);
+                  const K = recorded.retag_key || S;
+                  const kParsed = parseRetagKey(K);
+                  const start = `cd db && ${kParsed !== null && kParsed.model !== metaModel ? `OB1_METADATA_MODEL=${shellWord(kParsed.model)} ` : ""}bun retag.ts --url $DATABASE_URL --follow`;
+                  // K a key this tree's follower cannot run (another prompt version, hand-set): the retag pass row's words.
+                  const kRuns = kParsed !== null && kParsed.promptVersion === retagPromptVersion;
+                  const state = h.ended ? `${h.outcome === "failed" ? "ended on a failure" : "stopped"} ${ago(h.ageS)} ago` : `has not stamped for ${ago(h.ageS)}`;
+                  if (h.job === K) {
+                    const kind = h.refused === "key" ? undefined : h.refused;
+                    const startIt = kRuns ? `start it again — ${start}` : `the retag pass row says how ${K}'s pass goes on`;
+                    if (h.ended && h.outcome === "failed" && kind) return `${name} ended ${ago(h.ageS)} ago on its start's refusal (${kind}): ${startRefusalRemedy(kind, "retag")} — its log says more. Then ${startIt}${kind === "lookup" ? "" : "; started before that, it refuses again"}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
+                    return `${name} ${state}${h.ended && h.outcome === "failed" ? " — its log says why" : ""}: ${startIt}. Retired on purpose: DELETE FROM ob1_config WHERE key = '${key}'.`;
+                  }
+                  const keyRuns = w.heartbeats.some((x) => x.worker === "retag" && x.job === K && freshBeat(x));
+                  const which = recorded.retag_key ? `ob1_config.retag_key, ${K}` : `${K}, the key this configuration makes and a first run records`;
+                  const next = keyRuns ? `the follower under ${K} runs the pass` : kRuns ? `start the follower under ${K} — ${start}` : `the retag pass row says how ${K}'s pass goes on`;
+                  const meant = recorded.retag_key && h.job === S ? ` Or, if ${h.job} is meant, cd db && bun retag.ts --url $DATABASE_URL --switch-key records it and re-tags the corpus under it (a --dry-run first says how many), then start it again.` : "";
+                  return `${name} ${state}, under another key than the one a follower here runs (${which}): no start here rewrites its row, so retire it — DELETE FROM ob1_config WHERE key = '${key}' — and ${next}.${meant}`;
+                }
                 // Held by its supervisor, which runs it again on its own (SMD-3214).
                 const held = heldFix(h, name);
                 if (held !== null) return held;
@@ -5812,6 +5886,10 @@ if (configFailed) {
                 // Held by Linear's rate limit, by its own word (SMD-4133): it waits on its own; the fix is the hour's sum.
                 // A hold already past is said as past, as brain_info's words say it (review pass 1).
                 if (h.limited) return `${name}'s last pass was rate-limited by Linear: ${secondsSince(h, h.limited.until) < 0 ? `it sends no request until ${h.limited.until} (${limitByWords(h.limited)}), then passes again on its own` : `its hold ended at ${h.limited.until} (${limitByWords(h.limited)}), and its next trigger passes`}. Linear allows one user 2,500 requests an hour, shared by every brain and tool under that user: if this recurs, raise OB1_BOARD_SYNC_INTERVAL here or on the others, or give each brain a Linear user of its own (deploy/README.md, "What a pass costs", has the sum).`;
+                // A re-tag follower marks a pass failed for a worker stopped on the provider, or for its shape check's note
+                // gone unanswered, the thoughts behind it recorded failed (SMD-2298 PR 4a-2 review pass 5: said as a worker
+                // stopped, which none had); it carries on either way.
+                if (h.worker === "retag") return `${name}'s last pass met the provider failing — a worker stopped on it after its pauses, or the shape check's note after three refused thoughts went unanswered, those thoughts recorded failed (the retag pass row says how they go back): check the provider; its log says which.`;
                 return h.worker === "board-sync"
                   ? `${name}'s last pass failed — errors in its report, or Linear or the database out of reach: its log says why.`
                   : `${name}'s last pass stopped a worker on the provider still failing after its pauses: check the provider; its log says why.`;

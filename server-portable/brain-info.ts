@@ -226,8 +226,8 @@ export interface DatabaseFacts {
 export interface WorkerHeartbeat {
   /** The ob1_config row's key — what retiring the worker deletes. */
   key: string;
-  worker: "board-sync" | "extract" | "consolidate" | "sleep" | "reembed";
-  /** The claim job it works (extract:qwen2.5:7b@p2, reembed:qwen3-embedding:4b@1024, or a custom --job as given); null for board-sync. */
+  worker: "board-sync" | "extract" | "consolidate" | "sleep" | "reembed" | "retag";
+  /** The claim job it works (extract:qwen2.5:7b@p2, reembed:qwen3-embedding:4b@1024, retag:qwen2.5:7b@p1, or a custom --job as given); null for board-sync. */
   job: string | null;
   /** When it last stamped, a UTC instant, and how long ago by the database's clock. */
   at: string;
@@ -608,15 +608,17 @@ export type SleepHoldWhy = (typeof SLEEP_HOLD_WHY)[number];
 /**
  * The passes the sleep scheduler runs, as its `holds` and its waiting name
  * them: the subject sweep the fourth, beside consolidation (SMD-3306 PR 6b-2;
- * read since PR 6b-1, as SMD-3379 PR 1c-2's readers were before it).
+ * read since PR 6b-1, as SMD-3379 PR 1c-2's readers were before it), and the
+ * re-tag pass, read for a re-tag follower's own `waitingMidPass` ahead of the
+ * scheduler's (SMD-2298 PR 4a-2; PR 4b runs it).
  */
-export const SLEEP_PASSES = ["reembed", "extract", "consolidate", "subjects"] as const;
+export const SLEEP_PASSES = ["reembed", "extract", "consolidate", "subjects", "retag"] as const;
 /** A pass the sleep scheduler runs (SLEEP_PASSES). */
 export type SleepPass = (typeof SLEEP_PASSES)[number];
 /** A pass the sleep scheduler holds (WorkerHeartbeat.holds). */
 export type SleepHold = { pass: SleepPass; why: SleepHoldWhy; until: string | null };
 
-/** A `holds` value as db/sleep.ts writes it, or undefined: one to four passes, each once, each of the shape. */
+/** A `holds` value as db/sleep.ts writes it, or undefined: one to SLEEP_PASSES.length passes, each once, each of the shape. */
 function parseHolds(h: unknown): SleepHold[] | undefined {
   if (!Array.isArray(h) || h.length < 1 || h.length > SLEEP_PASSES.length) return undefined;
   const out: SleepHold[] = [];
@@ -836,7 +838,7 @@ export function parseRunner(r: { value: unknown; at: unknown; age_s: unknown }):
 
 /** Whether a heartbeat row under this key is one the readers take: a follower writing another is seen by no one (SMD-3486 review pass 2). */
 export const heartbeatKeyCarried = (key: string): boolean => HEARTBEAT_KEY.test(key);
-const HEARTBEAT_KEY = new RegExp(`^heartbeat:(board-sync|extract|consolidate|sleep|reembed)(?::(${NAME_CHARS}{1,120}))?$`);
+const HEARTBEAT_KEY = new RegExp(`^heartbeat:(board-sync|extract|consolidate|sleep|reembed|retag)(?::(${NAME_CHARS}{1,120}))?$`);
 // As long as a key's suffix with the worker's prefix on it, so every key
 // stampKey writes is one the reader takes (review pass 2: 121–128 were not).
 const JOB_TOKEN = new RegExp(`^${NAME_CHARS}{1,132}$`);
@@ -957,8 +959,9 @@ export function parseHeartbeats(rows: { key: unknown; value: unknown; at: unknow
     // Its passes waiting mid-pass (SMD-2905), left off when not of the shape:
     // the scheduler's by name, each once — re-embed among them since it runs
     // it (SMD-2679 PR 4b), the subject sweep since SMD-3306 PR 6b-1; a
-    // follower's its own name alone.
-    const mid = worker === "sleep" || worker === "extract" || worker === "consolidate" || worker === "reembed" ? v!.waitingMidPass : undefined;
+    // follower's its own name alone — the re-tag follower's since SMD-2298 PR
+    // 4a-2, its name among the passes ahead of the scheduler's pass (PR 4b).
+    const mid = worker === "sleep" || worker === "extract" || worker === "consolidate" || worker === "reembed" || worker === "retag" ? v!.waitingMidPass : undefined;
     const waitingMidPass = Array.isArray(mid) && mid.length > 0 && new Set(mid).size === mid.length
         && mid.every((p) => (SLEEP_PASSES as readonly unknown[]).includes(p)) && (worker === "sleep" || (mid.length === 1 && mid[0] === worker))
       ? (mid as SleepPass[])

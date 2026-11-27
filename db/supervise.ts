@@ -85,7 +85,8 @@ import type { SQL } from "bun";
 import { resolveEmbedConfig, type EmbedEnv } from "../server-portable/embed.ts";
 import { extractionKey } from "../server-portable/entities.ts";
 import { consolidatePassKey } from "../server-portable/consolidate-decide.ts";
-import { embeddingContract, MIGRATION_EXIT, reembedKey } from "./config.mjs";
+import { embeddingContract, MIGRATION_EXIT, reembedKey, retagKey } from "./config.mjs";
+import { METADATA_PROMPT_VERSION } from "../server-portable/metadata.ts";
 import { sleepUnless } from "./lease.ts";
 import { MIN_STAMP_EVERY_S, stampKey, TRIGGER_SIGNAL, type StampingWorker } from "./pass-stamp.ts";
 import { andList, commandLine, consoleWriter, type Writer } from "./cli.ts";
@@ -156,6 +157,8 @@ export function followerKey(worker: StampingWorker, env: Record<string, string |
   try {
     const cfg = resolveEmbedConfig(env as EmbedEnv);
     if (worker === "extract") return stampKey("extract", extractionKey(cfg.metadataModel));
+    // The tags' model and this tree's prompt version, as a re-tag follower without --job pools under (SMD-2298 PR 4a-2).
+    if (worker === "retag") return stampKey("retag", retagKey(cfg.metadataModel, METADATA_PROMPT_VERSION));
     // The model's own key, as a re-embed follower without --job pools under (SMD-2679).
     if (worker === "reembed") {
       const { model, dim } = embeddingContract(env);
