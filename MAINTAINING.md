@@ -359,6 +359,21 @@ reproduce a 768-only failure on its own:
 cd db && OB1_EMBEDDING_DIM=768 OB1_EMBEDDING_MODEL=nomic-embed-text bun test-schema.ts
 ```
 
+**Why a job ran that might have skipped (SMD-2435).** The `changes` job,
+shown as "What the change can affect", judges some jobs by the list of what
+each read on main. Where it does, its log says `changes.sh: <job> runs:
+<reason>` for each of them that runs, and its line on the run's summary page
+says `no list to go by for: <jobs>` when some lists could be used and theirs
+could not. A reason that begins `its list` is about main's list, or its
+fetch, and not about the pull request: the job runs to be safe, which costs
+time and risks nothing. Unless the list is not here or is cut short, the
+reason gives its header as main's run wrote it: `commit=` is the run to
+open, and `status=`, `sight=` and, for a job that watches what its containers
+open, `watch=` say what stood wrong there. For a `sight=` or a `watch=` that
+is not `ok`, a `reads.sh` warning among that run's annotations names the job
+by the same id and says why. Main's next green run writes new lists. A watch
+lost run after run is a fault to mend, and nothing counts the runs for you.
+
 ---
 
 ## Review passes: what caught a finding is written at the catch

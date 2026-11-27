@@ -91,8 +91,10 @@ jobs:
   # the reads-<job> artifacts of that run, with this job's token, which reads
   # and writes nothing more than the workflow's contents: read allows (enough
   # for a public repository's artifacts: the probe, OB1 PR 846). A job whose
-  # list is missing, cut short, or a failed or blind job's runs; with no
-  # lists, or any doubt about what differs, every job runs as before.
+  # list is missing, cut short, or a failed or blind job's runs, and so does
+  # a job that watches what containers open (its marker's --watch) whose
+  # watch did not stand ok on that run (PR 3c-2); with no lists, or any doubt
+  # about what differs, every job runs as before.
   # Each gated job runs on any other answer. It fails open: a failed or
   # cancelled run of this job runs them all, and the aggregate lets them skip
   # only when this job succeeded and said code=false or named them. Any other
@@ -4265,7 +4267,8 @@ jobs:
       # --watch: this job runs containers, and one handed a path of the
       # checkout reads it through a read-only bind mount, where no access
       # time moves. The watch is told of each open of a tracked folder, or of
-      # a file in one by its name there (PR 3c-1).
+      # a file in one by its name there (PR 3c-1). The job skips by its list
+      # only when main's run wrote it with the watch ok (PR 3c-2).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
         run: bash .github/ci/reads.sh mark --watch
@@ -5118,7 +5121,8 @@ jobs:
       # --watch: this job runs containers, and one handed a path of the
       # checkout reads it through a read-only bind mount, where no access
       # time moves. The watch is told of each open of a tracked folder, or of
-      # a file in one by its name there (PR 3c-1).
+      # a file in one by its name there (PR 3c-1). The job skips by its list
+      # only when main's run wrote it with the watch ok (PR 3c-2).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
         run: bash .github/ci/reads.sh mark --watch
@@ -5519,7 +5523,8 @@ jobs:
       # --watch: this job runs containers, and one handed a path of the
       # checkout reads it through a read-only bind mount, where no access
       # time moves. The watch is told of each open of a tracked folder, or of
-      # a file in one by its name there (PR 3c-1).
+      # a file in one by its name there (PR 3c-1). The job skips by its list
+      # only when main's run wrote it with the watch ok (PR 3c-2).
       - name: Mark the checkout, for the job's reads
         id: reads-mark
         run: bash .github/ci/reads.sh mark --watch
