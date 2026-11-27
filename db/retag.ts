@@ -706,7 +706,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
    * reads (review pass 3: under the note's own text such an allow list refused every note, and the follower never
    * stopped); only the note's own text is sent.
    */
-  async function shapeOf(row: Row): Promise<ShapeVerdict> {
+  async function shapeOf(row: Row, workerId: string): Promise<ShapeVerdict> {
     const subject: EgressSubject = { kind: "retag", ...(actorName ? { actor: actorName } : {}), metadata: row.metadata as Record<string, unknown>, content: row.content };
     const unknown = (why: string): ShapeVerdict => {
       // A stop that aborted the note is the stop's: nothing to say, no pass to mark (review pass 4).
@@ -720,7 +720,17 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
     const gate = mayLeaveBox(subject, cfg.chat, cfg.egress);
     if (!gate.allowed) return unknown(`the egress policy refused it: ${gate.reason}`);
     calls++;
-    const answer = await extractMetadata(SHAPE_NOTE, subject, cfg, halt.signal).catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+    // A call in hand as a thought's is (SMD-2298 PR 4b-1, from PR 4a-2's review pass 2): abortInHand counts and aborts it,
+    // as the hard stop and the pass's halt do. An abort is the caller's, said nowhere and marking no pass: nothing known.
+    const call = inCall.begin(workerId);
+    let answer: Record<string, unknown> | Error;
+    try {
+      answer = await extractMetadata(SHAPE_NOTE, subject, cfg, AbortSignal.any([halt.signal, onHardStop.signal, call.abort.signal]))
+        .catch((e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+    } finally {
+      inCall.end(workerId);
+    }
+    if (call.aborted) return "unknown";
     if (answer instanceof Error) return unknown(answer.message.split("\n")[0]);
     const mark = answer.metadata_extraction_failed;
     if (typeof mark !== "string") return "taken";
@@ -772,7 +782,7 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
         // A follower asks the shape first (SHAPE_NOTE): three long thoughts in a row are no reason to hold it down. A
         // one-shot run stops, as before: the operator re-runs it (review pass 1).
         if (FOLLOW) {
-          const verdict = await (shapeCheck ??= shapeOf(row).finally(() => { shapeCheck = null; }));
+          const verdict = await (shapeCheck ??= shapeOf(row, workerId).finally(() => { shapeCheck = null; }));
           if (verdict === "taken") shapeStreak = 0;
           // Stopped only where the note was refused as the thoughts were and the streak still stands when it comes back:
           // a thought answered meanwhile reset it (review pass 2), and a stop or another worker's stop reads first.

@@ -27226,6 +27226,31 @@ if (want("29")) {
       noteAnswer = null;
       assert(n4Ok && notesSent() > notes4 && n4Done.code === 0 && !/the request's shape/.test(n4Done.err),
         `a thought answered while the note is out: the note's refusal stops nothing, exit 0 (${n4Ok}; ${n4Done.code})`);
+      // The shape note is a call in hand (SMD-2298 PR 4b-1): the caller's abortInHand counts and aborts it while it is
+      // out, said nowhere — nothing known, so the follower carries on — and the next refusal asks again.
+      await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
+      noteSeen = new Promise((r) => { noteSeenR = r; });
+      noteAnswer = "hold";
+      let inHand: InHandAbort | null = null;
+      const pi = follow({ follow: 1, pausesMs: [10], workers: 1, onPass: (_stop, abortInHand) => { inHand = abortInHand; } });
+      for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
+      SPECIAL.set("[29] H long", 400);
+      const notesH = notesSent();
+      const hLongs = await streakOf("H");
+      const hSeen = await Promise.race([noteSeen.then(() => true), Bun.sleep(15_000).then(() => false)]);
+      const hAborted = inHand === null ? -1 : (inHand as InHandAbort)();
+      noteAnswer = null;
+      const h4 = await tagged("[29] H long 4");
+      await move(h4, "[29] H long 4, moved");
+      const hFailed = await allFailed([...hLongs, h4]);
+      const hAfter = await tagged("[29] H after");
+      await move(hAfter, "[29] H after, moved");
+      const hAfterOk = await settledSoon(hAfter);
+      pi.stop();
+      const piDone = await race(pi);
+      SPECIAL.delete("[29] H long");
+      assert(hSeen && hAborted === 1 && hFailed && notesSent() - notesH === 2 && hAfterOk && piDone.code === 0 && !/the shape check's note was not answered/.test(piDone.err),
+        `the shape note is a call in hand: abortInHand aborts and counts it, said nowhere; the follower carries on and the next refusal asks again (${hSeen}; ${hAborted} aborted; ${notesSent() - notesH} note(s); ${hFailed}/${hAfterOk}; ${piDone.code})`);
       // The egress gate's deny default, its allow list a topic the thoughts carry, the endpoint not local: the note is
       // judged under the metadata of the thought it stands for, so it is sent, answered, and the follower carries on
       // (review pass 2: under empty metadata the gate refused it).
