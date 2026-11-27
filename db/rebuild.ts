@@ -62,7 +62,9 @@
 import type { SQL } from "bun";
 import { blankProblem, commandLine, consoleWriter, flagList, numberProblem, type Writer } from "./cli.ts";
 import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSql } from "./connect.ts";
+import { shellWord } from "../server-portable/brain-info.ts";
 import { staleStandings, staleStandingsText, STALE_STANDING_ROWS_SQL, type StaleStandingRow } from "../server-portable/consolidate.ts";
+import { decideKeyModels, PARTS_STORE_SQL, PARTS_UNREAD, partsStanding, type PartsStanding } from "../server-portable/consolidate-decide.ts";
 
 // Every argument accounted for (db/cli.ts, SMD-2134): a flag this door does not
 // have is refused rather than ignored, and a blank --reason is refused as every
@@ -126,7 +128,19 @@ export function drainer(pool: string, subjectPool: string | null = null): string
     return `${question[1] ? "" : "OB1_SUBJECT_REASONING=off "}bun db/extract-entities.ts --url <url> --subjects`;
   }
   if (pool.startsWith("extract:")) return "bun db/extract-entities.ts --url <url>";
-  if (pool.startsWith("consolidate:")) return "bun db/consolidate.ts --url <url>";
+  if (pool.startsWith("consolidate:")) {
+    // A decide-mode key's pool is drained by a decide-mode run alone. The bare command is judge mode: it pools
+    // under another key and leaves this one (SMD-4446 PR 2b-2, review pass 4). So the key's decider and writer are
+    // given, as preflight gives them for a key that is not its server's own. Each as one shell word, the names
+    // being text read from the store (review pass 5: unquoted, a name with a space or a semicolon in it printed a
+    // command that ran something else). And what the key's own text leaves open is said: a key of another prompt
+    // or decide version, under which no run of this release judges, so the knobs would start a pass under another
+    // key; and names that hold a second plus sign, which could be parted another way.
+    const decide = decideKeyModels(pool);
+    if (decide === null) return "bun db/consolidate.ts --url <url>";
+    if (!decide.current) return "(a decide-mode pool of another prompt or decide version: no run of this release takes it)";
+    return `OB1_CONSOLIDATE_DECIDER=${shellWord(decide.decider)} OB1_JUDGE_MODEL=${shellWord(decide.writer)} bun db/consolidate.ts --url <url>${decide.sure ? "" : " (the key's names hold more than one plus sign: check which part is the decider's)"}`;
+  }
   if (pool.startsWith("retag:")) return "bun db/retag.ts --url <url>";
   return "(no worker in this tree drains this key)";
 }
@@ -138,7 +152,7 @@ function printReport(r: Report, out: Writer["out"]): void {
   out(`  rebuilt:     ${r.rebuilt} (a vector restored from the snapshot at the model — the one re-derivation the database owns${r.force ? "; or, under --force, a vector at the configured model whose text did not move, its record renewed" : ""})`);
   out(`  enqueued:    ${r.enqueued} (thought, pool) claim(s) for the workers`);
   out(`  deleted:     ${r.deleted} (lineage rows whose artifact is gone${r.input_gone ? "; the windows, the graph and the snapshot rows the input keyed" : ""})`);
-  out(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags before db/retag.ts has recorded its key, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (067) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not` : ""}${r.stale_parts ? `; ${r.stale_parts} settled part(s) set stale, as a proposal is (151)` : ""}`);
+  out(`  marked:      ${r.marked} lineage row(s) carry the reason until their producer writes again${r.unqueued ? `; ${r.unqueued} of them wait for no pool (the tags before db/retag.ts has recorded its key, a generated page section, or no configured model)` : ""}${r.stale_proposals ? `; ${r.stale_proposals} proposal(s) set stale — pending ones, and ones the consolidate pass itself had settled (067) — their status the mark; the next pass replaces one it finds in conflict again and settles one it does not, a judge-mode pass leaving one on a pair that holds an undecided settled part to a decide-mode pass` : ""}${r.stale_parts ? `; ${r.stale_parts} settled part(s) set stale, as a proposal is (151)` : ""}`);
   out(`  kept:        ${r.kept} (a structured pass reads its source, not the text; a person's decision on a proposal or a settled part stands)`);
   out(`  current:     ${r.current} (nothing moved)${r.legacy ? `; ${r.legacy} legacy row(s) read current by construction — --force re-runs them` : ""}`);
   if (r.input_gone) out(`  cascade:     ${r.cascading.proposals} proposal(s)${r.cascading.parts ? `, ${r.cascading.parts} settled part(s)` : ""} and ${r.cascading.lineage_rows} lineage row(s) go with the row delete (029's${r.cascading.parts ? ", 151's" : ""} and 061's triggers)`);
@@ -440,9 +454,12 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
                (SELECT count(*)::int FROM supersession_proposals WHERE status = 'stale') AS stale_proposals`) as { rows: number; by_kind: Record<string, number> | null; marked: number; stale: number; orphans: number; legacy: number; stale_proposals: number }[];
       // 067: where each stale row stands against the judge pools — the one read
       // and rank db/consolidate.ts's --status uses (server-portable/consolidate.ts),
-      // so the two doors never disagree (first review pass, mutant: a copy here
-      // read one way while the worker's read another); keyless here, so a
-      // failed or live claim is named with its judge key.
+      // so the two doors never disagree on a row both place (first review pass,
+      // mutant: a copy here read one way while the worker's read another);
+      // keyless here, so a failed or live claim is named with its judge key. A
+      // judge-mode pass's own --status places one row apart, a stale proposal on
+      // a pair it leaves to decide mode (SMD-4446 PR 2b-2): this read knows no
+      // mode, and places that row as any other.
       const standings = staleStandings((await sql.unsafe(STALE_STANDING_ROWS_SQL)) as StaleStandingRow[], null);
       const bound = Number(c.rows) >= LINEAGE_WINDOW ? " (the first 10,001 lineage rows by id read; the rest not)" : "";
       out(`  lineage:     ${c.rows} row(s)${bound}: ${Object.entries(c.by_kind ?? {}).map(([k, n]) => `${n} ${k}`).join(", ") || "none"}`);
@@ -451,6 +468,21 @@ async function rebuildWith(sql: SQL, o: { INPUT: string | undefined; STATUS: boo
       out(`  orphans:     ${c.orphans} row(s) whose artifact is gone${Number(c.orphans) ? " — bun db/rebuild.ts --orphans deletes them" : ""}`);
       out(`  legacy:      ${c.legacy} row(s) backfilled by 061 at the thought's current text (read as current; --force re-records a vector and re-runs the rest)`);
       out(`  proposals:   ${c.stale_proposals} stale (a text moved under the verdict${standings.total ? `: ${staleStandingsText(standings, null, "bun db/consolidate.ts --retry-failed")}` : ""}; the pass replaces one it finds in conflict again and settles one it does not — a reviewer may decide one sooner: bun db/consolidate.ts --list stale)`);
+      // 151 (SMD-4446): the settled parts that wait, where the store stands, and where each stands. The lineage
+      // rows above do not count them: a part's row is left out of `stale`, as a proposal's is, and a pending part
+      // at a text that has moved with no rebuild since has no mark at all. The pass's own read (partsStanding),
+      // keyless here as the stale proposals' above: a failed claim under any decide-mode key of the pass places a
+      // part, and its key is named, where a decide-mode pass's --status and preflight read the pass's key alone
+      // (review pass 2; a judge-mode key's failed claim places none, since no decide run skips a thought for it:
+      // review pass 3). A role that reads the proposals may not read the parts: it is told so, and the rest stands.
+      const [partsStore] = (await sql.unsafe(PARTS_STORE_SQL)) as { has: boolean; reads: boolean }[];
+      if (partsStore.has && !partsStore.reads) out(`  parts:       ${PARTS_UNREAD}`);
+      else if (partsStore.has) {
+        const standing = partsStanding("any");
+        const [w] = (await sql.unsafe(standing.sql)) as PartsStanding[];
+        const waits = standing.words(w);
+        out(`  parts:       ${w.stale} stale (a text moved under the settled part), ${w.moved} pending at a text that has moved since, which no rebuild has seen${waits ? ` — ${waits}` : ""}`);
+      }
       const pools = (await sql`SELECT work_type AS w, count(*)::int AS n FROM thought_work_claims WHERE status = 'pending' GROUP BY 1 ORDER BY 1`) as { w: string; n: number }[];
       // The named subject pool, read for the drainer: a role that cannot read ob1_config is told so on a subject
       // pool's line, and the rest stand (review pass 6: its status failed on the read).
