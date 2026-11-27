@@ -454,7 +454,7 @@ const FUNCTIONS = [
   "ob1_subject_repo_map_max()",
   "ob1_subject_repo_settings_by_setter()",
   "ob1_subject_unscoped_key(text)",
-  // 154 (SMD-3887 PR 3b-1): the repository a pull request's GitHub link names.
+  // 155 (SMD-3887 PR 3b-1): the repository a pull request's GitHub link names.
   "ob1_subject_linked_key(text, text)",
   // 149 (SMD-3887): a thought's state on three axes, read from the records that exist.
   "thought_validity(uuid[])",
@@ -611,6 +611,9 @@ const FUNCTIONS = [
   "review_settled_part(uuid, text, text, jsonb, boolean, text)",
   "ob1_keep_part_judgement()",
   "ob1_drop_part_derivation()",
+  // 154 (SMD-4446): the pass's removal of a part that is no longer a judgement of its texts. (154 also carries 149's
+  // thought_validity, named above.)
+  "settle_stale_part(uuid, text, text)",
 ];
 
 /**

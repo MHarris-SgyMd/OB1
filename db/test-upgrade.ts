@@ -809,13 +809,16 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // record_thought_subjects and close_thought_subjects, and adds the
   // operator's subject-key repository setting and its setter, refusing by
   // name without 016, 046, 061, 111, 113, 115, 120 or 130's index ([20cp]);
-  // 154 redefines 153's set_subject_repo and record_thought_subjects with a
-  // GitHub link's repository first, refusing by name without 016, 046, 111,
-  // 113, 115, 130 or 153 ([20cq]) —
+  // 154 adds settle_stale_part and carries 149's thought_validity with an
+  // arm for a settled part's row, refusing by name without what 149 reads
+  // or 151's settled_parts ([20cq]); 155 redefines 153's set_subject_repo
+  // and record_thought_subjects with a GitHub link's repository first,
+  // refusing by name without 016, 046, 061, 111, 113, 115, 130 or 153
+  // ([20cr]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 125, `030 is among the last one hundred and twenty-five migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 126, `030 is among the last one hundred and twenty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7779,21 +7782,114 @@ console.log("\n[20cp] Migration 153: onto a populated brain at the file before i
   }
 }
 
-console.log("\n[20cq] Migration 154: onto a populated brain at the file before it — refused without each function it needs and 153's setting, by name, nothing changed; then applied: the bare pr: subjects as they were, a link changing nothing with no repository set; an operator's setting then maps a key its GitHub link names to the link's repository, the rest to the setting's; a re-apply a no-op (SMD-3887)");
+console.log("\n[20cq] Migration 154: onto a populated brain at the file before it — refused by name without 151's settled_parts or a table 149's read reads, no function made; then applied: the parts standing are kept as they are; an undecided one at a text that has since moved reads stale, is refused a settle that names the texts as they were and removed by one that names them as they stand, the supersession lock and the part's row held in the call's transaction and no thought's row locked, and refused above READ COMMITTED; a decided one is kept by the settle and no longer read from the apply on, where the read before the file read it stale for good; applied again a no-op (SMD-4446)");
 {
-  const the154 = MIGRATIONS.find((f) => /^\d{3}_subject_key_links\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const the154 = MIGRATIONS.find((f) => /^\d{3}_stale_parts\.sql$/.test(f))!;  // by name: renumbered when main takes its number
   const NUM = the154.slice(0, 3);
   await dropSchema(URL_);
   await applyMigrations(URL_, { ...OPTS, only: (f) => f < the154 });
   const sql = new SQL({ url: URL_, max: 1 });
+  const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+  const fp = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (o: string, n: string, statement: string, shown: string) =>
+    String(((await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, 'older', ${statement}, ${shown}, 'updates', 'made up for the upgrade', ${KEY}, ${await fp(o)}, ${await fp(n)}, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  type Settle = { ok: boolean; action?: string; error?: string; was?: string; status?: string };
+  const settle = async (id: string, o: string, n: string) => (await sql`SELECT settle_stale_part(${id}::uuid, ${o}, ${n}) AS r`)[0].r as Settle;
+  type V = { thoughts: { freshness: { kinds: { kind: string; state: string }[] } }[] };
+  const partKind = async (id: string) => ((await sql`SELECT thought_validity(${`{${id}}`}::uuid[]) AS r`)[0].r as V).thoughts[0].freshness.kinds.find((k) => k.kind === "part")?.state ?? "absent";
+  const made = async () => (await sql`SELECT to_regprocedure('settle_stale_part(uuid, text, text)') IS NOT NULL AS m`)[0].m as boolean;
+  const parts = async () => JSON.stringify(await sql`SELECT id::text AS id, status, older_fingerprint, newer_fingerprint FROM settled_parts ORDER BY id`);
+  const apply154 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 }).then(() => "applied", (e: Error) => e.message);
+
+  // A brain at the file before it: a pair with two parts, one accepted, and the older text edited since.
+  const O = await thought("upgrade 154: the count stands at 40; the review is open");
+  const N = await thought("upgrade 154: the count is 52 now; the review closed");
+  const undecided = await part(O, N, "the count stands at 40", "the count is 52 now");
+  const decided = await part(O, N, "the review is open", "the review closed");
+  await sql`SELECT review_settled_part(${decided}::uuid, 'accept')`;
+  const oJudged = await fp(O);
+  const movedText = "upgrade 154: the count was 40 in March; the review is open";
+  await sql`UPDATE thoughts SET content = ${movedText}, content_fingerprint = content_fingerprint_of(${movedText}) WHERE id = ${O}::uuid`;
+  const oNow = await fp(O), nNow = await fp(N);
+  const before = await parts();
+  // The read before the file has no arm for a part's row: both rows read as standing, at a moved text stale. Each
+  // part's own record is read, since the kind is the worst of the two (review pass 5: `stale` before and after said
+  // nothing of the accepted part's row, the undecided one's reading stale either way).
+  const recordsOf = async (id: string) => ((await sql`SELECT thought_validity(${`{${id}}`}::uuid[]) AS r`)[0].r as { thoughts: { freshness: { records: { kind: string; artifact: string; state: string }[] } }[] })
+    .thoughts[0].freshness.records.filter((r) => r.kind === "part").map((r) => `${r.artifact === decided ? "decided" : r.artifact === undecided ? "undecided" : "other"}=${r.state}`).sort().join();
+  const kindBefore = await partKind(N);
+  const recordsBefore = await recordsOf(N);
+
+  // Without 151's settled_parts the file is refused by name, the table and each of its three columns the file
+  // reads, and makes no function; and without one thing 149's read reads, by that name alone (review pass 5: the
+  // message was read to its second name, so the guard without two of the columns, or without all of what 149 reads,
+  // passed).
+  await sql`ALTER TABLE settled_parts RENAME TO settled_parts_away`;
+  const without = await apply154();
+  await sql`ALTER TABLE settled_parts_away RENAME TO settled_parts`;
+  await sql`ALTER TABLE ob1_superseded_by RENAME TO ob1_superseded_by_away`;
+  const withoutRead = await apply154();
+  await sql`ALTER TABLE ob1_superseded_by_away RENAME TO ob1_superseded_by`;
+  const NEEDS = `migration ${NUM} needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134, 139, 149 and 151; this schema lacks `;
+  assert(without === `${NEEDS}settled_parts, settled_parts.older_fingerprint, settled_parts.newer_fingerprint, settled_parts.status` && withoutRead === `${NEEDS}ob1_superseded_by` && !(await made()),
+    `without 151's settled_parts the file is refused by name, the table and its three columns, and without a table 149's read reads, by that one; settle_stale_part is not made (${without}; ${withoutRead})`);
+
+  const applied = await apply154();
+  const kept = await parts();
+  const kindAfter = await partKind(N);
+  const recordsAfter = await recordsOf(N);
+  // On a real Postgres, in one session ([139] runs on PGlite and reads the settle's order from its source): above
+  // READ COMMITTED the settle is refused with its code; and inside its caller's transaction it holds the supersession
+  // advisory lock and the part's row, has read the thoughts with no row of theirs locked, and leaves no advisory lock
+  // once that transaction ends (review pass 5: no row on a real Postgres held a lock or the level).
+  await sql.unsafe("BEGIN ISOLATION LEVEL REPEATABLE READ");
+  const aboveLevel = await settle(undecided, oJudged, nNow).then(() => "answered", (e: Error) => `${String((e as { errno?: unknown }).errno ?? "?")}: ${e.message}`);
+  await sql.unsafe("ROLLBACK");
+  // The settle on the parts the brain already held: by the texts as they were judged it is refused; by the texts as
+  // they stand it removes the undecided part and keeps the reviewer's.
+  await sql.unsafe("BEGIN");
+  const byOldRead = await settle(undecided, oJudged, nNow);
+  const held = ((await sql`SELECT l.locktype || ':' || COALESCE(c.relname, '') || ':' || l.mode AS m FROM pg_locks l LEFT JOIN pg_class c ON c.oid = l.relation
+                            WHERE l.pid = pg_backend_pid() AND l.granted AND (l.locktype = 'advisory' OR c.relname IN ('settled_parts', 'thoughts')) ORDER BY 1`) as { m: string }[]).map((r) => r.m).join();
+  await sql.unsafe("COMMIT");
+  const heldAfter = Number((await sql`SELECT count(*)::int AS c FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'advisory'`)[0].c);
+  const removed = await settle(undecided, oNow, nNow);
+  const onDecided = await settle(decided, oNow, nNow);
+  const left = (await sql`SELECT id::text AS id, status FROM settled_parts ORDER BY id`) as { id: string; status: string }[];
+  const kindSettled = await partKind(N);
+  assert(applied === "applied" && (await made()) && kept === before && oNow !== oJudged && kindBefore === "stale" && kindAfter === "stale"
+         && recordsBefore === "decided=stale,undecided=stale" && recordsAfter === "undecided=stale"
+         && byOldRead.error === "EDITED_SINCE" && removed.action === "removed" && removed.was === "pending" && onDecided.error === "DECIDED" && onDecided.status === "accepted"
+         && left.length === 1 && left[0].id === decided && left[0].status === "accepted" && kindSettled === "absent",
+    `applied, the parts standing are as they were; the undecided one at a moved text reads stale, is refused a settle by the texts as judged and removed by one at the texts as they stand; the accepted one is kept and no longer read from the apply on, where the read before read it stale (${kindBefore} before, ${kindAfter} after, ${kindSettled} once settled; each part's record before the file: ${recordsBefore}; after it: ${recordsAfter}; ${byOldRead.error}, ${removed.action}, ${onDecided.error}; ${left.length} left)`);
+  assert(aboveLevel === "0A000: settle_stale_part must run under READ COMMITTED; this transaction is REPEATABLE READ"
+         && held === "advisory::ExclusiveLock,relation:settled_parts:RowShareLock,relation:thoughts:AccessShareLock" && heldAfter === 0,
+    `on this Postgres the settle is refused above READ COMMITTED with its code; in its caller's transaction it holds the supersession advisory lock and the part's row and locks no thought's row, and no advisory lock is left once the transaction ends (${aboveLevel}; held: ${held}; advisory locks after: ${heldAfter})`);
+
+  // A re-apply is a no-op: the part left as it is, the read and the settle answering as before.
+  const again = await apply154();
+  assert(again === "applied" && JSON.stringify(await sql`SELECT id::text AS id, status FROM settled_parts ORDER BY id`) === JSON.stringify(left) && (await partKind(N)) === "absent" && (await settle(decided, oNow, nNow)).error === "DECIDED",
+    `applied again is a no-op: the part left as it is, the read and the settle answering as before (${again})`);
+
+  await sql.close();
+}
+
+console.log("\n[20cr] Migration 155: onto a populated brain at the file before it — refused without each function it needs and 153's setting, by name, nothing changed; then applied: the bare pr: subjects as they were, a link changing nothing with no repository set; an operator's setting then maps a key its GitHub link names to the link's repository, the rest to the setting's; a re-apply a no-op (SMD-3887)");
+{
+  const the155 = MIGRATIONS.find((f) => /^\d{3}_subject_key_links\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the155.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the155 });
+  const sql = new SQL({ url: URL_, max: 1 });
   try {
-    const K = "subject:upgrade-154@p1";
+    const K = "subject:upgrade-155@p1";
     const thought = async (content: string, mins: number) =>
       String((await sql`INSERT INTO thoughts (content, content_fingerprint, created_at) VALUES (${content}, content_fingerprint_of(${content}), '2027-09-01T00:00:00Z'::timestamptz + make_interval(mins => ${mins}::int)) RETURNING id`)[0].id);
     const subjects = async (id: string, keys: string[]) =>
       // An array literal: Bun's client sends a JS array as no Postgres array here (these keys hold no comma or quote).
       sql`SELECT record_thought_subjects(${id}::uuid, ${`{${keys.join(",")}}`}::text[], 'model', ${K}, NULL::uuid, (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${id}::uuid), '{"deterministic": false}'::jsonb)`;
-    const a = await thought("upgrade 154: PR 12 https://github.com/siggymd/client/pull/12", 1), b = await thought("upgrade 154: PR 12 here", 2);
+    const a = await thought("upgrade 155: PR 12 https://github.com/siggymd/client/pull/12", 1), b = await thought("upgrade 155: PR 12 here", 2);
     await subjects(a, ["pr:12"]);
     await subjects(b, ["pr:12"]);
     const keyOf = async (id: string) => String((await sql`SELECT string_agg(payload->>'key', ',' ORDER BY 1) AS k FROM thought_facets WHERE thought_id = ${id}::uuid AND kind = 'subject' AND valid_until IS NULL`)[0].k);
@@ -7801,7 +7897,7 @@ console.log("\n[20cq] Migration 154: onto a populated brain at the file before i
     const before = `${await keyOf(a)};${await keyOf(b)}`;
 
     // Without any one thing it needs, the file is refused by name and changes nothing.
-    const apply154 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 }).then(() => "applied", (e: Error) => e.message);
+    const apply155 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the155 }).then(() => "applied", (e: Error) => e.message);
     const needs: [string, string, string][] = [
       ["content_fingerprint_of", "text", "016 (content_fingerprint_of)"],
       ["ob1_registry_kind", "uuid, text", "046 (ob1_registry_kind)"],
@@ -7819,38 +7915,38 @@ console.log("\n[20cq] Migration 154: onto a populated brain at the file before i
     const unrefused: string[] = [];
     for (const [name, args, says] of needs) {
       await sql.unsafe(`ALTER FUNCTION ${name}(${args}) RENAME TO ${name}_away`);
-      const got = await apply154();
+      const got = await apply155();
       await sql.unsafe(`ALTER FUNCTION ${name}_away(${args}) RENAME TO ${name}`).catch((e: Error) => unrefused.push(`${name} could not be put back: ${e.message.slice(0, 60)}`));
       if (!got.startsWith(`migration ${NUM} needs ${says}; this schema lacks it`) || (await linked())) unrefused.push(`${name}: ${got.slice(0, 80)}`);
     }
     await sql.unsafe(`ALTER TABLE subject_repo_settings RENAME TO subject_repo_settings_away`);
-    const noTable = await apply154();
+    const noTable = await apply155();
     await sql.unsafe(`ALTER TABLE subject_repo_settings_away RENAME TO subject_repo_settings`);
     if (!noTable.startsWith(`migration ${NUM} needs 153 (subject_repo_settings`) || (await linked())) unrefused.push(`the setting: ${noTable.slice(0, 80)}`);
     await sql.unsafe(`ALTER TABLE derivations RENAME TO derivations_away`);
-    const noLineage = await apply154();
+    const noLineage = await apply155();
     await sql.unsafe(`ALTER TABLE derivations_away RENAME TO derivations`);
     if (!noLineage.startsWith(`migration ${NUM} needs 061 (derivations`) || (await linked())) unrefused.push(`the lineage: ${noLineage.slice(0, 80)}`);
     assert(unrefused.length === 0 && !(await linked()) && `${await keyOf(a)};${await keyOf(b)}` === before,
       `without any one of the twelve functions, 061's lineage or 153's setting it needs, the file is refused by name; nothing made, the keys as they were (${unrefused.join(" | ") || `${needs.length} functions and the table tried`})`);
 
     // Applied: nothing stored moves, and with no repository set a link changes nothing.
-    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 });
-    const c = await thought("upgrade 154: github.com/siggymd/client/pull/12 again", 3);
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the155 });
+    const c = await thought("upgrade 155: github.com/siggymd/client/pull/12 again", 3);
     await subjects(c, ["pr:12"]);
     assert((await linked()) && before === "pr:12;pr:12" && `${await keyOf(a)};${await keyOf(b)}` === before && (await keyOf(c)) === "pr:12",
       `applied: the bare keys as they were, and a link changes nothing with no repository set (${await keyOf(c)})`);
 
     // An operator names the repository: a key its link names goes to the link's repository, the rest to the setting's.
-    await sql`SELECT set_agent_kind('upgrade-154-op', 'operator')`;
-    const op = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'upgrade-154-op'`)[0].id);
+    await sql`SELECT set_agent_kind('upgrade-155-op', 'operator')`;
+    const op = String((await sql`SELECT canonical_agent_id AS id FROM ob1_agents WHERE label = 'upgrade-155-op'`)[0].id);
     // Through text: Bun's client sends a string cast straight to jsonb as a jsonb string, not the object.
-    const set = (await sql`SELECT set_subject_repo('o/r', (${JSON.stringify({ name: "upgrade-154-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; mapped: number };
+    const set = (await sql`SELECT set_subject_repo('o/r', (${JSON.stringify({ name: "upgrade-155-op", agent_id: op })}::text)::jsonb) AS r`)[0].r as { ok: boolean; mapped: number };
     assert(set.ok === true && set.mapped === 3 && (await keyOf(a)) === "pr:siggymd/client#12" && (await keyOf(c)) === "pr:siggymd/client#12" && (await keyOf(b)) === "pr:o/r#12",
       `an operator's setting maps a key its link names to the link's repository and the rest to the setting's (${JSON.stringify(set)})`);
 
     // A re-apply with a setting standing is a no-op.
-    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the154 });
+    await applyMigrations(URL_, { ...OPTS, only: (f) => f === the155 });
     assert((await keyOf(a)) === "pr:siggymd/client#12" && (await keyOf(b)) === "pr:o/r#12" && (await sql`SELECT ob1_subject_repo() AS r`)[0].r === "o/r",
       "a re-apply with a setting standing is a no-op: the keys and the repository as they were");
   } catch (e) {

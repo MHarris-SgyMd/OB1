@@ -2199,7 +2199,7 @@ export function capSettingValue(r: unknown): WorkClaimCapSetting | null {
 /**
  * The operator's repository for the brain's pr: and version: subject keys (SMD-3887, migration 153): the one standing,
  * or null when none is (keys stay unscoped), who set it and when, `refused` what is wrong with a stored value, and
- * `links` whether migration 154's GitHub-link rule is applied (a pr: key a link names going to that repository).
+ * `links` whether migration 155's GitHub-link rule is applied (a pr: key a link names going to that repository).
  */
 export type SubjectRepoSetting = { repo: string | null; setAt: string | null; setBy: string | null; refused: string | null; links: boolean };
 /** subject_repo_setting()'s jsonb → the record's setting. An answer with no `source` throws: a reply this server cannot read is a fault. */
@@ -2706,7 +2706,7 @@ export function subjectRepoLine(db: Pick<DatabaseSummary, "subjectRepo" | "unrea
   const when = `set ${r.setAt ?? "?"}${r.setBy ? ` by ${cut(JSON.stringify(r.setBy).slice(1, -1), 80)}` : ""}`;
   const repo = cut(JSON.stringify(r.repo).slice(1, -1), 160);
   return r.refused === null
-    ? `${repo} (${when}): a bare pr: or version: key is scoped to it${r.links ? ", and a pr: key whose GitHub link names another repository to that one" : " — migration 154 is not applied, so a GitHub link names no other repository"}`
+    ? `${repo} (${when}): a bare pr: or version: key is scoped to it${r.links ? ", and a pr: key whose GitHub link names another repository to that one" : " — migration 155 is not applied, so a GitHub link names no other repository"}`
     : `${repo}, REFUSED, so no bare pr: or version: key can be written (${when}): ${cut(r.refused, 300)}. An operator key sets it again, or clears it, with SELECT set_subject_repo(<repo or NULL>, <its actor envelope>) (over REST and MCP in SMD-3887 PR 3b-2)`;
 }
 

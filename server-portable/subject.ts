@@ -101,7 +101,7 @@ export function scopedKey(key: string, repo: string): string {
  * pr: or version: key the standing key scoped from it (the setting's repository's, when one is given, else the first
  * by key); undefined when none stands. The sweep counts a set kept or a key new by it (review pass 5: it compared a
  * bare key with the scoped one standing, and counted every pass over a mapped brain a new key). It reads no text, so
- * it does not follow 154's GitHub links: where a thought's link names another repository than the scoped key it
+ * it does not follow 155's GitHub links: where a thought's link names another repository than the scoped key it
  * holds, the sweep counts the set kept, and where the thought reads current it releases it without calling the door,
  * so the key stays as it stands. Such a key comes only from a brain mapped under 153 alone or a raw write, and two
  * remaps repair it (SMD-3887 PR 3b-1, review passes 1 and 4).

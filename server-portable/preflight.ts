@@ -629,9 +629,23 @@ const APPLY_079 = "Apply db/migrations/079_linked_tickets_not_paired.sql.";
  * remedy names that file after it, in place of 150, whose body it carries.
  * On a brain from before the file the remedy is APPLY_067's, and the
  * migrator applies the file in its turn: its guard would refuse a hand
- * apply ahead of 114.
+ * apply ahead of 114. The stale parts' file is named after it (review pass
+ * 2): 151 applied by hand writes its three catalog comments as it first had
+ * them, naming no removal of a part, and that file amends them.
  */
-const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused (bun migrate.ts --reapply runs every file in order).";
+const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db/migrations/151_settled_parts.sql, then db/migrations/154_stale_parts.sql — 151 last defines rebuild_derived (on 150's body, and so 067's), derivation_descendants and ob1_record_derivation, which 063 also holds, so 067 alone leaves bodies that requeue no stale tags row and know no settled part: a moved text sets no pending part stale and a part's write is refused; and 154 amends three catalog comments 151 writes, which 151 alone leaves naming no removal of a part (bun migrate.ts --reapply runs every file in order).";
+/**
+ * 149's thought_validity is last defined by the stale parts' file (SMD-4446),
+ * which carries it whole with an arm for a settled part's lineage row. 149
+ * applied by hand alone puts back a read with no such arm: a part's row reads
+ * as standing whatever its part's status, so a part a reviewer decided reads
+ * stale for good once its text moves. So where the parts' table stands, 149's
+ * remedy names that file after it. On a brain from before the parts' table the
+ * remedy is 149's alone, and the migrator applies the file in its turn: its
+ * guard would refuse a hand apply ahead of 151.
+ */
+const APPLY_149 = "Apply db/migrations/149_thought_validity.sql.";
+const APPLY_149_PARTS = "Apply db/migrations/149_thought_validity.sql, then db/migrations/154_stale_parts.sql — 154 last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.";
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -3386,27 +3400,30 @@ if (configFailed) {
          * tool calls, and which of the tables it reads the server's role may SELECT. A table it may not leaves the axes
          * resting on it unknown, named in each answer's `unread`; thoughts itself faults the tool. Before 149 a skip;
          * the function missing where the ledger records 149, a failure, and where the role cannot read the ledger, a warning.
+         * Since the stale parts' file (SMD-4446) the read reads a settled part's row by its part, so settled_parts is
+         * among the tables, where it stands; and a by-hand remedy for 149 names that file after it (APPLY_149_PARTS).
          */
         {
           const VALIDITY_TABLES = ["thoughts", "ob1_superseded_by", "supersession_proposals", "deliverable_events", "thought_facets", "derivations",
-            "thought_chunks", "thought_entities", "ob1_entity_edges", "thought_audit", "thought_forgotten"];
+            "thought_chunks", "thought_entities", "ob1_entity_edges", "thought_audit", "thought_forgotten", "settled_parts"];
           const vRows = await sql.unsafe(`
             SELECT to_regprocedure('public.thought_validity(uuid[])') IS NOT NULL AS has_fn,
+                   to_regclass('public.settled_parts') IS NOT NULL AS has_parts,
                    -- CASE, not OR: the text form raises for a table not there.
                    ARRAY(SELECT t FROM unnest(ARRAY[${VALIDITY_TABLES.map((t) => `'${t}'`).join(", ")}]) t
                           WHERE CASE WHEN to_regclass('public.' || t) IS NULL THEN false ELSE NOT has_table_privilege('public.' || t, 'SELECT') END) AS unreadable`)
-            .then((r) => r as { has_fn: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+            .then((r) => r as { has_fn: boolean; has_parts: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
           const vl = Array.isArray(vRows) ? vRows[0] : null;
           if (!vl) {
             add("validity", "warn", `could not verify: ${(vRows as Error).message}`, "The check reads thought_validity and the tables it reads in public; the message says why it failed.");
           } else if (!vl.has_fn && ledger.has("149")) {
             // Recorded and not there (a --baseline adoption, a dropped function): the tool faults on every call (review pass 1).
             add("validity", "fail", "migration 149's thought_validity(uuid[]) missing though the ledger records 149; the validity tool faults on every call",
-                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+                ledgerRemedy("149", vl.has_parts ? APPLY_149_PARTS : APPLY_149));
           } else if (!vl.has_fn && ledgerPresent && !ledgerRead) {
             // Missing, and this role cannot read whether the ledger records 149: a warning, the remedy naming both.
             add("validity", "warn", `thought_validity(uuid[]) missing, and ${whyUnread}, so whether migration 149 is recorded is unknown; the validity tool faults until it is there`,
-                ledgerRemedy("149", "Apply db/migrations/149_thought_validity.sql."));
+                ledgerRemedy("149", vl.has_parts ? APPLY_149_PARTS : APPLY_149));
           } else if (!vl.has_fn) {
             add("validity", "skip", "not checked — thought_validity does not exist (migration 149 not applied); the validity tool faults until it is");
           } else if (vl.unreadable.includes("thoughts")) {
@@ -3420,10 +3437,10 @@ if (configFailed) {
         }
 
         /**
-         * Migrations 153 and 154's subject-key repository (SMD-3887 PR 3b-1): whether the server's role reads the
+         * Migrations 153 and 155's subject-key repository (SMD-3887 PR 3b-1): whether the server's role reads the
          * operator's setting, which the subject writer reads for a bare pr: or version: key and the thread read for a
          * bare key, and what stands. Before 153 a skip, the table missing where the ledger records 153 a failure; the
-         * role unable to read it, a stored value the refusal names, and a repository set without 154 (a key its GitHub
+         * role unable to read it, a stored value the refusal names, and a repository set without 155 (a key its GitHub
          * link names would be scoped to the setting's repository) warnings.
          */
         {
@@ -3442,25 +3459,25 @@ if (configFailed) {
             add("subject repository", "warn", `could not verify: ${(sRows as Error).message}`, "The check reads subject_repo_settings and its functions in public; the message says why it failed.");
           } else if (!sr.has_t && ledger.has("153")) {
             add("subject repository", "fail", "migration 153's subject_repo_settings missing though the ledger records 153; every subject write faults",
-                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 154_subject_key_links.sql."));
+                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 155_subject_key_links.sql."));
           } else if (!sr.has_t && ledgerPresent && !ledgerRead) {
             // Missing, and this role cannot read whether the ledger records 153: a warning, the remedy naming both (review pass 2).
             add("subject repository", "warn", `subject_repo_settings missing, and ${whyUnread}, so whether migration 153 is recorded is unknown; if it is, every subject write faults`,
-                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 154_subject_key_links.sql."));
+                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 155_subject_key_links.sql."));
           } else if (!sr.has_t) {
             add("subject repository", "skip", "not checked — subject_repo_settings does not exist (migration 153 not applied); pr: and version: keys stay unscoped");
           } else if (!sr.has_fn) {
             // The table without its reader (a partial re-apply): brain_info's row and a bare key's thread read fault (review pass 1).
             add("subject repository", "fail", "migration 153's subject_repo_setting() missing beside its table: brain_info's row faults, and a thread read by a bare pr: or version: key faults",
-                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 154_subject_key_links.sql."));
-          } else if (!sr.has_links && ledger.has("154")) {
-            // Recorded and not there: 154's setter and writer call it, so they fault whether or not a repository is set (review pass 1).
-            add("subject repository", "fail", "migration 154's ob1_subject_linked_key(text, text) missing though the ledger records 154; set_subject_repo, and every write of a bare pr: key once a repository is set, fault",
-                ledgerRemedy("154", "Apply db/migrations/154_subject_key_links.sql."));
+                ledgerRemedy("153", "Apply db/migrations/153_subject_repo_scope.sql, then 155_subject_key_links.sql."));
+          } else if (!sr.has_links && ledger.has("155")) {
+            // Recorded and not there: 155's setter and writer call it, so they fault whether or not a repository is set (review pass 1).
+            add("subject repository", "fail", "migration 155's ob1_subject_linked_key(text, text) missing though the ledger records 155; set_subject_repo, and every write of a bare pr: key once a repository is set, fault",
+                ledgerRemedy("155", "Apply db/migrations/155_subject_key_links.sql."));
           } else if (!sr.has_links && ledgerPresent && !ledgerRead) {
-            // Missing, and this role cannot read whether the ledger records 154 (review pass 2).
-            add("subject repository", "warn", `ob1_subject_linked_key(text, text) missing, and ${whyUnread}, so whether migration 154 is recorded is unknown; if it is, set_subject_repo faults`,
-                ledgerRemedy("154", "Apply db/migrations/154_subject_key_links.sql."));
+            // Missing, and this role cannot read whether the ledger records 155 (review pass 2).
+            add("subject repository", "warn", `ob1_subject_linked_key(text, text) missing, and ${whyUnread}, so whether migration 155 is recorded is unknown; if it is, set_subject_repo faults`,
+                ledgerRemedy("155", "Apply db/migrations/155_subject_key_links.sql."));
           } else if (!sr.can_read) {
             add("subject repository", "warn", "the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key faults, and a thread read by one reads it unscoped",
                 "Grant the capture group (SMD-3887): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture (db/README.md, Grants for a capturing role).");
@@ -3470,8 +3487,8 @@ if (configFailed) {
             add("subject repository", "warn", `the stored repository ${JSON.stringify(String(setting.repo ?? "")).slice(0, 120)} is refused (${setting.refused.slice(0, 200)}): no bare pr: or version: key can be written`,
                 "An operator key sets it again, or clears it, with SELECT set_subject_repo(<repo or NULL>, <its actor envelope>) (over REST and MCP in SMD-3887 PR 3b-2).");
           } else if (typeof setting?.repo === "string" && !sr.has_links) {
-            add("subject repository", "warn", `${setting.repo} is set but migration 154 is not applied: a key its GitHub link names for another repository is scoped to ${setting.repo}`,
-                ledgerRemedy("154", "Apply db/migrations/154_subject_key_links.sql."));
+            add("subject repository", "warn", `${setting.repo} is set but migration 155 is not applied: a key its GitHub link names for another repository is scoped to ${setting.repo}`,
+                ledgerRemedy("155", "Apply db/migrations/155_subject_key_links.sql."));
           } else {
             add("subject repository", "ok", typeof setting?.repo === "string"
               ? `${setting.repo}: a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one`
