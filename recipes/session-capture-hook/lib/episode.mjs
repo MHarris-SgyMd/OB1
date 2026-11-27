@@ -610,9 +610,9 @@ export function provenanceOf(s) {
  * clip leaves out whole sends nothing, so a hit there withholds nothing (review
  * pass 2: a digest quoted early in a long episode cost it its model summary).
  * Each reached message is read on its own too, as well as joined: the joiner's
- * blank line after a message's last line reads to the 64-hex rule as
+ * blank line after a message's last line read to the 64-hex rule as
  * `sha256sum`'s two-space gap, and a key ending a message went out whole
- * (review pass 3).
+ * (review pass 3; SMD-4546 has the rule read that gap as whitespace on its line, never a line break).
  */
 export function assistantExcerpt(ep) {
   const SEP = "\n\n----\n\n";
