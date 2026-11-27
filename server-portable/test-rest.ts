@@ -154,11 +154,16 @@ let resolveThrows = false;
 /** Set to hold every registry answer until it resolves (a request in flight at the registry, for a stop to cut). */
 let resolveGate: Promise<void> | null = null;
 const lines: string[] = [];
+/** The digests the registry has revoked, for the read that asks of callers who are not calling (SMD-4493); what it was asked; and whether it can be read. */
+const revokedNow = new Set<string>();
+const revokedAsked: string[][] = [];
+let revokedThrows = false;
 const app = createRestApp({
   core,
   init: () => {},
   keys: () => ({ MCP_ACCESS_KEYS: `r:read:${hashKey("read-raw")},w:write:${hashKey("write-raw")},c:capture:${hashKey("cap-raw")},f:forward:${hashKey("fwd-raw")}` }),
   resolve: async (p) => { resolvedNames.push(p.name); if (resolveGate) await resolveGate; if (resolveThrows) throw new Error("the registry threw"); return p.scope === "forward" ? carrierIdentity : identity; },
+  revoked: async (hashes) => { revokedAsked.push([...hashes]); if (revokedThrows) throw new Error("the registry could not be read"); return hashes.filter((h) => revokedNow.has(h)); },
   track: (run) => run(),
   log: (l) => lines.push(l),
 });
@@ -175,8 +180,8 @@ console.log("\n[5] The authorization ladder: a wrong key 401, a revoked one 401,
   assert(r.status === 401 && r.body.code === "UNAUTHORIZED", `a wrong key → 401 (${r.status})`);
   r = await json(await hit("/v1/stats?key=read-raw"));
   assert(r.status === 401, `a key in the query string is no key (${r.status})`);
-  // A forwarder key (SMD-2284) grants nothing: alone it is no caller, whatever
-  // it asks for, and the operation never runs.
+  // A forwarder key (SMD-2284) is no caller's: alone in a caller's slot it is
+  // refused, whatever it asks for, and the operation never runs.
   calls.length = 0;
   for (const [path, init] of [["/v1/stats", {}], ["/v1/whoami", {}], ["/v1/thoughts", { method: "POST", body: JSON.stringify({ content: "x" }) }]] as const) {
     r = await json(await hit(path, { key: "fwd-raw", ...init }));
@@ -319,7 +324,145 @@ console.log("\n[5b] Forwarded: a caller's key beside the forwarder slot — the 
   const schemes = (doc.body.components as { securitySchemes: Record<string, { in?: string; name?: string }> }).securitySchemes;
   const statsSecurity = ((doc.body.paths as Record<string, Record<string, { security?: Record<string, unknown>[] }>>)["/v1/stats"].get.security ?? []).map((x) => Object.keys(x).sort().join("+"));
   assert(schemes.forwarder?.in === "header" && schemes.forwarder?.name === "x-brain-forwarder" && statsSecurity.includes("brainKey+forwarder") && statsSecurity.includes("brainKey") && !statsSecurity.includes("forwarder"),
-    `the document names the forwarder slot, beside a caller's key and never alone (${statsSecurity.join(", ")})`);
+    `the document names the forwarder slot, for an operation beside a caller's key and never alone (${statsSecurity.join(", ")})`);
+}
+
+console.log("\n[5b2] Whether callers still stand (SMD-4493): the forwarder's own question, alone in its own slot — revoked by the registry, unknown to the key list, or standing; all answered or none");
+{
+  const ask = (body: unknown, headers: Record<string, string> = { "x-brain-forwarder": "fwd-raw" }, method = "POST") =>
+    app.fetch(new Request("http://api/v1/callers/standing", { method, headers: { ...headers, "content-type": "application/json" }, ...(method === "POST" ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}) }));
+  const standings = (body: Record<string, unknown>) => (body.callers as { name: string; digest: string; standing: string }[]);
+  identity = { status: "ok", agentId: "agent-1" };
+  carrierIdentity = { status: "ok", agentId: "agent-f" };
+  const R = hashKey("read-raw"), W = hashKey("write-raw"), F = hashKey("fwd-raw"), GONE = hashKey("a key whose line has gone"), GONE2 = hashKey("a key revoked, whose line has gone too"), T1 = "a".repeat(64), T2 = "b".repeat(64);
+  revokedNow.clear();
+  revokedNow.add(W);
+  revokedNow.add(T2);
+  revokedNow.add(GONE2);
+  revokedAsked.length = 0;
+  resolvedNames.length = 0;
+  calls.length = 0;
+  const asked = [
+    { name: "r", digest: R },
+    { name: "renamed-since", digest: R },
+    { name: "w", digest: W },
+    { name: "gone", digest: GONE },
+    { name: "oauth:operator+gui", digest: T1 },
+    { name: "oauth:operator+cli", digest: T2 },
+    { name: "f", digest: F },
+    { name: "c", digest: hashKey("cap-raw") },
+    { name: "gone-and-revoked", digest: GONE2 },
+    { name: "oauth-like", digest: GONE },
+    { name: " r ", digest: R },
+  ];
+  let r = await json(await ask({ callers: asked }));
+  assert(r.status === 200 && same(standings(r.body).map((c) => c.standing), ["stands", "stands", "revoked", "unknown", "stands", "revoked", "unknown", "stands", "revoked", "unknown", "stands"]),
+    `a listed key stands, under the name it had too (a rename keeps the digest); a digest the registry revoked is revoked; a key's digest in no line is unknown; a token caller is in no key list and stands, or is revoked; a forwarder's digest is no caller's; a capture key stands as a read or a write key does; a revoked key whose line has gone too is revoked, the registry's word first; and a key whose name only begins like a token caller's, with no colon, is a key (${r.status} ${JSON.stringify(standings(r.body).map((c) => c.standing))})`);
+  assert(same(standings(r.body).map(({ name, digest }) => ({ name, digest })), asked), "…each pair answered as it was asked, in the order asked");
+  assert(revokedAsked.length === 1 && same([...revokedAsked[0]].sort(), [...new Set(asked.map((a) => a.digest))].sort()), `…the registry read once, each digest once (${revokedAsked.length} read(s), ${revokedAsked[0]?.length} digests)`);
+  assert(same(resolvedNames, ["f"]) && calls.length === 0, `…the forwarder alone looked up, so no caller asked of is registered or stamped, and no operation run (${JSON.stringify(resolvedNames)}, ${calls.length})`);
+  const line = JSON.parse(lines[lines.length - 1]) as Record<string, unknown>;
+  assert(line.route === "/v1/callers/standing" && line.agent === "f" && line.status === 200 && line.outcome === "ok" && line.tool === undefined, `…and its line names the route and the forwarder, and no tool (${lines[lines.length - 1]})`);
+  // The old single key is in no list, and is a caller's all the same.
+  const legacy = createRestApp({ core, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `r:read:${R},f:forward:${F}`, MCP_ACCESS_KEY: "legacy-raw" }), resolve: async () => ({ status: "ok" }), revoked: async () => [], track: (run) => run() });
+  r = await json(await legacy.fetch(new Request("http://api/v1/callers/standing", { method: "POST", headers: { "x-brain-forwarder": "fwd-raw" }, body: JSON.stringify({ callers: [{ name: "MCP_ACCESS_KEY", digest: hashKey("legacy-raw") }, { name: "MCP_ACCESS_KEY", digest: GONE }, { name: "r", digest: R }] }) })));
+  assert(r.status === 200 && same(standings(r.body).map((c) => c.standing), ["stands", "unknown", "stands"]), `the old single key's digest stands, another under its name is unknown, and a listed key beside the old single key stands as ever (${JSON.stringify(r.body)})`);
+  // The key list is read as each question is asked: a line gone since the last one is gone.
+  let movingKeys = `r:read:${R},f:forward:${F}`;
+  const moving = createRestApp({ core, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: movingKeys }), resolve: async () => ({ status: "ok" }), revoked: async () => [], track: (run) => run() });
+  const askMoving = async () => standings((await json(await moving.fetch(new Request("http://api/v1/callers/standing", { method: "POST", headers: { "x-brain-forwarder": "fwd-raw" }, body: JSON.stringify({ callers: [{ name: "r", digest: R }] }) })))).body).map((c) => c.standing);
+  const whileListed = await askMoving();
+  movingKeys = `f:forward:${F}`;
+  assert(same(whileListed, ["stands"]) && same(await askMoving(), ["unknown"]), "a key stands while its line is there, and is unknown at the next question once the line has gone");
+  // A read cut short, or one that answers for some of what it was asked, must show: 256 callers, each its own digest.
+  const many = Array.from({ length: 256 }, (_, i) => ({ name: `k${i}`, digest: hashKey(`[5b2] caller ${i}`) }));
+  for (const i of [8, 100, 255]) revokedNow.add(many[i].digest);
+  revokedAsked.length = 0;
+  r = await json(await ask({ callers: many }));
+  const said = r.status === 200 ? standings(r.body).map((c) => c.standing) : [];
+  assert(said.length === 256 && said.every((s, i) => s === ([8, 100, 255].includes(i) ? "revoked" : "unknown")) && revokedAsked[0]?.length === 256,
+    `256 callers of 256 digests: the registry is asked of every one, the three it revoked are said at their places, the ninth, the hundred-and-first and the last, and each other, in no line, is unknown (${r.status}, ${revokedAsked[0]?.length} asked, ${said.filter((s) => s === "revoked").length} revoked)`);
+  // A key whose scope the list has changed keeps its digest, and stands.
+  const rescoped = createRestApp({ core, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `r:write:${R},f:forward:${F}` }), resolve: async () => ({ status: "ok" }), revoked: async () => [], track: (run) => run() });
+  r = await json(await rescoped.fetch(new Request("http://api/v1/callers/standing", { method: "POST", headers: { "x-brain-forwarder": "fwd-raw" }, body: JSON.stringify({ callers: [{ name: "r", digest: R }] }) })));
+  assert(r.status === 200 && same(standings(r.body).map((c) => c.standing), ["stands"]), `a key whose scope changed stands (${JSON.stringify(r.body)})`);
+  // Who may ask: the forwarder's own key, in its own slot, and no caller.
+  revokedAsked.length = 0;
+  let res = await ask({ callers: asked }, {});
+  r = await json(res);
+  assert(r.status === 401 && r.body.code === "UNAUTHORIZED" && r.body.credential === "forwarder" && !("callers" in r.body) && res.headers.get("www-authenticate") === "Bearer", `no forwarder slot → 401 UNAUTHORIZED, credential forwarder, WWW-Authenticate (${JSON.stringify(r.body)})`);
+  r = await json(await ask({ callers: asked }, { "x-brain-forwarder": "write-raw" }));
+  assert(r.status === 401 && r.body.credential === "forwarder", `a caller's key in the forwarder slot → 401, credential forwarder (${JSON.stringify(r.body)})`);
+  for (const [what, headers] of [["a caller's key alone", { "x-brain-key": "write-raw" }], ["a caller's key beside a sound forwarder", { "x-brain-key": "write-raw", "x-brain-forwarder": "fwd-raw" }], ["a caller's key in x-access-key beside one", { "x-access-key": "write-raw", "x-brain-forwarder": "fwd-raw" }], ["a forwarder's key as a caller's", { authorization: "Bearer fwd-raw" }], ["a bearer that is no key of the list", { authorization: "Bearer not-a-key", "x-brain-forwarder": "fwd-raw" }]] as const) {
+    r = await json(await ask({ callers: asked }, headers));
+    assert(r.status === 403 && r.body.code === "FORBIDDEN" && r.body.needs === "forward" && !("callers" in r.body), `${what} → 403 FORBIDDEN, needs forward: no caller's scope reaches it (${r.status} ${JSON.stringify(r.body)})`);
+  }
+  carrierIdentity = { status: "revoked", agentId: "agent-f", revokedAt: "2026-11-25T00:00:00Z", reason: null };
+  r = await json(await ask({ callers: asked }));
+  assert(r.status === 401 && r.body.code === "REVOKED" && r.body.credential === "forwarder", `a revoked forwarder → 401 REVOKED, credential forwarder (${JSON.stringify(r.body)})`);
+  carrierIdentity = { status: "busy" } as AgentOutcome;
+  res = await ask({ callers: asked });
+  r = await json(res);
+  assert(r.status === 503 && r.body.code === "BUSY" && r.body.credential === "forwarder" && res.headers.get("retry-after") === "2", `the registry busy on the forwarder's own lookup → 503 BUSY, credential forwarder, Retry-After (${JSON.stringify(r.body)})`);
+  assert(revokedAsked.length === 0, `…and none of these refusals reached the registry's read (${revokedAsked.length})`);
+  carrierIdentity = { status: "ok", agentId: "agent-f" };
+  // No answer: a registry that cannot be read answers for no caller.
+  revokedThrows = true;
+  res = await ask({ callers: asked });
+  r = await json(res);
+  assert(r.status === 503 && r.body.code === "STORE_UNAVAILABLE" && r.body.retryable === true && res.headers.get("retry-after") === "2" && !("callers" in r.body), `a registry that cannot be read → 503 STORE_UNAVAILABLE, retryable, and no caller answered for (${JSON.stringify(r.body)})`);
+  revokedThrows = false;
+  const bare = createRestApp({ core, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `f:forward:${F}` }), resolve: async () => ({ status: "ok" }), track: (run) => run() });
+  r = await json(await bare.fetch(new Request("http://api/v1/callers/standing", { method: "POST", headers: { "x-brain-forwarder": "fwd-raw" }, body: JSON.stringify({ callers: asked }) })));
+  assert(r.status === 503 && r.body.code === "STORE_UNAVAILABLE", `an app given no read of the registry → the same 503 (${JSON.stringify(r.body)})`);
+  for (const answer of [undefined, null, "none", {}, [{ key_hash: W }], [[W]], [null], [7], [W.toUpperCase()], [`${W} `], [hashKey("a digest that was not asked of")]] as const) {
+    const odd = createRestApp({ core, init: () => {}, keys: () => ({ MCP_ACCESS_KEYS: `f:forward:${F}` }), resolve: async () => ({ status: "ok" }), revoked: async () => answer as never, track: (run) => run() });
+    r = await json(await odd.fetch(new Request("http://api/v1/callers/standing", { method: "POST", headers: { "x-brain-forwarder": "fwd-raw" }, body: JSON.stringify({ callers: asked }) })));
+    assert(r.status === 503 && r.body.code === "STORE_UNAVAILABLE" && !("callers" in r.body), `a read that answers ${(JSON.stringify(answer) ?? "nothing").slice(0, 40)} where a list of digests asked of was due → 503, never "none revoked" (${r.status})`);
+  }
+  // The input: held to its schema, and a refusal names the field and never its value.
+  revokedAsked.length = 0;
+  r = await json(await ask({ callers: [] }));
+  assert(r.status === 200 && same(r.body, { callers: [] }) && revokedAsked.length === 0, `no caller asked of → none answered, and the registry not read (${JSON.stringify(r.body)})`);
+  r = await json(await ask("{not json"));
+  assert(r.status === 400 && r.body.code === "REFUSED_INPUT", `a body that is no JSON → 400 REFUSED_INPUT (${JSON.stringify(r.body)})`);
+  const shouted = R.toUpperCase();
+  r = await json(await ask({ callers: [{ name: "r", digest: R }, { name: "r", digest: shouted }] }));
+  assert(r.status === 400 && r.body.code === "REFUSED_INPUT" && JSON.stringify(r.body).includes("callers.1.digest") && !JSON.stringify(r.body).includes(shouted), `a listed key's digest in upper case → 400 naming callers.1.digest, its value not said: read as it stands it would match no line, and be unknown (${JSON.stringify(r.body)})`);
+  for (const [what, digest] of [["63 hex digits", R.slice(1)], ["65", `${R}0`], ["64 characters that are no hex", "z".repeat(64)], ["a number", 7], ["two digests on two lines", `${R}\n${R}`]] as const) {
+    r = await json(await ask({ callers: [{ name: "r", digest }] }));
+    assert(r.status === 400 && r.body.code === "REFUSED_INPUT", `a digest of ${what} → 400 REFUSED_INPUT (${r.status})`);
+  }
+  for (const [what, body] of [["a pair with a field more", { callers: [{ name: "r", digest: R, scope: "write" }] }], ["a body with a field more", { callers: [], holder: "x" }], ["a name of no characters", { callers: [{ name: "", digest: R }] }], ["257 pairs", { callers: Array.from({ length: 257 }, (_, i) => ({ name: `k${i}`, digest: R })) }], ["no list", {}]] as const) {
+    r = await json(await ask(body));
+    assert(r.status === 400 && r.body.code === "REFUSED_INPUT", `${what} → 400 REFUSED_INPUT (${r.status} ${JSON.stringify(r.body).slice(0, 120)})`);
+  }
+  r = await json(await ask({ callers: Array.from({ length: 256 }, (_, i) => ({ name: `k${i}`, digest: R })) }));
+  assert(r.status === 200 && standings(r.body).length === 256 && revokedAsked[revokedAsked.length - 1]?.length === 1, `256 pairs are answered, the one digest among them read once (${r.status})`);
+  // A key's name has no bound in the key list, so none here: one long name must not refuse the question for every caller.
+  r = await json(await ask({ callers: [{ name: "n".repeat(50_000), digest: R }, { name: "r", digest: GONE }] }));
+  assert(r.status === 200 && same(standings(r.body).map((c) => c.standing), ["stands", "unknown"]) && standings(r.body)[0].name.length === 50_000, `a name of 50,000 characters is answered like any other, given back whole, and the caller beside it too (${r.status})`);
+  // The bound, at its byte: a question of exactly 1 MiB is answered, and one byte more is refused.
+  const sized = (bytes: number) => JSON.stringify({ callers: [{ name: "n".repeat(bytes - JSON.stringify({ callers: [{ name: "", digest: R }] }).length), digest: R }] });
+  r = await json(await ask(sized(1024 * 1024)));
+  assert(r.status === 200 && same(standings(r.body).map((c) => c.standing), ["stands"]), `a body of exactly 1 MiB is answered (${r.status})`);
+  r = await json(await ask(sized(1024 * 1024 + 1)));
+  assert(r.status === 413 && r.body.code === "REFUSED_INPUT" && r.body.retryable === false, `…and one of a byte more → 413 REFUSED_INPUT, not retryable (${r.status} ${JSON.stringify(r.body)})`);
+  r = await json(await ask({ callers: Array.from({ length: 256 }, (_, i) => ({ name: `${i}-${"n".repeat(1000)}`, digest: R })) }));
+  assert(r.status === 200 && standings(r.body).every((c) => c.standing === "stands"), `256 pairs with names of a thousand characters fit the body's bound (${r.status})`);
+  r = await json(await ask(JSON.stringify({ callers: [], pad: "x".repeat(2 * 1024 * 1024) })));
+  assert(r.status === 413 && r.body.code === "REFUSED_INPUT", `a body past 1 MiB → 413, unread (${r.status} ${JSON.stringify(r.body)})`);
+  res = await ask(null, { "x-brain-forwarder": "fwd-raw" }, "GET");
+  assert(res.status === 405 && res.headers.get("allow") === "POST", `a GET → 405, Allow: POST (${res.status} ${res.headers.get("allow")})`);
+  await res.body?.cancel();
+  // whoami gives the digest the question is asked by.
+  let who = await json(await hit("/v1/whoami", { key: "read-raw" }));
+  assert(who.status === 200 && who.body.digest === R, `whoami gives the caller's digest (${String(who.body.digest).slice(0, 12)}…)`);
+  who = await json(await app.fetch(new Request("http://api/v1/whoami", { headers: { "x-brain-key": "write-raw", "x-brain-forwarder": "fwd-raw" } })));
+  assert(who.status === 200 && who.body.digest === W && who.body.digest !== F, "…forwarded, the caller's and not the forwarder's");
+  const doc = await (await app.fetch(new Request("http://api/openapi.json"))).json() as { paths: Record<string, Record<string, { operationId: string; security: unknown }>> };
+  assert(doc.paths["/v1/callers/standing"]?.post?.operationId === "callers_standing" && same(doc.paths["/v1/callers/standing"].post.security, [{ forwarder: [] }]), `the document has the route, under the forwarder's slot alone (${JSON.stringify(doc.paths["/v1/callers/standing"]?.post?.security)})`);
+  revokedNow.clear();
 }
 
 console.log("\n[5c] A keyed /health answers the brain's record on the health surface to a key that may read it, cleared in time; liveness to any other (SMD-2287)");
@@ -421,6 +564,7 @@ console.log("\n[5d] The authorization server's tokens (SMD-2286): issuer, audien
   let r = await json(await call("/v1/whoami", await mint()));
   assert(r.status === 200 && r.body.name === "oauth:operator+gui" && r.body.scope === "write" && r.body.agentId === "agent-o" && !("act" in r.body),
     `a write token: the caller is the subject and its client, oauth:operator+gui, write scope, its agent id resolved (${JSON.stringify(r.body).slice(0, 120)})`);
+  assert(r.body.digest === subjectHash(settings.issuer, "operator", "gui"), `…and whoami gives its digest, that of its issuer, subject and client, which another token of theirs keeps (SMD-4493) (${String(r.body.digest).slice(0, 12)}…)`);
   calls.length = 0;
   await call("/v1/stats", await mint());
   const p = calls[0]?.principal;

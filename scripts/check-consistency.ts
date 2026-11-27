@@ -318,7 +318,8 @@
  *      blanked, no `sql` template, `new SQL`, `.unsafe(` or `fetch(`, bare or
  *      on globalThis; the store's builder `db` named only in the root's
  *      import, at root.ts's declaration, as createCore's `store:`, in
- *      `agents().resolve(db(), …)`, as an object key and, in root.ts,
+ *      `agents().resolve(db(), …)` or `agents().revoked(db(), …)`, as an
+ *      object key and, in root.ts,
  *      serveHere()'s one start-up build (`void db().catch(() => {});`); and
  *      the store itself (`_store`, `createStore`) named only in root.ts's
  *      db() and closeStore() (the factory in db() alone), and the store
@@ -6762,7 +6763,8 @@ checkPostgrestClients();
 //     `fetch(` bare or on globalThis (a provider call is the core's);
 //   - the store's builder `db` named only in the root's import, where root.ts
 //     declares it, handed to the core (`createCore({ …, store: db })`), called
-//     for the agent registry (`agents().resolve(db(), …)`), as an object key,
+//     for the agent registry (`agents().resolve(db(), …)`, or its read of
+//     revocations, `agents().revoked(db(), …)`, SMD-4493), as an object key,
 //     or in root.ts by serveHere() as `void db().catch(() => {});` alone, its
 //     start-up build (SMD-2284) — an alias, `(db)()`, another caller (the
 //     root's other wiring too) or another `store:` is a hit;
@@ -6948,7 +6950,7 @@ function transportLeaksIn(text: string, role: TransportRole = PROBE_ROLE): { lin
     // serveHere's start-up build, the one form: its rejection is the first request's to report (review pass 2: any call in any wiring body passed).
     if (inBody("serveHere", m.index) && /\bvoid\s+$/.test(before) && /^\(\)\.catch\(\(\)\s*=>\s*\{\s*\}\);/.test(after)) continue;
     if (/\bcreateCore\(\s*\{[^{}]*\bstore\s*:\s*$/.test(before) && /^\s*[,}]/.test(after)) continue; // handed to the core, uncalled
-    if (/\bagents\(\)\s*\.\s*resolve\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup
+    if (/\bagents\(\)\s*\.\s*(?:resolve|revoked)\(\s*$/.test(before) && /^\s*\(\s*\)/.test(after)) continue; // the agent registry's lookup, and its read of revocations (SMD-4493)
     if (/[{,]\s*$/.test(before) && /^\s*:/.test(after)) continue; // an object key, not the builder
     if (/\bfunction\s+$/.test(before)) continue; // a second db(): said once, above
     hits.push({ line: lineAt(m.index), what: "the store's builder db named past the core" });
@@ -7054,6 +7056,8 @@ const TRANSPORT_PROBES: [string, boolean, TransportRole?][] = [
   ["let _store: Promise<ThoughtStore> | null = null;\nexport function db(): Promise<ThoughtStore> {\n  if (!_store) _store = createStore(env());\n  void _store.then((s) => s.jobSink(serving));\n  return _store;\n}\n", false, ROOT_ROLE],
   ["export function closeStore(): Promise<boolean> {\n  return _store ? _store.then(async (s) => { await s.close(); return true; }) : Promise.resolve(false);\n}\n", false, ROOT_ROLE],
   ["const identity = await agents().resolve(db(), principal);\n", false],
+  ["const gone = await agents().revoked(db(), keyHashes);\n", false],
+  ["const gone = await agents().revoke(db(), keyHashes);\n", true],
   ["const core = createCore({ env, store: db, door: SERVER_NAME });\n", false],
   ["const core = createCore({\n  env,\n  store: db,\n  door: SERVER_NAME,\n});\n", false],
   ['import {\n  createStore,\n  type ThoughtStore,\n} from "./store.ts";\n', false, ROOT_ROLE],

@@ -43,14 +43,15 @@
  *   operators to keep the key out of the extensions' env was the only guard).
  *   Migration 049 lets the agent registry record the scope.
  *
- *   A fourth, `forward` (SMD-2284), grants nothing by itself. It is the MCP
+ *   A fourth, `forward` (SMD-2284), is no caller's scope. It is the MCP
  *   server's own key when it forwards a client's key to the REST core: the
  *   client's key decides what the request may do, and the forwarder's names
  *   who carried it. No server admits it as a caller — the core servers admit
- *   CLIENT_SCOPES, and the vendored copies DEFAULT_ADMIT — so alone it is
- *   refused like an unknown key everywhere, and read in one place: the REST
- *   core's forwarder slot (`x-brain-forwarder`, rest/app.ts), which records
- *   it as the request's `act`. The registry records it with no scope
+ *   CLIENT_SCOPES, and the vendored copies DEFAULT_ADMIT — so as a caller's
+ *   key it is refused like an unknown one everywhere. It is read in one
+ *   place: the REST core's forwarder slot (`x-brain-forwarder`, rest/app.ts),
+ *   which records it as the request's `act`, and where, alone, it may ask
+ *   whether callers still stand (SMD-4493). The registry records it with no scope
  *   (agents.ts, recordedScope): 049's CHECK does not hold `forward`, and no
  *   migration widens it.
  *
@@ -101,7 +102,7 @@ export type Scope = "read" | "write" | "capture" | "forward";
 /** Every scope keygen.ts mints and parseKeyRecords accepts, in the order the docs list them. */
 export const SCOPES: readonly Scope[] = Object.freeze(["read", "write", "capture", "forward"]);
 /**
- * The scopes a caller may hold: every one but `forward`, which grants nothing
+ * The scopes a caller may hold: every one but `forward`, which is no caller's
  * and is read in the REST core's forwarder slot alone (SMD-2284). What the core
  * servers admit.
  */

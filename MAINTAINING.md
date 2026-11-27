@@ -56,7 +56,8 @@ remembered:
   and a cut removes it no sooner than two weeks after that release (SMD-3057).
 - **MINOR** — an additive migration (a new function; a new column with
   `IF NOT EXISTS`; an index swapped under the same names), a new tool, a new
-  worker, a new preflight check, or a surface marked deprecated (SemVer §7;
+  REST route (SMD-4493), a new worker, a new preflight check, or a surface
+  marked deprecated (SemVer §7;
   the root URL's `Deprecation` header, SMD-2306). A shipped function changed
   only additively is a MINOR too — a trailing parameter with a default, a
   trailing output column, or an older form dropped and created anew — when
