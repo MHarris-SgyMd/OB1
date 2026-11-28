@@ -9822,18 +9822,21 @@ console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the
       && empty({ judgeKey: "consolidate:a+b@p4d6", status: "stale" }) === "No stale settled parts judged by consolidate:a+b@p4d6. Either that pass has none in this selection, or no pass has exactly this key: the match is exact, and each part names the key that judged it (judged by consolidate:…).",
     "an empty page says which empty it is: none recorded, with the pass that records them where that can be the reason; none in a decided status; the walk's end; a key that selected nothing");
   // The value: a part's ids, words and flags, each side with whether it holds its quote, the cursor by this listing's
-  // own rule, and none of the texts. A word or a group the store does not know is not given.
+  // own rule, and none of the texts. A word or a group this server does not know is not given: a sentence, which the
+  // reply's guard would null too, and a single word, which the guard alone would pass.
   const part0 = sc.parts[0] as { older: Record<string, unknown>; newer: Record<string, unknown> };
   const odd = renderSettledParts({ ok: true, value: { status: "all", parts: [normalisePart(row({ word: "a sentence, not a word", word_group: "another group", status: "accepted", reviewed_at: "2026-11-28T09:00:00.000Z", reviewed_by: "op-key", reviewed_by_agent: true, reviewed_by_kind: "operator",
-    holder: "newer", shown_by_in_text: false, shown_by_before: null, shown_by_after: null, older_edited: true, whole_id: W, whole_status: "accepted", whole_verdict: "newer_supersedes_older", whole_superseding_id: N }))], cursor: cur, remaining: 1, pastCursor: false } } as never)
+    holder: "newer", shown_by_in_text: false, shown_by_before: null, shown_by_after: null, older_edited: true, whole_id: W, whole_status: "accepted", whole_verdict: "newer_supersedes_older", whole_superseding_id: N })),
+    normalisePart(row({ id: W, word: "retires", word_group: "retired_or_done" }))], cursor: cur, remaining: 1, pastCursor: false } } as never)
     .structuredContent as { parts: Record<string, any>[]; cursor: unknown };
   assert(JSON.stringify({ ...sc.parts[0], older: undefined, newer: undefined }) === JSON.stringify({ id: P, status: "pending", holder: "older", word: "implements", group: "done_or_settled", judgeKey: "consolidate:h2o+writer@p4d6", judgedAt: "2026-11-27T07:30:00.000Z", reviewedAt: null, whole: null, reviewer: null })
       && JSON.stringify(part0.older) === JSON.stringify({ id: O, created_at: "2026-11-20T10:00:00.000Z", edited: false, quoteInText: true }) && JSON.stringify(part0.newer) === JSON.stringify({ id: N, created_at: "2026-11-24T10:00:00.000Z", edited: false, quoteInText: true })
       && sc.cursor === null && !/exporter|Friday|carried|Plan for/.test(JSON.stringify({ ...sc, text: "" }))
       && odd.cursor === cur && odd.parts[0].word === null && odd.parts[0].group === null && odd.parts[0].status === "accepted" && odd.parts[0].holder === "newer"
+      && odd.parts[1].id === W && odd.parts[1].word === null && odd.parts[1].group === null
       && odd.parts[0].older.edited === true && odd.parts[0].older.quoteInText === false && odd.parts[0].newer.quoteInText === true
       && JSON.stringify(odd.parts[0].whole) === JSON.stringify({ id: W, status: "accepted", verdict: "newer_supersedes_older", supersedingId: N }) && JSON.stringify(odd.parts[0].reviewer) === JSON.stringify({ agentRecorded: true, kind: "operator", kindNow: null }),
-    "the value carries a part's ids, status, holder, word, group, pass and times, each side's id, time, edit and whether its text holds the quote the part takes from it, the whole-thought proposal and the reviewer's kinds, and its own cursor; no quote, reason or head, and no word or group the store does not know");
+    "the value carries a part's ids, status, holder, word, group, pass and times, each side's id, time, edit and whether its text holds the quote the part takes from it, the whole-thought proposal and the reviewer's kinds, and its own cursor; no quote, reason or head, and no word or group this server does not know, a sentence or a single word");
   // The refusals, each in the listing's own words, and the hint a brain without the listing gets.
   const refusal = (r: Record<string, unknown>) => renderSettledParts({ ok: false, refusal: { code: "REFUSED_CURSOR", retryable: false, value: "x", ...r } } as never);
   const shape = refusal({ reason: "shape" }), filters = refusal({ reason: "filters", made: KEYED }), plainFilters = refusal({ reason: "filters", made: SEL });
