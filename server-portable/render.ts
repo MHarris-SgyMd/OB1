@@ -2547,6 +2547,9 @@ function claimedWords(claimed: readonly ClaimedOn[] | null | undefined, more = 0
  * caller's). AGENTS.md's "Claim your work" rules, in words a client without it can follow.
  */
 const CLAIMED_KEY = "How to read a `⚠ Claimed` line: a claim whose id is in your worktree's .work-claims/, or that your task names, is yours — renew a lapsed one with the token file's lease and read the renewal's reply, unless a .ended.json or .blocked.json sits beside its token file (a subagent tells its caller instead). Any other live claim holds its work, another session's of your own key included, or this one's if it lost its token: leave that work alone and tell the user its label or claim id. Any other lapsed claim, never released, may be work paused elsewhere unless its PR merged or closed (the branch in its label; with none, ask): ask the user before starting that work. A result without the line says nothing either way: check the brain's list_claims and the ticket's branches and PRs before starting work.";
+/** fetch's title where the settled parts were not read, and the note beside it (SMD-4446 PR 3c), as the claims' and the priorities' are said. */
+const SETTLED_UNREAD_TITLE = "[settled parts not read] ";
+const SETTLED_UNREAD_COMPAT = "Whether a statement of this thought is settled could not be read (for instance, a brain before migration 157, or a server role without SELECT on settled_parts): it may hold one.";
 /** fetch's thought marked as search's result is: `[ingested]`, then who holds a ticket it names (SMD-3599), before its title; an ingested row's notice before its text. */
 const fetchedMarked = (v: FetchedThought): FetchedThought => {
   const ingested = ingestedNotice(v.metadata);
@@ -2556,7 +2559,11 @@ const fetchedMarked = (v: FetchedThought): FetchedThought => {
   const prio = priorityWords(priority, priorityMore ?? 0, 0, true);
   // SMD-2726: a related thought of outside text has its title marked as this one's is (review pass 1).
   const relations = Array.isArray(v.relations) ? { relations: v.relations.map((r) => r.other.trust === "ingested" && r.other.title !== undefined ? { ...r, other: { ...r.other, title: `[ingested] ${r.other.title}` } } : r) } : {};
-  return { ...rest, ...relations, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${prio ? `[priority: ${prio}] ` : priority === null ? PRIORITY_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}), ...priorityCompat(priority, priorityMore, priorityNotRead, unreviewedUnchecked), ...(priority === null ? { priorityNote: PRIORITY_UNREAD_COMPAT } : {}), ...unreviewedCompat([v]) } as FetchedThought;
+  // SMD-4446 PR 3c: the accepted parts standing on it, counted before its title, the last of the marks; the thought
+  // that shows each has its title marked where it is outside text, as a related thought's is.
+  const parts = Array.isArray(v.settled) ? v.settled.length + (v.settledMore ?? 0) : 0;
+  const settled = Array.isArray(v.settled) ? { settled: v.settled.map((p) => p.by.trust === "ingested" ? { ...p, by: { ...p.by, title: `[ingested] ${p.by.title}` } } : p) } : {};
+  return { ...rest, ...relations, ...settled, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${prio ? `[priority: ${prio}] ` : priority === null ? PRIORITY_UNREAD_TITLE : ""}${parts ? `[settled in part: ${parts}] ` : v.settled === null ? SETTLED_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}), ...priorityCompat(priority, priorityMore, priorityNotRead, unreviewedUnchecked), ...(priority === null ? { priorityNote: PRIORITY_UNREAD_COMPAT } : {}), ...unreviewedCompat([v]), ...(v.settled === null ? { settledNote: SETTLED_UNREAD_COMPAT } : {}) } as FetchedThought;
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
   `Refused: ${workText(r.ticket, r.piece)} is covered by ${r.heldBy.length === 1 ? "a live claim" : `${r.heldBy.length} live claims`}: ${r.heldBy.map(heldLine).join("; ")}. A whole ticket and any of its pieces are the same work. ${r.heldBy.some((c) => c.ownKey) ? own : "Leave it to its holder, or claim other work."}`;

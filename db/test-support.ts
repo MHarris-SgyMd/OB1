@@ -616,6 +616,7 @@ const FUNCTIONS = [
   "settle_stale_part(uuid, text, text)",
   // 156 (SMD-4446): the settled parts' listing.
   "list_settled_parts(text, int, text, timestamptz, uuid, int)",
+  "settled_parts_on(uuid[], int)",
 ];
 
 /**

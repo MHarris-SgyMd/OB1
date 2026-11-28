@@ -415,6 +415,30 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
         && selM.isError && selM.sc?.reason === "filters" && same(selM.sc?.made, made) && selM.text.startsWith("Refused: that cursor was made with `status: all` and no other filter"),
       `a parts cursor passed with other filters: REST's 400 REFUSED_CURSOR and the tool's refusal, each naming the filters it was made under (${selR.status} ${String(selR.body.reason)}, ${selM.text.slice(0, 80)})`);
   }
+  // SMD-4446 PR 3c: fetch through both doors on a thought an accepted part stands on. REST's answer is the core's
+  // value: each part with its statement, the words that show it and the thought they are from. The tool's reply is
+  // that value marked, the same whether the tool renders it or this suite renders REST's. The part is this block's
+  // own, on the first two seeded thoughts, and is removed after, so the parts the other rows count are as seeded.
+  {
+    const [{ r }] = await sql`SELECT record_settled_part(${ids[0]}::uuid, ${ids[1]}::uuid, 'older', 'first thought', 'second thought', 'updates', 'a part for fetch', 'consolidate:third+writer@p4d6',
+        (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${ids[0]}::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${ids[1]}::uuid), '{"deterministic": false, "model": "stub"}'::jsonb) AS r`;
+    const partId = String((r as { id?: string }).id);
+    const [{ d }] = await sql`SELECT review_settled_part(${partId}::uuid, 'accept', 'seeded', ${{ name: "rest-reviewer", via: "test" }}::jsonb) AS d`;
+    try {
+      const fr = await rest("GET", `/v1/thoughts/${ids[0]}`), fm = await mcp("fetch", { id: ids[0] });
+      const out = rendered((v) => say.renderFetch(ok(v as never)), fr.body);
+      const settled = fr.body.settled as { id: string; group: string; word: string; statement: string; shownBy: string; otherIs: string; by: { id: string; title: string; supersededBy: string | null }; acceptedAt: string | null; editedSince: boolean; shownByInText: boolean }[] | undefined;
+      const bare = await rest("GET", `/v1/thoughts/${ids[2]}`);
+      assert((d as { ok?: boolean }).ok === true && fr.status === 200 && settled?.length === 1 && settled[0].id === partId && settled[0].statement === "first thought" && settled[0].shownBy === "second thought"
+          && settled[0].group === "done_or_settled" && settled[0].word === "updates" && settled[0].otherIs === "newer" && settled[0].by.id === ids[1] && settled[0].by.title.endsWith(" - beta: the second thought through REST")
+          && typeof settled[0].acceptedAt === "string" && settled[0].editedSince === false && settled[0].shownByInText === true && !String(fr.body.title).includes("settled")
+          && out.content[0].text === fm.text && same(out.structuredContent, fm.sc) && String((fm.sc as { title?: string } | undefined)?.title).startsWith("[settled in part: 1] ")
+          && bare.status === 200 && !("settled" in bare.body),
+        `fetch on a thought an accepted part stands on: REST's value gives the part whole, its statement, the words that show it and the thought they are from; the tool's reply is that value with its title marked, the same rendered here from REST's answer; a thought with no part carries no such field (${fr.status}; ${JSON.stringify(settled?.[0])?.slice(0, 150)}; ${String((fm.sc as { title?: string } | undefined)?.title).slice(0, 40)})`);
+    } finally {
+      await sql`DELETE FROM settled_parts WHERE id = ${partId}::uuid`;
+    }
+  }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
   // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's
   // range, a 500); below the schema, the store keeps such a cast error from reading as the cursor's (test-store-sql [4b]).

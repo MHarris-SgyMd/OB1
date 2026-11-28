@@ -815,11 +815,13 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // and record_thought_subjects with a GitHub link's repository first,
   // refusing by name without 016, 046, 061, 111, 113, 115, 130 or 153
   // ([20cr]); 156 adds the settled parts' listing and the index it reads,
-  // refusing by name without 016, 029, 046 or 151 ([20cs]) —
+  // refusing by name without 016, 029, 046 or 151 ([20cs]); 157 adds the read
+  // of the accepted parts that stand on a thought and the index it reads,
+  // refusing by name without 016 or 151 ([20ct]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 127, `030 is among the last one hundred and twenty-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 128, `030 is among the last one hundred and twenty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -8031,6 +8033,79 @@ console.log("\n[20cs] Migration 156: onto a populated brain at the file before i
   const again = await apply156();
   assert(again === "applied" && (await parts()) === before && (await made()) === "true/true" && JSON.stringify(await list(null)) === JSON.stringify(every),
     `applied again is a no-op: the parts, the index and the listing as they were (${again})`);
+
+  await sql.close();
+}
+
+console.log("\n[20ct] Migration 157: onto a populated brain at the file before it — refused by name without 151's settled_parts, no read and no index made; then applied: the parts standing are kept as they are and the read gives the accepted one that stands on its thought, in its text's order with the other thought of its pair, and not the pending one; the index is there, valid, on the holder for accepted rows; a role that reads the parts and the thoughts reads them, and one without the parts is refused by that table; a re-apply is a no-op (SMD-4446 PR 3c)");
+{
+  const the157 = MIGRATIONS.find((f) => /^\d{3}_parts_on_thoughts\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the157.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the157 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+  const fp = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (o: string, n: string, statement: string, shown: string) =>
+    String(((await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, 'older', ${statement}, ${shown}, 'updates', 'made up for the upgrade', ${KEY}, ${await fp(o)}, ${await fp(n)}, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  const SIG = "settled_parts_on(uuid[], int)";
+  const made = async () => { const [r] = await sql`SELECT to_regprocedure(${SIG}) IS NOT NULL AS f, to_regclass('settled_parts_accepted_holder_idx') IS NOT NULL AS i`; return `${r.f}/${r.i}`; };
+  const parts = async () => JSON.stringify(await sql`SELECT id::text AS id, status, statement, shown_by, older_fingerprint, newer_fingerprint, judged_at::text AS judged_at, reviewed_at::text AS reviewed_at FROM settled_parts ORDER BY id`);
+  const apply157 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the157 }).then(() => "applied", (e: Error) => e.message);
+
+  // A brain at the file before it: a pair with three parts, two of them accepted and one pending.
+  const O = await thought("upgrade 157: the count stands at 40; the review is open; the rota is Ana's");
+  const N = await thought("upgrade 157: the count is 52 now; the review closed; the rota went to Cy");
+  const second = await part(O, N, "the review is open", "the review closed");
+  const first = await part(O, N, "the count stands at 40", "the count is 52 now");
+  const undecided = await part(O, N, "the rota is Ana's", "the rota went to Cy");
+  await sql`SELECT review_settled_part(${second}::uuid, 'accept')`;
+  await sql`SELECT review_settled_part(${first}::uuid, 'accept')`;
+  const before = await parts();
+
+  // Without 151's settled_parts the file is refused by name, the table and each of its columns the read takes.
+  // Nothing is made: no function and no index.
+  await sql`ALTER TABLE settled_parts RENAME TO settled_parts_away`;
+  const without = await apply157();
+  const madeWithout = await made();
+  await sql`ALTER TABLE settled_parts_away RENAME TO settled_parts`;
+  assert(without === `migration ${NUM} needs 016 and 151; this schema lacks settled_parts, settled_parts.holder, settled_parts.holder_id, settled_parts.word_group, settled_parts.older_fingerprint, settled_parts.newer_fingerprint, settled_parts.judged_at, settled_parts.reviewed_at`
+         && madeWithout === "false/false",
+    `without 151's settled_parts the file is refused by name, the table and its seven columns, and neither the read nor its index is made (${without}; ${madeWithout})`);
+
+  const applied = await apply157();
+  type On = { holder_id: string; id: string; statement: string; other_is: string; other_id: string; other_head: string; holder_edited: boolean; shown_by_in_text: boolean; place: number; total: number };
+  const on = async (ids: string[]) => (await sql`SELECT holder_id::text AS holder_id, id::text AS id, statement, other_is, other_id::text AS other_id, other_head, holder_edited, shown_by_in_text, place, total
+                                                    FROM settled_parts_on(${sql.array(ids, "UUID")}::uuid[], 10)`) as On[];
+  const mine = await on([O, N]);
+  const index = (await sql`SELECT i.indisvalid AS valid, i.indisready AS ready, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i WHERE i.indexrelid = to_regclass('settled_parts_accepted_holder_idx')`)[0] as { valid: boolean; ready: boolean; def: string } | undefined;
+  assert(applied === "applied" && (await made()) === "true/true" && (await parts()) === before
+         && mine.length === 2 && mine[0].id === first && mine[1].id === second && mine.every((r) => r.holder_id === O && r.other_is === "newer" && r.other_id === N && Number(r.total) === 2 && !r.holder_edited && r.shown_by_in_text)
+         && Number(mine[0].place) === "upgrade 157: ".length + 1 && mine[0].other_head === "upgrade 157: the count is 52 now; the review closed; the rota went to Cy" && !mine.some((r) => r.id === undecided),
+    `applied, the parts standing are as they were, and the read gives the two accepted ones on their thought, in the order its text says them and not the order they were accepted in, each with the other thought of its pair; the pending one is on no read (${applied}; ${mine.length} of ${mine[0]?.total}; ${mine.map((r) => r.place).join(", ")})`);
+  assert(index !== undefined && index.valid === true && index.ready === true && /ON public\.settled_parts USING btree \(holder_id\) WHERE \(status = 'accepted'::text\)$/.test(index.def),
+    `the read's index is there, valid and ready, on the holder for accepted rows (${index?.def})`);
+
+  // Who reads: a role holding SELECT on the parts and the thoughts reads them; one without the parts is refused by
+  // that table, and one without the thoughts by that one.
+  const READER = "ob1_upgrade_157_reader", NO_PARTS = "ob1_upgrade_157_no_parts", NO_THOUGHTS = "ob1_upgrade_157_no_thoughts";
+  await sql.unsafe(`CREATE ROLE ${READER} NOLOGIN; CREATE ROLE ${NO_PARTS} NOLOGIN; CREATE ROLE ${NO_THOUGHTS} NOLOGIN;
+                    GRANT SELECT ON settled_parts, thoughts TO ${READER}; GRANT SELECT ON thoughts TO ${NO_PARTS}; GRANT SELECT ON settled_parts TO ${NO_THOUGHTS}`);
+  const as = async (role: string) => {
+    try {
+      return await sql.begin(async (tx: SQL) => { await tx.unsafe(`SET LOCAL ROLE ${role}`); return `read ${((await tx.unsafe(`SELECT id FROM settled_parts_on(ARRAY['${O}']::uuid[])`)) as unknown[]).length}`; });
+    } catch (e) { return `${String((e as { errno?: unknown }).errno ?? "?")}: ${(e as Error).message}`; }
+  };
+  const asReader = await as(READER), asNoParts = await as(NO_PARTS), asNoThoughts = await as(NO_THOUGHTS);
+  for (const role of [READER, NO_PARTS, NO_THOUGHTS]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+  assert(asReader === "read 2" && asNoParts === "42501: permission denied for table settled_parts" && asNoThoughts === "42501: permission denied for table thoughts",
+    `a role that reads the parts and the thoughts reads the two; one without the parts is refused by that table, and one without the thoughts by that one (${asReader}; ${asNoParts}; ${asNoThoughts})`);
+
+  // A re-apply is a no-op: the parts, the index and the read as they were.
+  const again = await apply157();
+  assert(again === "applied" && (await parts()) === before && (await made()) === "true/true" && JSON.stringify(await on([O, N])) === JSON.stringify(mine),
+    `applied again is a no-op: the parts, the index and the read as they were (${again})`);
 
   await sql.close();
 }

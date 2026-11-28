@@ -1543,6 +1543,55 @@ console.log("\n[10b] listSettledParts reads migration 156's listing through the 
   await admin6.close();
 }
 
+console.log("\n[10c] settledPartsAmong reads migration 157's read through the one read every surface makes (SMD-4446 PR 3c)");
+{
+  // The pass writes the rows and a reviewer accepts them (both calls made directly here); the store reads back, for
+  // the thoughts asked for, the parts that stand on each.
+  const older = await store.captureThought({ content: "on: we bill monthly; the cap is 40 seats; the pilot is open", payload: { metadata: {} }, embedding: unit(8) });
+  const newer = await store.captureThought({ content: "on: we bill annually now; the cap is 60 seats; the pilot closed", payload: { metadata: {} }, embedding: unit(8) });
+  const bare = await store.captureThought({ content: "on: a thought no part names", payload: { metadata: {} }, embedding: unit(9) });
+  const admin6 = new SQL({ url: URL_, max: 1 });
+  await admin6`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id = ${older.id}`;
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (holder: string, statement: string, shown: string, word: string) =>
+    String(((await admin6`SELECT record_settled_part(${older.id}::uuid, ${newer.id}::uuid, ${holder}, ${statement}, ${shown}, ${word}, 'a store row', ${KEY},
+        (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${older.id}::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${newer.id}::uuid), '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  const accept = (id: string) => admin6`SELECT review_settled_part(${id}::uuid, 'accept', 'so', ${{ name: "store-reviewer", via: "test" }}::jsonb)`;
+  // Recorded out of the order the older text says them.
+  const cap = await part("older", "the cap is 40 seats", "the cap is 60 seats", "updates");
+  const bill = await part("older", "we bill monthly", "we bill annually now", "revises");
+  const pilot = await part("older", "the pilot is open", "the pilot closed", "resolves");
+  const back = await part("newer", "the pilot closed", "the pilot is open", "corrects");
+  const none = await store.settledPartsAmong([older.id, newer.id, bare.id], 5);
+  await accept(cap); await accept(bill); await accept(back);
+  const got = await store.settledPartsAmong([older.id, newer.id, bare.id], 5);
+  const mine = got[older.id], row = mine?.parts[0];
+  assert(Object.keys(none).length === 0 && Object.keys(got).sort().join() === [older.id, newer.id].sort().join() && mine !== undefined && mine.total === 2 && mine.parts.map((p) => p.id).join() === [bill, cap].join()
+         && !mine.parts.some((p) => p.id === pilot) && got[newer.id]?.total === 1 && got[newer.id]?.parts[0]?.id === back && got[newer.id]?.parts[0]?.otherIs === "older" && got[newer.id]?.parts[0]?.other.id === older.id,
+    `none while none is accepted; then each thought that holds an accepted part, its parts in its text's order and counted, a pending one left out and a thought with none absent; a newer holder's part names the older thought (${Object.keys(none).length} → ${mine?.parts.length} of ${mine?.total})`);
+  assert(row !== undefined && row.statement === "we bill monthly" && row.shownBy === "we bill annually now" && row.word === "revises" && row.group === "no_longer_holds" && row.otherIs === "newer" && row.other.id === newer.id
+         && row.other.head === "on: we bill annually now; the cap is 60 seats; the pilot closed" && /^\d{4}-\d{2}-\d{2}T/.test(row.other.created_at ?? "") && /^\d{4}-\d{2}-\d{2}T/.test(row.judgedAt ?? "") && /^\d{4}-\d{2}-\d{2}T/.test(row.acceptedAt ?? "")
+         && row.holderEdited === false && row.shownByInText === true && !("place" in row) && !("holder_id" in row),
+    `…mapped: the statement and the words that show it, the word and its group, the other thought with its first words and time, the part's two times as ISO instants, and the two flags (${JSON.stringify({ ...row, other: undefined })?.slice(0, 170)})`);
+  // As many of each thought as asked, the total whatever is shown; an id that is no uuid is passed over, and
+  // nothing asked reads nothing.
+  // A read that throws here is the row's failure, not the suite's end: the id that is no uuid must not reach Postgres.
+  const read = (ids: string[], per: number) => store.settledPartsAmong(ids, per).catch((e: Error) => ({ threw: { total: -1, parts: [] as { id: string }[], message: e.message } }) as Record<string, { total: number; parts: { id: string }[] }>);
+  const one = await read(["not-a-uuid", older.id], 1);
+  assert(one[older.id]?.parts.length === 1 && one[older.id]?.parts[0].id === bill && one[older.id]?.total === 2 && Object.keys(one).length === 1
+         && Object.keys(await read([], 5)).length === 0 && Object.keys(await read(["not-a-uuid"], 5)).length === 0,
+    `one part of a thought when one is asked, the total still two; an id that is no uuid is passed over, and an empty list reads nothing (${one[older.id]?.parts.length} of ${one[older.id]?.total})`);
+  // A brain without the read: the store throws, naming it. The label's reader takes that as not read (core/settled.ts).
+  await admin6`ALTER FUNCTION settled_parts_on(uuid[], int) RENAME TO settled_parts_on_away`;
+  let missing = "";
+  try { await store.settledPartsAmong([older.id], 5); } catch (e) { missing = (e as Error).message; }
+  await admin6`ALTER FUNCTION settled_parts_on_away(uuid[], int) RENAME TO settled_parts_on`;
+  assert(/settled_parts_on\(.*\) does not exist/.test(missing) && (await read([older.id], 5))[older.id]?.total === 2,
+    `on a brain without the read the store throws, naming the function, and reads again once it is back (${missing.slice(0, 80)})`);
+  await admin6`DELETE FROM thoughts WHERE id IN (${older.id}::uuid, ${newer.id}::uuid, ${bare.id}::uuid)`;
+  await admin6.close();
+}
+
 console.log("\n[11] logActions: the one writer of action rows — a batch in one statement, an absent agent as SQL NULL, a malformed agent or target refused loudly by column (migration 034, SMD-1719)");
 {
   const admin6 = new SQL({ url: URL_, max: 1 });

@@ -1210,6 +1210,82 @@ console.log("\n[9b] list_settled_parts lists the settled parts for a client: eac
 // The flag is on for the suite (set at boot). A search records one row with the
 // query and the ids it returned; a fetch of a returned id records an action row
 // the export join ties back to that search.
+console.log("\n[9c] fetch shows the accepted settled parts standing on a thought (SMD-4446 PR 3c): each statement a later record settled, in the order the text says them, with the words that show it and the thought they are from; the title says how many; a pending or rejected part, and a statement edited out of its thought, on no read; the thought that shows a part marked where it is outside text; a brain without the read says the parts were not read, and fetch goes on");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${new Array(EMBEDDING_DIM).fill(0).map((_, i) => (i === 6 ? 1 : 0)).join(",")}]`;
+  const seed = async (content: string, daysAgo: number, event?: Record<string, unknown>) => {
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: {}, ...(event ? { event } : {}) }}::jsonb, ${vec}::vector) AS r`)[0].r as { id: string }).id;
+    await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+    return id;
+  };
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (o: string, n: string, holder: string, statement: string, shown: string, word: string) =>
+    String(((await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, ${holder}, ${statement}, ${shown}, ${word}, 'a made-up reason', ${KEY},
+        (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${o}::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${n}::uuid), '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  const decide = async (id: string, decision: string) => {
+    const [{ r }] = await sql`SELECT review_settled_part(${id}::uuid, ${decision}, 'made up', ${{ name: "e2e-reviewer", via: "e2e" }}::jsonb) AS r`;
+    if ((r as { ok?: boolean }).ok !== true) throw new Error(`not decided: ${JSON.stringify(r)}`);
+  };
+  type By = { id: string; title: string; trust: string | null; created_at: string | null; supersededBy: string | null };
+  type Shown = { id: string; group: string | null; word: string; statement: string; shownBy: string; otherIs: string; by: By; acceptedAt: string | null; editedSince: boolean; shownByInText: boolean };
+  type Fetched = { id: string; title: string; text: string; settled?: Shown[] | null; settledMore?: number; settledNote?: string };
+  const fetched = async (id: string) => { const r = await result("fetch", { id }); return { raw: r.text, v: JSON.parse(r.text) as Fetched, sc: r.sc as Fetched | undefined }; };
+
+  // A pair: the older thought says four things, the newer, an outside text, shows three of them settled. The parts
+  // are recorded out of the order the older text says them.
+  const older = await seed("on-thought older: we ship the exporter by Friday \x1b[2A\x1b[2Kforged line; the count stands at 40; the review is open; the rota is Ana's", 9);
+  const newer = await seed("on-thought newer: the exporter shipped on Thursday; the count is 52 now; the review closed; the rota went to Cy", 0, { trust: "ingested" });
+  const pCount = await part(older, newer, "older", "the count stands at 40", "the count is 52 now", "updates");
+  const pShip = await part(older, newer, "older", "we ship the exporter by Friday", "the exporter shipped on Thursday", "implements");
+  const pReview = await part(older, newer, "older", "the review is open", "the review closed", "resolves");
+  const pRota = await part(older, newer, "older", "the rota is Ana's", "the rota went to Cy", "revises");
+  const pBack = await part(older, newer, "newer", "the rota went to Cy", "the rota is Ana's", "corrects");
+
+  // With nothing accepted, fetch is as it was: no field and no mark.
+  const before = await fetched(older);
+  await decide(pCount, "accept"); await decide(pShip, "accept"); await decide(pBack, "accept"); await decide(pRota, "reject");
+  const mine = await fetched(older), theirs = await fetched(newer);
+  const [ship, count] = mine.v.settled ?? [];
+  assert(!("settled" in before.v) && !before.v.title.includes("settled") && mine.v.settled?.length === 2 && !("settledMore" in mine.v) && !("settledNote" in mine.v)
+      && ship.id === pShip && ship.statement === "we ship the exporter by Friday" && ship.shownBy === "the exporter shipped on Thursday" && ship.word === "implements" && ship.group === "done_or_settled"
+      && ship.otherIs === "newer" && ship.by.id === newer && ship.by.trust === "ingested" && /^\[ingested\] .* - on-thought newer: the exporter shipped on Thursday/.test(ship.by.title) && ship.by.supersededBy === null
+      && typeof ship.acceptedAt === "string" && ship.editedSince === false && ship.shownByInText === true
+      && count.id === pCount && count.group === "done_or_settled" && !mine.v.settled.some((p) => p.id === pReview || p.id === pRota),
+    `with nothing accepted, fetch carries no part; then the accepted parts of its thought, in the order the text says them and not the order they were recorded in, each with its statement, the words that show it, its word and group, and the thought they are from, marked as outside text; a pending and a rejected part on no read (${mine.v.settled?.length}: ${ship?.id === pShip}/${count?.id === pCount})`);
+  assert(mine.v.title.startsWith("[settled in part: 2] ") && /on-thought older/.test(mine.v.title) && mine.v.text.startsWith("on-thought older: we ship the exporter by Friday") && !mine.raw.includes("\x1b")
+      && JSON.stringify(mine.sc) === JSON.stringify(mine.v)
+      && theirs.v.settled?.length === 1 && theirs.v.settled[0].id === pBack && theirs.v.settled[0].otherIs === "older" && theirs.v.settled[0].by.id === older && theirs.v.settled[0].by.trust !== "ingested"
+      && !theirs.v.settled[0].by.title.startsWith("[ingested]") && theirs.v.settled[0].group === "no_longer_holds" && /\[settled in part: 1\] /.test(theirs.v.title),
+    `the title says how many parts stand, the text is the thought's own, no escape sequence reaches the reply, and the structured value is the reply's; the newer thought's own part names the older as the one that shows it, unmarked (${mine.v.title.slice(0, 40)} | ${theirs.v.title.slice(0, 60)})`);
+
+  // An edit elsewhere in the text: the parts stand and say their thought has moved. An edit that takes a statement
+  // out: that part is on no read, and the title counts the one left.
+  await sql`SELECT update_thought(${older}::uuid, ${"on-thought older: we ship the exporter by Friday; the count stands at 40; the review is open; the rota is Ana's; a line added later"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
+  const elsewhere = await fetched(older);
+  await sql`SELECT update_thought(${older}::uuid, ${"on-thought older: we ship the exporter by Friday; the count was taken again; the review is open; the rota is Ana's; a line added later"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
+  const out = await fetched(older);
+  // The words that show the remaining part edited out of the other thought: still shown, and said so.
+  await sql`SELECT update_thought(${newer}::uuid, ${"on-thought newer: the exporter went out early; the count is 52 now; the review closed; the rota went to Cy"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
+  const unshown = await fetched(older);
+  assert(elsewhere.v.settled?.length === 2 && elsewhere.v.settled.every((p) => p.editedSince === true)
+      && out.v.settled?.length === 1 && out.v.settled[0].id === pShip && out.v.title.startsWith("[settled in part: 1] ")
+      && unshown.v.settled?.length === 1 && unshown.v.settled[0].shownByInText === false && unshown.v.settled[0].shownBy === "the exporter shipped on Thursday" && /on-thought newer: the exporter went out early/.test(unshown.v.settled[0].by.title),
+    `a text edited elsewhere keeps its parts, each saying it has moved since; a statement edited out of its thought is on no read, and the title counts what is left; the words that show a part edited out of the other thought are still given, and said to be no longer in it (${elsewhere.v.settled?.length} → ${out.v.settled?.length}; ${unshown.v.settled?.[0]?.shownByInText})`);
+
+  // A brain without the read: fetch goes on, and says the parts were not read.
+  await sql`DROP FUNCTION settled_parts_on(uuid[], int)`;
+  const pre157 = await fetched(older);
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => /^\d{3}_parts_on_thoughts\.sql$/.test(f) });
+  const back = await fetched(older);
+  assert(pre157.v.settled === null && pre157.v.title.startsWith("[settled parts not read] ") && /^Whether a statement of this thought is settled could not be read \(for instance, a brain before migration 157/.test(pre157.v.settledNote ?? "")
+      && pre157.v.text.startsWith("on-thought older:") && back.v.settled?.length === 1 && !("settledNote" in back.v),
+    `on a brain without the read, fetch still answers the thought, its parts null, its title and a note saying they were not read; the file applied, they are read again (${pre157.v.title.slice(0, 40)})`);
+
+  await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid)`;
+  await sql.close();
+}
+
 console.log("\n[10] query log: a search and its follow-up fetch, recorded and joined (SMD-1295)");
 {
   const qlog = new SQL({ url: URL_, max: 1 });

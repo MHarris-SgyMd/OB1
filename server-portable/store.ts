@@ -11,6 +11,7 @@
  */
 
 import type { PartPage, PartPosition, PartStatus } from "./part-listing.ts";
+import type { PartsOn } from "./parts-on.ts";
 import type { Reviewer, ReviewResult } from "./proposal-review.ts";
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress, readHeartbeats } from "./brain-info.ts";
@@ -3251,6 +3252,16 @@ export interface ThoughtStore {
   listSettledParts(opts: { status?: PartStatus | null; limit?: number; judgeKey?: string; after?: PartPosition }): Promise<PartPage>;
 
   /**
+   * Of the given thought ids, which hold an accepted settled part that stands on them, mapped to the first `per`
+   * of each in the order its text says them and how many stand in all: migration 157's read (parts-on.ts; SMD-4446
+   * PR 3c). A part stands on its thought while the text still holds the statement. The reads use it to SHOW a
+   * thought's parts: it labels, and ranks nothing. Empty when nothing is given or none holds a part. Throws on a
+   * schema before 157 or for a role that may not read the parts: the label's reader (core/settled.ts) takes that
+   * as not read, and the read it labels goes on.
+   */
+  settledPartsAmong(ids: string[], per: number): Promise<Record<string, PartsOn>>;
+
+  /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest
    * first, from a time or a cursor — see ChangeFilters. One function, so the bounds, the order and the bounded rendering are
    * decided once, in SQL. Throws on a schema before 052 (the tool names the
@@ -3410,7 +3421,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true, thoughtsKeyed: true, clientKeyOf: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, thoughtValidity: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, subjectRepo: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listSettledParts: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, settledPartsAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, subjectRepo: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listSettledParts: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, revokedKeys: true, jobSink: false, close: false,
 };
 

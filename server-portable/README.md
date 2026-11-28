@@ -861,6 +861,7 @@ no longer holds is said gone, and the whole-thought proposal on the same pair
 is named. REST's answer carries each quote with its context; the tool's value
 carries ids, words and flags, and its text the rest. Oldest judged first, by
 `status` and `judge_key`, with a cursor of its own. Nothing decides a part yet.
+An accepted part shows on its thought when it is fetched ("Settled parts on a thought", below).
 `Settled parts` is their queue, as stored (SMD-4446 PR 3a-3): how many are
 pending, how long ago the oldest pending one was judged, the stale ones, and
 where each is shown; `none pending` when there is none, `no table — migration
@@ -1117,6 +1118,35 @@ thread's edges (origin `thread`, 120) are the thread read's and fetch's `threads
 
 The reads need SELECT on `thought_facets` and `derivations`, which the capture group holds. A role without either
 gives `relations: null` on the reads, and faults the `relations` operation, the error naming the table.
+
+## Settled parts on a thought (SMD-4446)
+
+A settled part is a statement in one thought that the other thought of a pair shows no longer holds, or is done
+(migration 151; `list_settled_parts` lists them). Once a reviewer accepts one, **`fetch` shows it on the thought that
+holds the statement** (PR 3c-1), through migration 157's `settled_parts_on` and the one read every surface makes
+(`parts-on.ts`). The thought is not superseded and not demoted, and nothing ranks by a part.
+
+- **`settled`** rides only where the thought holds one: the first 20 parts in the order its text says them, with
+  `settledMore` for the rest.
+  - **Each part** carries its id; its `group` (`no_longer_holds` or `done_or_settled`; null for a group this server
+    doesn't know) and the writer's `word`; `statement`, the thought's own words; `shownBy`, the words that show it;
+    and `by`, the thought they are from: its id, title, `trust`, time and `supersededBy`. An outside text's title is
+    marked `[ingested]`.
+  - **`otherIs`** says whether that thought is the older or the newer of the pair. **`acceptedAt`** is when a
+    reviewer accepted the part.
+  - **`editedSince`** says the thought's text has moved since the part was judged, with the statement still in it.
+    **`shownByInText`** says whether the other thought still holds the words that show it.
+- **A part stands on its thought** while the text still holds the statement, read as the part's identity reads one:
+  case and white space folded. A statement edited out of its thought is on no read. A pending, stale or rejected part
+  never is.
+- **The title** starts `[settled in part: N]`, after the other marks, where N counts every part standing. The text is
+  the thought's own.
+- **`settled: null`** says the parts couldn't be read. The title then starts `[settled parts not read]`, a
+  `settledNote` says so, the log says why, and the fetch goes on.
+- **The pages carry none yet.** `search_thoughts`, `search_thoughts_keyword` and `list_thoughts` follow (PR 3c-2).
+
+The read needs SELECT on `settled_parts`, which the server group holds since 151, and on `thoughts`. A role without
+the first, or a brain before 157, gives `settled: null`.
 
 ## Worker-queue write actions
 

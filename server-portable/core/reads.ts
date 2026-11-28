@@ -24,6 +24,7 @@ import type { SettledPart } from "../part-listing.ts";
 import { parseSince } from "./since.ts";
 import { fetchedThreads, type FetchedThread } from "./threads.ts";
 import { relationsLabel, relationsOf, relationsResult } from "./relations.ts";
+import { settledOf, settledResult } from "./settled.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 import { weightsRefused } from "./weights.ts";
 import { itemKey, marksOn, type Markable, type MarkItem } from "./marks.ts";
@@ -296,9 +297,10 @@ export async function search(ctx: Ctx, principal: Principal, { query }: Input<"s
 /**
  * fetch's thought: ChatGPT's compat shape, its claims where a ticket it names is claimed, and `threads` where it stands
  * in a work thread (SMD-3306 PR 7a-2a) — the thought it continues and the one continuing it in each, null when they
- * could not be read.
+ * could not be read — and `settled` where an accepted settled part stands on it (SMD-4446 PR 3c): each statement of
+ * its text a later record settled, the words that show it and the thought they are from, null when not read.
  */
-export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown>; threads?: FetchedThread[] | null } & ReturnType<typeof claimedResult> & ReturnType<typeof relationsResult> & ReturnType<typeof priorityResult>;
+export type FetchedThought = { id: string; title: string; text: string; url: string; metadata: Record<string, unknown>; threads?: FetchedThread[] | null } & ReturnType<typeof claimedResult> & ReturnType<typeof relationsResult> & ReturnType<typeof priorityResult> & ReturnType<typeof settledResult>;
 
 export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input<"fetch">): Promise<Outcome<FetchedThought>> {
   const store = await ctx.store();
@@ -306,7 +308,7 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
   if (!thought) return refuse({ code: "NOT_FOUND", retryable: false, id });
   // Click-through relevance (034): the caller opened this id after a
   // search. Only on a hit — a fetch of a missing id labels nothing.
-  const [, claimed, threads, related, priority] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id), relationsOf(store, [thought], RELATIONS_FETCHED, true), priorityOf(store, [thought])]);
+  const [, claimed, threads, related, priority, settled] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id), relationsOf(store, [thought], RELATIONS_FETCHED, true), priorityOf(store, [thought]), settledOf(store, [thought])]);
   return ok({
     id: thought.id,
     title: thoughtTitle(thought.content, thought.created_at),
@@ -321,6 +323,8 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
     // SMD-2726: its judged relations, only where it has some, as `claimed` rides.
     ...relationsResult(related, thought.id),
     ...priorityResult(priority, thought.id),
+    // SMD-4446 PR 3c: the accepted parts standing on it, only where it holds one, as `relations` rides.
+    ...settledResult(settled, thought.id),
     // Only where it stands in a thread, or the read failed: a thought in none adds nothing to ChatGPT's shape.
     ...(threads === null || threads.length > 0 ? { threads } : {}),
   });
