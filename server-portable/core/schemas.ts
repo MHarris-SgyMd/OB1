@@ -13,6 +13,7 @@ import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS } from "../priority-kinds.ts";
 import { VERIFY_STATUSES } from "../deliverables.ts";
 import { VALIDITY_CAP } from "../validity.ts";
+import { subjectRepoValid } from "../subject-repo.ts";
 import { AGENDA_ORDERS, RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN, type PriorityWeights } from "../store.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
@@ -886,6 +887,28 @@ export const SPECS = {
     inputSchema: {
       holder: z.string().min(1).max(200).refine((v) => v.trim() !== "", "may not be blank").describe("The holder whose live claims to release: a key's name, as list_claims shows it (its `holder`). Surrounding white space is ignored"),
       reason: z.string().min(1).max(500).refine((v) => v.trim() !== "", "may not be blank").describe("Why the claims are released; kept on each released claim as history"),
+    },
+  },
+  // SMD-3887 PR 3b-2 (migrations 153, 155): the operator's repository for the brain's pr: and version: subject keys. The
+  // gate past the scope is the database's, as the cap's; the repository's rule is 153's, so BAD_REPO is unreachable
+  // from here, and the core refuses a remap with no repository, so REMAP_NEEDS_REPO is too.
+  set_subject_repo: {
+    title: "Set Subject Repository",
+    description:
+      "Operator only: a key the operator classified `operator` (set_agent_kind). Name the repository, `<owner>/<repo>` as GitHub names it, that the brain's pull-request and version subject keys stand in, or clear it with `null` (SMD-3887). Once a repository is set, a bare key (`pr:12`, `version:v1.2`) a pass writes is scoped (`pr:<owner>/<repo>#12`), a pull request's to the repository its own GitHub link in the thought names first, and the bare keys already standing are mapped to their scoped twins in the same call; `thread` reads a bare key as the repository's. With none set, keys stay bare. `remap_previous: true` also moves the keys scoped to the repository this replaces, to correct a mistaken one; by default they stay, as they name it truly after a real move, and a clear moves none. The reply gives the repository now and before (`changed` false: it was the one standing) and what moved: `mapped` (keys moved to a scoped twin written for them), `closedAlone` (closed beside a scoped twin that stood already), `remapped` (how many of those were scoped to the previous repository), `unscopable` (too long once scoped, left bare), and the `keys` they moved to and the `thoughts` they stand on. A mapping past its cap is refused SUBJECT_REPO_TOO_MANY_KEYS, nothing set. `brain_info` shows the setting; the one it replaces stays in the brain's history.",
+    annotations: {
+      readOnlyHint: false,
+      openWorldHint: false,
+      // A key moved closes its facet and writes its twin: both stay, as the setting replaced does.
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    inputSchema: {
+      // Trimmed and lowercased as 153 stores it, printable ASCII first so no character lowercases into the rule.
+      repo: z.string().max(200).trim().refine((v) => /^[\x21-\x7e]*$/.test(v), "may hold printable ASCII alone").toLowerCase()
+        .refine(subjectRepoValid, "is <owner>/<repo> as GitHub names it: an owner of 1 to 39 letters, digits and inner hyphens, a repository of 1 to 100 letters, digits, dots, hyphens and underscores, neither . nor ..")
+        .nullable().describe("The repository, <owner>/<repo> (any case; stored lowercase); null clears the setting, so keys stay bare"),
+      remap_previous: z.boolean().optional().describe("True: also move the keys scoped to the repository this replaces. Needs a repository. Default false"),
     },
   },
   // Open items (SMD-3665 PR 2, migration 117): a to-do, a commitment or a plugin's task — its id, status and history.

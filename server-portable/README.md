@@ -1476,6 +1476,28 @@ entity (its id), addressed by its kind and key, or an open item (`item`, its id:
   `{holder, released, claims}`: `released` the count ended, `claims` each ended claim's id,
   ticket and piece (bounded by the per-holder cap, since the cap holds how many live claims
   a holder may have).
+- **`set_subject_repo`** (`POST /v1/subject-repo`, write scope; SMD-3887 PR 3b-2,
+  migrations 153 and 155): the operator names the repository, `<owner>/<repo>` as
+  GitHub names it, that the brain's bare `pr:` and `version:` subject keys stand in, or
+  clears it with `null`. Setting one maps every standing bare key to its scoped twin
+  (`pr:12` to `pr:<owner>/<repo>#12`) in the same call, a pull request's key to the
+  repository its own GitHub link names first; from then on a pass writes scoped keys,
+  and `thread` reads a bare key as the repository's. `remap_previous: true` also moves
+  the keys scoped to the repository it replaces, to correct a mistaken one; by default
+  they stay. The repository is trimmed and lowercased, and one 153's rule refuses is
+  refused `REFUSED_INPUT` (400) by the schema; a remap with no repository is refused
+  `REFUSED_SUBJECT_REPO_INPUT` (400, `problem` `remap_needs_repo`). Past the scope, the
+  database admits a key the operator classified `operator`, by its agent id, alone: any
+  other is refused `REFUSED_NOT_OPERATOR` (403); while the registry cannot give the
+  key's agent id the call is refused `SUBJECT_REPO_UNATTRIBUTED` (503, retryable as
+  `set_work_claim_cap`'s `CLAIM_CAP_UNATTRIBUTED`). A mapping past its cap (2000 keys,
+  their targets counted beside them) is refused `SUBJECT_REPO_TOO_MANY_KEYS` (409:
+  `keys`, `targets`, null where the bound on the keys alone refused, and `max`), nothing
+  set; batching is SMD-4559. On a database with 153 and not 155 the call faults, nothing
+  set: 153's setter would scope a key to the setting's repository where its link names
+  another. The answer is `{changed, repo, previous, setAt, setBy, mapped, closedAlone,
+  unscopable, remapped, keys, thoughts, caller}`. `brain_info`'s
+  `database.subjectRepo` shows the one standing; a replaced setting stays as history.
 - **`list_priority_findings`** (`GET /v1/priority-findings`, read scope; SMD-3671 PR 2,
   migration 142): the priority review's findings, which sleep's scan proposes —
   `stale`, `overdue`, `disagree` and `settled` (`db/README.md`, migration 142). `status`

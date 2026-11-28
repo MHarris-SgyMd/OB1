@@ -57,6 +57,7 @@ export const CALLS = {
   clear_priority: (c, p, i) => c.clearPriority(p, i),
   set_priority_weights: (c, p, i) => c.setPriorityWeights(p, i),
   set_work_claim_cap: (c, p, i) => c.setWorkClaimCap(p, i),
+  set_subject_repo: (c, p, i) => c.setSubjectRepo(p, i),
   release_holder_claims: (c, p, i) => c.releaseHolderClaims(p, i),
   priority_history: (c, p, i) => c.priorityHistory(p, i),
   list_priority_findings: (c, p, i) => c.listPriorityFindings(p, i),

@@ -98,6 +98,7 @@ import { agentLabel, armOf, attribute, citePointerOf, goldFromFixture, NOT_SEARC
 import { refsOf, transitiveDemotion } from "../evals/transitive-freshness.ts";
 import { PASS_SETTLED_PREFIX } from "../server-portable/consolidate.ts";
 import { subjectKeyValid, unscopedKey } from "../server-portable/subject.ts";
+import { subjectRepoValid } from "../server-portable/subject-repo.ts";
 import { ENTITY_TYPES, NUMERIC_NAME_RE, RELATIONS } from "../server-portable/entities.ts";
 import { ENTITY_VOCABULARY, entityTypeGate, IDENTIFIER_SHAPES, normalizeEntityName, TRIM_RE } from "../server-portable/entity-gate.ts";
 import { linearAdapter, SAMPLE_ISSUE } from "./ingest-linear.ts";
@@ -23846,6 +23847,13 @@ console.log("\n[138] Migration 153: a pr: or version: subject key names its repo
     assert(/a repository is required/.test(refs[0] ?? "") && refs[1] === null && /lowercase/.test(refs[2] ?? "") && /<owner>\/<repo>/.test(refs[3] ?? "") && /<owner>\/<repo>/.test(refs[4] ?? "")
            && refs[5] !== null && /not \. or \.\./.test(refs[6] ?? "") && /not \. or \.\./.test(refs[7] ?? "") && refs[8] === null && refs[9] !== null,
       `ob1_subject_repo_refusal refuses NULL, capitals, no repository, a third part, an edge hyphen, . and .., an owner of 40; takes o/r and an owner of 39 (${refs.map((r) => r === null ? "ok" : r.slice(0, 18)).join(" | ")})`);
+    // subject-repo.ts's subjectRepoValid mirrors it on the lowercase value set_subject_repo stores (SMD-3887 PR 3b-2): the
+    // operation's schema takes it, so a repository the schema admits is one the setter stores, and BAD_REPO stays unreachable.
+    const repos = ["o/r", "owner", "o/r/x", "-o/r", "o-/r", "o--p/r", "o/..", "o/.", "o/...", "o/.x", `${owner39}/r`, `${owner39}d/r`, `o/${"r".repeat(100)}`, `o/${"r".repeat(101)}`, "o/r_x-1.2", "o/r#1", "o r/x", "o/", "/r", ""];
+    const repoRefs = await Promise.all(repos.map(refusal));
+    const repoOff = repos.filter((r, i) => subjectRepoValid(r) !== (repoRefs[i] === null));
+    assert(repoOff.length === 0 && repoRefs.filter((r) => r === null).length >= 6,
+      `subject-repo.ts's subjectRepoValid agrees with ob1_subject_repo_refusal on every lowercase repository above (${repoOff.join(" | ") || `all agree, ${repoRefs.filter((r) => r === null).length} taken`})`);
     const scoped = await q<{ k: string | null }>(`SELECT ob1_subject_scoped_key(k, r) AS k FROM (VALUES (1, 'pr:12', 'o/r'), (2, 'version:v1.2.3', 'o/r'), (3, 'ticket:SMD-1', 'o/r'), (4, 'phrase:x y', 'o/r'), (5, 'pr:a/b#12', 'o/r'), (6, 'pr:12', NULL)) AS v(n, k, r) ORDER BY n`);
     const unscoped = await q<{ k: string | null }>(`SELECT ob1_subject_unscoped_key(k) AS k FROM (VALUES (1, 'pr:o/r#12'), (2, 'version:o-1/r.x@v1.2.3'), (3, 'pr:12'), (4, 'ticket:SMD-1'), (5, 'phrase:pr:a/b#1'), (6, NULL)) AS v(n, k) ORDER BY n`);
     assert(unscoped.map((s) => String(s.k)).join(",") === "pr:12,version:v1.2.3,pr:12,ticket:SMD-1,phrase:pr:a/b#1,null"

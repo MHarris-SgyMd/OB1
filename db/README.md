@@ -2614,7 +2614,9 @@ raising. `ob1_subject_scoped_key(key, repo)` scopes a bare key.
 
 Nothing changes until an operator sets a repository. A pull request's GitHub
 link and a bare key's thread read came in PR 3b-1 (migration 155, above); the
-operation that sets it over REST and MCP comes in PR 3b-2.
+`set_subject_repo` operation sets it over REST and MCP since PR 3b-2
+(`server-portable/README.md`), and refuses to on a database with 153 and not
+155.
 153 carries `SELECT` on the setting to every role reading or writing
 `thought_facets`, and `INSERT, UPDATE` to one writing `thought_sources` too,
 the structure group's mark: a deliverables writer never sets it. It is refused

@@ -1653,6 +1653,45 @@ export function normaliseSetCap(r: unknown): SetCapResult {
   throw new Error(`set_work_claim_cap answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
 }
 
+/**
+ * set_subject_repo's answer (153's setter, 155's mapping; SMD-3887 PR 3b-2). `changed` false: the repository given was
+ * the one standing. `repo` the setting now (null: none, keys unscoped), `previous` the one it replaced; `mapped` the keys
+ * moved to a scoped twin written for them and `closedAlone` those closed beside a scoped twin that stood already (a
+ * remap's among both), `remapped` how many of those were scoped to the previous repository, `unscopable` the keys too
+ * long once scoped and left bare, `keys` the distinct keys they moved to, `thoughts` the thoughts they stand on. Refused: NOT_OPERATOR (`kind` what the key is),
+ * BAD_REPO and REMAP_NEEDS_REPO (in 153's words: the schema keeps both unreachable), TOO_MANY_KEYS (the keys and their
+ * targets past the cap; `targets` null where the bound on the keys alone refused).
+ */
+export type SetSubjectRepoResult =
+  | {
+      ok: true; changed: boolean; repo: string | null; previous: string | null; setAt: string | null; setBy: string | null;
+      mapped: number; closedAlone: number; unscopable: number; remapped: number; keys: number; thoughts: number;
+    }
+  | { ok: false; error: "NOT_OPERATOR"; kind: string | null; message: string }
+  | { ok: false; error: "BAD_REPO" | "REMAP_NEEDS_REPO"; message: string }
+  | { ok: false; error: "TOO_MANY_KEYS"; keys: number; targets: number | null; max: number; message: string };
+
+/** set_subject_repo's jsonb (153, 155) as the store's union. An error it does not name, or no envelope, throws: a refusal this server cannot word is a fault. */
+export function normaliseSetSubjectRepo(r: unknown): SetSubjectRepoResult {
+  const o = r !== null && typeof r === "object" ? (r as Record<string, unknown>) : undefined;
+  const word = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const count = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : null);
+  if (o?.ok === true && typeof o.changed === "boolean") {
+    const n = [o.mapped, o.closed_alone, o.unscopable, o.remapped, o.keys, o.thoughts].map(count);
+    if (n.every((x) => x !== null) && (o.repo === null || typeof o.repo === "string") && (o.previous === null || typeof o.previous === "string")) {
+      const [mapped, closedAlone, unscopable, remapped, keys, thoughts] = n as number[];
+      return { ok: true, changed: o.changed, repo: word(o.repo), previous: word(o.previous), setAt: isoTimestampOrNull(o.set_at), setBy: word(o.set_by),
+               mapped, closedAlone, unscopable, remapped, keys, thoughts };
+    }
+  }
+  if (o?.ok === false && o.error === "NOT_OPERATOR") return { ok: false, error: "NOT_OPERATOR", kind: word(o.kind), message: word(o.message) ?? "" };
+  if (o?.ok === false && (o.error === "BAD_REPO" || o.error === "REMAP_NEEDS_REPO") && typeof o.message === "string") return { ok: false, error: o.error, message: o.message };
+  if (o?.ok === false && o.error === "TOO_MANY_KEYS" && count(o.keys) !== null && count(o.max) !== null && (o.targets === null || count(o.targets) !== null)) {
+    return { ok: false, error: "TOO_MANY_KEYS", keys: count(o.keys)!, targets: o.targets === null ? null : count(o.targets), max: count(o.max)!, message: word(o.message) ?? "" };
+  }
+  throw new Error(`set_subject_repo answered no envelope this server reads: ${JSON.stringify(r)?.slice(0, 200)}`);
+}
+
 /** A claim release_holder_claims ended, as list_work_claims identifies it: its id, ticket and piece (null for a whole-ticket claim). */
 export type ReleasedClaim = { id: string; issue: string; piece: string | null };
 
@@ -2973,6 +3012,14 @@ export interface ThoughtStore {
    */
   setWorkClaimCap(opts: { cap: number | null; actor?: Actor }): Promise<SetCapResult>;
   /**
+   * The operator names the repository the brain's bare pr: and version: subject keys stand in, or clears it (153's
+   * set_subject_repo, 155's mapping; SMD-3887 PR 3b-2): a repository maps every standing bare key to its scoped twin, a
+   * pr: key to the repository its own GitHub link names first; `remapPrevious` also moves the keys scoped to the setting
+   * it replaces. The function decides who may — a key the registry classifies operator, by its agent id — and checks the
+   * repository in 153's words. A database before 155 throws.
+   */
+  setSubjectRepo(opts: { repo: string | null; remapPrevious: boolean; actor?: Actor }): Promise<SetSubjectRepoResult>;
+  /**
    * An operator ends every live claim one holder holds, in one call (migration 145's release_holder_claims, SMD-3606
    * PR 3): the holder's key name and a reason, each released claim kept as history. The function decides who may — a key
    * the registry classifies operator, by its agent id. A database before 144 throws.
@@ -3401,7 +3448,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true, thoughtsKeyed: true, clientKeyOf: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, thoughtValidity: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, subjectRepo: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, setSubjectRepo: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, subjectRepo: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, revokedKeys: true, jobSink: false, close: false,
 };
 

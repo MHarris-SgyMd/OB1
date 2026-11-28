@@ -170,6 +170,10 @@
       "scope": "write"
     },
     {
+      "name": "set_subject_repo",
+      "scope": "write"
+    },
+    {
       "name": "review_priority_finding",
       "scope": "write"
     },

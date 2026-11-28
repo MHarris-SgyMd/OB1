@@ -42,8 +42,9 @@ import type { ValidityCode, ValidityResult } from "./core/validity.ts";
 import type { ValidityFound, ValidityRecord, ValidityThought } from "./validity.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type CapSet, type CapSetCode, type HolderRelease, type HolderReleaseCode, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
-import type { ThreadResult, ThreadShown } from "./core/threads.ts";
+import type { SubjectRepoSet, SubjectRepoSetCode, ThreadResult, ThreadShown } from "./core/threads.ts";
 import { subjectKeyValid } from "./subject.ts";
+import { subjectRepoValid } from "./subject-repo.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
@@ -110,6 +111,8 @@ function guard(v: unknown, key = ""): unknown {
   if (typeof v === "string" && key === "key" && UUID.test(v)) return v;
   // A work thread's key (SMD-3306 PR 7a-2a): a ticket's, a pull request's or a version's shape; a phrase's is nulled.
   if (typeof v === "string" && key === "key" && shapedKey(v)) return v;
+  // set_subject_repo's repository, now and before (SMD-3887 PR 3b-2): held to 153's `<owner>/<repo>`, so no sentence.
+  if (typeof v === "string" && (key === "repo" || key === "previous")) return subjectRepoValid(v) ? v : null;
   // An embedding's id (SMD-4212's little gap): the server's own setting, `<model>@<dim>`, held to no space, so no sentence.
   if (typeof v === "string" && (key === "embeddingId" || key === "measuredOn")) return EMBEDDING_ID.test(v) ? v : null;
   if (typeof v === "string" && key === "identitySha256") return SHA256.test(v) ? v : null;
@@ -2156,6 +2159,50 @@ export function renderReleaseHolderClaims(o: Outcome<HolderRelease, HolderReleas
     : unknownRefusal(r),
   (v) => ({ holder: v.holder, released: v.released, claims: v.claims }));
 }
+
+// ── set_subject_repo (SMD-3887 PR 3b-2, migrations 153 and 155) ──────────────
+export function renderSetSubjectRepo(o: Outcome<SubjectRepoSet, SubjectRepoSetCode>): Reply {
+  return render(o, (v) => {
+    const name = (r: string | null) => (r === null ? "none (keys stay bare)" : r);
+    if (!v.changed && v.mapped + v.closedAlone + v.unscopable + v.remapped === 0) {
+      return `Unchanged: the subject-key repository is already ${name(v.repo)}${v.repo !== null && v.setAt ? ` (set ${v.setAt}${v.setBy ? ` by ${snipText(v.setBy, 80)}` : ""})` : ""}, and no key needed moving. Nothing was written.`;
+    }
+    // 155's counts: `mapped` every key moved to a twin written for it and `closedAlone` every one closed beside a twin
+    // that stood, a remap's among both; `remapped` how many of those were scoped to the previous repository.
+    const moved = [
+      v.mapped ? `${v.mapped} key${v.mapped === 1 ? "" : "s"} moved to ${v.mapped === 1 ? "its" : "their"} scoped twin${v.mapped === 1 ? "" : "s"}` : "",
+      v.closedAlone ? `${v.closedAlone} closed beside a scoped twin that stood already` : "",
+      v.unscopable ? `${v.unscopable} too long once scoped, left bare` : "",
+    ].filter(Boolean);
+    const from = v.remapped ? `, ${v.remapped} of those moved from ${v.previous ?? "the previous repository"}'s scope` : "";
+    const what = moved.length ? `: ${moved.join("; ")}${from} (${v.keys} key${v.keys === 1 ? "" : "s"} on ${v.thoughts} thought${v.thoughts === 1 ? "" : "s"})` : "; no key needed moving";
+    const head = !v.changed ? `The subject-key repository stays ${name(v.repo)}`
+      : v.repo === null ? `Cleared the subject-key repository (it was ${v.previous}): keys written from now stay bare, and those scoped stay as they are`
+      : `Set the subject-key repository to ${v.repo} (before: ${name(v.previous)})`;
+    return `${head}${what}.${v.repo === null ? "" : " A pull request's key takes the repository its own GitHub link names first."} brain_info shows the setting; null clears it.`;
+  }, (r) => r.code === "REFUSED_NOT_OPERATOR" && r.unidentified
+      ? `Refused: only a key the operator classified \`operator\` may set the subject-key repository, known by its agent id, and this call (${snipText(r.key, 80)}) reached the brain with none; call with the operator's own key.`
+    : r.code === "REFUSED_NOT_OPERATOR" ? notOperatorText(r, "Refused: only a key the operator classified `operator` may set the subject-key repository.")
+    : r.code === "SUBJECT_REPO_UNATTRIBUTED"
+      ? `Refused: the operator's key is known by its agent id, which ${r.cause === "registry_away" ? "the agent registry did not give just now; retry shortly" : "the agent registry cannot give this server until an operator acts (the server's log says why)"}.`
+    : r.code === "SUBJECT_REPO_TOO_MANY_KEYS"
+      ? `Refused: the mapping would move ${r.targets === null ? `at least ${r.keys}` : `${r.keys}`} distinct pr: and version: keys${r.targets === null ? "" : ` to ${r.targets} targets`} in one transaction, past the ${r.max} keys one mapping takes; nothing is set. Mapping in batches is SMD-4559.`
+    : r.code === "REFUSED_SUBJECT_REPO_INPUT"
+      ? "Refused: remap_previous moves the keys scoped to the previous repository to the new one, so it needs a repository; a clear leaves scoped keys as they are."
+    : unknownRefusal(r),
+  (v) => ({ changed: v.changed, repo: v.repo, previous: v.previous, setAt: v.setAt, setBy: v.setBy, mapped: v.mapped, closedAlone: v.closedAlone,
+            unscopable: v.unscopable, remapped: v.remapped, keys: v.keys, thoughts: v.thoughts }));
+}
+
+/** set_subject_repo's fault: a database before 153 has no such function, one before 155 no link rule, or the server's role lacks the grant. */
+export const setSubjectRepoHint = (msg: string): string =>
+  /set_subject_repo/.test(msg) && /does not exist|could not find/i.test(msg)
+    ? " — migrations 153 and 155 (db/migrations/153_subject_repo_scope.sql, 155_subject_key_links.sql) are not applied"
+    : /ob1_subject_linked_key is not applied/.test(msg)
+    ? " — apply db/migrations/155_subject_key_links.sql"
+    : /permission denied for (table|function) /i.test(msg)
+    ? " — the server's role needs the structure group's grants (subject_repo_settings, thought_facets and the lineage a mapping writes; db/README.md, Grants for a capturing role; migrate.ts --grant issues them)"
+    : "";
 
 /** release_holder_claims' fault: a database before 145 has no such function. */
 export const releaseHolderHint = (msg: string): string =>

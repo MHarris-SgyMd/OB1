@@ -12,7 +12,9 @@ import { isBareKey, isTicket, scopedKey, subjectKeyValid } from "../subject.ts";
 import { ListCursorRefused, UUID_RE, type ThoughtStore, type ThreadLink, type ThreadPage, type ThreadTicket } from "../store.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
+import { notOperator, operatorGate } from "./caller.ts";
 import { ok, refuse, type Outcome } from "./refusal.ts";
+import { actorOf } from "./writes.ts";
 import { parseThreadCursor, threadCursor } from "./list-cursor.ts";
 import type { Input } from "./schemas.ts";
 
@@ -162,4 +164,36 @@ export async function fetchedThreads(store: Pick<ThoughtStore, "threadPlaces" | 
   const side = (n: (typeof sides)[number] | null): ThreadNeighbourShown | null =>
     n === null ? null : { id: n.id, title: thoughtTitle(n.content, n.created_at), supersededBy: superseded[n.id] ?? null };
   return places.map((p) => ({ key: p.key, place: p.place, total: p.total, continues: side(p.previous), continuedBy: side(p.next) }));
+}
+
+/**
+ * What the operator's subject-key repository setting did (SMD-3887 PR 3b-2; 153's set_subject_repo, 155's mapping): the
+ * repository bare pr: and version: keys now stand in (null: none, keys bare), the one it replaced, when and by which key
+ * the standing one was set, and what moved — the keys moved to a scoped twin written for them, those closed beside a
+ * twin that stood already (a remap's among both), how many of those were scoped to the previous repository, those too
+ * long once scoped and left bare, and the distinct keys they moved to and the thoughts they stand on.
+ */
+export type SubjectRepoSet = {
+  changed: boolean; repo: string | null; previous: string | null; setAt: string | null; setBy: string | null;
+  mapped: number; closedAlone: number; unscopable: number; remapped: number; keys: number; thoughts: number; caller: string;
+};
+export type SubjectRepoSetCode = "REFUSED_NOT_OPERATOR" | "SUBJECT_REPO_UNATTRIBUTED" | "SUBJECT_REPO_TOO_MANY_KEYS" | "REFUSED_SUBJECT_REPO_INPUT";
+
+export async function setSubjectRepo(ctx: Ctx, principal: Principal, { repo, remap_previous }: Input<"set_subject_repo">): Promise<Outcome<SubjectRepoSet, SubjectRepoSetCode>> {
+  // A remap moves keys to the new repository: with none there is nowhere to move them (153's REMAP_NEEDS_REPO, said here).
+  if (remap_previous === true && repo === null) return refuse({ code: "REFUSED_SUBJECT_REPO_INPUT", retryable: false, problem: "remap_needs_repo" });
+  // Who may is the database's to say (153; operatorGate).
+  const gate = operatorGate("SUBJECT_REPO_UNATTRIBUTED", principal);
+  if (gate) return gate;
+  const result = await (await ctx.store()).setSubjectRepo({ repo, remapPrevious: remap_previous === true, actor: actorOf(ctx, principal) });
+  if (!result.ok) {
+    if (result.error === "NOT_OPERATOR") return notOperator(principal, result.kind);
+    if (result.error === "TOO_MANY_KEYS") return refuse({ code: "SUBJECT_REPO_TOO_MANY_KEYS", retryable: false, keys: result.keys, targets: result.targets, max: result.max });
+    // BAD_REPO and REMAP_NEEDS_REPO are unreachable: the schema admits a repository by 153's rule alone and the check
+    // above refuses a remap with none; a database refusing either means the two have diverged — a fault, not the caller's.
+    throw new Error(`set_subject_repo: the database refused what the schema admits (${result.error}: ${result.message})`);
+  }
+  // No action-log row, as set_work_claim_cap: a setting is no search.
+  const { ok: _, ...set } = result;
+  return ok({ ...set, caller: principal.name });
 }

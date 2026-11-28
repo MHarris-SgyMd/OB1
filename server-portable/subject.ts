@@ -43,6 +43,7 @@ import { pairContext, jsonObject } from "./consolidate-decide.ts";
 import { cutByCodePoint, oneLine, type PairSide } from "./consolidate.ts";
 import { providerCall, type EmbedConfig } from "./embed.ts";
 import type { EgressSubject } from "./egress.ts";
+import { KEY_REPO } from "./subject-repo.ts";
 
 // ── The key ───────────────────────────────────────────────────────────────────
 
@@ -78,8 +79,6 @@ const CONNECTIVES = /\b(?:and|or|plus|with|of|for|the|a|an|to|in|on|its)\b/giu;
 /** The most code points a phrase keeps: 111's 207 less `phrase:`. */
 const PHRASE_MAX = 200;
 
-/** A repository as a scoped key names it, `<owner>/<repo>`, lowercase, as GitHub names them (153's ob1:subject-key-shapes). */
-const KEY_REPO = "[a-z0-9]([a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9._-]{1,100}";
 const SCOPED_PR = new RegExp(`^pr:${KEY_REPO}#[0-9]{1,9}$`);
 const SCOPED_VERSION = new RegExp(`^version:${KEY_REPO}@v[0-9]+(\\.[0-9]+){1,3}$`);
 /** 111's bare shapes: a pull request's and a version's key with no repository. */

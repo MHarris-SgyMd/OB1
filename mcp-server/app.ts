@@ -359,6 +359,8 @@ const WORDS: Record<ToolName, Words> = {
   // The per-holder claim cap (SMD-3606 PR 1b, migration 140).
   set_work_claim_cap: { render: (o) => say.renderSetWorkClaimCap(o), fault: writeFault("set_work_claim_cap failed: ", say.setCapHint) },
   release_holder_claims: { render: (o) => say.renderReleaseHolderClaims(o), fault: writeFault("release_holder_claims failed: ", say.releaseHolderHint) },
+  // The operator's subject-key repository (SMD-3887 PR 3b-2, migrations 153 and 155).
+  set_subject_repo: { render: (o) => say.renderSetSubjectRepo(o), fault: writeFault("set_subject_repo failed: ", say.setSubjectRepoHint) },
   // Priority assertions (SMD-3664).
   set_priority: { render: (o) => say.renderSetPriority(o), fault: writeFault("set_priority failed: ") },
   clear_priority: { render: (o) => say.renderClearPriority(o), fault: writeFault("clear_priority failed: ") },

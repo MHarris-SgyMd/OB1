@@ -77,6 +77,7 @@ export function createCore(deps: CoreDeps) {
     setWorkClaimCap: bind(ctx, claims.setWorkClaimCap),
     releaseHolderClaims: bind(ctx, claims.releaseHolderClaims),
     thread: bind(ctx, threads.thread),
+    setSubjectRepo: bind(ctx, threads.setSubjectRepo),
     relations: bind(ctx, relations.relations),
     setPriority: bind(ctx, priority.setPriority),
     clearPriority: bind(ctx, priority.clearPriority),
