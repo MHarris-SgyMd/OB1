@@ -1560,6 +1560,21 @@ export class SqlStore implements ThoughtStore {
     return normaliseAgentResolution(rows[0]?.r);
   }
 
+  async revokedKeys(keyHashes: readonly string[]): Promise<string[]> {
+    if (keyHashes.length === 0) return [];
+    // A plain read of the table, which writes nothing (SMD-4493). Its one lock wait is the table's own, taken as the
+    // statement is planned, before any of it runs: so the cap (RESOLVE_LOCK_TIMEOUT_MS, a stricter setting kept) is
+    // set by a statement of its own, and the two share a transaction. A migration holding the table ends the read at
+    // the cap with 55P03, and the read is no answer. A transaction, so not for a pooler in statement mode, which
+    // resolveAgent's one statement passes: behind one this read never answers, and nothing is ended on its word.
+    return await this.sql.begin(async (tx) => {
+      await tx`SELECT set_config('lock_timeout', (CASE WHEN s.lt = 0 OR s.lt > ${RESOLVE_LOCK_TIMEOUT_MS}::int THEN ${RESOLVE_LOCK_TIMEOUT_MS}::int ELSE s.lt END)::text, true)
+                 FROM (SELECT setting::int AS lt FROM pg_settings WHERE name = 'lock_timeout') s`;
+      const rows = await tx`SELECT key_hash FROM ob1_agent_keys WHERE key_hash = ANY(${this.sql.array([...keyHashes], "TEXT")}::text[]) AND revoked_at IS NOT NULL`;
+      return rows.map((r: Record<string, unknown>) => String(r.key_hash));
+    }) as string[];
+  }
+
   async captureActorOf(id: string): Promise<{ actorName: string | null; agentId: string | null } | null> {
     if (!UUID_RE.test(id)) return null;
     // The FIRST capture row: a re-capture of the same text by another key
@@ -1825,6 +1840,26 @@ export class SqlStore implements ThoughtStore {
        LIMIT ${THREAD_LINKS_SHOWN + 1}::int`;
     const read = links.map((r: Record<string, unknown>) => normaliseThreadLink(r)).filter((l: ThreadLink | null): l is ThreadLink => l !== null);
     return { key, total, members, links: read.slice(0, THREAD_LINKS_SHOWN), linksMore: read.length > THREAD_LINKS_SHOWN };
+  }
+
+  async subjectRepo(): Promise<string | null> {
+    let r: Record<string, unknown> | undefined;
+    try {
+      [r] = await this.sql`SELECT subject_repo_setting() AS s`;
+    } catch (e) {
+      // A brain before 153 has no setting; any other failure, the role's grant included, is a fault. The function gone
+      // beside its table (a partial re-apply) is one too, not a brain before 153 (review pass 5).
+      if (String((e as { errno?: unknown }).errno ?? "") === "42883" && /subject_repo_setting\(/.test(String((e as Error).message))) {
+        const [t] = await this.sql`SELECT to_regclass('subject_repo_settings') IS NULL AS absent`;
+        if (t?.absent === true) return null;
+      }
+      throw e;
+    }
+    const s = r?.s as { repo?: unknown; refused?: unknown } | null | undefined;
+    // A stored value the refusal names is no repository, but its keys may stand mapped: a fault the thread read says,
+    // not "none set" (review pass 6).
+    if (typeof s?.refused === "string") throw new Error(`the stored subject repository is refused: ${s.refused.slice(0, 200)}`);
+    return typeof s?.repo === "string" && s.repo !== "" ? s.repo : null;
   }
 
   async threadPlaces(id: string): Promise<ThreadPlace[]> {

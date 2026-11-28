@@ -59,6 +59,7 @@ export function restApp(log?: (line: string) => void, tokenCheck?: () => TokenCh
     keys: () => ({ MCP_ACCESS_KEYS: env().MCP_ACCESS_KEYS, MCP_ACCESS_KEY: env().MCP_ACCESS_KEY }),
     tokens: tokenCheck ?? tokens,
     resolve: (principal) => agents().resolve(db(), principal),
+    revoked: (keyHashes) => agents().revoked(db(), keyHashes),
     track: calls.track,
     plugins,
     hooks,

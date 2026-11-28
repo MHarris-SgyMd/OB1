@@ -1109,6 +1109,7 @@ const safeThread: Safe<ThreadResult> = (v) => ({
     members: t.members.map((m) => ({ id: m.id, created_at: m.created_at, place: m.place, supersededBy: m.supersededBy, ticket: m.ticket ? { issue: m.ticket.issue, statusType: m.ticket.statusType } : null })),
     linked: t.linked.map((l) => ({ key: l.key, relation: l.relation, total: l.total })), linkedMore: t.linkedMore,
   })),
+  ...(v.scopeUnread ? { scopeUnread: true as const } : {}),
 });
 /** How a linked ticket stands to the thread's, in words. */
 const LINKED_WORDS: Record<ThreadShown["linked"][number]["relation"], string> = { parent: "its parent", child: "its child", blocks: "blocks it", blocked_by: "blocked by it", relates_to: "relates to it" };
@@ -1151,12 +1152,15 @@ function threadText(t: ThreadShown, thought: string | null): string {
 }
 
 export function renderThread(o: Outcome<ThreadResult>): Reply {
-  return render(o, ({ id, threads }) => {
+  return render(o, ({ id, threads, scopeUnread }) => {
+    // A bare key read as written, the repository unread or stored refused, says so (SMD-3887 PR 3b-1 review passes 5
+    // and 6).
+    const note = scopeUnread ? "\n\nThe subject-key repository could not be read, or is stored refused, so this bare key was read as written: on a brain whose operator names a repository, its thread stands under the scoped key, and this answer may miss it." : "";
     if (id !== null && threads.length === 0) return `Thought ${id} stands in no thread: no subject has been found for it yet (the extraction worker's rules find a ticket's, its --subjects sweep asks the judge model for the rest).`;
     const t = threads[0];
-    if (id === null && t && t.total === 0) return [`No thought holds subject ${threadKeyText(t.key)}: its thread is empty.`, linkedLine(t)].filter(Boolean).join("\n");
+    if (id === null && t && t.total === 0) return [`No thought holds subject ${threadKeyText(t.key)}: its thread is empty.`, linkedLine(t)].filter(Boolean).join("\n") + note;
     const lead = id === null ? "" : `Thought ${id} stands in ${threads.length === 1 ? "one thread" : `${threads.length} threads`}.\n\n`;
-    return lead + threads.map((x) => threadText(x, id)).join("\n\n———\n\n");
+    return lead + threads.map((x) => threadText(x, id)).join("\n\n———\n\n") + note;
   }, (r) => r.code === "REFUSED_THREAD_INPUT"
     ? r.problem === "key_or_id" ? "Refused: give exactly one of `key` (a subject key, such as ticket:SMD-3306) or `id` (a thought's id)."
       : r.problem === "after_needs_key" ? "Refused: `after` continues one thread — give it with that thread's `key`, as the page that ended with it said."

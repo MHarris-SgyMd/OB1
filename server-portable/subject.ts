@@ -91,17 +91,31 @@ export function unscopedKey(key: string): string {
   return key.replace(/^pr:[^#/]+\/[^#]+#/, "pr:").replace(/^version:[^@/]+\/[^@]+@/, "version:");
 }
 
+/** A bare pr: or version: key, one no repository scopes (111's shapes): the thread read resolves it to the operator's repository. */
+export function isBareKey(key: string): boolean {
+  return BARE_PR.test(key) || BARE_VERSION.test(key);
+}
+
+/** 153's ob1_subject_scoped_key: a bare pr: or version: key scoped to a repository (`pr:12` in `o/r` is `pr:o/r#12`); any other key as given. */
+export function scopedKey(key: string, repo: string): string {
+  return BARE_PR.test(key) ? key.replace(/^pr:/, `pr:${repo}#`) : BARE_VERSION.test(key) ? key.replace(/^version:/, `version:${repo}@`) : key;
+}
+
 /**
  * The standing key a found key is written as, as 153's door writes it: the key itself when it stands, or for a bare
  * pr: or version: key the standing key scoped from it (the setting's repository's, when one is given, else the first
  * by key); undefined when none stands. The sweep counts a set kept or a key new by it (review pass 5: it compared a
- * bare key with the scoped one standing, and counted every pass over a mapped brain a new key).
+ * bare key with the scoped one standing, and counted every pass over a mapped brain a new key). It reads no text, so
+ * it does not follow 155's GitHub links: where a thought's link names another repository than the scoped key it
+ * holds, the sweep counts the set kept, and where the thought reads current it releases it without calling the door,
+ * so the key stays as it stands. Such a key comes only from a brain mapped under 153 alone or a raw write, and two
+ * remaps repair it (SMD-3887 PR 3b-1, review passes 1 and 4).
  */
 export function heldAs(found: string, standing: readonly string[], repo: string | null = null): string | undefined {
   if (standing.includes(found)) return found;
-  if (!BARE_PR.test(found) && !BARE_VERSION.test(found)) return undefined;
+  if (!isBareKey(found)) return undefined;
   const scoped = standing.filter((s) => unscopedKey(s) === found).sort();
-  const own = repo === null ? undefined : scoped.find((s) => s === found.replace(/^pr:/, `pr:${repo}#`).replace(/^version:/, `version:${repo}@`));
+  const own = repo === null ? undefined : scoped.find((s) => s === scopedKey(found, repo));
   return own ?? scoped[0];
 }
 

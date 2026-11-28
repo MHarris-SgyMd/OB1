@@ -8,7 +8,7 @@
 // across one.
 
 import { thoughtTitle } from "../thoughts.ts";
-import { isTicket, subjectKeyValid } from "../subject.ts";
+import { isBareKey, isTicket, scopedKey, subjectKeyValid } from "../subject.ts";
 import { ListCursorRefused, UUID_RE, type ThoughtStore, type ThreadLink, type ThreadPage, type ThreadTicket } from "../store.ts";
 import type { Principal } from "../auth.ts";
 import type { Ctx } from "./context.ts";
@@ -24,8 +24,13 @@ export type ThreadMemberShown = { id: string; title: string; created_at: string 
  * ticket's linked threads.
  */
 export type ThreadShown = { key: string; total: number; place: number | null; members: ThreadMemberShown[]; earlier: boolean; cursor: string | null; linked: ThreadLink[]; linkedMore: boolean };
-/** The read: the thought it was asked about (null for a key's), and each thread — one for a key, one per subject for an id, none when it stands in no thread. */
-export type ThreadResult = { id: string | null; threads: ThreadShown[] };
+/**
+ * The read: the thought it was asked about (null for a key's), and each thread — one for a key, one per subject for an
+ * id, none when it stands in no thread. `scopeUnread` (SMD-3887 PR 3b-1 review passes 5 and 6): a bare pr: or version:
+ * key read as written because the operator's repository could not be read, or is stored refused, so the answer may
+ * miss a thread that stands under the scoped key.
+ */
+export type ThreadResult = { id: string | null; threads: ThreadShown[]; scopeUnread?: true };
 
 /** A number's digits without their leading zeros, as text (a version's part may pass 2^53, which Number would round). */
 const noLeadingZeros = (n: string) => n.replace(/^0+(?=[0-9])/, "");
@@ -37,9 +42,9 @@ const noLeadingZeros = (n: string) => n.replace(/^0+(?=[0-9])/, "");
  * a ticket alone (`SMD-3306`) is read so only when its prefix is a ticket's (isTicket), as a word such as `PR-12` or
  * `UTF-8` is no ticket a text names (review pass 1); `pr:` and `version:v` are read in any case (review pass 3), their
  * numbers without leading zeros (`pr:012` is `pr:12`, `version:v01.2` `version:v1.2`), and a repository they are scoped
- * to lowercased (`pr:O/R#012` is `pr:o/r#12`, 153's shape: SMD-3887; a bare key is read as written, not resolved to the
- * brain's repository — 3b's). Any other key is taken as written, trimmed. Null for what is no subject key (153's
- * subject_key_valid, mirrored by subjectKeyValid).
+ * to lowercased (`pr:O/R#012` is `pr:o/r#12`, 153's shape: SMD-3887). A bare key is returned bare: thread() resolves
+ * it to the operator's repository, where one is set (SMD-3887 PR 3b-1). Any other key is taken as written, trimmed.
+ * Null for what is no subject key (153's subject_key_valid, mirrored by subjectKeyValid).
  */
 export function threadKey(raw: string): string | null {
   const k = raw.trim();
@@ -90,8 +95,27 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
   if (after !== undefined && !byKey) return refuse({ code: "REFUSED_THREAD_INPUT", retryable: false, problem: "after_needs_key" });
   const store = await ctx.store();
   if (byKey) {
-    const k = threadKey(key);
+    let k = threadKey(key);
+    let scopeUnread = false;
     if (k === null) return refuse({ code: "REFUSED_THREAD_INPUT", retryable: false, problem: "key_shape", value: key });
+    // A bare pr: or version: key reads as the operator's repository, where the setter and the writer put its subjects
+    // (153, SMD-3887 PR 3b-1; the maintainer, 2026-11-23), but for one whose GitHub link names another repository,
+    // which stands under that one's key (155); a key scoped already reads as given. One too long once
+    // scoped stays bare, as the writer leaves it.
+    // Bare alone: `pr:3scale/apicast#12` and `version:vercel/next.js@v1.2` are scoped already (review pass 4).
+    if (isBareKey(k)) {
+      // A setting the role cannot read, or a stored value the refusal names (review pass 6), leaves the key bare, said
+      // in the log, as fetch's threads do (review pass 3: a read that worked before 153 faulted); preflight's subject
+      // repository row names the grant. The answer says so too (review pass 5: a bare read of a mapped brain's key
+      // answered empty, as if no thought held it).
+      const repo = await store.subjectRepo().catch((e: unknown) => {
+        console.error(`thread: the subject-key repository could not be read, so ${k} is read as written: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+        scopeUnread = true;
+        return null;
+      });
+      const scoped = repo === null ? null : scopedKey(k, repo);
+      if (scoped !== null && subjectKeyValid(scoped)) k = scoped;
+    }
     const pos = after === undefined ? undefined : parseThreadCursor(after);
     if (pos === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after ?? "", reason: "shape" });
     let page: ThreadPage;
@@ -101,7 +125,7 @@ export async function thread(ctx: Ctx, _principal: Principal, { key, id, after, 
       if (e instanceof ListCursorRefused) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after ?? "", reason: "shape" });
       throw e;
     }
-    return ok({ id: null, threads: await shown(store, [page], null) });
+    return ok({ id: null, threads: await shown(store, [page], null), ...(scopeUnread ? { scopeUnread: true as const } : {}) });
   }
   const asked = (id ?? "").trim(), thought = asked.toLowerCase();
   if (!UUID_RE.test(thought)) return refuse({ code: "NOT_FOUND", retryable: false, id: asked });

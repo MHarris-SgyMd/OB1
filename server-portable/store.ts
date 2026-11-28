@@ -3096,6 +3096,16 @@ export interface ThoughtStore {
   resolveAgent(opts: { keyHash: string; label: string; scope?: string }): Promise<AgentResolution>;
 
   /**
+   * Which of these key digests the registry has revoked: a read, and nothing
+   * written (SMD-4493). resolveAgent, the registry's other read of a caller's
+   * standing, registers, renames and stamps the caller it is asked of, so it
+   * cannot be asked of a caller who is not calling. A digest the registry has
+   * no row for is not revoked. Its lock wait is capped as resolveAgent's is,
+   * and a failure throws: it is no answer.
+   */
+  revokedKeys(keyHashes: readonly string[]): Promise<string[]>;
+
+  /**
    * Who captured a thought: the actor of its `capture` audit row (008) — the
    * key's name, and since 010 its agent id — or null when nothing captured it
    * through the server (a load by hand, a brain from before 008). Read by
@@ -3195,6 +3205,14 @@ export interface ThoughtStore {
    * with no standing subject, or no such thought. Throws as threadPage does.
    */
   threadPlaces(id: string): Promise<ThreadPlace[]>;
+
+  /**
+   * The repository the operator names for the brain's subject keys (migration 153's subject_repo_setting(), SMD-3887):
+   * the thread read resolves a bare `pr:` or `version:` key to it. Null when none is set and on a brain before 153.
+   * Throws when the stored value is one the refusal names (its keys may stand mapped, so the read says it is unscoped),
+   * and what Postgres throws otherwise.
+   */
+  subjectRepo(): Promise<string | null>;
 
   /**
    * Each thought's standing judged relations (SMD-2726; SMD-3306 PR 7a-2b): 084's `relation` facets of origin
@@ -3383,8 +3401,8 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true, thoughtsKeyed: true, clientKeyOf: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, thoughtValidity: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
-  pluginTx: true, trustCeiling: true, jobSink: false, close: false,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, subjectRepo: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  pluginTx: true, trustCeiling: true, revokedKeys: true, jobSink: false, close: false,
 };
 
 /**

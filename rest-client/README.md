@@ -98,9 +98,12 @@ else console.log(answer.status, answer.body); // { code, retryable, …facts }, 
   until SMD-2287 PR 6b retired it, cannot reach the REST core at all, so it reaches no
   server now: its client needs a new key (`deploy/README.md`, "Upgrading a stack from
   before SMD-2287 PR 6b"). **`forwarderKey`** goes in `x-brain-forwarder` on every
-  call: it names who carried the request (`act`) and grants nothing. A refusal carried
-  that way also holds itself whole as `refusal`, the words its facts leave out
-  included, so the MCP server words it exactly as it always has.
+  call: it names who carried the request (`act`) and grants that request nothing. A
+  refusal carried that way also holds itself whole as `refusal`, the words its facts
+  leave out included, so the MCP server words it exactly as it always has. One
+  operation is the forwarder's alone: `call("callers_standing", { callers }, {})`,
+  with no key and no token, asks the REST core whether callers still stand
+  (SMD-4493), and a call of it with a caller's key is a 403.
 - **`headers()`** adds headers to each request as it is sent, such as the calling
   span's `traceparent`. It may not set a key's header (`x-brain-key`, `x-access-key`,
   `authorization`) or the forwarder slot; any it names are left out.

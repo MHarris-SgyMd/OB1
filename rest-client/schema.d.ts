@@ -122,7 +122,7 @@ export interface paths {
         };
         /**
          * Read a Work Thread
-         * @description Read a work thread: the thoughts holding one subject — a ticket (ticket:SMD-3306, or SMD-3306 alone), a pull request (pr:12, or pr:<owner>/<repo>#12 on a brain whose operator names its repository), a version (version:v2.0.0, or version:<owner>/<repo>@v2.0.0) or a phrase (phrase:<lower-case words>) — in the order they were captured (created_at, ties by id, an undated thought last). Give exactly one of `key` or `id`. A key is read as the extractor writes it: `ticket:`, `pr:` and `version:` in any case, a ticket's id upper-cased, a pull request's or version's numbers without leading zeros, a repository it names lowercased. A ticket alone whose team a text never means as a ticket (PR-12, UTF-8) is refused: a ticket filed under such a team is read with `ticket:` before it (ticket:ES-5), a pull request is pr:12, a word a phrase (phrase:utf-8). `key` reads that subject's thread from its start, `limit` thoughts a page; when more follow the thread carries a `cursor`, passed as `after` with the same `key` for the next page. `id` reads each thread that thought stands in, around it: up to half the page before it, then it and those after it, its `place` marked (1 is the first); its `cursor` continues the thread with its `key`. A thought stands in no thread until its subject is found (the extraction worker's rules, or its --subjects sweep). The reply is `{id, threads}`: `id` the thought an id read was about (null for a key's), `threads` one per thread — one for a key (with `total` 0 when no thought holds it), one per subject for an id (none when it stands in no thread). A thread is `{key, total, place, earlier, cursor, members, linked, linkedMore}`: `earlier` when members come before the page, `cursor` null at the thread's end. Each member carries its id, title, created_at and place; `supersededBy` when a newer thought supersedes it (the thread keeps its whole history); and the ticket's own row — the board's head row for it, which is rewritten in place and so keeps its first place — its `ticket`: the ticket and its status as that row records it. A ticket's thread names the threads its ticket's board links reach (`linked`): each ticket's key, how it stands to this one (parent, child, blocks, blocked_by, relates_to) and how many thoughts its thread holds; the first 50, `linkedMore` when more. No thread runs across a link. MCP's structured value leaves out each member's title and a ticket row's status, and gives a phrase key (the judge model's words) as null: the text carries them, the key whole as a JSON string — send it decoded, without its quotes or escapes. Refused: neither or both of key and id, a key that is no subject key, or `after` without `key` (REFUSED_THREAD_INPUT); a cursor that is not this tool's (REFUSED_CURSOR); an id no thought has (NOT_FOUND).
+         * @description Read a work thread: the thoughts holding one subject — a ticket (ticket:SMD-3306, or SMD-3306 alone), a pull request (pr:12, or pr:<owner>/<repo>#12 on a brain whose operator names its repository), a version (version:v2.0.0, or version:<owner>/<repo>@v2.0.0) or a phrase (phrase:<lower-case words>) — in the order they were captured (created_at, ties by id, an undated thought last). Give exactly one of `key` or `id`. A key is read as the extractor writes it: `ticket:`, `pr:` and `version:` in any case, a ticket's id upper-cased, a pull request's or version's numbers without leading zeros, a repository it names lowercased; on a brain whose operator names its repository, a bare pr: or version: key reads that repository's thread (the reply's `scopeUnread` true when the repository could not be read, or is stored refused, and the key was read as written). A ticket alone whose team a text never means as a ticket (PR-12, UTF-8) is refused: a ticket filed under such a team is read with `ticket:` before it (ticket:ES-5), a pull request is pr:12, a word a phrase (phrase:utf-8). `key` reads that subject's thread from its start, `limit` thoughts a page; when more follow the thread carries a `cursor`, passed as `after` with the key the page names (a bare key reads as the operator's repository, which can change between pages) for the next page. `id` reads each thread that thought stands in, around it: up to half the page before it, then it and those after it, its `place` marked (1 is the first); its `cursor` continues the thread with its `key`. A thought stands in no thread until its subject is found (the extraction worker's rules, or its --subjects sweep). The reply is `{id, threads}`: `id` the thought an id read was about (null for a key's), `threads` one per thread — one for a key (with `total` 0 when no thought holds it), one per subject for an id (none when it stands in no thread). A thread is `{key, total, place, earlier, cursor, members, linked, linkedMore}`: `earlier` when members come before the page, `cursor` null at the thread's end. Each member carries its id, title, created_at and place; `supersededBy` when a newer thought supersedes it (the thread keeps its whole history); and the ticket's own row — the board's head row for it, which is rewritten in place and so keeps its first place — its `ticket`: the ticket and its status as that row records it. A ticket's thread names the threads its ticket's board links reach (`linked`): each ticket's key, how it stands to this one (parent, child, blocks, blocked_by, relates_to) and how many thoughts its thread holds; the first 50, `linkedMore` when more. No thread runs across a link. MCP's structured value leaves out each member's title and a ticket row's status, and gives a phrase key (the judge model's words) as null: the text carries them, the key whole as a JSON string — send it decoded, without its quotes or escapes. Refused: neither or both of key and id, a key that is no subject key, or `after` without `key` (REFUSED_THREAD_INPUT); a cursor that is not this tool's (REFUSED_CURSOR); an id no thought has (NOT_FOUND).
          */
         get: operations["thread"];
         put?: never;
@@ -922,11 +922,31 @@ export interface paths {
         };
         /**
          * Who is calling
-         * @description The key's name, its scope, its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).
+         * @description The key's name, its scope, its `digest` (what the agent registry knows the caller by: the key's SHA-256, or of a token caller a digest of its issuer, its subject and the client it signed in through, if any, which a new token keeps; it is no credential), its stable agent id and the operations it may call; forwarded, `act` names who carried it (the forwarder key's name and agent id).
          */
         get: operations["whoami"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/callers/standing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Whether callers still stand
+         * @description For each caller, by its name and the `digest` whoami gave for it: `revoked` where the agent registry has revoked the digest; `unknown` where a key caller's digest is no longer in the key list (its line gone, or the key rotated), which is never said of a token caller (`oauth:…`); and `stands` otherwise, a renamed caller, one whose scope changed and one the registry has no row for among them. A read of the callers asked of: none is registered, renamed or stamped (the forwarder is looked up as on any request it carries). Every pair is answered or none is: any answer but the 200 answers for no caller. Asked with a forward-scope key in x-brain-forwarder and no caller's credential: the MCP server's question of the callers whose listen streams it holds (SMD-4493).
+         */
+        post: operations["callers_standing"];
         delete?: never;
         options?: never;
         head?: never;
@@ -7053,6 +7073,107 @@ export interface operations {
                 };
             };
             /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+        };
+    };
+    callers_standing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    callers: {
+                        name: string;
+                        digest: string;
+                    }[];
+                };
+            };
+        };
+        responses: {
+            /** @description Each caller asked of, in the order asked, with its standing. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        callers: {
+                            name: string;
+                            digest: string;
+                            /** @enum {string} */
+                            standing: "stands" | "revoked" | "unknown";
+                        }[];
+                    };
+                };
+            };
+            /** @description The body is not JSON, or does not fit the schema (REFUSED_INPUT). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The forwarder slot is empty or holds something other than a forward-scope key (UNAUTHORIZED), or a revoked one (REVOKED); each with `credential: "forwarder"`. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A key or a bearer token was presented in a caller's header, whatever it was and unchecked, a forwarder's key among them (FORBIDDEN, `needs: "forward"`). No caller's scope reaches this route. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The body is larger than 1 MiB (REFUSED_INPUT). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A fault (FAILED, with its message; no retryable until SMD-2461). */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Retry, after Retry-After: the agent registry could not be read (STORE_UNAVAILABLE; a table held by a lock ends the read at 250 ms), or was busy on the forwarder's own lookup, which meets a held table first where the forwarder is not remembered (BUSY, `credential: "forwarder"`, after that lookup's retries, some two seconds). */
             503: {
                 headers: {
                     /** @description Seconds to wait before retrying. */

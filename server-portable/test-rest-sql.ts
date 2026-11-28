@@ -99,7 +99,7 @@ const KEYS = { writer: "writer-raw", reader: "reader-raw", hook: "hook-raw", gon
 process.env.MCP_ACCESS_KEYS = [
   `writer:write:${hashKey(KEYS.writer)}`, `reader:read:${hashKey(KEYS.reader)}`,
   `hook:capture:${hashKey(KEYS.hook)}`, `gone:write:${hashKey(KEYS.gone)}`,
-  // Forwarders (SMD-2284): grant nothing; read in the REST core's forwarder slot alone.
+  // Forwarders (SMD-2284): no caller's keys; read in the REST core's forwarder slot alone.
   `mcp-forwarder:forward:${hashKey(KEYS.forwarder)}`, `old-forwarder:forward:${hashKey(KEYS.forwarderGone)}`,
   `fresh:write:${hashKey(KEYS.fresh)}`, // never used but by [6b]'s refused forwarded request
   `rival:write:${hashKey(KEYS.rival)}`, // [10]'s second agent, beside the writer
@@ -1109,6 +1109,63 @@ console.log("\n[6c] The authorization server's token through REST (SMD-2286, SMD
   assert(other.status === 200 && other.body.name === "oauth:operator+connector-b" && gui.status === 200 && gui.body.name === "oauth:operator+gui",
     `…while connector B and the GUI, signed in as the same operator, go on (${other.status} ${gui.status})`);
   tokenApi.stop(true);
+}
+
+console.log("\n[6d] Whether callers still stand, against the real registry (SMD-4493): one read that writes nothing — a revoked key, a key in no line, a token caller revoked and not, a caller the registry has never seen — and no answer while the registry's table is held");
+{
+  const ask = async (callers: unknown, carrier: string | null = KEYS.forwarder, key = ""): Promise<Answer> => {
+    const r = await fetch(`${API}/v1/callers/standing`, { method: "POST", headers: { ...(key ? { "x-brain-key": key } : {}), ...(carrier ? { "x-brain-forwarder": carrier } : {}), "content-type": "application/json" }, body: JSON.stringify({ callers }) });
+    return { status: r.status, body: await r.json() as Record<string, unknown>, headers: r.headers };
+  };
+  const standings = (a: Answer) => ((a.body.callers ?? []) as { standing: string }[]).map((c) => c.standing);
+  const who = await rest("GET", "/v1/whoami", undefined, KEYS.reader);
+  assert(who.status === 200 && who.body.digest === hashKey(KEYS.reader), `whoami gives the caller's digest, its key's SHA-256 (${String(who.body.digest).slice(0, 12)}…)`);
+  // A token caller's row, as the REST core registers one, and then revoked; another never registered.
+  const tokenGone = hashKey("[6d] a token caller the registry revoked"), tokenNew = hashKey("[6d] a token caller never seen");
+  await sql`SELECT resolve_agent(${tokenGone}::text, ${"oauth:standing+suite"}::text, NULL::text)`;
+  await sql`SELECT revoke_agent_key(${tokenGone}, ${"rest suite [6d]"})`;
+  // The registry as the callers asked of left it. The forwarder's own row is left out: its lookup, as on any request
+  // it carries, may stamp it.
+  const registry = async () => JSON.stringify(await sql`SELECT (SELECT count(*)::int FROM ob1_agents) AS agents, (SELECT count(*)::int FROM ob1_agent_keys) AS keys, (SELECT max(last_used_at)::text FROM ob1_agent_keys WHERE key_hash <> ${hashKey(KEYS.forwarder)}) AS used, (SELECT max(updated_at)::text FROM ob1_agents) AS updated`);
+  const before = await registry();
+  const asked = [
+    { name: "reader", digest: hashKey(KEYS.reader) },
+    { name: "reader-as-it-was-named", digest: hashKey(KEYS.reader) },
+    { name: "gone", digest: hashKey(KEYS.gone) },
+    { name: "reader", digest: hashKey("reader-raw, before it was rotated") },
+    { name: "fresh", digest: hashKey(KEYS.fresh) },
+    { name: "MCP_ACCESS_KEY", digest: hashKey("legacy-raw") },
+    { name: "oauth:standing+suite", digest: tokenGone },
+    { name: "oauth:never-seen+suite", digest: tokenNew },
+    { name: "mcp-forwarder", digest: hashKey(KEYS.forwarder) },
+  ];
+  const answered = await ask(asked);
+  assert(answered.status === 200 && same(standings(answered), ["stands", "stands", "revoked", "unknown", "stands", "stands", "revoked", "stands", "unknown"]),
+    `a listed key stands, under an older name too; a revoked key is revoked; a rotated key's old digest is unknown; a listed key the registry has never seen stands; the old single key stands; a revoked token caller is revoked; a token caller the registry has never seen stands; a forwarder's digest is no caller's (${answered.status} ${JSON.stringify(standings(answered))})`);
+  const [fresh] = await sql`SELECT count(*)::int AS c FROM ob1_agent_keys WHERE key_hash IN (${hashKey(KEYS.fresh)}, ${tokenNew})`;
+  assert((await registry()) === before && Number(fresh.c) === 0, "…and the registry is as it was: no caller asked of registered, renamed or stamped");
+  const refused = await ask(asked, KEYS.forwarder, KEYS.writer);
+  assert(refused.status === 403 && refused.body.code === "FORBIDDEN" && refused.body.needs === "forward", `a write key beside the forwarder's does not reach it (${refused.status} ${JSON.stringify(refused.body)})`);
+  const alone = await ask(asked, null);
+  assert(alone.status === 401 && alone.body.credential === "forwarder", `no forwarder slot → 401, credential forwarder (${alone.status} ${JSON.stringify(alone.body)})`);
+  // The store's read under a held table: ended at its cap, a throw and no answer; and the route, the same, a 503.
+  const store = await db();
+  let threw = "", waited = 0, held: Answer | undefined;
+  await sql.begin(async (tx) => {
+    await tx`LOCK TABLE ob1_agent_keys IN ACCESS EXCLUSIVE MODE`;
+    const t0 = performance.now();
+    // Raced with five seconds: a read with no cap would wait on this very transaction, which waits on it.
+    const read = store.revokedKeys([hashKey(KEYS.gone)]).then(() => "it answered", (e) => String((e as { errno?: unknown }).errno ?? (e as Error).message));
+    threw = await Promise.race([read, new Promise<string>((resolve) => setTimeout(() => resolve("no end in 5 s"), 5000))]);
+    waited = performance.now() - t0;
+    held = await ask(asked);
+  });
+  assert(threw === "55P03" && waited < 2000, `the read of a held table ends at its lock cap, 55P03, inside two seconds (${threw}, ${Math.round(waited)} ms)`);
+  assert(held?.status === 503 && held?.body.code === "BUSY" && held?.body.credential === "forwarder" && !("callers" in (held?.body ?? {})) && held?.headers.get("retry-after") !== null,
+    `…and the route answers 503 with a Retry-After, for no caller: the forwarder's own lookup met the held table first, and is BUSY after its retries (${held?.status} ${JSON.stringify(held?.body)})`);
+  const again = await ask(asked);
+  assert(again.status === 200 && same(standings(again), standings(answered)), `…and the same as before once the table is free (${again.status})`);
+  assert(same(await store.revokedKeys([]), []) && same((await store.revokedKeys([hashKey(KEYS.reader), hashKey(KEYS.gone), tokenGone, tokenNew])).sort(), [hashKey(KEYS.gone), tokenGone].sort()), "the store's read: none of none, and of four the two revoked");
 }
 
 console.log("\n[7] The OpenAPI document and the internal liveness answer with no key");
@@ -2301,6 +2358,32 @@ console.log("\n[16b] Work threads, review pass 1 (SMD-3306 PR 7a-2a): a thread w
       && threadsOf(sMcp.sc)[0]?.key === "pr:o3/x.y#12" && sMcp.text.includes("Thread pr:o3/x.y#12 — ")
       && sDots.status === 400 && sDots.body.problem === "key_shape",
     `a scoped key reads its thread in any case and without leading zeros, its key shown shaped; a repository of .. is no key (${sPr.status} ${sVer.status} ${JSON.stringify(threadsOf(sMcp.sc)[0]?.key)} ${sDots.status} ${sDots.body.problem})`);
+  // A bare key reads as the operator's repository once one is set (SMD-3887 PR 3b-1): pr:12 and version:v01.2 read the
+  // threads scoped to o3/x.y, through both doors. The setting is planted with the guard off and taken out after, so the
+  // setter's mapping moves no other section's keys.
+  await sql.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history`);
+  const [{ id: plantedRepo }] = await sql`INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at) VALUES ('o3/x.y', 'test', gen_random_uuid(), now()) RETURNING id`;
+  await sql.unsafe(`ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+  let bareRead: { body: Record<string, unknown> }, bareVer: { body: Record<string, unknown> }, bareMcp: { sc: Record<string, unknown> };
+  let refusedRead: { body: Record<string, unknown> };
+  try {
+    [bareRead, bareVer, bareMcp] = await Promise.all([rest("GET", "/v1/thread?key=pr:12"), rest("GET", "/v1/thread?key=version:v01.2"), mcp("thread", { key: "PR:12" })]);
+    // A stored value the refusal names (review pass 6): the key is read as written, and the answer says it is unscoped.
+    await sql.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history`);
+    await sql`UPDATE subject_repo_settings SET repo = 'O3/X.Y' WHERE id = ${plantedRepo}`;
+    await sql.unsafe(`ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+    refusedRead = await rest("GET", "/v1/thread?key=pr:12");
+  } finally {
+    await sql.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history`);
+    await sql`DELETE FROM subject_repo_settings WHERE id = ${plantedRepo}`;
+    await sql.unsafe(`ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+  }
+  const afterClear = threadsOf((await rest("GET", "/v1/thread?key=pr:12")).body)[0];
+  assert(threadsOf(bareRead.body)[0]?.key === "pr:o3/x.y#12" && threadsOf(bareRead.body)[0].total === 1 && threadsOf(bareRead.body)[0].members[0]?.id === scopedPr
+         && threadsOf(bareVer.body)[0]?.key === "version:o3/x.y@v1.2" && threadsOf(bareMcp.sc)[0]?.key === "pr:o3/x.y#12"
+         && afterClear?.key === "pr:12" && afterClear.total === 1 && afterClear.members[0]?.id === prThought
+         && bareRead.body.scopeUnread === undefined && threadsOf(refusedRead.body)[0]?.key === "pr:12" && refusedRead.body.scopeUnread === true,
+    `with a repository set a bare key reads its scoped thread through both doors, with a refused one the bare thread said unscoped, and with none the bare one again (${threadsOf(bareRead.body)[0]?.key}; ${threadsOf(bareVer.body)[0]?.key}; ${threadsOf(refusedRead.body)[0]?.key} ${refusedRead.body.scopeUnread}; ${afterClear?.key})`);
   // The render's shape check is subject_key_valid's (review pass 3): a key of the scoped shape whose repository is `..`
   // is shown as a JSON string and given as null in the value, as a phrase key is, never as a shaped key.
   const dotsShown = say.renderThread(ok({ id: null, threads: [{ key: "pr:o/..#1", total: 0, place: null, members: [], earlier: false, cursor: null, linked: [], linkedMore: false }] }));

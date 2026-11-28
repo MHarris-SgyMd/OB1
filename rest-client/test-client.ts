@@ -59,7 +59,7 @@ console.log("\n[2] Every operation's method and path is its route's");
     assert(op.method === ROUTES[name].method && op.path === ROUTES[name].path, `${name}: ${op.method} ${op.path}`);
   }
   const extra = Object.keys(OPERATIONS).filter((k) => !(TOOL_NAMES as readonly string[]).includes(k)).sort();
-  assert(same(extra, ["health", "job_stream", "plugins", "whoami"]), `beside the tools: the REST core's own operations (${extra.join(", ")})`);
+  assert(same(extra, ["callers_standing", "health", "job_stream", "plugins", "whoami"]), `beside the tools: the REST core's own operations (${extra.join(", ")})`);
 }
 
 // ── The real REST app over a stub core that records what each operation got ──

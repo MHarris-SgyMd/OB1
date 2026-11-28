@@ -454,6 +454,8 @@ const FUNCTIONS = [
   "ob1_subject_repo_map_max()",
   "ob1_subject_repo_settings_by_setter()",
   "ob1_subject_unscoped_key(text)",
+  // 155 (SMD-3887 PR 3b-1): the repository a pull request's GitHub link names.
+  "ob1_subject_linked_key(text, text)",
   // 149 (SMD-3887): a thought's state on three axes, read from the records that exist.
   "thought_validity(uuid[])",
   // 116 (SMD-3663): priority assertions — the five calls, the drift check, the
