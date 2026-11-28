@@ -1125,8 +1125,9 @@ A settled part is a statement in one thought that the other thought of a pair sh
 (migration 151; `list_settled_parts` lists them). Once a reviewer accepts one, **the reads of a thought show it on the
 thought that holds the statement**: `fetch` whole (PR 3c-1), and `search_thoughts`, `search_thoughts_keyword` and
 `list_thoughts` as a mark (PR 3c-2). All of them read migration 157's `settled_parts_on` through one read
-(`parts-on.ts`). The thought is not superseded and not demoted, and nothing ranks by a part: a search gives the same
-results, in the same order, with the same scores.
+(`parts-on.ts`). The `validity` read marks it too (PR 3c-3; Validity, below): migration 158's `thought_validity`
+makes the same read in the database. The thought is not superseded and not demoted, and nothing ranks by a part: a
+search gives the same results, in the same order, with the same scores.
 
 - **On `fetch`, `settled`** rides only where the thought holds one: the first 20 parts in the order its text says
   them, with `settledMore` for the rest.
@@ -1780,11 +1781,24 @@ REST and MCP alike:
 
 | Tool | REST | Group | Answers |
 | --- | --- | --- | --- |
-| `validity` | `GET /v1/validity?ids=…` (`ids` once per id) | read | `{cap, thoughts}`: each thought's three states with the records each was read from, its version and `unread`; an id that is no thought `found: false`, `forgotten` and `forgottenAt` |
+| `validity` | `GET /v1/validity?ids=…` (`ids` once per id) | read | `{cap, thoughts}`: each thought's three states with the records each was read from, the partly settled mark beside its validity state, its version and `unread`; an id that is no thought `found: false`, `forgotten` and `forgottenAt` |
 
 - **Up to 100 ids a call**, a repeat counted: the input's rule, so more is `REFUSED_INPUT`
   (400). A list of 100 ids fits the 16 KB request line Bun allows; 1,000 would not.
 - **It labels only.** No rank moves and no other read changes.
+- **The partly settled mark** (SMD-4446 PR 3c-3, migration 158) rides beside the validity
+  state: `validity.settled`, the accepted settled parts standing on the thought ("Settled
+  parts on a thought", above), the first 20 in the order its text says them, and
+  `validity.settledMore` for the rest; `[]` with none.
+  - **Each part** is as a search page gives one, less its statement:
+    `{id, group, word, otherIs, by: {id}, acceptedAt, editedSince, shownByInText}`. `by` is
+    the thought that shows it. `fetch` gives the statement and the words that show it.
+  - **It changes no state.** A partly settled thought stands: a superseded one reads
+    superseded, an unchallenged one unchallenged.
+  - **`settled: null`** says the parts weren't read: the server's role holds no SELECT on
+    `settled_parts` (`unread` names `part`), or the brain is from before 158.
+  - **MCP's text** puts `, partly settled (N statements)` after the state, gives a line to
+    each of the first three parts, and says once what the mark means.
 - **The records keep the database's keys** (`superseded_by`, `checkpoint_reads`,
   `produced_by`), as the record's shape names them; a judge's number carries
   `calibrated: false`, and a record's `at` is in the API's time form.

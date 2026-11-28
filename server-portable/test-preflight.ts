@@ -3864,7 +3864,9 @@ else {
       try { noParts = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { if (heldParts) await claims.unsafe("GRANT SELECT ON settled_parts TO ob1_pf_capture"); }
       // The function gone while the ledger records 149 (a --baseline adoption): a failure naming the re-run, not a skip —
       // read as the owner, who reads the ledger; this role cannot, and is told so in a warning.
-      let noFn: { out: string }, noFnUnread: { out: string }, noFnNoParts: { out: string };
+      let noFn: { out: string }, noFnUnread: { out: string }, noFnNoParts: { out: string }, noFnNoPartsOn: { out: string };
+      /** The partly settled migration as the tree names it (PR 3c-3): the read's last definer, which the remedy names last. */
+      const PARTLY_SETTLED_FILE = readdirSync(join(HERE, "..", "db", "migrations")).find((n) => n.endsWith("_partly_settled.sql")) ?? "no _partly_settled.sql";
       // This suite's brain keeps no ledger: plant one recording 149 (as [ledger] below plants 014's), removed after.
       const plantedLedger = (await claims`SELECT to_regclass('schema_migrations') IS NULL AS absent`)[0].absent as boolean;
       if (plantedLedger) await claims.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
@@ -3877,6 +3879,10 @@ else {
         noFn = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
         if (roleReads) await claims.unsafe("REVOKE SELECT ON schema_migrations FROM ob1_pf_capture");
         noFnUnread = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+        // A brain between the parts' table and 157's read of the parts standing on a thought: the by-hand remedy
+        // stops at the stale parts' file (the partly settled file's guard would refuse a hand apply ahead of 157).
+        await claims.unsafe("ALTER FUNCTION settled_parts_on(uuid[], int) RENAME TO settled_parts_on_away_pf");
+        try { noFnNoPartsOn = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { await claims.unsafe("ALTER FUNCTION settled_parts_on_away_pf(uuid[], int) RENAME TO settled_parts_on"); }
         // A brain from before the parts' table: the by-hand remedy is 149's alone (the migrator applies the stale
         // parts' file in its turn, and its guard would refuse a hand apply ahead of 151).
         await claims.unsafe("ALTER TABLE settled_parts RENAME TO settled_parts_away_pf");
@@ -3932,13 +3938,17 @@ else {
              && /✓  validity\s+thought_validity present; the server's role reads every table it reads/.test(missingBoth.out)
              && /✗  validity\s+migration 149's thought_validity\(uuid\[\]\) missing though the ledger records 149; the validity tool faults on every call/.test(noFn.out)
              && /!  validity\s+thought_validity\(uuid\[\]\) missing, and .*so whether migration 149 is recorded is unknown/.test(noFnUnread.out)
-             // The by-hand remedy names the stale parts' file after 149 (SMD-4446): it last defines the read, and 149 alone
-             // would put back one with no arm for a settled part's row. The file's name is read from the tree, so a
+             // The by-hand remedy names the stale parts' file after 149 (SMD-4446), and the partly settled file after
+             // that (PR 3c-3): it last defines the read, 149 alone would put back one with no arm for a settled part's
+             // row, and 149 and the stale parts' file one without the mark. Each file's name is read from the tree, so a
              // file renumbered when main takes its number fails this row until the remedy names it (review pass 1: a
              // pattern for any number passed a remedy that named a file no longer there).
-             && noFnUnread.out.includes(`Apply db/migrations/149_thought_validity.sql, then db/migrations/${STALE_PARTS_FILE} — ${STALE_PARTS_FILE.slice(0, 3)} last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.`)
-             && /!  validity\s+thought_validity\(uuid\[\]\) missing, and /.test(noFnNoParts.out) && /Apply db\/migrations\/149_thought_validity\.sql\./.test(noFnNoParts.out) && !/_stale_parts\.sql/.test(noFnNoParts.out),
-             `…and the validity row names a table its read cannot SELECT, a warning, the settled parts' among them; with every table readable, ok; the function gone while the ledger records 149, a failure, and to a role that cannot read the ledger a warning whose by-hand remedy names the stale parts' file after 149, and on a brain without the parts' table 149 alone (${validityLine(noAudit.out)} | ${validityLine(noParts.out)} | ${validityLine(missingBoth.out)} | ${validityLine(noFn.out)} | ${validityLine(noFnUnread.out)})`);
+             && noFnUnread.out.includes(`Apply db/migrations/149_thought_validity.sql, then db/migrations/${STALE_PARTS_FILE}, then db/migrations/${PARTLY_SETTLED_FILE} — ${PARTLY_SETTLED_FILE.slice(0, 3)} last defines thought_validity (${STALE_PARTS_FILE.slice(0, 3)}'s, with the partly settled mark; ${STALE_PARTS_FILE.slice(0, 3)}'s is 149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided, and 149 and ${STALE_PARTS_FILE.slice(0, 3)} one without the mark, which the validity tool then says it did not read.`)
+             // Without 157's read the remedy stops at the stale parts' file and says the migrator applies the rest.
+             && /!  validity\s+thought_validity\(uuid\[\]\) missing, and /.test(noFnNoPartsOn.out) && !noFnNoPartsOn.out.includes(`then db/migrations/${PARTLY_SETTLED_FILE}`)
+             && noFnNoPartsOn.out.includes(`Apply db/migrations/149_thought_validity.sql, then db/migrations/${STALE_PARTS_FILE} — ${STALE_PARTS_FILE.slice(0, 3)} defines thought_validity after it (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided. The migrator applies the files after it in their turn, ${PARTLY_SETTLED_FILE.slice(0, 3)} among them, the read's last definer.`)
+             && /!  validity\s+thought_validity\(uuid\[\]\) missing, and /.test(noFnNoParts.out) && /Apply db\/migrations\/149_thought_validity\.sql\./.test(noFnNoParts.out) && !/_stale_parts\.sql/.test(noFnNoParts.out) && !/_partly_settled\.sql/.test(noFnNoParts.out),
+             `…and the validity row names a table its read cannot SELECT, a warning, the settled parts' among them; with every table readable, ok; the function gone while the ledger records 149, a failure, and to a role that cannot read the ledger a warning whose by-hand remedy names the stale parts' file and then the partly settled file after 149, the stale parts' file alone on a brain without 157's read, and 149 alone on one without the parts' table (${validityLine(noAudit.out)} | ${validityLine(noParts.out)} | ${validityLine(missingBoth.out)} | ${validityLine(noFn.out)} | ${validityLine(noFnUnread.out)} | ${validityLine(noFnNoPartsOn.out).slice(0, 80)})`);
       // 153 and 155's subject-key repository (SMD-3887 PR 3b-1): ok with none set; the role unable to read it, a stored
       // value the refusal names, and a repository set without 155's link rule, each a warning; a repository set, ok.
       const repoLine = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+subject repository\s/.test(l))?.trim() ?? "(no subject repository row)";

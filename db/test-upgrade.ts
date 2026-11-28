@@ -817,11 +817,14 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // ([20cr]); 156 adds the settled parts' listing and the index it reads,
   // refusing by name without 016, 029, 046 or 151 ([20cs]); 157 adds the read
   // of the accepted parts that stand on a thought and the index it reads,
-  // refusing by name without 016 or 151 ([20ct]) —
+  // refusing by name without 016 or 151 ([20ct]); 158 carries 154's
+  // thought_validity with the partly settled mark beside the validity state,
+  // refusing by name without what 154 reads or 157's settled_parts_on
+  // ([20cu]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 128, `030 is among the last one hundred and twenty-eight migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 129, `030 is among the last one hundred and twenty-nine migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -8106,6 +8109,100 @@ console.log("\n[20ct] Migration 157: onto a populated brain at the file before i
   const again = await apply157();
   assert(again === "applied" && (await parts()) === before && (await made()) === "true/true" && JSON.stringify(await on([O, N])) === JSON.stringify(mine),
     `applied again is a no-op: the parts, the index and the read as they were (${again})`);
+
+  await sql.close();
+}
+
+console.log("\n[20cu] Migration 158: onto a populated brain at the file before it — refused by name without 157's settled_parts_on or a table the read reads, the read left as it was; then applied: the parts standing are kept as they are, and every thought answers as it did with one key more, the accepted parts standing on it in its text's order beside a state that has not moved, superseded or unchallenged, a pending part in none and an empty list for a thought with none; a role that may not read the parts gets null and part in unread under a custom plan and a generic one, never a permission error, and one that may reads the mark; a re-apply is a no-op (SMD-4446 PR 3c-3)");
+{
+  const the158 = MIGRATIONS.find((f) => /^\d{3}_partly_settled\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the158.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the158 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+  const fp = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (o: string, n: string, statement: string, shown: string) =>
+    String(((await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, 'older', ${statement}, ${shown}, 'updates', 'made up for the upgrade', ${KEY}, ${await fp(o)}, ${await fp(n)}, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  type Mark = { total: number; parts: { part: string; other: string; other_is: string; group: string; word: string; edited: boolean; shown_by_in_text: boolean }[] };
+  type T = { id: string; found: boolean; validity: { state: string; found: string; settled?: Mark | null }; unread: string[] };
+  const read = async (ids: string[]) => ((await sql`SELECT thought_validity(${sql.array(ids, "UUID")}::uuid[]) AS r`)[0].r as { thoughts: T[] }).thoughts;
+  // The answer less the mark: what the read said before the file.
+  const lessMark = (ts: T[]) => JSON.stringify(ts.map((t) => { const { settled: _mark, ...rest } = t.validity; return { ...t, validity: rest }; }));
+  const marked = async () => String((await sql`SELECT obj_description('thought_validity(uuid[])'::regprocedure, 'pg_proc') AS c`)[0].c).includes(`Since migration ${NUM} (SMD-4446) validity carries settled beside its state`);
+  const parts = async () => JSON.stringify(await sql`SELECT id::text AS id, status, statement, shown_by, older_fingerprint, newer_fingerprint, judged_at::text AS judged_at, reviewed_at::text AS reviewed_at FROM settled_parts ORDER BY id`);
+  const apply158 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the158 }).then(() => "applied", (e: Error) => e.message);
+
+  // A brain at the file before it: a pair with three parts, two of them accepted and one pending; a superseded
+  // thought with an accepted part; and a thought no part names.
+  const O = await thought("upgrade 158: the count stands at 40; the review is open; the rota is Ana's");
+  const N = await thought("upgrade 158: the count is 52 now; the review closed; the rota went to Cy");
+  const SO = await thought("upgrade 158: the gate opens at nine"), SN = await thought("upgrade 158: the gate opens at ten now");
+  const BARE = await thought("upgrade 158: a thought no part names");
+  const second = await part(O, N, "the review is open", "the review closed");
+  const first = await part(O, N, "the count stands at 40", "the count is 52 now");
+  const undecided = await part(O, N, "the rota is Ana's", "the rota went to Cy");
+  const gate = await part(SO, SN, "the gate opens at nine", "the gate opens at ten now");
+  await sql`SELECT review_settled_part(${second}::uuid, 'accept')`;
+  await sql`SELECT review_settled_part(${first}::uuid, 'accept')`;
+  await sql`SELECT review_settled_part(${gate}::uuid, 'accept')`;
+  await sql`UPDATE thoughts SET supersedes = ${SO}::uuid WHERE id = ${SN}::uuid`;
+  const ALL = [O, N, SO, SN, BARE];
+  const before = await read(ALL);
+  const partsBefore = await parts();
+
+  // Without 157's read the file is refused by name, and without a table the read reads, by that one. The read
+  // stays the one the brain had: no mark, and every answer as it was.
+  await sql`ALTER FUNCTION settled_parts_on(uuid[], int) RENAME TO settled_parts_on_away`;
+  const without = await apply158();
+  await sql`ALTER FUNCTION settled_parts_on_away(uuid[], int) RENAME TO settled_parts_on`;
+  await sql`ALTER TABLE ob1_superseded_by RENAME TO ob1_superseded_by_away`;
+  const withoutRead = await apply158();
+  await sql`ALTER TABLE ob1_superseded_by_away RENAME TO ob1_superseded_by`;
+  const NEEDS = `migration ${NUM} needs 016, 029, 042, 046, 050, 061, 063, 068, 114, 134, 139, 149, 151 and 157; this schema lacks `;
+  assert(without === `${NEEDS}settled_parts_on(uuid[], int)` && withoutRead === `${NEEDS}ob1_superseded_by` && !(await marked())
+         && JSON.stringify(await read(ALL)) === JSON.stringify(before) && before.every((t) => !("settled" in t.validity)),
+    `without 157's settled_parts_on the file is refused by name, and without a table the read reads, by that one; the read stays the brain's own, with no mark and every answer as it was (${without}; ${withoutRead})`);
+
+  const applied = await apply158();
+  const after = await read(ALL);
+  const by = (id: string) => after.find((t) => t.id === id)!;
+  const said = (id: string) => `${by(id).validity.state}/${by(id).validity.settled?.total}/${(by(id).validity.settled?.parts ?? []).map((p) => (p.part === first ? "first" : p.part === second ? "second" : p.part === gate ? "gate" : "other")).join("+")}`;
+  assert(applied === "applied" && (await marked()) && (await parts()) === partsBefore && lessMark(after) === JSON.stringify(before) && JSON.stringify(after) !== JSON.stringify(before),
+    `applied, the parts standing are as they were, and every thought answers as it did before the file with the one key more: no state, record or other key moved (${applied}; the same less the mark: ${lessMark(after) === JSON.stringify(before)})`);
+  assert(said(O) === "unchallenged/2/first+second" && said(SO) === "superseded/1/gate" && said(N) === "unchallenged/0/" && said(SN) === "unchallenged/0/" && said(BARE) === "unchallenged/0/"
+         && by(O).validity.settled!.parts.every((p) => p.other === N && p.other_is === "newer" && p.group === "done_or_settled" && p.word === "updates" && !p.edited && p.shown_by_in_text)
+         && !JSON.stringify(by(O).validity.settled).includes(undecided),
+    `the mark is the accepted parts standing on the thought, in the order its text says them and not the order they were accepted in, each with the other thought of its pair, beside a state that stands: unchallenged with two, superseded with one; the pending part is in none, and a thought with none says so (${[O, SO, N, SN, BARE].map(said).join(" ")})`);
+
+  // Who reads, on a real Postgres and under both plans: a role that reads everything the read reads but the parts
+  // gets null for the mark and part in unread, its states as the owner's, and is never refused by the table: the
+  // read is behind an IF of its own, so no plan of it is made for such a role. One that reads the parts reads the mark.
+  const NO_PARTS = "ob1_upgrade_158_no_parts", READER = "ob1_upgrade_158_reader";
+  const TABLES = "thoughts, ob1_superseded_by, supersession_proposals, deliverable_events, thought_facets, derivations, thought_chunks, thought_entities, ob1_entity_edges, thought_audit, thought_forgotten";
+  await sql.unsafe(`CREATE ROLE ${NO_PARTS} NOLOGIN; CREATE ROLE ${READER} NOLOGIN; GRANT SELECT ON ${TABLES} TO ${NO_PARTS}; GRANT SELECT ON ${TABLES}, settled_parts TO ${READER}`);
+  const as = async (role: string, plan: string) => {
+    try {
+      return await sql.begin(async (tx: SQL) => {
+        await tx.unsafe(`SET LOCAL ROLE ${role}`);
+        await tx.unsafe(`SET LOCAL plan_cache_mode = ${plan}`);
+        const ts = ((await tx.unsafe(`SELECT thought_validity(ARRAY['${O}', '${SO}', '${BARE}']::uuid[]) AS r`))[0].r as { thoughts: T[] }).thoughts;
+        return ts.map((t) => `${t.validity.state}|${"settled" in t.validity ? (t.validity.settled === null ? "null" : t.validity.settled!.total) : "no key"}|${t.unread.join()}`).join(" ");
+      });
+    } catch (e) { return `${String((e as { errno?: unknown }).errno ?? "?")}: ${(e as Error).message}`; }
+  };
+  const noPartsCustom = await as(NO_PARTS, "force_custom_plan"), noPartsGeneric = await as(NO_PARTS, "force_generic_plan");
+  const readerCustom = await as(READER, "force_custom_plan"), readerGeneric = await as(READER, "force_generic_plan");
+  for (const role of [NO_PARTS, READER]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+  const UNREAD = "unchallenged|null|part superseded|null|part unchallenged|null|part", READ = "unchallenged|2| superseded|1| unchallenged|0|";
+  assert(noPartsCustom === UNREAD && noPartsGeneric === UNREAD && readerCustom === READ && readerGeneric === READ,
+    `a role that may not read settled_parts gets null for the mark and part in unread, its states as the owner reads them, under a custom plan and a generic one and with no permission error; a role that may reads the mark (${noPartsCustom} ; ${noPartsGeneric} ; ${readerCustom} ; ${readerGeneric})`);
+
+  // A re-apply is a no-op: the parts and every answer as they were.
+  const again = await apply158();
+  assert(again === "applied" && (await parts()) === partsBefore && JSON.stringify(await read(ALL)) === JSON.stringify(after) && (await marked()),
+    `applied again is a no-op: the parts and every answer as they were (${again})`);
 
   await sql.close();
 }

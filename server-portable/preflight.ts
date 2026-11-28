@@ -643,9 +643,20 @@ const APPLY_067_PARTS = "Apply db/migrations/067_pass_settles_stale.sql, then db
  * remedy names that file after it. On a brain from before the parts' table the
  * remedy is 149's alone, and the migrator applies the file in its turn: its
  * guard would refuse a hand apply ahead of 151.
+ *
+ * Since the partly settled file (SMD-4446 PR 3c-3) the read's last definer is
+ * that file, which carries the stale parts' body whole with the accepted parts
+ * standing on a thought beside its validity state. So where 157's read of
+ * those parts stands, the remedy names both files after 149. Where the parts'
+ * table stands and that read does not (a brain between 151 and 157), it names
+ * the stale parts' file alone and says the migrator applies the rest: the
+ * partly settled file's guard would refuse a hand apply ahead of 157.
  */
 const APPLY_149 = "Apply db/migrations/149_thought_validity.sql.";
-const APPLY_149_PARTS = "Apply db/migrations/149_thought_validity.sql, then db/migrations/154_stale_parts.sql — 154 last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.";
+const APPLY_149_PARTS = "Apply db/migrations/149_thought_validity.sql, then db/migrations/154_stale_parts.sql — 154 defines thought_validity after it (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided. The migrator applies the files after it in their turn, 158 among them, the read's last definer.";
+const APPLY_149_MARK = "Apply db/migrations/149_thought_validity.sql, then db/migrations/154_stale_parts.sql, then db/migrations/158_partly_settled.sql — 158 last defines thought_validity (154's, with the partly settled mark; 154's is 149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided, and 149 and 154 one without the mark, which the validity tool then says it did not read.";
+/** 149's by-hand remedy, by what the schema holds: the parts' table (151), and 157's read of the parts standing on a thought. */
+const apply149 = (hasParts: boolean, hasPartsOn: boolean): string => (!hasParts ? APPLY_149 : hasPartsOn ? APPLY_149_MARK : APPLY_149_PARTS);
 /**
  * 046's rule — the kind from the key, never the payload — stands when the audit
  * trigger's body carries its sentinel (046) or calls ob1_append_thought_event
@@ -3448,7 +3459,8 @@ if (configFailed) {
          * resting on it unknown, named in each answer's `unread`; thoughts itself faults the tool. Before 149 a skip;
          * the function missing where the ledger records 149, a failure, and where the role cannot read the ledger, a warning.
          * Since the stale parts' file (SMD-4446) the read reads a settled part's row by its part, so settled_parts is
-         * among the tables, where it stands; and a by-hand remedy for 149 names that file after it (APPLY_149_PARTS).
+         * among the tables, where it stands; and a by-hand remedy for 149 names that file after it (APPLY_149_PARTS),
+         * and the partly settled file last where 157's read stands (APPLY_149_MARK, PR 3c-3).
          */
         {
           const VALIDITY_TABLES = ["thoughts", "ob1_superseded_by", "supersession_proposals", "deliverable_events", "thought_facets", "derivations",
@@ -3456,21 +3468,22 @@ if (configFailed) {
           const vRows = await sql.unsafe(`
             SELECT to_regprocedure('public.thought_validity(uuid[])') IS NOT NULL AS has_fn,
                    to_regclass('public.settled_parts') IS NOT NULL AS has_parts,
+                   to_regprocedure('public.settled_parts_on(uuid[], int)') IS NOT NULL AS has_parts_on,
                    -- CASE, not OR: the text form raises for a table not there.
                    ARRAY(SELECT t FROM unnest(ARRAY[${VALIDITY_TABLES.map((t) => `'${t}'`).join(", ")}]) t
                           WHERE CASE WHEN to_regclass('public.' || t) IS NULL THEN false ELSE NOT has_table_privilege('public.' || t, 'SELECT') END) AS unreadable`)
-            .then((r) => r as { has_fn: boolean; has_parts: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
+            .then((r) => r as { has_fn: boolean; has_parts: boolean; has_parts_on: boolean; unreadable: string[] }[], (e: unknown) => (e instanceof Error ? e : new Error(String(e))));
           const vl = Array.isArray(vRows) ? vRows[0] : null;
           if (!vl) {
             add("validity", "warn", `could not verify: ${(vRows as Error).message}`, "The check reads thought_validity and the tables it reads in public; the message says why it failed.");
           } else if (!vl.has_fn && ledger.has("149")) {
             // Recorded and not there (a --baseline adoption, a dropped function): the tool faults on every call (review pass 1).
             add("validity", "fail", "migration 149's thought_validity(uuid[]) missing though the ledger records 149; the validity tool faults on every call",
-                ledgerRemedy("149", vl.has_parts ? APPLY_149_PARTS : APPLY_149));
+                ledgerRemedy("149", apply149(vl.has_parts, vl.has_parts_on)));
           } else if (!vl.has_fn && ledgerPresent && !ledgerRead) {
             // Missing, and this role cannot read whether the ledger records 149: a warning, the remedy naming both.
             add("validity", "warn", `thought_validity(uuid[]) missing, and ${whyUnread}, so whether migration 149 is recorded is unknown; the validity tool faults until it is there`,
-                ledgerRemedy("149", vl.has_parts ? APPLY_149_PARTS : APPLY_149));
+                ledgerRemedy("149", apply149(vl.has_parts, vl.has_parts_on)));
           } else if (!vl.has_fn) {
             add("validity", "skip", "not checked — thought_validity does not exist (migration 149 not applied); the validity tool faults until it is");
           } else if (vl.unreadable.includes("thoughts")) {

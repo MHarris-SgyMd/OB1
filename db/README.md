@@ -343,7 +343,7 @@ guards against the accident (`plugins/README.md`).
 `bun test-schema.ts` prints `N assertions: N passed, 0 failed` and `PASS`. The
 wiki's [Test-counts](https://github.com/MHarris-SgyMd/OB1/wiki/Test-counts)
 page has N as main's last run counted it (SMD-3614).
-Against a real database, `bun migrate.ts` reports one hundred and fifty-seven (157) migrations applied, and
+Against a real database, `bun migrate.ts` reports one hundred and fifty-eight (158) migrations applied, and
 `\d thoughts` shows ten columns and thirteen indexes — twelve of our own plus
 the primary key, which `\d` also lists. Twelve with `OB1_TRGM_INDEX=off`. `\d
 thought_chunks` shows five columns since 013 added `context`.
@@ -384,7 +384,7 @@ Migrations 024 onward are described in `changes/`, one numbered change each
 045 SMD-1490, 046 SMD-1730, 047 SMD-1492, 048 SMD-1804, 049 SMD-1298, 050 SMD-1726,
 051 SMD-1804, 052 SMD-1296, 053 SMD-1867, 054 SMD-2090, 055 SMD-2115, 056 SMD-1935, 057 SMD-1804,
 058 SMD-2074, 059 SMD-2255, 060 SMD-2116, 061 SMD-1731, 062 SMD-1804, 063 SMD-1732, 064 SMD-1812, 065 SMD-2300, 066 SMD-2292, 067 SMD-2297,
-068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298, 151 SMD-4446, 152 SMD-4540, 153 SMD-3887, 154 SMD-4446, 155 SMD-3887, 156 SMD-4446, 157 SMD-4446).
+068 SMD-2256, 069 SMD-2318, 070 SMD-2313, 071 SMD-2267, 072 SMD-1804, 073 SMD-1724, 074 SMD-1724, 075 SMD-1724, 076 SMD-1804, 077 SMD-2271, 078 SMD-2284, 079 SMD-2448, 080 SMD-2539, 081 SMD-1804, 082 SMD-2638, 083 SMD-1804, 084 SMD-1873, 085 SMD-2664, 086 SMD-2744, 087 SMD-2681, 088 SMD-2744, 089 SMD-1804, 090 SMD-2898, 091 SMD-2913, 092 SMD-2708, 093 SMD-2694, 094 SMD-2707, 095 SMD-2540, 096 SMD-1849, 097 SMD-3035, 098 SMD-2540, 099 SMD-3045, 100 SMD-3056, 101 SMD-3060, 102 SMD-3117, 103 SMD-1804, 104 SMD-3046, 105 SMD-2935, 106 SMD-2891, 107 SMD-3036, 108 SMD-3160, 109 SMD-3248, 110 SMD-3249, 111 SMD-3306, 112 SMD-3314, 113 SMD-3306, 114 SMD-2608, 115 SMD-3597, 116 SMD-3663, 117 SMD-3665, 118 SMD-3600, 119 SMD-3778, 120 SMD-3306, 121 SMD-1804, 122 SMD-3667, 123 SMD-3669, 124 SMD-4162, 125 SMD-4149, 126 SMD-2684, 127 SMD-4177, 128 SMD-4194, 129 SMD-4192, 130 SMD-3306, 131 SMD-4193, 132 SMD-4193, 133 SMD-4127, 134 SMD-1715, 135 SMD-3306, 136 SMD-3711, 137 SMD-4264, 138 SMD-4238, 139 SMD-1723, 140 SMD-3606, 141 SMD-4241, 142 SMD-3671, 143 SMD-3606, 144 SMD-1723, 145 SMD-3606, 146 SMD-1804, 147 SMD-1804, 148 SMD-2298, 149 SMD-3887, 150 SMD-2298, 151 SMD-4446, 152 SMD-4540, 153 SMD-3887, 154 SMD-4446, 155 SMD-3887, 156 SMD-4446, 157 SMD-4446, 158 SMD-4446).
 
 Migration 044 records `schema_version` in `ob1_config` — the version the brain was
 migrated under (`MAJOR.MINOR.PATCH`, plain from 2.0.0, SMD-3317; the releases before
@@ -3291,7 +3291,7 @@ rows, as it does for every worker; narrowing it would take row-level policy.
 | | `thought_sources` (053) | `SELECT` — `search_thoughts`' opt-in `prefer_current` runs 059's wrapper, which at 059 read the source rows through 058's node_state (SMD-2255); since 068 its columns come from the projection and on PostgreSQL 16 and 17 it runs without this (a removed join's tables go unchecked — observed, not documented), so keep it |
 | | `thought_audit` (008) | `SELECT` — a capture-only key may supersede only a thought whose capture row is its own (SMD-1298); without this the server refuses that pointer and names the grant; `thought_changes` (052, SMD-1296) reads the log for the MCP tool of the same name, and names the grant too |
 | | `supersession_proposals` (029) | `SELECT, UPDATE` — `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the proposal queue, `list_supersession_proposals` lists it, and preflight's `proposals` row reads it; without `SELECT` `brain_info` reports the queue unread and preflight's `proposals` row names this grant (SMD-2680). `UPDATE`: `review_supersession_proposal` decides a proposal through 029's review function, which runs as the caller (SMD-3338); without it a decision is refused — over MCP its reply names this grant, over REST it is a `FAILED` 500 with Postgres's "permission denied". Recording a proposal (`INSERT`) stays the worker group's. A role granted before SMD-2680 needs `--grant` again, and one granted before SMD-3338 needs `--grant <role> --groups server` for decisions |
-| | `settled_parts` (151) | `SELECT, UPDATE` — a settled part (SMD-4446) is listed and decided as a proposal is, through 151's `review_settled_part`, which runs as the caller. An accept reads both thoughts' texts, which the capture group grants: with this group alone a reject is made and an accept is refused on `thoughts`. The server's role reads the table in five places: `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the parts' queue, which preflight's `settled parts` row says too (SMD-4446 PR 3a-3); `list_settled_parts` lists the parts through 156's function, which runs as the caller (SMD-4446 PR 3a-2); the validity read takes a part's lineage row by its part (154); preflight's `lineage` row counts the parts that wait and looks for one with no lineage row; and on a judge-mode server its `proposals` row counts the stale proposals on a pair that holds an undecided part (SMD-4446 PR 2b-2). Where the role may not, `brain_info` reports the queue unread and the `settled parts` row names this grant, the listing fails with Postgres's "permission denied", the validity read and the `lineage` row say so, and the `proposals` row counts none. The surface that decides a part comes later in SMD-4446. 151 carries this grant to every role holding `SELECT` and `UPDATE` on `supersession_proposals`, so such a role granted before 151 needs nothing more. One granted before SMD-3338 holds `SELECT` alone there, gains nothing from 151, and needs `--grant <role> --groups server` as it does for a proposal's decisions. Recording a part (`INSERT`, `DELETE`) stays the worker group's |
+| | `settled_parts` (151) | `SELECT, UPDATE` — a settled part (SMD-4446) is listed and decided as a proposal is, through 151's `review_settled_part`, which runs as the caller. An accept reads both thoughts' texts, which the capture group grants: with this group alone a reject is made and an accept is refused on `thoughts`. The server's role reads the table in six places: `brain_info` (so keyed `/health` and `GET /v1/brain`) counts the parts' queue, which preflight's `settled parts` row says too (SMD-4446 PR 3a-3); `list_settled_parts` lists the parts through 156's function, which runs as the caller (SMD-4446 PR 3a-2); `fetch` and the search and list pages read the accepted parts standing on a thought through 157's function, which runs as the caller (SMD-4446 PR 3c); the validity read takes a part's lineage row by its part (154) and marks a thought with its accepted parts (158); preflight's `lineage` row counts the parts that wait and looks for one with no lineage row; and on a judge-mode server its `proposals` row counts the stale proposals on a pair that holds an undecided part (SMD-4446 PR 2b-2). Where the role may not, `brain_info` reports the queue unread and the `settled parts` row names this grant, the listing fails with Postgres's "permission denied", a fetch and a page say the parts were not read and go on, the validity read and the `lineage` row say so, and the `proposals` row counts none. The surface that decides a part comes later in SMD-4446. 151 carries this grant to every role holding `SELECT` and `UPDATE` on `supersession_proposals`, so such a role granted before 151 needs nothing more. One granted before SMD-3338 holds `SELECT` alone there, gains nothing from 151, and needs `--grant <role> --groups server` as it does for a proposal's decisions. Recording a part (`INSERT`, `DELETE`) stays the worker group's |
 | | `board_findings_posted` (087) | `SELECT` — `brain_info`'s `Findings` row reads what became of the findings board-sync posted to the board (SMD-2682); without it that row says the table is not readable by this role, and nothing else changes. A role granted before SMD-2682 needs `--grant` again |
 | | `forget_thought(uuid, jsonb, boolean)` (144) | `EXECUTE` — `forget_thought`, which runs as its owner since 144 (SMD-1723) and is not PUBLIC's: the one privilege forgetting needs, the stores it reaches staying the owner's. Without it the forget tool alone fails, naming the function, and preflight's `forget definer` row says so. 144 carries a grant 139's function held to the wrapper; a role granted before 144 needs `--grant` again |
 | | `ob1_forget_leftovers()` (144) | `EXECUTE` — preflight's `forgotten` row, which reads every store `forget_thought` reaches as the function's owner; without it the row says it could not verify |
@@ -5628,7 +5628,7 @@ its texts'.
   `settled_parts` has `part` in `unread`, and freshness `unknown` for a
   thought such a row names; preflight's validity row names the table with
   the others. Its validity and review axes read no part: the mark for an
-  accepted part comes with the review surfaces (PR 3).
+  accepted part is migration 158's, beside the validity state (below).
 
 The file also amends three of 151's catalog comments in place, which named
 no removal: the table's, the status column's and `rebuild_derived`'s. A
@@ -5638,7 +5638,8 @@ own back.
 Needs 149 and all it reads, and 151. No table, column, trigger or grant, and
 no row is written at apply time. 149 applied by hand over it puts back the
 read with no arm; where the parts' table stands, preflight's by-hand remedy
-for 149 names 154 after it. test-schema [139], test-upgrade [20cq].
+for 149 names 154 after it, and 158, the read's last definer since, after
+that. test-schema [139], test-upgrade [20cq].
 
 **Migration 156 lists the settled parts** (SMD-4446 PR 3a): the first reader
 of a part that is not the pass.
@@ -5721,8 +5722,9 @@ PR 3c): what a read of a thought shows of its accepted parts.
   2.8 ms.
 - **`fetch` carries them** (PR 3c-1; `server-portable/README.md`), and the
   search and list pages mark them (PR 3c-2), through the one read the
-  server's store makes (`server-portable/parts-on.ts`). The validity read's
-  mark follows (PR 3c-3). Nothing ranks, demotes or supersedes by a part.
+  server's store makes (`server-portable/parts-on.ts`). The validity read
+  marks them too, through this function in the database (migration 158,
+  next). Nothing ranks, demotes or supersedes by a part.
 
 It is SECURITY INVOKER and reads `settled_parts` and `thoughts`. The server
 group holds the first since 151 and the capture group the second. A role
@@ -5730,6 +5732,51 @@ without the parts is refused, and the servers' reads then say the parts were
 not read. No grant changes. Needs 016 and 151. No row is written at apply
 time; the index build holds a SHARE lock on the parts' table for as long as
 it takes. test-schema [142], test-upgrade [20ct].
+
+**Migration 158 puts the partly settled mark on the validity read** (SMD-4446
+PR 3c-3). `docs/claim-validity.md` said the mark joins a thought's validity
+state once the parts' store lands.
+
+- **`thought_validity` carries `settled` under `validity`:** `{total, parts}`,
+  the accepted parts that stand on the thought, as 157's `settled_parts_on`
+  reads them. At most 20 parts, in the order the thought's text says them;
+  `total` counts them all.
+  - **Each part** is `{part, group, word, other, other_is, accepted_at,
+    edited, shown_by_in_text}`: its id, its group and the writer's word, the
+    other thought of its pair and which of the pair that is, when a reviewer
+    accepted it, whether the thought's text has moved since it was judged,
+    and whether the other thought still holds the words that show it.
+  - **No word of either thought.** `fetch` gives the statement and the words
+    that show it.
+  - **None** is `{total: 0, parts: []}`. Where the role may not read
+    `settled_parts` it is null, and `part` is in `unread`, as it was.
+- **It moves no state.** No state, found level or record of the three axes
+  reads a part. A superseded thought with an accepted part reads superseded,
+  and an unchallenged one unchallenged. The answer less the one key is 154's,
+  character for character.
+- **One read for the call**, before the loop over the thoughts and behind an
+  IF of its own: a role without the parts is never planned against the
+  table. It is the read `fetch` and the pages make, so the mark and the parts
+  shown there cannot disagree: a statement edited out of its thought is in
+  no mark, and a pending, stale or rejected part never is.
+- **The body is 154's, carried whole**, with three pieces added: two
+  variables, the read, and the key. Its comment is 154's with the key named
+  and one sentence after.
+- **Measured** on the fixture 157 was measured on, about five parts standing
+  on each thought: ten thoughts took 3.4 ms against 1.4 ms without the mark,
+  one 0.47 ms against 0.25 ms, and the cap of a hundred 41.5 ms against
+  14.6 ms: about 0.06 ms a part listed. On thoughts that hold none, which is
+  every thought on the dogfood brains today, the two were within the runs'
+  spread: about 15.5 ms at the cap either way.
+- **The `validity` operation gives it** as `settled` and `settledMore`
+  (`server-portable/README.md`, Validity).
+
+It is SECURITY INVOKER as before. No grant changes, no table, column, trigger
+or index, and no row is written at apply time. Needs all 154 needs, and 157's
+`settled_parts_on`. This file is `thought_validity`'s last definer: 149 or
+154 applied by hand over it puts back a read with no mark, and preflight's
+by-hand remedy for 149 names 154 and then 158 after it where 157's read
+stands. test-schema [143], test-upgrade [20cu].
 
 ### `consolidate.ts`
 

@@ -12,7 +12,7 @@ import { EVIDENCE_LIMITS, META_KEYS_MAX, TICKET_META_KEYS_TEXT } from "./refusal
 import { PASS_KEY_CHARS } from "../pass-key.ts";
 import { FINDING_KINDS, FINDING_STATUSES, PRIORITY_KINDS } from "../priority-kinds.ts";
 import { VERIFY_STATUSES } from "../deliverables.ts";
-import { VALIDITY_CAP } from "../validity.ts";
+import { VALIDITY_CAP, VALIDITY_PARTS } from "../validity.ts";
 import { AGENDA_ORDERS, RELATION_WORDS, RELATIONS_FETCHED, RELATIONS_SHOWN, type PriorityWeights } from "../store.ts";
 
 /** One tool's self-description: the fields an MCP `registerTool` config and an OpenAPI operation both draw on. */
@@ -1018,6 +1018,7 @@ export const SPECS = {
       "review — did a key decide: pending, decided, checked (a deliverable's verification), unchecked, or none; " +
       "freshness — have the views derived from its text caught up: stale, requested (a re-run asked), legacy, current, or none. " +
       "Each axis gives the records it was read from, and reads unknown when a record it rests on was not readable (`unread` names what). A judge's confidence carries `calibrated: false`: it is raw model output. " +
+      `Beside its state, validity carries the PARTLY SETTLED mark: \`settled\`, the accepted settled parts standing on the thought — a statement of it that the other thought of a pair shows no longer holds, or is done, as a reviewer accepted — the first ${VALIDITY_PARTS} in the order its text says them, each with its id, group, the writer's word, the thought that shows it (\`by\`) and which of the pair that is, when it was accepted, and whether either text has moved; \`settledMore\` counts the rest. The mark changes no state: a partly settled thought stands. It quotes no statement (fetch shows each, with the words that show it). \`settled\` is null when the parts could not be read. ` +
       `Each thought carries its version: its key now (fingerprint) and its newest audit seq. Up to ${VALIDITY_CAP} ids a call, a repeat counted, answered in the order given; a repeat is answered once. ` +
       "An id that is no thought answers found false, `forgotten` true with `forgottenAt` when the brain forgot it (null when the record of forgetting could not be read). The records behind each state keep the database's own keys. It labels only: no ranking and no other read changes. " +
       `Refused: more than ${VALIDITY_CAP} ids, by the input's own rule (REFUSED_INPUT over REST, 400).`,

@@ -10084,4 +10084,112 @@ console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the
     "a part whose group and word this server does not know, each a single word: the page's value gives neither, and its line says the statement is settled");
 }
 
+console.log("\n[39] The validity read's partly settled mark in the value and the words (SMD-4446 PR 3c-3, migration 158): the database's {total, parts} read whole into the pages' names, the rest counted; none an empty list; null and an answer without the key both not read; a mark or a part this server cannot read a fault that carries nothing of the row; the text's mark beside the state, its part lines and its two notes");
+{
+  const { normaliseValidity, VALIDITY_PARTS } = await import("./validity.ts");
+  const { renderValidity } = await import("./render.ts");
+  const T1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", T2 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", T3 = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const N = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", P = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const pid = (i: number) => `dddddddd-dddd-4ddd-8ddd-${String(i).padStart(12, "0")}`;
+  // A part and a thought as migration 158's thought_validity gives them.
+  const dbPart = (over: Record<string, unknown> = {}): Record<string, unknown> =>
+    ({ part: P, group: "done_or_settled", word: "implements", other: N, other_is: "newer", accepted_at: "2026-11-28T09:00:00.123456+00:00", edited: false, shown_by_in_text: true, ...over });
+  const dbThought = (id: string, settled: unknown, over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id, found: true, version: { fingerprint: "f".repeat(64), seq: 7 },
+    validity: { state: "unchallenged", found: "unchallenged", records: [], ...(settled === undefined ? {} : { settled }) },
+    review: { state: "none", records: [] }, freshness: { state: "none", kinds: [], records: [] }, unread: [], ...over,
+  });
+  type Found = { id: string; found: true; validity: { state: string; settled: Record<string, unknown>[] | null; settledMore: number }; unread: string[] };
+  const norm = (thoughts: unknown[]): Found[] => {
+    const a = normaliseValidity({ ok: true, cap: 100, thoughts }, "thought_validity");
+    if (!a.ok) throw new Error("refused");
+    return a.thoughts as unknown as Found[];
+  };
+  const fault = (settled: unknown): string => { try { norm([dbThought(T1, settled)]); return "read"; } catch (e) { return (e as Error).message; } };
+
+  // The value: the database's parts under the names the search and list pages give a part, the rest counted.
+  // The two flags are told apart: a part with both set, one with the first alone, and one with neither.
+  const two = norm([dbThought(T1, { total: 6, parts: [dbPart(), dbPart({ part: pid(2), group: "no_longer_holds", word: "corrects", other_is: "older", accepted_at: null, edited: true, shown_by_in_text: true }),
+    dbPart({ part: pid(3), edited: false, shown_by_in_text: false })] })])[0];
+  assert(JSON.stringify(two.validity.settled) === JSON.stringify([
+        { id: P, group: "done_or_settled", word: "implements", otherIs: "newer", by: { id: N }, acceptedAt: "2026-11-28T09:00:00.123Z", editedSince: false, shownByInText: true },
+        { id: pid(2), group: "no_longer_holds", word: "corrects", otherIs: "older", by: { id: N }, acceptedAt: null, editedSince: true, shownByInText: true },
+        { id: pid(3), group: "done_or_settled", word: "implements", otherIs: "newer", by: { id: N }, acceptedAt: "2026-11-28T09:00:00.123Z", editedSince: false, shownByInText: false }])
+      && two.validity.settledMore === 3 && two.validity.state === "unchallenged" && VALIDITY_PARTS === 20,
+    `the mark as a value: each part's id, group, word, which of the pair the other thought is and its id, the time it was accepted in the API's form, and the two flags, each its own, under the pages' names; the parts not listed are counted (${two.validity.settled?.length} listed, ${two.validity.settledMore} more)`);
+  // None, not read, and a brain before the file: an empty list, and null for the two that were not read.
+  // (Each read on its own: one that throws is this row's failure, not the suite's end.)
+  const one = (settled: unknown, over: Record<string, unknown> = {}): Found | undefined => { try { return norm([dbThought(T1, settled, over)])[0]; } catch { return undefined; } };
+  const none = one({ total: 0, parts: [] }), unreadRole = one(null, { unread: ["part"] }), before158 = one(undefined), laterGroup = one({ total: 1, parts: [dbPart({ group: "another_group", word: "retires" })] });
+  assert(none !== undefined && JSON.stringify(none.validity.settled) === "[]" && none.validity.settledMore === 0
+      && unreadRole !== undefined && unreadRole.validity.settled === null && unreadRole.validity.settledMore === 0 && unreadRole.unread.join() === "part"
+      && before158 !== undefined && before158.validity.settled === null && before158.validity.settledMore === 0 && "settled" in before158.validity
+      && laterGroup?.validity.settled?.[0]?.group === null && laterGroup?.validity.settled?.[0]?.word === "retires",
+    "a thought with no part carries an empty list; a mark the database gave as null (the role may not read the parts) and an answer with no mark at all (a read from before migration 158) are both null, not read; a group this server does not know is not given, and the word is kept as data");
+  // A mark this server cannot read is a fault, as a state it does not know is: it names the call and nothing of the row.
+  const MARK = "thought_validity answered a partly settled mark this server cannot read", PART = "thought_validity answered a settled part this server cannot read";
+  const faults = [fault("three"), fault([]), fault({ parts: [] }), fault({ total: "many", parts: [] }), fault({ total: 1, parts: "none" }), fault({ total: 1, parts: [dbPart(), dbPart()] }), fault({ total: -1, parts: [] })];
+  const partFaults = [{ part: 7 }, { other: null }, { word: 3 }, { other_is: "both" }, { edited: "no" }, { shown_by_in_text: null }, { accepted_at: 5 }].map((over) => fault({ total: 1, parts: [dbPart(over)] }));
+  assert(faults.every((f) => f === MARK) && partFaults.every((f) => f === PART) && fault({ total: 1, parts: ["secret words of a thought"] }) === PART && fault({ total: "1", parts: [dbPart()] }) === "read",
+    `a mark that is no object, has no count or no list, or counts fewer parts than it lists, and a part without its id, its other thought, its word, its side, a flag or a time that is one, is a fault naming the call and nothing of the row; a count sent as text is read (${[...new Set([...faults, ...partFaults])].join(" | ")})`);
+
+  // The words. The mark follows the validity state; a thought with none has no mark; one not read says so.
+  // A read or a renderer that throws gives one line that says so: the rows below then fail, and the suite goes on.
+  // A line a regression takes away reads as an empty one (`line`), for the same reason.
+  const text = (thoughts: unknown[]) => { try { return renderValidity({ ok: true, value: { cap: 100, thoughts: norm(thoughts) } } as never).content[0].text; } catch (e) { return `threw: ${(e as Error).message}`; } };
+  const lines = (thoughts: unknown[]) => text(thoughts).split("\n");
+  const line = (of: string[], i: number) => of[i] ?? "";
+  const superseded = { state: "superseded", found: "superseded", records: [{ kind: "pointer", superseded_by: N }] };
+  const five = Array.from({ length: 5 }, (_, i) => dbPart({ part: pid(i + 1) }));
+  const said = lines([
+    dbThought(T1, undefined, { validity: { ...superseded, settled: { total: 25, parts: five } }, review: { state: "decided", records: [{ kind: "proposal", id: pid(9), status: "accepted", at: "2026-11-27T10:00:00.000Z" }] } }),
+    dbThought(T2, { total: 0, parts: [] }),
+    dbThought(T3, { total: 1, parts: [dbPart({ group: "no_longer_holds", word: "reverses", other_is: "older", edited: true, shown_by_in_text: false })] }),
+  ]);
+  const NOTE = "Partly settled: a reviewer accepted that another thought settles a statement of this one (it no longer holds, or is done), while the thought itself stands; the mark sits beside the validity state and changes none. fetch shows each statement and the words that show it.";
+  const UNREAD_NOTE = "Partly settled not read: whether a statement of the thought is settled could not be read (a server role without SELECT on settled_parts, or a brain before migration 158); it may hold one.";
+  const at = (needle: string) => said.findIndex((l) => l === needle);
+  assert(said[1] === NOTE && said.filter((l) => l === NOTE).length === 1 && !said.includes(UNREAD_NOTE)
+      && at(`- ${T1}: validity superseded, partly settled (25 statements); review decided; freshness none; version ffffffffffff, seq 7`) === 2
+      && at(`- ${T2}: validity unchallenged; review none; freshness none; version ffffffffffff, seq 7`) > 0
+      && at(`- ${T3}: validity unchallenged, partly settled (1 statement); review none; freshness none; version ffffffffffff, seq 7`) > 0,
+    `the mark follows the validity state, with how many statements are settled, one or many; a thought with none has no mark; what the mark means is said once, after the reply's first line (${said[2]})`);
+  // The first three parts, each on a line after the validity records and before the review's, and the rest counted.
+  const partLine = (i: number) => `  - settled part ${pid(i)}: a statement of it is done or settled (the writer's word: implements), shown by ${N}, the newer of the pair, accepted 2026-11-28T09:00:00.123Z`;
+  assert(said[3] === `  - superseded by ${N}` && said[4] === partLine(1) && said[5] === partLine(2) && said[6] === partLine(3) && said[7] === "  partly settled: 22 more settled part(s) (the value lists the first 20)"
+      && line(said, 8).startsWith(`  review: proposal ${pid(9)} accepted`) && !said.some((l) => l.includes(pid(4)) || l.includes(pid(5)))
+      && said.includes(`  - settled part ${P}: a statement of it no longer holds (the writer's word: reverses), shown by ${N}, the older of the pair (whose text no longer holds the words that showed it), accepted 2026-11-28T09:00:00.123Z; the thought's text has moved since it was judged`),
+    `the first three parts each have a line, after the validity's records and before the review's: the part, what it says of a statement, the writer's word, the thought that shows it and which of the pair that is, when it was accepted, and whether either text has moved; the rest are counted (${said[4]})`);
+  // Exactly three parts: no line counts a rest. A part with no time says none.
+  const three = lines([dbThought(T1, { total: 3, parts: [dbPart({ part: pid(1), accepted_at: null }), dbPart({ part: pid(2) }), dbPart({ part: pid(3) })] })]);
+  assert(three.length === 6 && line(three, 2).includes("partly settled (3 statements)") && line(three, 3).endsWith(`shown by ${N}, the newer of the pair`) && !three.some((l) => l.startsWith("  partly settled:")),
+    "a thought with three parts has three lines and none that counts a rest; a part with no time of acceptance says none");
+  // Not read: the mark says so, the note once, and no part line; a thought read beside it keeps its own.
+  const mixed = lines([dbThought(T1, null, { unread: ["part"] }), dbThought(T2, undefined), dbThought(T3, { total: 1, parts: [dbPart()] })]);
+  assert(mixed[1] === NOTE && mixed[2] === UNREAD_NOTE && mixed.filter((l) => l === UNREAD_NOTE).length === 1
+      && mixed[3] === `- ${T1}: validity unchallenged, partly settled not read; review none; freshness none; version ffffffffffff, seq 7` && mixed[4] === "  not read: part"
+      && mixed[5] === `- ${T2}: validity unchallenged, partly settled not read; review none; freshness none; version ffffffffffff, seq 7`
+      && line(mixed, 6).includes("partly settled (1 statement)") && mixed.filter((l) => l.startsWith("  - settled part")).length === 1,
+    "where the parts were not read the mark says so, for a role that may not read them (part among what was not read) and for a brain before the file alike, with a note said once; a thought read in the same reply keeps its own mark");
+  // No part anywhere: neither note, and the reply is as it was before the file.
+  const plain = lines([dbThought(T1, { total: 0, parts: [] }), { id: T2, found: false, forgotten: false, forgotten_at: null, unread: [] }]);
+  assert(plain.length === 3 && plain[1] === `- ${T1}: validity unchallenged; review none; freshness none; version ffffffffffff, seq 7` && plain[2] === `- ${T2}: not a thought` && !plain.join("\n").includes("artly settled"),
+    "a reply in which no thought holds a part says nothing of parts: the lines are as they were before the mark");
+  // A word and a group this server does not know (a brain migrated ahead): the line says settled, the word on one line and cut.
+  const ODD_WORD = `retires\n- ${T2}: validity superseded ${"x".repeat(60)}`;
+  const odd = lines([dbThought(T1, { total: 1, parts: [dbPart({ group: "another_group", word: ODD_WORD })] })]);
+  assert(odd.length === 4 && line(odd, 3).startsWith(`  - settled part ${P}: a statement of it is settled (the writer's word: ${ODD_WORD.replace("\n", " ").slice(0, 40)}…), shown by ${N}`) && odd.filter((l) => l.startsWith("- ")).length === 1,
+    `a group this server does not know reads as settled, and a word that holds a line break and a thought's line starts no line of the reply and is cut (${line(odd, 3).slice(0, 120)})`);
+  // The value is the read's JSON: the mark rides in it as normalised; and a value with no mark at all (a REST core
+  // from before the mark, behind this renderer) is said not read, never a fault.
+  const reply = renderValidity({ ok: true, value: { cap: 100, thoughts: norm([dbThought(T1, { total: 4, parts: [dbPart()] })]) } } as never);
+  const value = (reply.structuredContent as { thoughts: Found[] }).thoughts[0].validity;
+  const old = norm([dbThought(T1, { total: 0, parts: [] })]).map((t) => { const { settled: _s, settledMore: _m, ...validity } = t.validity; return { ...t, validity }; });
+  // A renderer that throws on it is this row's failure, not the suite's end.
+  const oldText = (() => { try { return renderValidity({ ok: true, value: { cap: 100, thoughts: old } } as never).content[0].text; } catch (e) { return `threw: ${(e as Error).message}`; } })();
+  assert(reply.isError === undefined && JSON.stringify(value.settled) === JSON.stringify([{ id: P, group: "done_or_settled", word: "implements", otherIs: "newer", by: { id: N }, acceptedAt: "2026-11-28T09:00:00.123Z", editedSince: false, shownByInText: true }]) && value.settledMore === 3
+      && oldText.includes(`- ${T1}: validity unchallenged, partly settled not read; review none`) && oldText.includes(UNREAD_NOTE),
+    "the reply's value is the read's JSON, the mark in it under the same names; a value that carries no mark at all is said not read");
+}
+
 report();
