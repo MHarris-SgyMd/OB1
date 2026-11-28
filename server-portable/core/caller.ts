@@ -30,7 +30,7 @@ export async function asked<T, E extends Error>(Refused: abstract new (...args: 
   }
 }
 
-type UnattributedCode = "CLAIM_UNATTRIBUTED" | "PRIORITY_UNATTRIBUTED" | "ITEM_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED" | "RELEASE_HOLDER_UNATTRIBUTED";
+type UnattributedCode = "CLAIM_UNATTRIBUTED" | "PRIORITY_UNATTRIBUTED" | "ITEM_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED" | "RELEASE_HOLDER_UNATTRIBUTED" | "SUBJECT_REPO_UNATTRIBUTED";
 /**
  * What a claim's refusal names beyond its cause: its id, whether a force was asked, and when the caller's own claim
  * had lapsed, if it had (SMD-3705). The other two name nothing more.
@@ -50,6 +50,7 @@ export function unattributedAs(code: "PRIORITY_UNATTRIBUTED", principal: Princip
 export function unattributedAs(code: "ITEM_UNATTRIBUTED", principal: Principal): Outcome<never, "ITEM_UNATTRIBUTED"> | null;
 export function unattributedAs(code: "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, "CLAIM_CAP_UNATTRIBUTED"> | null;
 export function unattributedAs(code: "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, "RELEASE_HOLDER_UNATTRIBUTED"> | null;
+export function unattributedAs(code: "SUBJECT_REPO_UNATTRIBUTED", principal: Principal): Outcome<never, "SUBJECT_REPO_UNATTRIBUTED"> | null;
 export function unattributedAs<C extends Exclude<UnattributedCode, "CLAIM_UNATTRIBUTED">>(code: C, principal: Principal): Outcome<never, C> | null;
 export function unattributedAs(code: UnattributedCode, principal: Principal, facts?: ClaimFacts): Outcome<never, UnattributedCode> | null {
   if (principal.agentId !== undefined || principal.agentUnresolved === undefined) return null;
@@ -63,7 +64,7 @@ export function unattributedAs(code: UnattributedCode, principal: Principal, fac
 
 /**
  * The gate an operator-only write asks before its store call (set_priority_weights, set_work_claim_cap,
- * release_holder_claims, review_priority_finding): who may is the database's to say, by the key's registry kind under its agent id, which the
+ * release_holder_claims, review_priority_finding, set_subject_repo): who may is the database's to say, by the key's registry kind under its agent id, which the
  * server does not hold. Without the agent id the database can tell no operator (a name lends no kind): the registry's
  * absence is said as `code` (unattributedAs), and a principal that has none by design is named so, never told to
  * classify a key that may be the operator's already (132's rule). Null: the store is asked.
@@ -71,7 +72,8 @@ export function unattributedAs(code: UnattributedCode, principal: Principal, fac
 export function operatorGate(code: "PRIORITY_UNATTRIBUTED", principal: Principal): Outcome<never, "PRIORITY_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
 export function operatorGate(code: "CLAIM_CAP_UNATTRIBUTED", principal: Principal): Outcome<never, "CLAIM_CAP_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
 export function operatorGate(code: "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, "RELEASE_HOLDER_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
-export function operatorGate(code: "PRIORITY_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED" | "RELEASE_HOLDER_UNATTRIBUTED", principal: Principal): Outcome<never, RefusalCode> | null {
+export function operatorGate(code: "SUBJECT_REPO_UNATTRIBUTED", principal: Principal): Outcome<never, "SUBJECT_REPO_UNATTRIBUTED" | "REFUSED_NOT_OPERATOR"> | null;
+export function operatorGate(code: "PRIORITY_UNATTRIBUTED" | "CLAIM_CAP_UNATTRIBUTED" | "RELEASE_HOLDER_UNATTRIBUTED" | "SUBJECT_REPO_UNATTRIBUTED", principal: Principal): Outcome<never, RefusalCode> | null {
   const away = unattributedAs(code, principal);
   if (away) return away;
   return principal.agentId === undefined ? refuse({ code: "REFUSED_NOT_OPERATOR", retryable: false, key: principal.name, kind: null, unidentified: true }) : null;

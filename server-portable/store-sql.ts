@@ -29,7 +29,7 @@ import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-revie
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
 import { normaliseValidity, type ValidityAnswer } from "./validity.ts";
-import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, normaliseStaleUnreviewed, type Unreviewed, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
+import { ClaimRefused, claimProblemOf, normaliseAgenda, normaliseEffectivePriority, normalisePriorityAnswer, normalisePriorityAssertion, PRIORITY_KINDS, type AgendaOrder, type AgendaResult, type EffectivePriority, type PriorityWeights, PriorityRefused, priorityProblemOf, type PriorityAnswer, type PriorityItem, type PriorityRecord, ListCursorRefused, normaliseClaimAnswer, normaliseWorkClaim, timeCastFailed, type ProposalPage, type ProposalPosition, actorPayload, captureEnvelope, isoTimestampOrNull, normaliseActionRows, normaliseAgentResolution, normaliseChange, normaliseDerivative, normaliseHybridRow, normaliseKeywordRow, normaliseListItem, normaliseMatchRow, normaliseMutation, normaliseForget, normaliseProposal, normaliseProvenanceNode, withWriters, WRITERS_MISSING, normaliseRecaptureLabel, normaliseResetStamp, normaliseSetWeights, normaliseSetCap, normaliseSetSubjectRepo, normaliseReleaseHolder, normaliseThoughtMeta, normaliseThoughtRecord, normaliseVectorlessRow, provenanceEnvelope, RECENCY_DEFAULTS, UUID_RE, idList, labelReadFailed, labelReadOk, normaliseTicketStatusInputs, ticketList, TEXT_PAGE, normaliseThreadLink, normaliseThreadMember, normaliseThreadPlace, THREAD_HEAD_CHARS, THREAD_LINKS_SHOWN, type ThreadLink, type ThreadPage, type ThreadPlace, type ThreadWindow, normaliseRelationEdge, type RelationEdge, type RelationsOf, type RelationsWindow, type ClaimLease, type ClaimLeaseWork, type ClaimPage, type ClaimPosition, type ClosedTicket, normalisePriorityFinding, normaliseReviewFinding, normaliseStaleUnreviewed, type Unreviewed, type FindingPosition, type PriorityFinding, type ReviewFindingResult } from "./store.ts";
 import type {
   Actor,
   AgentResolution,
@@ -47,6 +47,7 @@ import type {
   ResetStampResult,
   SetWeightsResult,
   SetCapResult,
+  SetSubjectRepoResult,
   ReleaseHolderResult,
   ProvenanceNode,
   QueryActionLog,
@@ -1297,6 +1298,20 @@ export class SqlStore implements ThoughtStore {
     const rows = await this.sql`
       SELECT set_work_claim_cap(${opts.cap}, ${actorPayload(opts.actor)}::jsonb) AS r`;
     return normaliseSetCap(rows[0]?.r);
+  }
+
+  // SMD-3887 PR 3b-2: 155's operator write, one statement (its mapping inside it). The repository rides as text (null
+  // clears), the remap as a boolean; the function decides who may.
+  // On a brain with 153 and not 155 the setter is 153's, which scopes every key to the setting's repository where its
+  // GitHub link names another: it is not called there, in the same statement, and the fault names 155.
+  async setSubjectRepo(opts: { repo: string | null; remapPrevious: boolean; actor?: Actor }): Promise<SetSubjectRepoResult> {
+    const rows = await this.sql`
+      SELECT CASE WHEN to_regprocedure('ob1_subject_linked_key(text, text)') IS NOT NULL
+                  THEN set_subject_repo(${opts.repo}::text, ${actorPayload(opts.actor)}::jsonb, ${opts.remapPrevious}::boolean) END AS r`;
+    if (rows[0]?.r === null || rows[0]?.r === undefined) {
+      throw new Error("set_subject_repo: migration 155's ob1_subject_linked_key is not applied, so 153's setter would scope a key to the setting's repository where its GitHub link names another; nothing is set");
+    }
+    return normaliseSetSubjectRepo(rows[0].r);
   }
 
   // SMD-3606 PR 3: 145's operator write, one statement. The holder and reason ride as text; the function decides who may and ends every live claim of the holder.

@@ -4056,6 +4056,85 @@ console.log("\n[28] The validity read through both doors (SMD-3887 PR 2b, migrat
   }
 }
 
+// Last: setting a repository maps every bare key in the brain, other sections' among them, so no section reads keys after it.
+console.log("\n[29] set_subject_repo through both doors (SMD-3887 PR 3b-2, migrations 153 and 155): a mapping past its cap refused 409 SUBJECT_REPO_TOO_MANY_KEYS, nothing set; the operator sets a repository over REST, the standing bare keys mapped — a pull request's to the repository its GitHub link names — and the thread read follows; the same again over MCP unchanged; an agent key refused 403 NOT_OPERATOR; a repository 153's rule refuses, and a remap with none, refused 400 before the brain is asked; a remap over MCP moves the keys scoped to the previous repository and leaves a link's; a clear");
+{
+  await sql`SELECT set_agent_kind('writer', 'operator'), set_agent_kind('rival', 'agent')`;
+  const maxDef = String((await sql`SELECT pg_get_functiondef('ob1_subject_repo_map_max()'::regprocedure) AS d`)[0].d);
+  const keyOf = async (id: string) => ((await sql`SELECT payload->>'key' AS k FROM thought_facets WHERE thought_id = ${id}::uuid AND kind = 'subject' AND valid_until IS NULL`) as { k: string }[]).map((r) => r.k).join(",");
+  try {
+    const a = await capture("[29] subject repo: the retry budget work, pull request 41");
+    const b = await capture("[29] subject repo: the vendored fix, https://github.com/Other/Lib/pull/42 upstream");
+    const c = await capture("[29] subject repo: the release notes for v7.1");
+    await subject(a, "pr:41", "model"); await subject(b, "pr:42", "model"); await subject(c, "version:v7.1", "model");
+
+    // Past the cap (lowered to none for the row): refused with the keys counted, nothing set.
+    let tooMany: Awaited<ReturnType<typeof rest>>;
+    try {
+      await sql.unsafe(`CREATE OR REPLACE FUNCTION ob1_subject_repo_map_max() RETURNS integer LANGUAGE sql IMMUTABLE AS $f$ SELECT 0 $f$`);
+      tooMany = await rest("POST", "/v1/subject-repo", { repo: "Acme/App" });
+    } finally {
+      await sql.unsafe(maxDef);
+    }
+    // A brain with 153 and not 155 (its link function renamed aside for the call): a fault naming 155, nothing set.
+    let no155: Awaited<ReturnType<typeof mcp>>;
+    try {
+      await sql.unsafe(`ALTER FUNCTION ob1_subject_linked_key(text, text) RENAME TO ob1_subject_linked_key_aside`);
+      no155 = await mcp("set_subject_repo", { repo: "acme/app" });
+    } finally {
+      await sql.unsafe(`ALTER FUNCTION ob1_subject_linked_key_aside(text, text) RENAME TO ob1_subject_linked_key`);
+    }
+    const unset = (await sql`SELECT subject_repo_setting() AS s`)[0].s as { repo: string | null };
+    assert(no155.isError && /ob1_subject_linked_key is not applied/.test(no155.text) && /apply db\/migrations\/155_subject_key_links\.sql/.test(no155.text) && unset.repo === null,
+      `on a brain with 153 and not 155 the call faults naming 155, nothing set (${no155.text.slice(0, 160)}; ${unset.repo})`);
+    assert(tooMany.status === 409 && tooMany.body.code === "SUBJECT_REPO_TOO_MANY_KEYS" && (tooMany.body.keys as number) >= 3 && tooMany.body.targets === null
+        && tooMany.body.max === 0 && unset.repo === null && await keyOf(a) === "pr:41",
+      `a mapping past its cap refused 409 SUBJECT_REPO_TOO_MANY_KEYS, the keys counted, nothing set (${tooMany.status} ${String(tooMany.body.code)} ${String(tooMany.body.keys)}/${String(tooMany.body.targets)}/${String(tooMany.body.max)} ${unset.repo})`);
+
+    // The operator (the writer, rest/mcp's default key) sets it over REST: the bare keys mapped, a link's to its own repository.
+    const set = await rest("POST", "/v1/subject-repo", { repo: " Acme/App " });
+    const [ta, tb, tc] = await Promise.all([rest("GET", "/v1/thread?key=pr:41"), rest("GET", `/v1/thread?key=${encodeURIComponent("pr:other/lib#42")}`), rest("GET", "/v1/thread?key=version:v7.1")]);
+    const has = (body: Record<string, unknown>, id: string) => threadsOf(body)[0]?.members.some((m) => m.id === id) === true;
+    assert(set.status === 200 && set.body.changed === true && set.body.repo === "acme/app" && set.body.previous === null && (set.body.mapped as number) >= 3
+        && set.body.caller === "writer" && typeof set.body.setAt === "string"
+        && await keyOf(a) === "pr:acme/app#41" && await keyOf(b) === "pr:other/lib#42" && await keyOf(c) === "version:acme/app@v7.1"
+        && threadsOf(ta.body)[0]?.key === "pr:acme/app#41" && has(ta.body, a) && has(tb.body, b) && threadsOf(tc.body)[0]?.key === "version:acme/app@v7.1" && has(tc.body, c),
+      `the operator sets the repository over REST, trimmed and lowercased: the bare keys mapped, a pull request's to its link's repository, and a bare key's thread read as the setting's (${set.status} ${String(set.body.repo)} mapped ${String(set.body.mapped)}; ${await keyOf(a)} ${await keyOf(b)} ${await keyOf(c)}; ${threadsOf(ta.body)[0]?.key})`);
+
+    // The same again over MCP: unchanged; an agent key refused; inputs refused before the brain is asked.
+    const same = await mcp("set_subject_repo", { repo: "acme/app" });
+    const byAgent = await rest("POST", "/v1/subject-repo", { repo: "acme/other" }, KEYS.rival);
+    const [dots, noRepo, plain, remapNone] = await Promise.all([
+      rest("POST", "/v1/subject-repo", { repo: "acme/.." }), rest("POST", "/v1/subject-repo", {}), rest("POST", "/v1/subject-repo", { repo: "acme" }),
+      rest("POST", "/v1/subject-repo", { repo: null, remap_previous: true })]);
+    const remapNoneMcp = await mcp("set_subject_repo", { repo: null, remap_previous: true });
+    const still = (await sql`SELECT subject_repo_setting() AS s`)[0].s as { repo: string | null };
+    assert(!same.isError && same.sc.changed === false && same.sc.mapped === 0 && /^Unchanged: the subject-key repository is already acme\/app/.test(same.text)
+        && byAgent.status === 403 && byAgent.body.code === "REFUSED_NOT_OPERATOR"
+        && dots.status === 400 && dots.body.code === "REFUSED_INPUT" && noRepo.status === 400 && plain.status === 400
+        && remapNone.status === 400 && remapNone.body.code === "REFUSED_SUBJECT_REPO_INPUT" && remapNone.body.problem === "remap_needs_repo"
+        && remapNoneMcp.isError && /remap_previous .* needs a repository/.test(remapNoneMcp.text) && still.repo === "acme/app",
+      `the same over MCP unchanged; an agent key 403 NOT_OPERATOR; a repository 153 refuses, none given, and a remap with none refused 400; the setting stands (${String(same.sc.changed)} ${byAgent.status} ${dots.status}/${String(dots.body.code)} ${noRepo.status} ${plain.status} ${remapNone.status}/${String(remapNone.body.code)} ${still.repo})`);
+
+    // A remap over MCP moves the keys scoped to the previous repository; a link's stays its own.
+    const remap = await mcp("set_subject_repo", { repo: "acme/app2", remap_previous: true });
+    const ta2 = await rest("GET", "/v1/thread?key=pr:41");
+    assert(!remap.isError && remap.sc.changed === true && remap.sc.previous === "acme/app" && (remap.sc.remapped as number) >= 2
+        && await keyOf(a) === "pr:acme/app2#41" && await keyOf(c) === "version:acme/app2@v7.1" && await keyOf(b) === "pr:other/lib#42"
+        && threadsOf(ta2.body)[0]?.key === "pr:acme/app2#41" && has(ta2.body, a) && /^Set the subject-key repository to acme\/app2 \(before: acme\/app\)/.test(remap.text),
+      `a remap over MCP moves the keys scoped to the previous repository, a link's left its own, and the thread read follows (${String(remap.sc.changed)} ${String(remap.sc.previous)} ${String(remap.sc.remapped)} ${threadsOf(ta2.body)[0]?.key} ${has(ta2.body, a)}; ${await keyOf(a)} ${await keyOf(b)} ${await keyOf(c)}; ${remap.text.slice(0, 80)})`);
+
+    // A clear: keys stay as they are, and the setting is none.
+    const clear = await rest("POST", "/v1/subject-repo", { repo: null });
+    assert(clear.status === 200 && clear.body.changed === true && clear.body.repo === null && clear.body.previous === "acme/app2" && clear.body.setAt === null
+        && await keyOf(a) === "pr:acme/app2#41",
+      `a clear sets none and moves no key (${clear.status} ${String(clear.body.repo)} ${String(clear.body.previous)} ${await keyOf(a)})`);
+  } finally {
+    await rest("POST", "/v1/subject-repo", { repo: null });
+    await sql`DELETE FROM thoughts WHERE content LIKE '[29] subject repo:%'`;
+  }
+}
+
 apiServer.stop();
 mcpServer.stop();
 await sql.close();

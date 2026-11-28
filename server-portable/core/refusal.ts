@@ -88,6 +88,12 @@ export type Refusal =
   | { code: "PRIORITY_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
   | { code: "CLAIM_CAP_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // set_work_claim_cap needs the operator's agent id to classify the key, and the registry does not give it just now (SMD-3606 PR 1b)
   | { code: "CLAIM_CAP_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
+  | { code: "SUBJECT_REPO_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // set_subject_repo needs the operator's agent id to classify the key, and the registry does not give it just now (SMD-3887 PR 3b-2)
+  | { code: "SUBJECT_REPO_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
+  // set_subject_repo's mapping past its cap (153's ob1_subject_repo_map_max, 155's count): the bare keys it would move and
+  // their targets, two thread locks apiece; `targets` null where the bound on the keys alone refused. Nothing is set.
+  | { code: "SUBJECT_REPO_TOO_MANY_KEYS"; retryable: false; keys: number; targets: number | null; max: number }
+  | { code: "REFUSED_SUBJECT_REPO_INPUT"; retryable: false; problem: "remap_needs_repo" } // set_subject_repo: remap_previous with no repository to move the keys to
   | { code: "RELEASE_HOLDER_UNATTRIBUTED"; retryable: true; cause: "registry_away" } // release_holder_claims needs the operator's agent id to classify the key, and the registry does not give it just now (SMD-3606 PR 3)
   | { code: "RELEASE_HOLDER_UNATTRIBUTED"; retryable: false; cause: "registry_misconfigured" | "registry_refused" } // …and the registry cannot answer this server until an operator acts
   // Open items (117, SMD-3665 PR 2): the item writers' own refusals. ITEM_NOT_FOUND, ITEM_NOT_YOURS and READ_ONLY_KEY
@@ -253,6 +259,9 @@ const FACTS: Facts = {
   READ_ONLY_KEY: none,
   PRIORITY_UNATTRIBUTED: (r) => ({ cause: r.cause }),
   CLAIM_CAP_UNATTRIBUTED: (r) => ({ cause: r.cause }),
+  SUBJECT_REPO_UNATTRIBUTED: (r) => ({ cause: r.cause }),
+  SUBJECT_REPO_TOO_MANY_KEYS: (r) => ({ keys: r.keys, targets: r.targets, max: r.max }),
+  REFUSED_SUBJECT_REPO_INPUT: (r) => ({ problem: r.problem }),
   RELEASE_HOLDER_UNATTRIBUTED: (r) => ({ cause: r.cause }),
   // The open items' (SMD-3665 PR 2): ids and the words 117 answers in, never another key's text.
   REFUSED_ITEM_INPUT: (r) => ({ problem: r.problem }),

@@ -3536,7 +3536,7 @@ if (configFailed) {
             add("subject repository", "warn", `could not read the setting: ${setting.message}`, "The check calls subject_repo_setting(); the message says why it failed.");
           } else if (typeof setting?.refused === "string") {
             add("subject repository", "warn", `the stored repository ${JSON.stringify(String(setting.repo ?? "")).slice(0, 120)} is refused (${setting.refused.slice(0, 200)}): no bare pr: or version: key can be written, and a thread read by one reads it as written, saying so (scopeUnread)`,
-                "An operator key sets it again, or clears it, with SELECT set_subject_repo(<repo or NULL>, <its actor envelope>) (over REST and MCP in SMD-3887 PR 3b-2).");
+                "An operator key sets it again, or clears it, through set_subject_repo.");
           } else if (typeof setting?.repo === "string" && !sr.has_links) {
             add("subject repository", "warn", `${setting.repo} is set but migration 155 is not applied: a key its GitHub link names for another repository is scoped to ${setting.repo}`,
                 ledgerRemedy("155", APPLY_155));

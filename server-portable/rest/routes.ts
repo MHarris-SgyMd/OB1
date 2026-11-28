@@ -64,6 +64,9 @@ export const REFUSAL_STATUS: Record<RefusalCode, 400 | 403 | 404 | 409 | 422 | 5
   REFUSED_CLAIM_KEY: 403,
   CLAIM_UNATTRIBUTED: 503,
   CLAIM_CAP_UNATTRIBUTED: 503,
+  SUBJECT_REPO_UNATTRIBUTED: 503,
+  SUBJECT_REPO_TOO_MANY_KEYS: 409,
+  REFUSED_SUBJECT_REPO_INPUT: 400,
   RELEASE_HOLDER_UNATTRIBUTED: 503,
   ITEM_NOT_FOUND: 404,
   ITEM_NOT_YOURS: 403,
@@ -167,6 +170,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   // The operator's weights every read takes as its defaults (SMD-4193 PR 2, migration 132): the weights in the body, {} to clear.
   set_priority_weights: { method: "POST", path: "/v1/priority-weights", ok: 200, call: CALLS.set_priority_weights },
   set_work_claim_cap: { method: "POST", path: "/v1/work-claim-cap", ok: 200, call: CALLS.set_work_claim_cap },
+  // The operator's repository for the brain's pr: and version: subject keys (SMD-3887 PR 3b-2, migrations 153 and 155).
+  set_subject_repo: { method: "POST", path: "/v1/subject-repo", ok: 200, call: CALLS.set_subject_repo },
   release_holder_claims: { method: "POST", path: "/v1/claims/release-holder", ok: 200, call: CALLS.release_holder_claims },
   priority_history: { method: "GET", path: "/v1/priorities/{kind}/{key}", ok: 200, call: CALLS.priority_history },
   // The priority review's findings (SMD-3671 PR 2, migration 142): the list's filters in the query, a decision in the body.

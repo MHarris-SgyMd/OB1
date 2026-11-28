@@ -85,6 +85,8 @@ export const TOOLS = [
   // SMD-3606 PR 1b (migration 140): the operator's per-holder claim cap; past the scope, the database admits an operator key alone.
   { name: "set_work_claim_cap", scope: "write" },
   { name: "release_holder_claims", scope: "write" },
+  // SMD-3887 PR 3b-2 (migrations 153, 155): the operator's repository for subject keys; past the scope, the database admits an operator key alone.
+  { name: "set_subject_repo", scope: "write" },
   // SMD-3671 PR 2 (migration 142): an operator's decision on a priority finding; past the scope, the database admits an operator key alone.
   { name: "review_priority_finding", scope: "write" },
   { name: "capture_deliverable", scope: "write" },
