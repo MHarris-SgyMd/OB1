@@ -26526,6 +26526,8 @@ if (want("29")) {
      * ok" wait for, so they meet the provider while the note is out.
      */
     let noteAnswer: number | "prose" | "hold" | "late400" | null = null;
+    /** A held note's request cut by its caller before the stub answered (SMD-2298 PR 4b-1 review pass 1). */
+    let noteCut = false;
     let noteSeenR: () => void = () => {};
     let noteSeen: Promise<void> = new Promise((r) => { noteSeenR = r; });
     let n3Down = false;
@@ -26537,7 +26539,7 @@ if (want("29")) {
         noteSeenR();
         if (noteAnswer === "prose") return Response.json({ choices: [{ message: { content: "Sure, here is a note about shapes." } }] });
         if (noteAnswer === "hold") {
-          await Bun.sleep(4000);
+          noteCut = await Promise.race([Bun.sleep(4000).then(() => false), new Promise<boolean>((r) => req.signal.addEventListener("abort", () => r(true), { once: true }))]);
           return Response.json({ choices: [{ message: { content: JSON.stringify(ANSWER) } }] });
         }
         if (noteAnswer === "late400") {
@@ -27227,10 +27229,12 @@ if (want("29")) {
       assert(n4Ok && notesSent() > notes4 && n4Done.code === 0 && !/the request's shape/.test(n4Done.err),
         `a thought answered while the note is out: the note's refusal stops nothing, exit 0 (${n4Ok}; ${n4Done.code})`);
       // The shape note is a call in hand (SMD-2298 PR 4b-1): the caller's abortInHand counts and aborts it while it is
-      // out, said nowhere — nothing known, so the follower carries on — and the next refusal asks again.
+      // out — its request cut at the stub, the model server freed (review pass 1: flagged alone, it passed) — said
+      // nowhere: nothing known, so the follower carries on, and the next refusal asks again.
       await sql`DELETE FROM ob1_config WHERE key = ${hbKey}`;
       noteSeen = new Promise((r) => { noteSeenR = r; });
       noteAnswer = "hold";
+      noteCut = false;
       let inHand: InHandAbort | null = null;
       const pi = follow({ follow: 1, pausesMs: [10], workers: 1, onPass: (_stop, abortInHand) => { inHand = abortInHand; } });
       for (let i = 0; i < 100 && (await beat()) === undefined; i++) await Bun.sleep(50);
@@ -27249,8 +27253,8 @@ if (want("29")) {
       pi.stop();
       const piDone = await race(pi);
       SPECIAL.delete("[29] H long");
-      assert(hSeen && hAborted === 1 && hFailed && notesSent() - notesH === 2 && hAfterOk && piDone.code === 0 && !/the shape check's note was not answered/.test(piDone.err),
-        `the shape note is a call in hand: abortInHand aborts and counts it, said nowhere; the follower carries on and the next refusal asks again (${hSeen}; ${hAborted} aborted; ${notesSent() - notesH} note(s); ${hFailed}/${hAfterOk}; ${piDone.code})`);
+      assert(hSeen && hAborted === 1 && noteCut && hFailed && notesSent() - notesH === 2 && hAfterOk && piDone.code === 0 && !/the shape check's note was not answered/.test(piDone.err),
+        `the shape note is a call in hand: abortInHand aborts and counts it, said nowhere; the follower carries on and the next refusal asks again (${hSeen}; ${hAborted} aborted, cut ${noteCut}; ${notesSent() - notesH} note(s); ${hFailed}/${hAfterOk}; ${piDone.code})`);
       // The egress gate's deny default, its allow list a topic the thoughts carry, the endpoint not local: the note is
       // judged under the metadata of the thought it stands for, so it is sent, answered, and the follower carries on
       // (review pass 2: under empty metadata the gate refused it).

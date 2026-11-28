@@ -227,7 +227,9 @@ export interface RetagOptions {
   /**
    * Called once as the pass begins, with its stop (db/lease.ts's PassStop) and its InHandAbort (SMD-2298 PR 4a-1): the
    * caller aborts each worker's tags call in hand, and the thought goes to the back of the queue (setBackAborted),
-   * the worker going on with its next claim — the sleep scheduler's, while a live call wants the model server.
+   * the worker going on with its next claim — the sleep scheduler's, while a live call wants the model server. A
+   * follower's shape note is in hand too (PR 4b-1): aborted, the thoughts that wait on it stay failed, each answered
+   * already, and the next refusal asks again.
    */
   onPass?: (stop: PassStop, abortInHand: InHandAbort) => void;
   /**
@@ -698,10 +700,11 @@ async function retagWith(sql: SQL, opts: RetagOptions, settled: Numbers, detach:
    * outage, an abort or the gate stopped the follower):
    * - "refused": the note met a 400 or 422, as the thoughts did — the request's shape;
    * - "taken": it was answered at all — tags, or prose, as a thought's prose answer resets the streak;
-   * - "unknown": anything else — an outage, a timeout, another status, a throw, an abort (a stop, or another worker's
-   *   outage halting the pass) — which stops nothing and leaves the streak, so the next refusal asks again. It is
-   *   said, and the pass stamped failed: a follower whose every note goes unanswered fails each refused thought, and
-   *   its row says so (review pass 3).
+   * - "unknown": anything else — an outage, a timeout, another status, a throw, an abort (a stop, another worker's
+   *   outage halting the pass, or the caller's abortInHand) — which stops nothing and leaves the streak, so the next
+   *   refusal asks again. It is said, and the pass stamped failed — a follower whose every note goes unanswered fails
+   *   each refused thought, and its row says so (review pass 3) — but for a stop's abort or the caller's, which are
+   *   theirs (PR 4b-1).
    * The gate judges it as the call it stands for — the thought's subject, its text included, which a `marker:` term
    * reads (review pass 3: under the note's own text such an allow list refused every note, and the follower never
    * stopped); only the note's own text is sent.
