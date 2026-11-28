@@ -25,7 +25,7 @@ import { TEXT_PAGE } from "./store.ts";
 import type { JobHandle, PublicJob } from "./jobs.ts";
 import { renderBrainInfo, type BrainInfo, type TaskStatusResult } from "./brain-info.ts";
 import { INGESTED_NOTICE, ingestedNotice, SAID_BY, TRUST } from "./core/filter.ts";
-import { parseListCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor, type FindingSelection, type ProposalSelection } from "./core/list-cursor.ts";
+import { parseListCursor, parsePartsCursor, parseProposalCursor, parseRelationsCursor, parseThreadCursor, type FindingSelection, type PartSelection, type ProposalSelection } from "./core/list-cursor.ts";
 import { judgeKeyText, PASS_KEY_CHARS } from "./pass-key.ts";
 import { adviceFor, type EmbeddingProviderError } from "./core/provider-refusal.ts";
 import { EVIDENCE_LIMITS, failure, META_KEYS_MAX, META_VALUE_MAX, TICKET_META_KEYS_TEXT, ok, refusalValue, type HeldClaim, type Outcome, type Refusal, type RefusalCode } from "./core/refusal.ts";
@@ -45,12 +45,12 @@ import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/w
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import { subjectKeyValid } from "./subject.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
-import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
+import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PartsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
 import { marksOn, showsFailure, type Markable, type MarkItem } from "./core/marks.ts";
 import type { Captured, Deleted, EvidenceAppended, EvidenceCode, ForgetCode, Forgotten, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
-import { PART_CONTEXT, PART_GROUP_WORDS, type PartQuote, type SettledPart } from "./part-listing.ts";
+import { PART_CONTEXT, PART_GROUP_WORDS, PART_STATUSES, PARTS_LISTING_MISSING, type PartQuote, type PartSide, type SettledPart } from "./part-listing.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
@@ -101,7 +101,7 @@ function guard(v: unknown, key = ""): unknown {
   // list_thoughts' cursor (SMD-2995): not a uuid, but held to its own shape, which carries no sentence.
   // list_supersession_proposals' (SMD-3249) likewise: a tag, its selection's tokens and pass key, a confidence, a
   // timestamp's text and a uuid.
-  if (typeof v === "string" && key === "cursor" && v === v.trim() && (parseListCursor(v) || parseProposalCursor(v) || parseThreadCursor(v) || parseRelationsCursor(v))) return v;
+  if (typeof v === "string" && key === "cursor" && v === v.trim() && (parseListCursor(v) || parseProposalCursor(v) || parsePartsCursor(v) || parseThreadCursor(v) || parseRelationsCursor(v))) return v;
   // A proposal's pass (SMD-3248): held to pass-key.ts's one rule — one token, no space, so no sentence — the rule the
   // input took it by (review pass 4: a full-shape guard nulled keys the input admitted).
   if (typeof v === "string" && key === "judgeKey") return PASS_KEY_CHARS.test(v) ? v : null;
@@ -1340,6 +1340,62 @@ export function renderSupersessionProposals(o: Outcome<ProposalsResult>): Reply 
       : "Refused: `after` is not a list_supersession_proposals cursor — pass the `cursor` a previous page ended with, as it was given, with the same filters, or leave it out for the first page."
     : unknownRefusal(r), safeProposals);
 }
+
+/** What every listing of settled parts says first of what a part is, the CLI's --parts and the tool's reply alike. */
+export const PARTS_ARE = "Each is a statement in one thought that the other thought of its pair shows is no longer true or no longer open; both thoughts stand whatever is decided, and a part writes no thought";
+
+/** The eight settling labels a part's word is one of (151's CHECK), for the reply's value: a word outside them is not given. */
+const PART_WORDS = ["corrects", "reverses", "revises", "withdraws", "implements", "resolves", "updates", "prioritizes"] as const;
+const PROPOSAL_STATUS_WORDS = ["pending", "accepted", "rejected", "stale"] as const;
+const WHOLE_VERDICTS = ["newer_supersedes_older", "older_supersedes_newer", "conflict_undirected"] as const;
+
+/**
+ * list_settled_parts: per part its ids, status, holder, word and group, dates and the pass that judged it, whether
+ * each thought's text has moved and still holds its quote, the whole-thought proposal on its pair and who decided it.
+ * The quotes, the reason, the note and the thoughts' first words are in the text.
+ */
+const safeParts: Safe<PartsResult> = (v) => ({
+  status: v.status, ...(v.judgeKey === undefined ? {} : { judgeKey: v.judgeKey }),
+  cursor: v.cursor, remaining: v.remaining, pastCursor: v.pastCursor,
+  parts: v.parts.map((p) => {
+    const side = (s: PartSide, quoteInText: boolean) => ({ id: s.id, created_at: s.created_at, edited: s.edited, quoteInText });
+    return {
+      id: p.id, status: oneOf(PART_STATUSES, p.status), holder: p.holder === "newer" ? "newer" : "older", word: oneOf(PART_WORDS, p.word), group: p.group === "no_longer_holds" || p.group === "done_or_settled" ? p.group : null,
+      judgeKey: p.judgeKey, judgedAt: p.judgedAt, reviewedAt: p.reviewedAt,
+      // Each side with whether its text still holds the quote the part takes from it: the statement from the holder, the words that show it from the other.
+      older: side(p.older, p.holder === "older" ? p.statement.inText : p.shownBy.inText), newer: side(p.newer, p.holder === "newer" ? p.statement.inText : p.shownBy.inText),
+      whole: p.whole ? { id: p.whole.id, status: oneOf(PROPOSAL_STATUS_WORDS, p.whole.status), verdict: oneOf(WHOLE_VERDICTS, p.whole.verdict), supersedingId: p.whole.supersedingId } : null,
+      // Who decided: whether an agent was recorded, and the kinds; the key's name is in the text (the proposals' rule).
+      reviewer: p.reviewer ? { agentRecorded: p.reviewer.agentRecorded, kind: oneOf(SAID_BY, p.reviewer.kind), kindNow: oneOf(SAID_BY, p.reviewer.kindNow) } : null,
+    };
+  }),
+});
+
+/**
+ * list_settled_parts' reply (SMD-4446 PR 3a): the page's parts, each as partBlock prints it, under a line that says
+ * what was selected and what a part is, with the line that lists the next page where more follow. An empty page says
+ * which kind of empty it is: the walk's end, a pass's key that selected nothing, or none recorded.
+ */
+export function renderSettledParts(o: Outcome<PartsResult>): Reply {
+  return render(o, ({ status, judgeKey, parts, cursor, remaining, pastCursor }) => {
+    const selected = `${status === "all" ? "" : `${status} `}settled parts${judgeKey === undefined ? "" : ` judged by ${judgeKeyText(judgeKey)}`}`;
+    const next = cursor ? `\n\n${remaining} more follow${remaining === 1 ? "s" : ""} — pass after: ${cursor} (with the same filters) for the next page.` : "";
+    if (!parts.length) {
+      if (pastCursor) return `No more ${selected} past this cursor — the listing ends here.`;
+      if (judgeKey !== undefined) return `No ${selected}. Either that pass has none in this selection, or no pass has exactly this key: the match is exact, and each part names the key that judged it (judged by consolidate:…).`;
+      return `No ${selected}.${status === "pending" || status === "all" ? " A decide-mode consolidation pass records them: cd db && bun consolidate.ts --url $DATABASE_URL, with OB1_CONSOLIDATE_DECIDER set." : ""}`;
+    }
+    return `${parts.length} ${selected.replace("settled parts", "settled part(s)")}${pastCursor ? " past the cursor" : ""}, oldest judged first. ${PARTS_ARE}. Nothing decides a part through this server yet.\n\n${parts.map((p, i) => partBlock(p, i + 1)).join("\n\n")}${next}`;
+  }, (r) => r.code === "REFUSED_CURSOR"
+    ? r.reason === "filters" && r.made && r.made.list === "parts"
+      ? `Refused: that cursor was made with \`status: ${r.made.status}\`${r.made.judgeKey === null ? " and no other filter" : `, \`judge_key: ${judgeKeyText(r.made.judgeKey)}\``} — pass the same filters with it, or leave out \`after\` to start the list again.`
+      : "Refused: `after` is not a list_settled_parts cursor — pass the `cursor` a previous page ended with, as it was given, with the same filters, or leave it out for the first page."
+    : unknownRefusal(r), safeParts);
+}
+
+/** The hint a parts listing's error carries: a brain short of 156 fails naming the listing, and the hint names the file. */
+export const partsHint = (msg: string): string =>
+  PARTS_LISTING_MISSING.test(msg) ? " — migration 156 is not applied (db/migrations/156_parts_listing.sql, the settled parts' listing): cd db && bun migrate.ts --url <url>" : "";
 
 /**
  * The hint a listing error carries. 070 (SMD-2313), 109 (SMD-3248), then 110
@@ -2732,7 +2788,7 @@ const findingLine = (f: PriorityFinding) => {
 };
 
 /** The selection a refused findings cursor was made under, in words: its status and its kind. */
-const madeUnder = (m: ProposalSelection | FindingSelection | undefined) =>
+const madeUnder = (m: ProposalSelection | FindingSelection | PartSelection | undefined) =>
   m?.list === "findings" ? `status ${m.status} and ${m.kind === null ? "every kind" : `kind ${m.kind}`}` : "another status or kind";
 export const renderPriorityFindings = (o: Outcome<FindingsListed>): Reply => render(o, (v) => {
   const which = `${v.status === "all" ? "" : `${v.status} `}priority finding`;

@@ -1109,6 +1109,103 @@ console.log("\n[9] list_supersession_proposals renders the queue for a client: b
   await sql.close();
 }
 
+console.log("\n[9b] list_settled_parts lists the settled parts for a client: each quote in its thought's text between its marks, both ids and the part's, the value with no word of a thought in it, a page and its cursor, a cursor that is not this listing's or was made under other filters refused, one pass's by its key, an edit since judged, the whole-thought proposal on the pair, a decision's reviewer, and a brain without the listing named by its file (migration 156, SMD-4446)");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${new Array(EMBEDDING_DIM).fill(0).map((_, i) => (i === 5 ? 1 : 0)).join(",")}]`;
+  const seed = async (content: string, daysAgo: number) => {
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: {} }}::jsonb, ${vec}::vector) AS r`)[0].r as { id: string }).id;
+    await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+    return id;
+  };
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (o: string, n: string, holder: string, statement: string, shown: string, word: string, reason: string) =>
+    String(((await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, ${holder}, ${statement}, ${shown}, ${word}, ${reason}, ${KEY},
+        (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${o}::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${n}::uuid), '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  const older = await seed("parts older: we ship the exporter by Friday \x1b[2A\x1b[2Kforged line; the count stands at 40", 9);
+  const newer = await seed("parts newer: the exporter shipped on Thursday; the count is 52 now", 0);
+  const p1 = await part(older, newer, "older", "we ship the exporter by Friday", "the exporter shipped on Thursday", "implements", "the plan was carried out \x1b[31mred");
+  const p2 = await part(older, newer, "older", "the count stands at 40", "the count is 52 now", "updates", "a later count");
+
+  // The page as a client reads it: what a part is, each part's block, and nothing a thought can do to the terminal.
+  const listed = await call("list_settled_parts", {});
+  const lines = listed.split("\n");
+  assert(listed.startsWith("2 pending settled part(s), oldest judged first. Each is a statement in one thought that the other thought of its pair shows is no longer true or no longer open; both thoughts stand whatever is decided, and a part writes no thought. Nothing decides a part through this server yet.")
+      && lines.includes("1. [pending] done or settled (the writer's word: implements)") && lines.includes("2. [pending] done or settled (the writer's word: updates)")
+      && listed.indexOf(`part ${p1}`) > 0 && listed.indexOf(`part ${p1}`) < listed.indexOf(`part ${p2}`),
+    `the tool lists the pending parts, oldest judged first, under a line that says what a part is (${lines[0].slice(0, 60)})`);
+  assert(lines.some((l) => /^ {3}older \[[^\]]+\] holds the statement: parts older: «we ship the exporter by Friday» /.test(l)) && lines.some((l) => /^ {3}newer \[[^\]]+\] shows it: parts newer: «the exporter shipped on Thursday»; the count is 52 now$/.test(l))
+      && lines.some((l) => /^ {3}older \[[^\]]+\] holds the statement: .*forged line; «the count stands at 40»$/.test(l)) && lines.filter((l) => l === `      ID: ${older}`).length === 2 && lines.filter((l) => l === `      ID: ${newer}`).length === 2
+      && lines.some((l) => l.startsWith(`   part ${p1} — judged by ${KEY} on `)) && lines.some((l) => l.startsWith(`   part ${p2} — judged by ${KEY} on `)) && !listed.includes("\x1b") && lines.includes("   reason: the plan was carried out [31mred"),
+    "…each quote in its thought's text between its marks, at the text's end too, with both thoughts' ids under each part and the part's own; an escape sequence in a text or a reason reaches no terminal");
+
+  // The value: ids, words and flags, and no word of a thought; the cursor walks the queue and ends it.
+  const { parsePartsCursor, partsCursor } = await import("./core/list-cursor.ts");
+  const pg1 = await result("list_settled_parts", { limit: 1 });
+  const pg2 = await result("list_settled_parts", { limit: 1, after: String(pg1.sc?.cursor) });
+  const first = pg1.sc?.parts?.[0];
+  assert(pg1.sc?.parts?.length === 1 && first.id === p1 && first.status === "pending" && first.holder === "older" && first.word === "implements" && first.group === "done_or_settled" && first.judgeKey === KEY
+      && first.older.id === older && first.older.edited === false && first.older.quoteInText === true && first.newer.id === newer && first.newer.quoteInText === true && first.whole === null && first.reviewer === null
+      && pg1.sc?.remaining === 1 && pg1.sc?.pastCursor === false && parsePartsCursor(String(pg1.sc?.cursor))?.id === p1 && !/exporter|Friday|carried/.test(JSON.stringify({ ...pg1.sc, text: "" })),
+    `the value carries a part's ids, status, holder, word, group and pass, each side's edit and whether it holds its quote, and no word of a thought or a reason; one more follows, by a cursor of this listing's own (${JSON.stringify(first).slice(0, 120)})`);
+  const at1 = parsePartsCursor(String(pg1.sc?.cursor))!;
+  const ended = await result("list_settled_parts", { after: partsCursor(at1.selection, "2999-01-01 00:00:00+00", at1.id) });
+  assert(pg2.sc?.parts?.length === 1 && pg2.sc.parts[0].id === p2 && pg2.sc.cursor === null && pg2.sc.remaining === 0 && pg2.sc.pastCursor === true && /^1 pending settled part\(s\) past the cursor, oldest judged first\./.test(pg2.text)
+      && ended.text === "No more pending settled parts past this cursor — the listing ends here." && ended.sc?.parts?.length === 0,
+    "the cursor lists the next page, which says it follows one and ends the walk; past the last part the listing says it ends, not that the queue is empty");
+  // A cursor that is not this listing's, one made under other filters, and one whose time Postgres cannot read.
+  const proposalsCur = (await import("./core/list-cursor.ts")).proposalCursor({ status: "pending", lineage: null, judgeKey: null }, "0.90", "2026-09-25 00:00:00+00", p1);
+  const wrongCur = await result("list_settled_parts", { after: proposalsCur });
+  const otherStatus = await result("list_settled_parts", { status: "all", after: String(pg1.sc?.cursor) });
+  const otherKey = await result("list_settled_parts", { judge_key: KEY, after: String(pg1.sc?.cursor) });
+  const year0 = await result("list_settled_parts", { after: partsCursor(at1.selection, "0000-01-01 00:00:00+00", at1.id) });
+  const NOT_ITS = "Refused: `after` is not a list_settled_parts cursor — pass the `cursor` a previous page ended with, as it was given, with the same filters, or leave it out for the first page.";
+  const MADE = "Refused: that cursor was made with `status: pending` and no other filter — pass the same filters with it, or leave out `after` to start the list again.";
+  assert(wrongCur.isError && wrongCur.sc?.code === "REFUSED_CURSOR" && wrongCur.text === NOT_ITS && year0.isError && year0.sc?.code === "REFUSED_CURSOR" && year0.text === NOT_ITS
+      && otherStatus.isError && otherStatus.text === MADE && otherStatus.sc?.reason === "filters" && otherStatus.sc?.made?.status === "pending" && otherKey.isError && otherKey.text === MADE,
+    `the proposals' cursor and one whose time Postgres cannot read are refused as none of this listing's, and this listing's own under another status or with a key by the filters it was made with (${otherStatus.text.slice(0, 70)})`);
+  // One pass's parts by its key; a key no part carries says so.
+  const keyed = await call("list_settled_parts", { judge_key: KEY });
+  const nobody = await call("list_settled_parts", { judge_key: "consolidate:nobody+writer@p4d6" });
+  assert(keyed.startsWith(`2 pending settled part(s) judged by ${KEY}, oldest judged first.`)
+      && nobody === "No pending settled parts judged by consolidate:nobody+writer@p4d6. Either that pass has none in this selection, or no pass has exactly this key: the match is exact, and each part names the key that judged it (judged by consolidate:…).",
+    "judge_key lists that pass's parts alone, and a key no part carries says what an empty selection can mean");
+
+  // An edit that takes the words that show the second part out of the newer text, and a whole-thought proposal on the pair.
+  await sql`SELECT update_thought(${newer}::uuid, ${"parts newer: the exporter shipped on Thursday; the count was corrected"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
+  const [{ id: whole }] = await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.8, 'a whole', 0.9, ${KEY}, NULL) AS id`;
+  const moved = await result("list_settled_parts", {});
+  const movedLines = moved.text.split("\n");
+  assert(movedLines.some((l) => /^ {3}newer \[[^\]]+\] \(edited since judged\) shows it: no longer in its text: «the count is 52 now»$/.test(l)) && movedLines.some((l) => /^ {3}newer \[[^\]]+\] \(edited since judged\) shows it: parts newer: «the exporter shipped on Thursday»; the count was corrected$/.test(l))
+      && movedLines.filter((l) => l.startsWith("   WAITS: a text has moved since this part was judged — a decide-mode pass takes such a part up,")).length === 2
+      && movedLines.filter((l) => l === `   WHOLE: this pair also holds a whole-thought proposal, pending (the newer thought supersedes the older) — proposal ${whole}`).length === 2
+      && moved.sc?.parts?.[1].newer.edited === true && moved.sc.parts[1].newer.quoteInText === false && moved.sc.parts[0].newer.quoteInText === true && moved.sc.parts[1].older.edited === false
+      && moved.sc.parts[0].whole?.id === whole && moved.sc.parts[0].whole.status === "pending" && moved.sc.parts[0].whole.verdict === "newer_supersedes_older",
+    "after an edit of the newer text each part says that side was edited and that it waits for the pass, the quote that left is said gone and the one still there is shown; the whole-thought proposal on the pair is named under each, in the text and the value");
+
+  // A decision made in the store: the part leaves the pending listing and is listed under its status with who decided it.
+  await sql`SELECT review_settled_part(${p1}::uuid, 'reject', ${"not settled \x1b[31mred"}, ${{ name: "e2e-reviewer", via: "e2e" }}::jsonb)`;
+  const rejected = await result("list_settled_parts", { status: "rejected" });
+  const stillPending = await call("list_settled_parts", {});
+  assert(rejected.sc?.parts?.length === 1 && rejected.sc.parts[0].id === p1 && rejected.sc.parts[0].status === "rejected" && rejected.sc.parts[0].reviewer?.agentRecorded === false
+      && /^1\. \[rejected [^\]]+\] done or settled/m.test(rejected.text) && rejected.text.includes("   decided by: e2e-reviewer, no agent id recorded") && rejected.text.includes("   note: not settled [31mred") && !rejected.text.includes("\x1b")
+      && stillPending.startsWith("1 pending settled part(s), oldest judged first.") && !stillPending.includes(p1)
+      && (await call("list_settled_parts", { status: "accepted" })) === "No accepted settled parts." && (await call("list_settled_parts", { status: "all" })).startsWith("2 settled part(s), oldest judged first."),
+    "a rejected part is listed under its status with who decided it and the note, cleaned; the pending listing no longer holds it; a status with none says so, and all lists both");
+
+  // A brain without the listing: the tool's error names the file.
+  await sql`DROP FUNCTION list_settled_parts(text, int, text, timestamptz, uuid, int)`;
+  const pre156 = await call("list_settled_parts", {}).catch((e: Error) => e.message);
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => /^\d{3}_parts_listing\.sql$/.test(f) });
+  assert(/list_settled_parts\(text, integer, text, timestamp with time zone, uuid, integer\) does not exist/.test(pre156) && /migration 156 is not applied \(db\/migrations\/156_parts_listing\.sql, the settled parts' listing\): cd db && bun migrate\.ts --url <url>/.test(pre156)
+      && (await call("list_settled_parts", {})).startsWith("1 pending settled part(s)"),
+    `on a brain without the listing the tool's error names its file, and the file applied, it lists again (${pre156.replace(/\n/g, " ").slice(0, 160)})`);
+
+  await sql`DELETE FROM supersession_proposals WHERE id = ${whole}::uuid`;
+  await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid)`;
+  await sql.close();
+}
+
 // ── The opt-in query log (034, SMD-1295), through the real handlers ──────────
 // The flag is on for the suite (set at boot). A search records one row with the
 // query and the ids it returned; a fetch of a returned id records an action row

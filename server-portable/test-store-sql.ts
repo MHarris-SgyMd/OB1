@@ -1500,6 +1500,49 @@ console.log("\n[10] listSupersessionProposals reads migration 029's queue throug
   await admin5.close();
 }
 
+console.log("\n[10b] listSettledParts reads migration 156's listing through the one read the CLI makes (SMD-4446 PR 3a)");
+{
+  // The pass writes the rows (its call, made directly here); the store reads them back as the tool prints them.
+  const older = await store.captureThought({ content: "parts: we bill monthly; the cap is 40 seats", payload: { metadata: {} }, embedding: unit(7) });
+  const newer = await store.captureThought({ content: "parts: we bill annually now; the cap is 60 seats", payload: { metadata: {} }, embedding: unit(7) });
+  const admin6 = new SQL({ url: URL_, max: 1 });
+  await admin6`UPDATE thoughts SET created_at = now() - interval '10 days' WHERE id = ${older.id}`;
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (statement: string, shown: string, word: string) =>
+    String(((await admin6`SELECT record_settled_part(${older.id}::uuid, ${newer.id}::uuid, 'older', ${statement}, ${shown}, ${word}, 'a store row', ${KEY},
+        (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${older.id}::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${newer.id}::uuid), '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  const a = await part("we bill monthly", "we bill annually now", "revises");
+  const b = await part("the cap is 40 seats", "the cap is 60 seats", "updates");
+  const c = await part("parts: we bill monthly; the cap", "parts: we bill annually now; the cap", "corrects");
+  const all = await store.listSettledParts({});
+  const row = all.parts[0];
+  assert(all.parts.map((x) => x.id).join() === [a, b, c].join() && all.next === null && all.remaining === 0,
+    `the default lists the pending parts, oldest judged first, with none to follow (${all.parts.length})`);
+  assert(row.status === "pending" && row.holder === "older" && row.word === "revises" && row.group === "no_longer_holds" && row.reason === "a store row" && row.judgeKey === KEY && row.reviewer === null && row.whole === null
+         && row.statement.text === "we bill monthly" && row.statement.inText && row.statement.before === "parts: " && row.statement.after === "; the cap is 40 seats"
+         && row.shownBy.text === "we bill annually now" && row.shownBy.before === "parts: " && row.older.id === older.id && row.older.head === "parts: we bill monthly; the cap is 40 seats" && !row.older.edited
+         && row.newer.id === newer.id && row.older.created_at != null && row.newer.created_at != null && row.older.created_at < row.newer.created_at && /^\d{4}-\d{2}-\d{2}T/.test(row.judgedAt),
+    `…mapped: status, holder, word and group, the reason and the key, each quote with its context, both thoughts with their heads and times (${JSON.stringify({ ...row, older: undefined, newer: undefined }).slice(0, 160)})`);
+  // The cursor is the page's LAST row's place; past the last part there is none; a status and a key select; a time
+  // Postgres cannot read is the caller's.
+  const w1 = await store.listSettledParts({ limit: 2 });
+  const w2 = await store.listSettledParts({ limit: 2, after: w1.next! });
+  const past = await store.listSettledParts({ after: { judgedAt: "9999-01-01 00:00:00+00", id: "ffffffff-ffff-4fff-8fff-ffffffffffff" } });
+  let refusedTime = "";
+  try { await store.listSettledParts({ after: { judgedAt: "0000-01-01 00:00:00+00", id: a } }); } catch (e) { refusedTime = (e as Error).name; }
+  assert(w1.parts.map((x) => x.id).join() === [a, b].join() && w1.remaining === 1 && w1.next?.id === b && w2.parts.map((x) => x.id).join() === c && w2.next === null && w2.remaining === 0
+         && past.parts.length === 0 && past.next === null && refusedTime === "ListCursorRefused",
+    `pages of two over three: the first two with the second's place as next and one to follow, then the third alone; past the last, none; a cursor time Postgres cannot read, ListCursorRefused (${refusedTime})`);
+  await admin6`SELECT review_settled_part(${b}::uuid, 'reject', 'not so', ${{ name: "store-reviewer", via: "test" }}::jsonb)`;
+  const rejected = await store.listSettledParts({ status: "rejected" }), everything = await store.listSettledParts({ status: null }), keyed = await store.listSettledParts({ judgeKey: KEY }), nobody = await store.listSettledParts({ judgeKey: "consolidate:nobody+writer@p4d6" });
+  assert(rejected.parts.length === 1 && rejected.parts[0].id === b && rejected.parts[0].status === "rejected" && rejected.parts[0].reviewNote === "not so" && rejected.parts[0].reviewedAt != null
+         && rejected.parts[0].reviewer?.name === "store-reviewer" && rejected.parts[0].reviewer.agentRecorded === false && !("agentId" in rejected.parts[0].reviewer)
+         && everything.parts.length === 3 && keyed.parts.map((x) => x.id).join() === [a, c].join() && nobody.parts.length === 0,
+    `a status selects, null lists every status, and a key one pass's alone; a decided part names its reviewer without the agent's id (${rejected.parts.length}/${everything.parts.length}/${keyed.parts.length}/${nobody.parts.length})`);
+  await admin6`DELETE FROM thoughts WHERE id IN (${older.id}::uuid, ${newer.id}::uuid)`;
+  await admin6.close();
+}
+
 console.log("\n[11] logActions: the one writer of action rows — a batch in one statement, an absent agent as SQL NULL, a malformed agent or target refused loudly by column (migration 034, SMD-1719)");
 {
   const admin6 = new SQL({ url: URL_, max: 1 });

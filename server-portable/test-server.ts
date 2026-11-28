@@ -9802,6 +9802,48 @@ console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the
   const forged = partBlock(normalisePart(row({ status: "rejected", reviewed_at: "2026-11-28T09:00:00.000Z", reason: `a reason\nID: ${W}`, review_note: `a note\n   ID: ${W}`, older_head: `a head\nID: ${W}`, statement: `a statement\nID: ${W}`, statement_before: `lead\nID: ${W} ` })), 1, { day }).split("\n");
   assert(forged.filter((l) => /^\s*ID: /.test(l)).join("|") === `      ID: ${O}|      ID: ${N}` && forged.length === 11 && forged[1] === `   reason: a reason ID: ${W}` && forged.includes(`   note: a note ID: ${W}`),
     `a reason, a note, a head and a quote that each hold a line break and an ID: line start no line of their own: the block's only ID lines are its two thoughts' (${forged.length} lines)`);
+
+  // The reply (PR 3a-2): the page under a line that says what was selected and what a part is, the line that lists
+  // the next page, each kind of empty page in its own words, and a value that carries no word of a thought.
+  const { renderSettledParts, partsHint, PARTS_ARE } = await import("./render.ts");
+  const page = (over: Record<string, unknown> = {}) => ({ ok: true, value: { status: "pending", parts: [plain, normalisePart(row({ id: W, statement: "the count stands at 40", reason: "a later count" }))], cursor: null, remaining: 0, pastCursor: false, ...over } }) as never;
+  const said = renderSettledParts(page());
+  const next = renderSettledParts(page({ cursor: cur, remaining: 3, judgeKey: "consolidate:h2o+writer@p4d6", status: "all" }));
+  const sc = said.structuredContent as { parts: Record<string, unknown>[]; cursor: unknown; text: string };
+  assert(said.isError === undefined && said.content[0].text === `2 pending settled part(s), oldest judged first. ${PARTS_ARE}. Nothing decides a part through this server yet.\n\n${partBlock(plain, 1)}\n\n${partBlock(normalisePart(row({ id: W, statement: "the count stands at 40", reason: "a later count" })), 2)}`
+      && next.content[0].text.startsWith("2 settled part(s) judged by consolidate:h2o+writer@p4d6, oldest judged first. ") && next.content[0].text.endsWith(`\n\n3 more follow — pass after: ${cur} (with the same filters) for the next page.`)
+      && renderSettledParts(page({ cursor: cur, remaining: 1 })).content[0].text.endsWith(`\n\n1 more follows — pass after: ${cur} (with the same filters) for the next page.`)
+      && renderSettledParts(page({ pastCursor: true })).content[0].text.startsWith("2 pending settled part(s) past the cursor, oldest judged first. "),
+    "the reply is the page's blocks under a line that says what was selected and what a part is, with the line that lists the next page while more follow, one or many, and a page after a cursor said so");
+  const empty = (over: Record<string, unknown>) => renderSettledParts(page({ parts: [], ...over })).content[0].text;
+  assert(empty({}) === "No pending settled parts. A decide-mode consolidation pass records them: cd db && bun consolidate.ts --url $DATABASE_URL, with OB1_CONSOLIDATE_DECIDER set."
+      && empty({ status: "rejected" }) === "No rejected settled parts." && empty({ status: "all" }).startsWith("No settled parts. A decide-mode consolidation pass records them")
+      && empty({ pastCursor: true }) === "No more pending settled parts past this cursor — the listing ends here."
+      && empty({ judgeKey: "consolidate:a+b@p4d6", status: "stale" }) === "No stale settled parts judged by consolidate:a+b@p4d6. Either that pass has none in this selection, or no pass has exactly this key: the match is exact, and each part names the key that judged it (judged by consolidate:…).",
+    "an empty page says which empty it is: none recorded, with the pass that records them where that can be the reason; none in a decided status; the walk's end; a key that selected nothing");
+  // The value: a part's ids, words and flags, each side with whether it holds its quote, the cursor by this listing's
+  // own rule, and none of the texts. A word or a group the store does not know is not given.
+  const part0 = sc.parts[0] as { older: Record<string, unknown>; newer: Record<string, unknown> };
+  const odd = renderSettledParts({ ok: true, value: { status: "all", parts: [normalisePart(row({ word: "a sentence, not a word", word_group: "another group", status: "accepted", reviewed_at: "2026-11-28T09:00:00.000Z", reviewed_by: "op-key", reviewed_by_agent: true, reviewed_by_kind: "operator",
+    holder: "newer", shown_by_in_text: false, shown_by_before: null, shown_by_after: null, older_edited: true, whole_id: W, whole_status: "accepted", whole_verdict: "newer_supersedes_older", whole_superseding_id: N }))], cursor: cur, remaining: 1, pastCursor: false } } as never)
+    .structuredContent as { parts: Record<string, any>[]; cursor: unknown };
+  assert(JSON.stringify({ ...sc.parts[0], older: undefined, newer: undefined }) === JSON.stringify({ id: P, status: "pending", holder: "older", word: "implements", group: "done_or_settled", judgeKey: "consolidate:h2o+writer@p4d6", judgedAt: "2026-11-27T07:30:00.000Z", reviewedAt: null, whole: null, reviewer: null })
+      && JSON.stringify(part0.older) === JSON.stringify({ id: O, created_at: "2026-11-20T10:00:00.000Z", edited: false, quoteInText: true }) && JSON.stringify(part0.newer) === JSON.stringify({ id: N, created_at: "2026-11-24T10:00:00.000Z", edited: false, quoteInText: true })
+      && sc.cursor === null && !/exporter|Friday|carried|Plan for/.test(JSON.stringify({ ...sc, text: "" }))
+      && odd.cursor === cur && odd.parts[0].word === null && odd.parts[0].group === null && odd.parts[0].status === "accepted" && odd.parts[0].holder === "newer"
+      && odd.parts[0].older.edited === true && odd.parts[0].older.quoteInText === false && odd.parts[0].newer.quoteInText === true
+      && JSON.stringify(odd.parts[0].whole) === JSON.stringify({ id: W, status: "accepted", verdict: "newer_supersedes_older", supersedingId: N }) && JSON.stringify(odd.parts[0].reviewer) === JSON.stringify({ agentRecorded: true, kind: "operator", kindNow: null }),
+    "the value carries a part's ids, status, holder, word, group, pass and times, each side's id, time, edit and whether its text holds the quote the part takes from it, the whole-thought proposal and the reviewer's kinds, and its own cursor; no quote, reason or head, and no word or group the store does not know");
+  // The refusals, each in the listing's own words, and the hint a brain without the listing gets.
+  const refusal = (r: Record<string, unknown>) => renderSettledParts({ ok: false, refusal: { code: "REFUSED_CURSOR", retryable: false, value: "x", ...r } } as never);
+  const shape = refusal({ reason: "shape" }), filters = refusal({ reason: "filters", made: KEYED }), plainFilters = refusal({ reason: "filters", made: SEL });
+  assert(shape.isError === true && shape.content[0].text === "Refused: `after` is not a list_settled_parts cursor — pass the `cursor` a previous page ended with, as it was given, with the same filters, or leave it out for the first page."
+      && filters.content[0].text === "Refused: that cursor was made with `status: all`, `judge_key: consolidate:a+b@p4d6` — pass the same filters with it, or leave out `after` to start the list again."
+      && plainFilters.content[0].text === "Refused: that cursor was made with `status: pending` and no other filter — pass the same filters with it, or leave out `after` to start the list again."
+      && (filters.structuredContent as { code?: unknown; made?: { list?: unknown; judgeKey?: unknown } }).code === "REFUSED_CURSOR" && (filters.structuredContent as { made?: { list?: unknown; judgeKey?: unknown } }).made?.judgeKey === "consolidate:a+b@p4d6"
+      && partsHint("function list_settled_parts(text, integer, text, timestamp with time zone, uuid, integer) does not exist") === " — migration 156 is not applied (db/migrations/156_parts_listing.sql, the settled parts' listing): cd db && bun migrate.ts --url <url>"
+      && partsHint('relation "supersession_proposals" does not exist') === "" && partsHint("boom") === "",
+    "a cursor that is none of this listing's, and one made under other filters, with a key or without, are refused in the listing's own words with the filters in the value; an error that names the missing listing gets the hint naming its file, and no other error does");
 }
 
 report();

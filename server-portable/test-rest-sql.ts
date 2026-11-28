@@ -176,6 +176,14 @@ const proposalIds: string[] = [];
   proposalIds.push(String((await sql`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[1]}::uuid, 'conflict_undirected', 0.7, 'a seeded reason', 0.9, 'consolidate:stub@p2', NULL) AS pid`)[0].pid));
   // SMD-3249: a second, under another pass, so a page of one has a next page to list.
   await sql`SELECT record_supersession_proposal(${ids[1]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.6, 'a second seeded reason', 0.9, 'consolidate:stub@p3', NULL)`;
+  // SMD-4446 PR 3a: two settled parts, each under a pass of its own, so the parts' listing has a page, a next page and
+  // a key to select by. Each quote is its thought's own words.
+  for (const [o, n, statement, shown, key] of [[ids[0], ids[1], "the first thought through REST", "the second thought through REST", "consolidate:stub+writer@p4d6"],
+                                               [ids[1], ids[2], "the second thought through REST", "the third thought through REST", "consolidate:other+writer@p4d6"]]) {
+    const [{ r }] = await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, 'older', ${statement}, ${shown}, 'updates', 'a seeded part', ${key},
+        (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${o}::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${n}::uuid), '{"deterministic": false, "model": "stub"}'::jsonb) AS r`;
+    assert((r as { action?: string }).action === "recorded", `a settled part is seeded (${JSON.stringify(r)})`);
+  }
   // Judged ahead of every read, so brain_info's oldest pending age is 0 s at
   // both doors: each door rounds its own read's age, and two reads either side
   // of a half second answered 0 and 1 (SMD-3195 review pass 2, under load).
@@ -201,7 +209,7 @@ const writer = authenticate(KEYS.writer, { MCP_ACCESS_KEYS: process.env.MCP_ACCE
 assert(writer !== null, "the writer's key authenticates in process");
 const CORE_OP: Record<string, keyof typeof direct> = {
   search: "search", fetch: "fetch", search_thoughts: "searchThoughts", search_thoughts_keyword: "searchThoughtsKeyword", list_thoughts: "listThoughts",
-  list_thought_ids: "listThoughtIds", list_logged_searches: "listLoggedSearches", list_supersession_proposals: "listSupersessionProposals",
+  list_thought_ids: "listThoughtIds", list_logged_searches: "listLoggedSearches", list_supersession_proposals: "listSupersessionProposals", list_settled_parts: "listSettledParts",
   thought_stats: "thoughtStats", thought_changes: "thoughtChanges", worker_status: "workerStatus", task_status: "taskStatus",
   capture_thought: "capture", update_thought: "updateThought", delete_thought: "deleteThought",
 };
@@ -228,6 +236,10 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     // SMD-3248: one pass's proposals by its judge key (109), the key echoed in the value beside each row's.
     ["list_supersession_proposals", { status: "all", judge_key: "consolidate:stub@p2" }, "GET", "/v1/proposals?status=all&judge_key=consolidate%3Astub%40p2", undefined, (v) => say.renderSupersessionProposals(ok(v)),
       (v) => v.judgeKey === "consolidate:stub@p2" && Array.isArray(v.proposals) && v.proposals.length > 0 && (v.proposals as { judgeKey: string }[]).every((p) => p.judgeKey === "consolidate:stub@p2")],
+    // SMD-4446 PR 3a: the settled parts' listing (156), every status, and one pass's by its judge key, the key's + encoded.
+    ["list_settled_parts", { status: "all" }, "GET", "/v1/settled-parts?status=all", undefined, (v) => say.renderSettledParts(ok(v)), has("parts")],
+    ["list_settled_parts", { judge_key: "consolidate:stub+writer@p4d6" }, "GET", "/v1/settled-parts?judge_key=consolidate%3Astub%2Bwriter%40p4d6", undefined, (v) => say.renderSettledParts(ok(v)),
+      (v) => v.judgeKey === "consolidate:stub+writer@p4d6" && Array.isArray(v.parts) && v.parts.length === 1 && (v.parts as { judgeKey: string }[])[0].judgeKey === "consolidate:stub+writer@p4d6"],
     ["thought_stats", {}, "GET", "/v1/stats", undefined, (v) => say.renderThoughtStats(ok(v)), (v) => typeof v.total === "number" && v.total > 0],
     ["thought_changes", { limit: 10, actions: ["capture"] }, "GET", "/v1/changes?limit=10&actions=capture", undefined, (v) => say.renderThoughtChanges(ok(v)), has("changes")],
     ["worker_status", {}, "GET", "/v1/workers", undefined, (v) => say.renderWorkerStatus(ok(v)), has("pools")],
@@ -368,6 +380,30 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
     assert(selR.status === 400 && selR.body.code === "REFUSED_CURSOR" && selR.body.reason === "filters" && same(selR.body.made, made)
         && selM.isError && selM.sc?.reason === "filters" && same(selM.sc?.made, made) && selM.text.startsWith("Refused: that cursor was made with `status: all` and no other filter"),
       `a cursor passed with other filters: REST's 400 REFUSED_CURSOR and the tool's refusal, each naming the filters it was made under (${selR.status} ${String(selR.body.reason)}, ${selM.text.slice(0, 80)})`);
+  }
+  // SMD-4446 PR 3a: the parts' cursor through both doors, as the proposals' above: page two the same through REST and
+  // MCP, and a cursor that is none of this listing's, the proposals' own among them, or made under other filters,
+  // refused alike. REST's answer carries the quotes and their contexts, which the tool's value leaves to its text.
+  {
+    const p1 = await rest("GET", "/v1/settled-parts?status=all&limit=1");
+    const cur = String(p1.body.cursor);
+    const r2 = await rest("GET", `/v1/settled-parts?status=all&limit=1&after=${encodeURIComponent(cur)}`);
+    const m2 = await mcp("list_settled_parts", { status: "all", limit: 1, after: cur });
+    const out2 = rendered((v) => say.renderSettledParts(ok(v as never)), r2.body);
+    const first = (p1.body.parts as { statement: { text: string; inText: boolean; before: string | null; after: string | null }; older: { head: string } }[])[0];
+    const proposalsCur = String((await rest("GET", "/v1/proposals?status=all&limit=1")).body.cursor);
+    const badR = await rest("GET", `/v1/settled-parts?after=${encodeURIComponent(proposalsCur)}`);
+    const badM = await mcp("list_settled_parts", { after: proposalsCur });
+    assert(p1.status === 200 && typeof p1.body.cursor === "string" && p1.body.remaining === 1 && r2.status === 200 && r2.body.cursor === null && out2.content[0].text === m2.text && same(out2.structuredContent, m2.sc)
+        && first.statement.text === "the first thought through REST" && first.statement.inText === true && first.statement.before === "alpha: " && first.statement.after === "" && first.older.head === "alpha: the first thought through REST"
+        && badR.status === 400 && badR.body.code === "REFUSED_CURSOR" && badM.isError && badM.text.startsWith("Refused: `after` is not a list_settled_parts cursor"),
+      `the parts' page two by page one's cursor, the same through REST and MCP; REST's answer gives each quote with its context and the thought's first words; the proposals' cursor refused alike (${r2.status}, ${badR.status} ${String(badR.body.code)}, ${JSON.stringify(first.statement)})`);
+    const selR = await rest("GET", `/v1/settled-parts?limit=1&after=${encodeURIComponent(cur)}`);
+    const selM = await mcp("list_settled_parts", { limit: 1, after: cur });
+    const made = { list: "parts", status: "all", judgeKey: null };
+    assert(selR.status === 400 && selR.body.code === "REFUSED_CURSOR" && selR.body.reason === "filters" && same(selR.body.made, made)
+        && selM.isError && selM.sc?.reason === "filters" && same(selM.sc?.made, made) && selM.text.startsWith("Refused: that cursor was made with `status: all` and no other filter"),
+      `a parts cursor passed with other filters: REST's 400 REFUSED_CURSOR and the tool's refusal, each naming the filters it was made under (${selR.status} ${String(selR.body.reason)}, ${selM.text.slice(0, 80)})`);
   }
   // A limit is a whole number of thoughts, 1 to 1000: 0, -1, 1.5 and 1001 are the schema's refusal, not an empty page (review pass 1).
   // A `days` past a thousand years is the schema's refusal (review pass 2: a larger one put `since` past timestamptz's

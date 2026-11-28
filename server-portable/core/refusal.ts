@@ -9,7 +9,7 @@ import type { Citation, ClaimProblem, PriorityItem, PriorityProblem } from "../s
 import type { ItemProblem } from "../open-items.ts";
 import type { StandingFlag } from "../standing.ts";
 import type { FindingInputError } from "../priority-kinds.ts";
-import type { FindingSelection, ProposalSelection } from "./list-cursor.ts";
+import type { FindingSelection, PartSelection, ProposalSelection } from "./list-cursor.ts";
 
 /**
  * Every refusal an operation returns. The SMD-1978 codes the session hook keys
@@ -27,7 +27,7 @@ export type Refusal =
   | { code: "REFUSED_EGRESS"; retryable: false; rule: string; reason: string; actor: string } // the query may not leave for its embedding (SMD-1903)
   | { code: "REFUSED_THREAD_INPUT"; retryable: false; problem: "key_or_id" | "key_shape" | "after_needs_key"; value?: string } // thread (SMD-3306 PR 7a-2a): neither or both of key and id; a key that is no subject key (value: it, in the text alone); after without key
   | { code: "REFUSED_SINCE"; retryable: false; value: string }        // a `since` that is neither a time nor a cursor
-  | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort" | "filters"; sort?: "newest" | "oldest"; made?: ProposalSelection | FindingSelection } // list_thought_ids' `after` is not a thought id; list_thoughts' is none of this tool's cursors (shape) or was made under the other `sort` (sort: the one it was made under); list_supersession_proposals' is none of its cursors (shape, SMD-3249) or was made under other filters (filters, made: the status, lineage and judge_key it was made under — tokens, a boolean and a pass key, review pass 1); list_priority_findings' is none of its cursors (shape) or was made under another status or kind (filters, made: the status and kind it was made under, SMD-3671 PR 2)
+  | { code: "REFUSED_CURSOR"; retryable: false; value: string; reason?: "shape" | "sort" | "filters"; sort?: "newest" | "oldest"; made?: ProposalSelection | FindingSelection | PartSelection } // list_thought_ids' `after` is not a thought id; list_thoughts' is none of this tool's cursors (shape) or was made under the other `sort` (sort: the one it was made under); list_supersession_proposals' is none of its cursors (shape, SMD-3249) or was made under other filters (filters, made: the status, lineage and judge_key it was made under — tokens, a boolean and a pass key, review pass 1); list_priority_findings' is none of its cursors (shape) or was made under another status or kind (filters, made: the status and kind it was made under, SMD-3671 PR 2)
   // The compat search found nothing while its query's embedding provider did not answer (SMD-2891): what was
   // matched without a vector (the query's literals, or with none the query as one text) and why nothing came of it.
   | { code: "EMBEDDING_PROVIDER_UNAVAILABLE"; retryable: true; reason: string; detail: string; base: string; matched: "literals" | "text" | "none"; needles: string[]; commonNeedles: string[] }

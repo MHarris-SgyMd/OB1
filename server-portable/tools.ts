@@ -42,6 +42,8 @@ export const TOOLS = [
   { name: "job_status", scope: "read" },
   { name: "scan_thoughts", scope: "read" },
   { name: "list_supersession_proposals", scope: "read" },
+  // The settled parts' listing (SMD-4446 PR 3a, migration 156): any key that reads lists them, as it lists the proposals.
+  { name: "list_settled_parts", scope: "read" },
   { name: "thought_stats", scope: "read" },
   { name: "thought_changes", scope: "read" },
   { name: "brain_info", scope: "read" },

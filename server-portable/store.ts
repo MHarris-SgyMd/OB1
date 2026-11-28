@@ -10,6 +10,7 @@
  * meet, and the normalisers below keep each row shape in one place.
  */
 
+import type { PartPage, PartPosition, PartStatus } from "./part-listing.ts";
 import type { Reviewer, ReviewResult } from "./proposal-review.ts";
 import type { EgressRecord } from "./egress.ts";
 import type { DatabaseFacts, ReadOptions, ReadProgress, readHeartbeats } from "./brain-info.ts";
@@ -3242,6 +3243,14 @@ export interface ThoughtStore {
   listSupersessionProposals(opts: { status?: "pending" | "accepted" | "rejected" | "stale" | null; limit?: number; lineage?: boolean; judgeKey?: string; after?: ProposalPosition }): Promise<ProposalPage>;
 
   /**
+   * The settled parts in one status (null: every status), oldest judged first, each with its two quotes as its
+   * thoughts hold them now: migration 156's listing, through the one read db/consolidate.ts --parts makes too
+   * (part-listing.ts; SMD-4446 PR 3a). `after` starts past that place. Throws on a schema before 156, and
+   * ListCursorRefused for a cursor whose time Postgres cannot read; the tool names the migration.
+   */
+  listSettledParts(opts: { status?: PartStatus | null; limit?: number; judgeKey?: string; after?: PartPosition }): Promise<PartPage>;
+
+  /**
    * Migration 052's change feed (SMD-1296): one page of thought_audit, oldest
    * first, from a time or a cursor — see ChangeFilters. One function, so the bounds, the order and the bounded rendering are
    * decided once, in SQL. Throws on a schema before 052 (the tool names the
@@ -3401,7 +3410,7 @@ const STORE_OPERATIONS: Record<Exclude<keyof ThoughtStore, "kind">, boolean> = {
   listThoughtIds: true, listVectorless: true, mendLock: false, listLoggedSearches: true, workerStatus: true, heartbeats: true, retryFailed: true, releaseStaleLeases: true, dryRunClaim: true,
   statsSummary: true, databaseFacts: true, pageThoughtMeta: true, captureThought: true, updateThought: true, deleteThought: true, forgetThought: true, textForgottenAt: true, thoughtsKeyed: true, clientKeyOf: true,
   resetCaptureStamp: true, reviewProposal: true, claimWork: true, renewClaim: true, releaseClaim: true, claimTokenIs: true, listClaims: true, unreleasedClaimsOn: true, closedTicket: true, claimLease: true, claimsMadeSince: true, assertPriority: true, clearPriority: true, priorityRecord: true, priorityItem: true, effectivePriority: true, agenda: true, logAgenda: true, logPlanContext: true, openItem: true, updateItem: true, setItemStatus: true, proposeItemClose: true, decideItemClose: true, itemHistory: true, listItems: true, recordDeliverable: true, verifyDeliverable: true, deliverableHistory: true, thoughtValidity: true, derivedFromOf: true, resolveAgent: true, captureActorOf: true, takenFromCapturer: true, existingIds: true, thoughtsNamed: true, keyAtText: true, traceProvenance: true,
-  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, subjectRepo: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listChanges: true, logSearch: true, logActions: true,
+  prioritySpan: true, setPriorityWeights: true, setWorkClaimCap: true, releaseHolderClaims: true, listPriorityFindings: true, staleUnreviewedOn: true, reviewPriorityFinding: true, findDerivatives: true, supersededAmong: true, ticketStatusInputs: true, threadPage: true, threadPlaces: true, subjectRepo: true, relationsAmong: true, relationsPage: true, listSupersessionProposals: true, listSettledParts: true, listChanges: true, logSearch: true, logActions: true,
   pluginTx: true, trustCeiling: true, revokedKeys: true, jobSink: false, close: false,
 };
 

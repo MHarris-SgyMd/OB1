@@ -139,6 +139,8 @@ export const ROUTES: { [K in ToolName]: Route<K> } = {
   list_thought_ids: { method: "GET", path: "/v1/thought-ids", ok: 200, call: CALLS.list_thought_ids },
   list_logged_searches: { method: "GET", path: "/v1/logged-searches", ok: 200, call: CALLS.list_logged_searches },
   list_supersession_proposals: { method: "GET", path: "/v1/proposals", ok: 200, call: CALLS.list_supersession_proposals },
+  // The settled parts' listing (SMD-4446 PR 3a, migration 156): its filters and its cursor in the query.
+  list_settled_parts: { method: "GET", path: "/v1/settled-parts", ok: 200, call: CALLS.list_settled_parts },
   thought_stats: { method: "GET", path: "/v1/stats", ok: 200, call: CALLS.thought_stats },
   thought_changes: { method: "GET", path: "/v1/changes", ok: 200, call: CALLS.thought_changes },
   worker_status: { method: "GET", path: "/v1/workers", ok: 200, call: CALLS.worker_status },

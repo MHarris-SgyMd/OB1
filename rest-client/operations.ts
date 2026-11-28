@@ -23,6 +23,7 @@ export const OPERATIONS = {
   list_items: { method: "GET", path: "/v1/items" },
   list_logged_searches: { method: "GET", path: "/v1/logged-searches" },
   list_priority_findings: { method: "GET", path: "/v1/priority-findings" },
+  list_settled_parts: { method: "GET", path: "/v1/settled-parts" },
   list_supersession_proposals: { method: "GET", path: "/v1/proposals" },
   list_thought_ids: { method: "GET", path: "/v1/thought-ids" },
   list_thoughts: { method: "GET", path: "/v1/thoughts" },

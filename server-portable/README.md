@@ -851,6 +851,16 @@ with no active Linear link between them now (079's `child_of`, `blocks`,
 `blocked_by`, `relates_to`, and a `duplicate_of` either way), so a link made
 after a verdict takes the pair out; not counted before 079 — and the stale
 ones; `none pending` when there is none.
+The **settled parts** a decide-mode pass records (SMD-4446) have a listing of
+their own: the `list_settled_parts` tool, `GET /v1/settled-parts` and
+`consolidate.ts --parts`, one read (`part-listing.ts`, migration 156). Each part
+is shown with its two quotes in their thoughts' texts as they stand, between
+`«` and `»`; a side edited since the part was judged says so, a quote its text
+no longer holds is said gone, and the whole-thought proposal on the same pair
+is named. REST's answer carries each quote with its context; the tool's value
+carries ids, words and flags, and its text the rest. Oldest judged first, by
+`status` and `judge_key`, with a cursor of its own. Nothing decides a part yet.
+
 `consolidate.ts --accept`/`--reject` and the `review_supersession_proposal` tool decide
 them (SMD-3338); `consolidate.ts --list` and the `list_supersession_proposals` tool list
 them — each accepted or rejected row with who decided it (114's columns, read by the
@@ -1889,7 +1899,7 @@ stripped (`X-Forwarded-Prefix`).
   /v1/thoughts/{id}`, `POST /v1/thoughts`, `POST
   /v1/thoughts/{id}/reset-capture-stamp`, `/evidence` and `/forget`, `POST /v1/search` (and
   `/keyword`, `/compat`), `GET /v1/stats`, `/v1/changes`, `/v1/thought-ids`,
-  `/v1/logged-searches`, `/v1/proposals`, `/v1/brain`, `/v1/workers`, `POST
+  `/v1/logged-searches`, `/v1/proposals`, `/v1/settled-parts`, `/v1/brain`, `/v1/workers`, `POST
   /v1/workers/retry`, `/release-leases`, `/run`, `POST /v1/scans`, `GET
   /v1/jobs/{job_id}` and its `/stream`. A GET or DELETE reads its input from the
   query string, a POST or PATCH from a JSON body, and input sent the other way is

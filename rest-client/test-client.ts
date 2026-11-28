@@ -21,7 +21,7 @@ import { ROUTES } from "../server-portable/rest/routes.ts";
 import { createRestApp } from "../server-portable/rest/app.ts";
 import { loadPlugins } from "../server-portable/core/plugins.ts";
 // SMD-3249 review pass 2: a cursor the real core reads, made for the selection beside it (a hand-written one went stale with pass 1).
-import { proposalCursor } from "../server-portable/core/list-cursor.ts";
+import { partsCursor, proposalCursor } from "../server-portable/core/list-cursor.ts";
 import { TOOL_NAMES, type ToolName } from "../server-portable/tools.ts";
 import { renderAll } from "./generate.ts";
 import { createRestClient, FORWARDER_HEADER, OPERATIONS, type Answer, type InputOf } from "./index.ts";
@@ -105,6 +105,8 @@ console.log("\n[3] Every operation through the client: its input arrives as the 
     list_thought_ids: { limit: 2, after: ID },
     list_logged_searches: { since: "2026-10-01T00:00:00+02:00", limit: 3 },
     list_supersession_proposals: { status: "all", lineage: false, limit: 2, judge_key: "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3", after: proposalCursor({ status: "all", lineage: false, judgeKey: "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d3" }, "0.90", "2026-09-25 00:00:00+00", "22222222-2222-4222-8222-222222222222") },
+    // The settled parts' listing (SMD-4446 PR 3a): its filters and its own cursor ride the query string, the key's + among them.
+    list_settled_parts: { status: "all", limit: 2, judge_key: "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d6", after: partsCursor({ list: "parts", status: "all", judgeKey: "consolidate:h2o-lightning-4b+qwen3.8:27b@p4d6" }, "2026-09-25 00:00:00+00", "22222222-2222-4222-8222-222222222222") },
     thought_stats: {},
     thought_changes: { actions: ["capture", "delete"], others_only: true, limit: 4 },
     worker_status: {},

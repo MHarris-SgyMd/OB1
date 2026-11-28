@@ -5681,8 +5681,9 @@ of a part that is not the pass.
   both whole texts through the sort: listing every status took 676 ms on that
   table, and 12 ms chosen first.
 - **`consolidate.ts --parts [status]`** prints it (below), through the one
-  read the server's store will make (`server-portable/part-listing.ts`). The
-  REST route and the MCP tool follow (PR 3a-2), then the decision (PR 3b).
+  read the server's store makes too (`server-portable/part-listing.ts`): the
+  `list_settled_parts` tool and `GET /v1/settled-parts` (PR 3a-2;
+  `server-portable/README.md`). The decision follows (PR 3b).
 
 It is SECURITY INVOKER and reads `settled_parts`, `thoughts` and
 `supersession_proposals`, and `ob1_agents` for a decided row whose decision

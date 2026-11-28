@@ -19,7 +19,8 @@ import type { Ctx } from "./context.ts";
 import { embeddingProviderError, providerLogWords } from "./provider-refusal.ts";
 import { FilterError, parseFilter, trustAtOrAbove, withActorFilter, type Trust } from "./filter.ts";
 import { ok, refuse, type Outcome, type Refusal } from "./refusal.ts";
-import { listCursor, parseListCursor, parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "./list-cursor.ts";
+import { listCursor, parseListCursor, parsePartsCursor, parseProposalCursor, partsCursor, proposalCursor, samePartSelection, sameSelection, type PartSelection, type ProposalSelection } from "./list-cursor.ts";
+import type { SettledPart } from "../part-listing.ts";
 import { parseSince } from "./since.ts";
 import { fetchedThreads, type FetchedThread } from "./threads.ts";
 import { relationsLabel, relationsOf, relationsResult } from "./relations.ts";
@@ -1088,6 +1089,33 @@ export async function listSupersessionProposals(ctx: Ctx, _principal: Principal,
   }
   const cursor = page.next ? proposalCursor(selection, page.next.confidence, page.next.judgedAt, page.next.id) : null;
   return ok({ status, ...(lineage === undefined ? {} : { lineage }), ...(judgeKey === undefined ? {} : { judgeKey }), proposals: page.proposals, cursor, remaining: page.remaining, pastCursor: position !== undefined, reviewersRead: page.reviewersRead });
+}
+
+/**
+ * A page of the settled parts (SMD-4446 PR 3a): `cursor` the next page's `after` while more follow, else null;
+ * `remaining` how many follow this page; `pastCursor` whether this page followed a cursor, so an empty one is said as
+ * the walk's end, not an empty queue (the proposals' listing's shape, SMD-3249).
+ */
+export type PartsResult = { status: Input<"list_settled_parts">["status"]; judgeKey?: string; parts: SettledPart[]; cursor: string | null; remaining: number; pastCursor: boolean };
+
+export async function listSettledParts(ctx: Ctx, _principal: Principal, { status, limit, judge_key: judgeKey, after }: Input<"list_settled_parts">): Promise<Outcome<PartsResult>> {
+  // `after` is a cursor a page of this listing ended with, read before the store sees it. It carries the selection it
+  // was made under, and one passed with other filters is refused rather than read as a place in another selection
+  // (list_supersession_proposals' rule, SMD-3249).
+  const selection: PartSelection = { list: "parts", status, judgeKey: judgeKey ?? null };
+  const position = after === undefined ? undefined : parsePartsCursor(after);
+  if (position === null) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "shape" });
+  if (position && !samePartSelection(position.selection, selection)) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after!, reason: "filters", made: position.selection });
+  let page;
+  try {
+    page = await (await ctx.store()).listSettledParts({ status: status === "all" ? null : status, limit, ...(judgeKey === undefined ? {} : { judgeKey }), ...(position ? { after: { judgedAt: position.judgedAt, id: position.id } } : {}) });
+  } catch (e) {
+    // A cursor of the right shape whose time Postgres cannot read: the same refusal, not a fault quoting it.
+    if (e instanceof ListCursorRefused && after !== undefined) return refuse({ code: "REFUSED_CURSOR", retryable: false, value: after, reason: "shape" });
+    throw e;
+  }
+  const cursor = page.next ? partsCursor(selection, page.next.judgedAt, page.next.id) : null;
+  return ok({ status, ...(judgeKey === undefined ? {} : { judgeKey }), parts: page.parts, cursor, remaining: page.remaining, pastCursor: position !== undefined });
 }
 
 // ── thought_stats and thought_changes ────────────────────────────────────────
