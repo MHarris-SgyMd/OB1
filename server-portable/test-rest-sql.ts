@@ -4101,13 +4101,14 @@ console.log("\n[27] The unreviewed mark on a priority (SMD-3671 PR 3): sleep's s
   }
 }
 
-console.log("\n[28] The validity read through both doors (SMD-3887 PR 2b, migration 149): GET /v1/validity?ids=… and MCP validity, a read key's — a thought under a pending proposal contested, the other side unchallenged, both review pending, the judge's number uncalibrated, an unknown id found false, a repeat answered once in the order given; the text names each thought's three states; a review record's time in the API's form; over 100 ids refused by the input's rule (REST 400 REFUSED_INPUT, MCP isError); a malformed id refused 400 by the schema; a capture-only key refused 403");
+console.log("\n[28] The validity read through both doors (SMD-3887 PR 2b, migration 149): GET /v1/validity?ids=… and MCP validity, a read key's — a thought under a pending proposal contested, the other side unchallenged, both review pending, the judge's number uncalibrated, an unknown id found false, a repeat answered once in the order given; the text names each thought's three states; an accepted settled part in its thought's mark beside a state that stands, under the pages' names through both doors, the text marking the state and naming the part (SMD-4446 PR 3c-3, migration 158); a review record's time in the API's form; over 100 ids refused by the input's rule (REST 400 REFUSED_INPUT, MCP isError); a malformed id refused 400 by the schema; a capture-only key refused 403");
 {
   const ins = async (content: string) => String((await sql`INSERT INTO thoughts (content, metadata) VALUES (${content}, '{}'::jsonb) RETURNING id`)[0].id);
   const older = await ins("[28] validity: the deploy window is noon"), newer = await ins("[28] validity: the deploy window is nine");
   const ghost = "3887f028-0000-4000-8000-000000000028";
   await sql`SELECT record_supersession_proposal(${older}::uuid, ${newer}::uuid, 'newer_supersedes_older', 0.83, '[28]', 0.9, 'consolidate:[28]@p1', NULL, NULL, NULL, NULL)`;
   type T = { id: string; found: boolean; forgotten?: boolean | null; validity?: { state: string; records: { kind: string; judge?: { confidence: number; calibrated: boolean } }[] }; review?: { state: string } };
+  type M28 = { id: string; found: boolean; validity?: { state: string; settled: { id: string; group: string | null; word: string; otherIs: string; by: { id: string }; acceptedAt: string | null; editedSince: boolean; shownByInText: boolean }[] | null; settledMore: number } };
   try {
     const q = `/v1/validity?ids=${older}&ids=${newer}&ids=${older}&ids=${ghost}`;
     const viaRest = await rest("GET", q, undefined, KEYS.reader);
@@ -4121,6 +4122,33 @@ console.log("\n[28] The validity read through both doors (SMD-3887 PR 2b, migrat
         && !viaMcp.isError && same(mt, rt) && viaMcp.text.includes(`${older}: validity contested; review pending`) && viaMcp.text.includes(`${ghost}: not a thought`)
         && viaMcp.text.includes("uncalibrated") && /review: proposal [0-9a-f-]{36} pending/.test(viaMcp.text),
       `a read key reads both doors alike: the falling side contested, the other unchallenged, both pending, the judge's 0.83 uncalibrated, the unknown id found false, a repeat once in order (${viaRest.status} ${rt.map((t) => t.validity?.state ?? "missing").join("/")} ${JSON.stringify(judge)} ${viaMcp.isError})`);
+
+    // The partly settled mark (SMD-4446 PR 3c-3, migration 158): an accepted settled part stands on the contested
+    // thought. Both doors carry it beside the state, which stands, under the names the search and list pages give a
+    // part; the other side of the pair carries an empty list, and an id that is no thought no validity at all. The
+    // text marks the state, names the part and says once what the mark means.
+    const fp28 = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+    const before28 = ((await rest("GET", q, undefined, KEYS.reader)).body.thoughts ?? []) as M28[];
+    const part28 = String(((await sql`SELECT record_settled_part(${older}::uuid, ${newer}::uuid, 'older', 'the deploy window is noon', 'the deploy window is nine', 'revises', 'made up for [28]',
+                                                                 'consolidate:rest28+writer@p4d6', ${await fp28(older)}, ${await fp28(newer)}, '{"deterministic": false}'::jsonb) AS r`)[0].r as { id: string }).id);
+    const pending28 = ((await rest("GET", q, undefined, KEYS.reader)).body.thoughts ?? []) as M28[];
+    await sql`SELECT review_settled_part(${part28}::uuid, 'accept')`;
+    const markRest = await rest("GET", q, undefined, KEYS.reader);
+    const mr = (markRest.body.thoughts ?? []) as M28[];
+    const markMcp = await mcp("validity", { ids: [older, newer, older, ghost] }, KEYS.reader);
+    const [heldPart] = mr[0]?.validity?.settled ?? [];
+    assert(before28.every((t) => !t.found || (JSON.stringify(t.validity?.settled) === "[]" && t.validity?.settledMore === 0)) && JSON.stringify(pending28[0]?.validity?.settled) === "[]"
+        && markRest.status === 200 && mr[0].validity?.state === "contested" && mr[0].validity.settled?.length === 1 && mr[0].validity.settledMore === 0
+        && JSON.stringify({ ...heldPart, acceptedAt: null }) === JSON.stringify({ id: part28, group: "no_longer_holds", word: "revises", otherIs: "newer", by: { id: newer }, acceptedAt: null, editedSince: false, shownByInText: true })
+        && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(String(heldPart?.acceptedAt))
+        && mr[1].validity?.state === "unchallenged" && JSON.stringify(mr[1].validity.settled) === "[]" && mr[1].validity.settledMore === 0 && mr[2].found === false && mr[2].validity === undefined,
+      `with no part accepted, each thought's mark is an empty list, a pending part in none; accepted, the part is in its thought's mark over REST under the pages' names, its time in the API's form, beside a state that stands; the other side's mark is empty and an id that is no thought has none (${markRest.status} ${mr[0]?.validity?.state} ${JSON.stringify(heldPart)})`);
+    assert(!markMcp.isError && same((markMcp.sc.thoughts ?? []) as M28[], mr)
+        && markMcp.text.includes(`- ${older}: validity contested, partly settled (1 statement); review pending`) && markMcp.text.includes(`- ${newer}: validity unchallenged; review pending`)
+        && markMcp.text.includes(`  - settled part ${part28}: a statement of it no longer holds (the writer's word: revises), shown by ${newer}, the newer of the pair, accepted ${String(heldPart?.acceptedAt)}`)
+        && markMcp.text.split("Partly settled: a reviewer accepted that another thought settles a statement of this one").length === 2 && !markMcp.text.includes("partly settled not read")
+        && !markMcp.text.includes("the deploy window is"),
+      `the MCP door carries the same value, and its text marks the state, names the part, what it says of a statement and the thought that shows it, says once what the mark means, and quotes no statement (${markMcp.isError}; ${markMcp.text.split("\n").find((l) => l.includes("settled part")) ?? "no part line"})`);
 
     // A verification's record carries its time in the API's form ('…Z'), not jsonb's '+00:00' (review pass 2).
     const spec28 = await ins("[28] validity: the spec");

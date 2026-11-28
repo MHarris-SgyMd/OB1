@@ -8,7 +8,7 @@ An architecture decision record. **Proposed and accepted by the maintainer on 20
 - **Record:** a table, column or facet that already says something about a thought: a pointer, a proposal, a relation, a citation, a lineage row, an audit event.
 - **Version:** which text of a thought a record was made on: the thought's id with its `content_fingerprint` (003), or one audit event's `seq` (050).
 - **Axis:** one question asked of a thought. This record keeps three: **validity** (does it still hold), **review** (did someone decide on it), **freshness** (have the views derived from it caught up). Each has its own states, read from its own records.
-- **Settled part:** a statement inside a thought that a later thought settles, while the thought itself still stands. SMD-4446 builds its store (decided on SMD-3340, 2026-11-19): migration 151 is the table, `settled_parts`, and the consolidation pass writes them since decide version 6 (`@p4d6`), as proposals for review. `consolidate.ts --parts`, the `list_settled_parts` tool and `GET /v1/settled-parts` list them, each quote in its thought's text as it stands (migration 156); nothing decides one yet, and no thought shows one. Freshness (row 6) reads a part's lineage row as it reads a proposal's, by the part's own status, since migration 154: `pending` or `stale` it stands, `stale` reading requested; a reviewer's decision is history; with no part it is orphaned. The pass rejects no part: one it settles it removes, so no rejection of the pass's is read. A role that cannot read `settled_parts` has `part` in `unread`, and freshness unknown for a thought such a row names.
+- **Settled part:** a statement inside a thought that a later thought settles, while the thought itself still stands. SMD-4446 builds its store (decided on SMD-3340, 2026-11-19): migration 151 is the table, `settled_parts`, and the consolidation pass writes them since decide version 6 (`@p4d6`), as proposals for review. `consolidate.ts --parts`, the `list_settled_parts` tool and `GET /v1/settled-parts` list them, each quote in its thought's text as it stands (migration 156). No REST or MCP operation decides one yet: 151's `review_settled_part` is the database's. An accepted part shows on the thought that holds its statement: `fetch` carries it whole and the search and list pages mark it (migration 157), and this read carries the partly settled mark (migration 158; Validity states, below). Freshness (row 6) reads a part's lineage row as it reads a proposal's, by the part's own status, since migration 154: `pending` or `stale` it stands, `stale` reading requested; a reviewer's decision is history; with no part it is orphaned. The pass rejects no part: one it settles it removes, so no rejection of the pass's is read. A role that cannot read `settled_parts` has `part` in `unread`, and freshness unknown for a thought such a row names.
 - **Challenge:** a record that says a thought may not hold: a pending or stale supersession proposal that names it as the side that falls, or as one side of an undirected conflict; or a deliverable's `corrected` verification.
 
 ## Why
@@ -93,7 +93,7 @@ What the counts say:
 
 **The checkpoint rule.** A deliverable's checkpoint is free text (134: a commit hash or a content fingerprint, 1 to 200 characters), and a 64-character hex string can be either. The read does not guess which. It compares: a checkpoint equal to the thought's fingerprint now reads **current**; one equal to the fingerprint of an earlier text of the thought, computed from the text its audit events carry (a capture's content since 055, an update's before and after), reads **earlier**; anything else reads **unmatched**, and is taken as applying to the current text, as a commit's must be. An earlier text the log does not hold (an event from before 055, or one a forget redacted, 139) cannot be matched, so its checkpoint reads unmatched: the rule errs toward the challenge standing. The read names the checkpoint's reading.
 
-A **partly settled** mark joins when SMD-4446's store lands: an accepted settled part says a statement in the thought no longer holds, while the thought stands. It sits beside the state, never in place of it, as SMD-4446 decides ("a part never sets `supersedes` and never demotes a thought").
+A **partly settled** mark sits beside the state since migration 158 (SMD-4446): an accepted settled part says a statement in the thought no longer holds, or is done, while the thought stands. The read carries it under `validity` as `settled`: the accepted parts standing on the thought, as 157's `settled_parts_on` reads them (a part stands while the thought's text still says its statement), the first 20 in the order the text says them, and the rest counted. Each part gives its id, its group and word, the other thought of its pair and which of the pair that is, when it was accepted, and whether either text has moved since. It quotes no statement: `fetch` shows each, with the words that show it. It is never in place of the state, as SMD-4446 decides ("a part never sets `supersedes` and never demotes a thought"): no state, found level or record of an axis reads a part, so a superseded thought with an accepted part is superseded and an unchallenged one unchallenged. A thought with none carries an empty list. Where the role cannot read `settled_parts` the mark is null, with `part` in `unread`.
 
 ### Transitions
 
@@ -127,12 +127,15 @@ The read is one SQL function and one core operation. Its names and file layout a
 {
   "id": "…",
   "version": { "fingerprint": "…", "seq": 1234 },
-  "validity": { "state": "contested", "records": [ { "kind": "proposal", "id": "…", "status": "pending", "verdict": "newer_supersedes_older", "falls": "this", "judge": { "confidence": 0.83, "calibrated": false } } ] },
+  "validity": { "state": "contested", "records": [ { "kind": "proposal", "id": "…", "status": "pending", "verdict": "newer_supersedes_older", "falls": "this", "judge": { "confidence": 0.83, "calibrated": false } } ],
+                "settled": [ { "id": "…", "group": "no_longer_holds", "word": "revises", "otherIs": "newer", "by": { "id": "…" }, "acceptedAt": "…", "editedSince": false, "shownByInText": true } ], "settledMore": 0 },
   "review": { "state": "pending", "records": [ { "kind": "proposal", "id": "…", "status": "pending" } ] },
   "freshness": { "state": "stale", "kinds": [ { "kind": "entities", "state": "stale", "produced_by": "…", "moved": ["…"] }, { "kind": "vector", "state": "current" } ] },
   "unread": []
 }
 ```
+
+`settled` and `settledMore` are the operation's names for the partly settled mark (migration 158), the ones the search and list pages give a part. The SQL function gives the same as `settled: {total, parts}` with the database's keys: `part`, `group`, `word`, `other`, `other_is`, `accepted_at`, `edited`, `shown_by_in_text`.
 
 An id the caller gives twice is answered once, and the cap counts distinct ids. A call with more distinct ids than the cap is refused whole, naming the cap, over REST and MCP alike.
 
@@ -151,7 +154,7 @@ An id the caller gives twice is answered once, and the cap counts distinct ids. 
 | SMD-3887 PR 3 | Row 13: the brain setting, the key shapes in `subject_key_valid` (111) and `server-portable/subject.ts`, the subject sweep's URL read, the mapping of existing keys with their threads | — (independent of PR 2) |
 | SMD-3901 | Row 8's revision trigger record | PR 2 |
 | SMD-3900 | The eligible mode and the revalidation read, over this read | PR 2 |
-| SMD-4446 | The settled-part store; the partly settled mark joins the read when it lands | — |
+| SMD-4446 | The settled-part store (151), and the partly settled mark on this read (158) | PR 2 for the mark |
 | SMD-2011 | The valid window on `thoughts`; the read gains it as one more input when it lands | — |
 
 ## Not decided here

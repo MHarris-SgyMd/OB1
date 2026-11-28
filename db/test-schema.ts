@@ -243,7 +243,11 @@ function definedIn(file: string): string[] {
  * no entry: 149 defines nothing else, so no restore has to run it first.
  * 155 is 153's set_subject_repo and record_thought_subjects with a GitHub
  * link's repository first (SMD-3887 PR 3b-1), and carries 153: a restore
- * re-runs 130 and 153 (153 carries 130), then 155.
+ * re-runs 130 and 153 (153 carries 130), then 155. 158 is 154's
+ * thought_validity with the partly settled mark (SMD-4446 PR 3c-3) and needs
+ * no entry: the one other function 154 defines, settle_stale_part, it still
+ * last defines and no earlier file holds, so no re-apply reverts it and no
+ * restore of the read has to run 154 first.
  */
 const CARRIES: Record<string, string[]> = { "148": ["073"], "120": ["102", "111"], "134": ["120"], "137": ["129"], "139": ["055"], "141": ["061"], "151": ["067", "111"], "152": ["115", "140"], "153": ["130"], "155": ["153"] };
 async function restoreShipped(...fns: string[]): Promise<string[]> {
@@ -22510,14 +22514,15 @@ console.log("\n[134] Migration 149: thought_validity — a thought's state on th
     db.query(`SELECT ob1_record_derivation($1, $2::uuid, $3::uuid[], $4::text[], $5, '{"deterministic": true}'::jsonb)`, [kind, artifact, inputs, fps, by]);
   const kindState = (t: T, kind: string) => t.freshness.kinds?.find((k) => k.kind === kind)?.state ?? "absent";
 
-  // The shape: one function, STABLE, SECURITY INVOKER, 149's comment. Its last definer is the stale parts' file, which
-  // carries it whole with an arm for a settled part's lineage row (SMD-4446; [139] holds the arm and that nothing else
-  // moved): every row of this section reads that body, the shipped one.
-  const carrier = files.find((f) => f.endsWith("_stale_parts.sql")) ?? "no _stale_parts.sql";
+  // The shape: one function, STABLE, SECURITY INVOKER, 149's comment. Its last definer is the partly settled file,
+  // which carries the stale parts' file's body whole with the partly settled mark beside the validity state ([143]
+  // holds the mark and that nothing else moved), as that file carries 149's with an arm for a settled part's lineage
+  // row ([139] holds the arm; both SMD-4446): every row of this section reads that body, the shipped one.
+  const carrier = files.find((f) => f.endsWith("_partly_settled.sql")) ?? "no _partly_settled.sql";
   const meta = await one<{ d: boolean; v: string; c: string | null }>(
     `SELECT p.prosecdef AS d, p.provolatile AS v, obj_description(p.oid, 'pg_proc') AS c FROM pg_proc p WHERE p.oid = 'thought_validity(uuid[])'::regprocedure`);
   assert(meta.d === false && meta.v === "s" && /Migration 149 \/ SMD-3887\./.test(meta.c ?? "") && lastDefinerOf("thought_validity") === carrier && (await functionsNamed("thought_validity")) === 1,
-    `thought_validity: STABLE, SECURITY INVOKER, 149's comment, the stale parts' file its last definer and the only one of the name (${meta.d}/${meta.v}/${lastDefinerOf("thought_validity")})`);
+    `thought_validity: STABLE, SECURITY INVOKER, 149's comment, the partly settled file its last definer and the only one of the name (${meta.d}/${meta.v}/${lastDefinerOf("thought_validity")})`);
 
   // The call: NULL NO_IDS; 101 distinct TOO_MANY whole; 100 distinct and a repeat answered (the cap counts distinct ids); the order given, a repeat once; an unknown id found false; 1001 ids TOO_MANY before de-duplication.
   const A = await thought("[134] A: the deploy runs at noon"), B = await thought("[134] B: the deploy runs at nine");
@@ -22778,8 +22783,9 @@ console.log("\n[134] Migration 149: thought_validity — a thought's state on th
   assert(forgot.found === false && forgot.forgotten === true && typeof forgot.forgotten_at === "string" && forgot.version === undefined,
     `a forgotten thought answers found false, forgotten, with its time and no version (${forgot.found}/${forgot.forgotten})`);
 
-  // 149 applied again makes no second function. It puts its own body back, without the part's arm, so the shipped
-  // file is restored for the sections after ([139] holds what the two bodies read differently).
+  // 149 applied again makes no second function. It puts its own body back, without the part's arm and without the
+  // partly settled mark, so the shipped file is restored for the sections after ([139] and [143] hold what the
+  // bodies read differently).
   await reapply(file);
   const afterReapply = await functionsNamed("thought_validity");
   const restoredRead = await restoreShipped("thought_validity");
@@ -24162,10 +24168,15 @@ console.log("\n[139] Migration 154: a settled part that is no longer a judgement
   await restoreShipped("settle_stale_part", "thought_validity", "record_settled_part", "review_settled_part", "rebuild_derived", "ob1_record_derivation", "update_thought");
 
   try {
-    // The shape: one function of each name, this file their last definer, each comment naming it, and the sentinels.
+    // The shape: one function of each name, each comment naming this file, and the sentinels. This file last defines
+    // the settle. The validity read's last definer is the partly settled file, which carries this file's body whole
+    // with its mark ([143] holds that nothing else moved), so the read's rows below run on the shipped body, and the
+    // rows on this file's own text and comment apply it first.
     const SETTLE = "settle_stale_part(uuid, text, text)", VALIDITY = "thought_validity(uuid[])";
-    for (const fn of ["settle_stale_part", "thought_validity"])
-      assert((await functionsNamed(fn)) === 1 && lastDefinerOf(fn) === file, `one ${fn}, this file its last definer (${lastDefinerOf(fn)})`);
+    const carrier = files.find((f) => f.endsWith("_partly_settled.sql")) ?? "no _partly_settled.sql";
+    assert((await functionsNamed("settle_stale_part")) === 1 && lastDefinerOf("settle_stale_part") === file, `one settle_stale_part, this file its last definer (${lastDefinerOf("settle_stale_part")})`);
+    assert((await functionsNamed("thought_validity")) === 1 && lastDefinerOf("thought_validity") === carrier && definedIn(file).join() === "settle_stale_part,thought_validity",
+      `one thought_validity, which this file defines and the partly settled file last defines (${lastDefinerOf("thought_validity")}; this file defines ${definedIn(file).join()})`);
     const settleComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SETTLE])).c ?? "", validityComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [VALIDITY])).c ?? "";
     const meta = await one<{ d: boolean; v: string }>(`SELECT p.prosecdef AS d, p.provolatile AS v FROM pg_proc p WHERE p.oid = $1::regprocedure`, [VALIDITY]);
     assert(new RegExp(`Migration ${NUM} / SMD-4446\\.$`).test(settleComment) && /Migration 149 \/ SMD-3887\./.test(validityComment) && new RegExp(`Since migration ${NUM} \\(SMD-4446\\) a settled part's lineage row`).test(validityComment)
@@ -24419,20 +24430,25 @@ console.log("\n[139] Migration 154: a settled part that is no longer a judgement
     await review(pu, "reject");
 
     // 149 applied again alone puts back the read with no arm: the accepted part's row, its newer text moved, reads
-    // stale for good, and no role has part in unread. The shipped file restores the arm. 149's own comment is read
-    // while it stands: this file's is that comment whole with one sentence after (review pass 5: two fragments of it
-    // were read, so a word of 149's part or the end of the added sentence could change and no row fail).
+    // stale for good, and no role has part in unread. This file applied over it puts the arm back, and the shipped
+    // file, which carries this one's body, keeps it. 149's own comment is read while it stands, and this file's
+    // while it does: this file's is 149's whole with one sentence after (review pass 5: two fragments of it were
+    // read, so a word of 149's part or the end of the added sentence could change and no row fail).
     await reapply(validityFile.slice(0, 4));
     const own149 = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [VALIDITY])).c ?? "";
     const ADDED = ` Since migration ${NUM} (SMD-4446) a settled part's lineage row (151) is read by its part's status: pending or stale it stands, stale it reads requested, a reviewer's decision is history and not read, and with no part it is listed as orphaned; a role that may not read settled_parts has part in unread, and freshness unknown for a thought such a row names.`;
     const without = await both(VO.id, VN.id);
+    await reapply(file.slice(0, 4));
+    const ownComment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [VALIDITY])).c ?? "";
+    const withOwn = await both(VO.id, VN.id);
     const restored = await restoreShipped("thought_validity");
     const withArm = await both(VO.id, VN.id);
-    assert(without === "stale/stale" && withArm === "absent/absent" && restored.includes(file) && lastDefinerOf("thought_validity") === file
-        && own149.length > 2000 && !own149.includes("settled part") && validityComment === own149 + ADDED,
-      `${validityFile.slice(0, 3)} applied again alone reads a decided part's row stale once its text moved, and the shipped file restores the arm; the read's comment is ${validityFile.slice(0, 3)}'s whole with one sentence after (${without}; ${withArm}; restored ${restored.join()}; ${own149.length} characters and ${validityComment.length - own149.length} more, whole: ${validityComment === own149 + ADDED})`);
+    assert(without === "stale/stale" && withOwn === "absent/absent" && withArm === "absent/absent" && restored.join() === carrier && lastDefinerOf("thought_validity") === carrier
+        && own149.length > 2000 && !own149.includes("settled part") && ownComment === own149 + ADDED,
+      `${validityFile.slice(0, 3)} applied again alone reads a decided part's row stale once its text moved; this file over it puts the arm back, and the shipped file keeps it; this file's comment on the read is ${validityFile.slice(0, 3)}'s whole with one sentence after (${without}; ${withOwn}; ${withArm}; restored ${restored.join()}; ${own149.length} characters and ${ownComment.length - own149.length} more, whole: ${ownComment === own149 + ADDED})`);
 
     // A re-apply is a no-op: one function of each name, the parts as they were, the read and the settle as before.
+    // (It leaves this file's read in place, without the later mark: the section's end restores the shipped one.)
     const partsBefore = JSON.stringify(await q(`SELECT id::text AS id, status FROM settled_parts ORDER BY id`));
     await reapply(file.slice(0, 4));
     assert((await functionsNamed("settle_stale_part")) === 1 && (await functionsNamed("thought_validity")) === 1 && JSON.stringify(await q(`SELECT id::text AS id, status FROM settled_parts ORDER BY id`)) === partsBefore
@@ -24474,6 +24490,9 @@ console.log("\n[139] Migration 154: a settled part that is no longer a judgement
     // A throw is a failed row, not the suite's end: the cleanup below runs, and so does whatever follows this section.
     assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
   } finally {
+    // This file applied again, above, leaves its own read in place: the shipped one, with the later mark, is put
+    // back for the sections after.
+    await restoreShipped("thought_validity");
     await db.exec(`DELETE FROM settled_parts WHERE older_id IN (SELECT id FROM thoughts WHERE content LIKE '[139]%') OR newer_id IN (SELECT id FROM thoughts WHERE content LIKE '[139]%')`);
     await db.exec(`DELETE FROM derivations WHERE artifact_kind = 'part'`);
     await db.exec(`DELETE FROM thought_work_claims WHERE thought_id IN (SELECT id FROM thoughts WHERE content LIKE '[139]%')`);
@@ -25004,6 +25023,264 @@ console.log("\n[142] Migration 157: the settled parts that stand on a thought �
     await db.exec(`DELETE FROM thoughts WHERE content LIKE '[142]%'`);
     await db.exec(`DELETE FROM ob1_agents WHERE label = '[142] op'`);
   }
+}
+
+console.log("\n[143] Migration 158: the validity read's partly settled mark — thought_validity carries, beside a thought's validity state, the accepted settled parts standing on it: validity.settled {total, parts}, each part its id, group and word, the other thought of its pair and which it is, when it was accepted, whether its thought's text has moved and whether the words that show it are still in the other; in the order the thought's text says them, at most twenty, total counting them all; none as an empty list; a pending, rejected or stale part and a statement edited out in no mark; no word of either thought; for a role that may not read the parts null, with part in unread, under either plan; no state, found level or record of any axis moved, the answer less the mark being the stale parts' file's whole; one read for the call, 157's, before the loop and behind an IF of its own; the body that file's verbatim but for the mark and its comment that file's with the key named and one sentence after; 149 or that file applied again takes the mark away and the shipped file restores it; a re-apply a no-op (SMD-4446)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const file = files.find((f) => f.endsWith("_partly_settled.sql")) ?? "no _partly_settled.sql";  // by name: renumbered when main takes its number
+  const NUM = file.slice(0, 3);
+  const staleFile = files.find((f) => f.endsWith("_stale_parts.sql")) ?? "no _stale_parts.sql";
+  const validityFile = files.find((f) => /^\d{3}_thought_validity\.sql$/.test(f)) ?? "no NNN_thought_validity.sql";
+  const SIG = "thought_validity(uuid[])";
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await restoreShipped("thought_validity", "settled_parts_on", "record_settled_part", "review_settled_part", "record_supersession_proposal", "update_thought");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[143]%'`);
+  await db.exec(`SELECT set_agent_kind('[143] op', 'operator')`);
+
+  try {
+    // The shape: one function, this file its last definer, STABLE and SECURITY INVOKER as it was; its comment keeps
+    // 149's and the stale parts' sentences, names the key in the answer's shape and says what this file adds; the
+    // sentinel is in the body.
+    const meta = await one<{ d: boolean; v: string }>(`SELECT p.prosecdef AS d, p.provolatile AS v FROM pg_proc p WHERE p.oid = $1::regprocedure`, [SIG]);
+    const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
+    const body = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).s);
+    assert((await functionsNamed("thought_validity")) === 1 && lastDefinerOf("thought_validity") === file && definedIn(file).join() === "thought_validity" && meta.d === false && meta.v === "s"
+        && /Migration 149 \/ SMD-3887\./.test(comment) && new RegExp(`Since migration ${staleFile.slice(0, 3)} \\(SMD-4446\\) a settled part's lineage row`).test(comment)
+        && /validity:\{state, found, records, settled\}, review:\{state, records\}/.test(comment)
+        && new RegExp(`Since migration ${NUM} \\(SMD-4446\\) validity carries settled beside its state: [^']* a partly settled thought stands\\.$`).test(comment)
+        && /ob1:partly-settled-sits-beside-the-state/.test(body),
+      `one thought_validity, this file its last definer and the only function it defines, STABLE and SECURITY INVOKER still; its comment keeps 149's and the stale parts' sentences, names settled in the answer's shape and says what ${NUM} adds; the sentinel (${meta.d}/${meta.v}; ${lastDefinerOf("thought_validity")}; ${definedIn(file).join()})`);
+
+    // One read for the call: 157's settled_parts_on, asked once of every id for twenty parts of each, behind an IF
+    // of its own and before the loop over the thoughts, which reads its answer by the thought's id.
+    const at = (needle: string) => body.indexOf(needle);
+    assert(body.split("settled_parts_on(").length === 2 && /\n  c_parts     constant int := 20;\n/.test(body)
+        && /\n  IF r_part THEN\n    SELECT COALESCE\(jsonb_object_agg\(x\.holder_id::text, [^\n]*\n(?:[^\n]*\n){4}              FROM settled_parts_on\(v_ids, c_parts\) s\n             GROUP BY s\.holder_id\) x;\n  END IF;\n\n  FOREACH v_id IN ARRAY v_ids LOOP\n/.test(body)
+        && at("FROM settled_parts_on(v_ids, c_parts) s") > at("v_unread := array_remove(ARRAY[") && at("v_unread := array_remove(ARRAY[") > 0
+        && body.split("v_settled").length === 4 && /'settled', CASE WHEN r_part THEN COALESCE\(v_settled -> v_id::text, jsonb_build_object\('total', 0, 'parts', '\[\]'::jsonb\)\) END\),\n/.test(body),
+      "the mark is one read for the call: 157's read asked once, of every id and for twenty parts of each, behind an IF of its own and before the loop over the thoughts, which takes each thought's parts from that answer by its id and reads the table no second time");
+
+    // Nothing else of thought_validity moves: this file's is the stale parts' file's verbatim but for the mark's
+    // three pieces, each taken out by its own text, and a piece that is not found counts against the row ([139]'s
+    // rule: a replace that finds nothing changes nothing). Its comment is that file's with the key named in the
+    // answer's shape and one sentence after.
+    const text = (f: string) => readFileSync(join(MIGRATIONS, f), "utf8");
+    const validityIn = (f: string) => { const x = text(f); const i = x.indexOf("CREATE OR REPLACE FUNCTION thought_validity("); return i < 0 ? `no thought_validity in ${f}` : x.slice(i, x.indexOf("\n$$;\n", i)); };
+    const commentIn = (f: string) => { const x = text(f); const i = x.indexOf("COMMENT ON FUNCTION thought_validity(uuid[]) IS\n"); return i < 0 ? `no comment on thought_validity in ${f}` : x.slice(i, x.indexOf("';\n", i) + 3); };
+    const less = (whole: string, pieces: [string | RegExp, string][]) => {
+      let out = whole, found = 0;
+      for (const [piece, without] of pieces) { const next = out.replace(piece, without); if (next !== out) found++; out = next; }
+      return { out, found };
+    };
+    const PIECES: [string | RegExp, string][] = [
+      [new RegExp(`  -- partly settled \\(${NUM}\\): how many parts of a thought the read lists, and the\\n  -- accepted parts standing on each thought asked for, by the thought's id\\.\\n  c_parts     constant int := 20;\\n  v_settled   jsonb := '\\{\\}'::jsonb;\\n`), ""],
+      [/\n  -- ob1:partly-settled-sits-beside-the-state[\s\S]*?\n  END IF;\n(?=\n  FOREACH v_id IN ARRAY v_ids LOOP\n)/, ""],
+      [/'records', v_vrecs,\n +-- Beside the state, never in place of it:[^\n]*\n +-- list, and null where the role may not read them\.\n +'settled', CASE WHEN r_part THEN [^\n]* END\),\n/, "'records', v_vrecs),\n"],
+    ];
+    const COMMENT_PIECES: [string | RegExp, string][] = [
+      ["validity:{state, found, records, settled}, review:{state, records}", "validity:{state, found, records}, review:{state, records}"],
+      [new RegExp(` Since migration ${NUM} \\(SMD-4446\\) validity carries settled beside its state: [^']* a partly settled thought stands\\.(?=';\\n$)`), ""],
+    ];
+    const asStale = less(validityIn(file), PIECES), commentAsStale = less(commentIn(file), COMMENT_PIECES);
+    assert(asStale.out === validityIn(staleFile) && asStale.found === PIECES.length && asStale.out.length < validityIn(file).length
+        && commentAsStale.out === commentIn(staleFile) && commentAsStale.found === COMMENT_PIECES.length && commentIn(staleFile).length > 2000,
+      `this file's thought_validity is ${staleFile.slice(0, 3)}'s verbatim but for the mark, each of its ${PIECES.length} pieces there, and its comment is that file's with the key named and one sentence after (${asStale.found} and ${commentAsStale.found} found; ${asStale.out.length} vs ${validityIn(staleFile).length} chars, ${commentAsStale.out.length} vs ${commentIn(staleFile).length})`);
+
+    type Part = { part: string; group: string; word: string; other: string; other_is: string; accepted_at: string; edited: boolean; shown_by_in_text: boolean };
+    type Mark = { total: number; parts: Part[] };
+    type V = { id: string; found: boolean; validity?: { state: string; found: string; records: unknown[]; settled?: Mark | null }; review?: { state: string }; freshness?: { state: string }; unread: string[] };
+    const READ_SQL = `SELECT thought_validity($1::uuid[]) AS r`;
+    const read = async (ids: (string | null)[]) => (await one<{ r: { ok: boolean; thoughts: V[] } }>(READ_SQL, [ids])).r.thoughts;
+    const v = async (id: string) => (await read([id]))[0];
+    const mark = async (id: string) => (await v(id)).validity?.settled ?? null;
+    const ids = (m: Mark | null | undefined) => (m?.parts ?? []).map((p) => p.part).join();
+    // The answer less the mark: what the read said before this file.
+    const lessMark = (ts: V[]) => JSON.stringify(ts.map((t) => { if (!t.validity) return t; const { settled: _mark, ...rest } = t.validity; return { ...t, validity: rest }; }));
+    const JUDGE = "consolidate:stub+writer@p4d6";
+    const RECIPE = JSON.stringify({ deterministic: false, model: "stub-writer" });
+    const cap = async (content: string, at: number) =>
+      (await one<{ r: { id: string } }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify({ metadata: { source: "mcp" }, embedding_model: EMBEDDING_MODEL }), unit(at)])).r.id;
+    const edit = async (id: string, content: string) =>
+      (await one<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) AS r`, [id, content])).r;
+    type Rec = { action?: string; id?: string };
+    const part = async (o: string, n: string, holder: string, statement: string, shown: string, word: string) => {
+      const r = (await one<{ r: Rec }>(`SELECT record_settled_part($1::uuid, $2::uuid, $3, $4, $5, $6, '[143] a reason', $7, content_fingerprint_of((SELECT content FROM thoughts WHERE id = $1::uuid)), content_fingerprint_of((SELECT content FROM thoughts WHERE id = $2::uuid)), $8::jsonb) AS r`,
+        [o, n, holder, statement, shown, word, JUDGE, RECIPE])).r;
+      if (r.action !== "recorded" || !r.id) throw new Error(`not recorded: ${JSON.stringify(r)}`);
+      return r.id;
+    };
+    const OP = (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = '[143] op'`)).id;
+    const ACTOR = JSON.stringify({ name: "[143] op", agent_id: OP });
+    const decide = async (id: string, decision: string) => {
+      const r = (await one<{ r: { ok?: boolean; status?: string } }>(`SELECT review_settled_part($1::uuid, $2, '[143] a note', $3::jsonb, true) AS r`, [id, decision, ACTOR])).r;
+      await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+      if (r.ok !== true) throw new Error(`not decided: ${JSON.stringify(r)}`);
+    };
+    // No part: an empty list and a total of 0, in jsonb's own key order.
+    const NONE = JSON.stringify({ parts: [], total: 0 });
+
+    // One pair, the older thought holding four statements and the newer one; the parts recorded out of the order the
+    // older text says them.
+    const O1 = await cap("[143] The exporter ships on Friday. The count stands at 40. The review is open. The budget is 10k.", 95);
+    const N1 = await cap("[143] the exporter shipped on Thursday; the count is 52 now; the review closed on Monday; the budget went to 12k", 96);
+    const BARE = await cap("[143] a thought no part names", 97);
+    const pCount = await part(O1, N1, "older", "The count stands at 40", "the count is 52 now", "updates");
+    const pShip = await part(O1, N1, "older", "The exporter ships on Friday", "the exporter shipped on Thursday", "implements");
+    const pReview = await part(O1, N1, "older", "The review is open", "the review closed on Monday", "resolves");
+    const pBudget = await part(O1, N1, "older", "The budget is 10k", "the budget went to 12k", "revises");
+    const pNewer = await part(O1, N1, "newer", "the budget went to 12k", "The budget is 10k", "corrects");
+
+    // With none accepted: the key is there, an empty list, for a thought parts name and for one none does.
+    const before = await read([O1, N1, BARE]);
+    assert(before.length === 3 && before.every((t) => t.validity !== undefined && "settled" in t.validity && JSON.stringify(t.validity.settled) === NONE && t.validity.state === "unchallenged" && t.unread.length === 0),
+      `with no part accepted the mark is an empty list with a total of 0, the key there, on a thought pending parts name as on one no part names (${before.map((t) => JSON.stringify(t.validity?.settled)).join(" ")})`);
+
+    // Accepted, a part is in its thought's mark: its id, group and word, the other thought of the pair and which it
+    // is, the time it was accepted, and the two flags. In the order the text says them, not the order recorded or
+    // decided in. A rejected part and a pending one are in none.
+    await decide(pCount, "accept"); await decide(pShip, "accept"); await decide(pNewer, "accept"); await decide(pBudget, "reject");
+    const mO = await mark(O1), mN = await mark(N1);
+    const [ship, count] = mO?.parts ?? [];
+    const acceptedAt = async (id: string) => new Date(String((await one<{ t: string }>(`SELECT reviewed_at::text AS t FROM settled_parts WHERE id = $1::uuid`, [id])).t)).getTime();
+    const KEYS = "accepted_at,edited,group,other,other_is,part,shown_by_in_text,word";
+    assert(mO?.total === 2 && ids(mO) === [pShip, pCount].join() && Object.keys(ship ?? {}).sort().join() === KEYS && Object.keys(mO ?? {}).sort().join() === "parts,total"
+        && ship.group === "done_or_settled" && ship.word === "implements" && ship.other === N1 && ship.other_is === "newer" && ship.edited === false && ship.shown_by_in_text === true
+        && new Date(ship.accepted_at).getTime() === (await acceptedAt(pShip)) && new Date(count.accepted_at).getTime() === (await acceptedAt(pCount)) && count.word === "updates"
+        && mN?.total === 1 && ids(mN) === pNewer && mN.parts[0].group === "no_longer_holds" && mN.parts[0].word === "corrects" && mN.parts[0].other === O1 && mN.parts[0].other_is === "older",
+      `an accepted part is in its thought's mark with its id, group and word, the other thought of its pair and which that is, and when it was accepted; the parts in the order the text says them, not the order recorded or decided in; a rejected and a pending part in none; a newer holder's part names the older as the other (${mO?.total}: ${(mO?.parts ?? []).map((p) => p.word).join(", ")}; ${mN?.total}: ${mN?.parts[0]?.other_is}; keys ${Object.keys(ship ?? {}).sort().join()})`);
+    // No word of either thought: the statement and the words that show it are fetch's to give.
+    const carried = JSON.stringify([mO, mN]);
+    assert(carried.length > 300 && !/exporter|stands at|52 now|budget|friday|thursday|review is|closed on/i.test(carried),
+      `the mark carries no word of either thought: not the statement and not the words that show it (${carried.length} characters)`);
+
+    // The mark and 157's read cannot disagree: the same parts, in the same order, and the same count.
+    const on = await q<{ id: string; total: number }>(`SELECT id::text AS id, total FROM settled_parts_on($1::uuid[], 20)`, [[O1]]);
+    assert(on.map((r) => r.id).join() === ids(mO) && Number(on[0]?.total) === mO?.total, `the mark lists the parts 157's read gives for the thought, in its order, and counts as it counts (${on.length} of ${on[0]?.total})`);
+
+    // A stale part is in no mark; accepted, it joins the others at its place in the text.
+    await db.query(`UPDATE settled_parts SET status = 'stale' WHERE id = $1::uuid`, [pReview]);
+    const withStale = await mark(O1);
+    await db.query(`UPDATE settled_parts SET status = 'pending' WHERE id = $1::uuid`, [pReview]);
+    await decide(pReview, "accept");
+    const three = await mark(O1);
+    assert(withStale?.total === 2 && ids(withStale) === [pShip, pCount].join() && three?.total === 3 && ids(three) === [pShip, pCount, pReview].join(),
+      `a stale part is in no mark; accepted, it joins the others at its place in the text (${withStale?.total} → ${three?.total})`);
+
+    // Twenty of a thought that holds more, the first in its text's order, and the total counts them all.
+    const BULK_O = await cap(`[143] bulk: ${Array.from({ length: 22 }, (_, i) => `item ${String(i + 1).padStart(2, "0")} stands;`).join(" ")}`, 98);
+    const BULK_N = await cap("[143] bulk, later: every item was closed", 99);
+    await db.query(`INSERT INTO settled_parts (older_id, newer_id, holder, statement, shown_by, word, reason, older_fingerprint, newer_fingerprint, judge_key, judged_at, status, reviewed_at)
+                    SELECT $1::uuid, $2::uuid, 'older', 'item ' || lpad(g::text, 2, '0') || ' stands', 'every item was closed', 'resolves', '[143] bulk', 'fp-o', 'fp-n', $3::text,
+                           timestamptz '2026-10-01 00:00:00+00', 'accepted', timestamptz '2026-10-02 00:00:00+00'
+                      FROM generate_series(22, 1, -1) g`, [BULK_O, BULK_N, JUDGE]);
+    const bulk = await mark(BULK_O);
+    const firstTwenty = (await q<{ id: string }>(`SELECT id::text AS id FROM settled_parts WHERE older_id = $1::uuid ORDER BY statement LIMIT 20`, [BULK_O])).map((r) => r.id).join();
+    assert(bulk?.total === 22 && bulk.parts.length === 20 && ids(bulk) === firstTwenty && bulk.parts.every((p) => p.edited === true && new Date(p.accepted_at).toISOString() === "2026-10-02T00:00:00.000Z"),
+      `a thought holding twenty-two standing parts lists twenty, the first in its text's order, and its total says twenty-two; a part judged at another text says its thought has moved (${bulk?.parts.length} of ${bulk?.total})`);
+
+    // The state stands beside the mark, whatever it is: a superseded thought with an accepted part is superseded, a
+    // contested one contested, and an unchallenged one unchallenged.
+    const S_O = await cap("[143] The gate opens at nine. The badge desk is on floor two.", 100);
+    const S_N = await cap("[143] the gate opens at ten now; the badge desk is on floor two", 101);
+    const C_O = await cap("[143] The rota is Ana's. The pager is with Ben.", 102);
+    const C_N = await cap("[143] the rota went to Cy; the pager is with Ben", 103);
+    const pGate = await part(S_O, S_N, "older", "The gate opens at nine", "the gate opens at ten now", "revises");
+    const pRota = await part(C_O, C_N, "older", "The rota is Ana's", "the rota went to Cy", "updates");
+    await decide(pGate, "accept"); await decide(pRota, "accept");
+    await db.query(`SELECT update_thought($1::uuid, p_actor => $2::jsonb, p_provenance => $3::jsonb)`, [S_N, ACTOR, JSON.stringify({ supersedes: S_O })]);
+    await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+    await db.query(`SELECT record_supersession_proposal($1::uuid, $2::uuid, 'newer_supersedes_older', 0.83, '[143]', 0.9, 'consolidate:[143]@p1', NULL, NULL, NULL, NULL)`, [C_O, C_N]);
+    const ALL = [O1, N1, BARE, BULK_O, S_O, S_N, C_O, C_N];
+    const withMark = await read(ALL);
+    const by = (id: string) => withMark.find((t) => t.id === id)!;
+    const said = (id: string) => `${by(id).validity?.state}/${by(id).validity?.found}/${by(id).validity?.settled?.total}`;
+    assert(said(O1) === "unchallenged/unchallenged/3" && said(S_O) === "superseded/superseded/1" && said(C_O) === "contested/contested/1" && said(S_N) === "unchallenged/unchallenged/0" && said(BARE) === "unchallenged/unchallenged/0"
+        && ids(by(S_O).validity?.settled) === pGate && ids(by(C_O).validity?.settled) === pRota,
+      `the state stands beside the mark: an unchallenged thought with three parts is unchallenged, a superseded one with a part superseded, a contested one with a part contested, and a thought with none says so beside its state (${[O1, S_O, C_O, S_N, BARE].map(said).join(" ")})`);
+
+    // The call: each thought its own parts, in the order asked, a repeat once; an id that is no thought has no
+    // validity and so no mark.
+    const ghost = "00000000-0000-4000-8000-0000000001a3";
+    const mixed = await read([BARE, O1, ghost, null, N1, O1]);
+    assert(mixed.map((t) => t.id).join() === [BARE, O1, ghost, N1].join() && JSON.stringify(mixed[0].validity?.settled) === NONE && ids(mixed[1].validity?.settled) === [pShip, pCount, pReview].join()
+        && mixed[2].found === false && mixed[2].validity === undefined && ids(mixed[3].validity?.settled) === pNewer,
+      `in one call each thought carries its own parts, in the order asked and a repeat once; an id that is no thought has no validity and no mark (${mixed.map((t) => t.validity?.settled?.total ?? "none").join(", ")})`);
+
+    // It moves nothing. The stale parts' file applied again is the read without the mark: its answer for every
+    // thought here is this file's less the one key, character for character. 149 applied again has no mark either,
+    // and reads each state the same. The shipped file restores the mark.
+    await reapply(staleFile.slice(0, 4));
+    const noMark = await read(ALL);
+    await reapply(validityFile.slice(0, 4));
+    const noMark149 = await read(ALL);
+    const restored = await restoreShipped("thought_validity");
+    const back = await read(ALL);
+    const states = (ts: V[]) => ts.map((t) => `${t.validity?.state}/${t.validity?.found}`).join();
+    assert(lessMark(withMark) === JSON.stringify(noMark) && JSON.stringify(withMark) !== JSON.stringify(noMark) && noMark.every((t) => t.validity !== undefined && !("settled" in t.validity))
+        && noMark149.every((t) => t.validity !== undefined && !("settled" in t.validity)) && states(noMark149) === states(withMark)
+        && restored.join() === file && JSON.stringify(back) === JSON.stringify(withMark),
+      `the mark moves nothing: ${staleFile.slice(0, 3)} applied again answers as this file does less the one key, for every thought here, superseded, contested and unchallenged; ${validityFile.slice(0, 3)} applied again has no mark and reads each state the same; the shipped file restores the mark (${lessMark(withMark) === JSON.stringify(noMark)}; ${states(noMark149) === states(withMark)}; restored ${restored.join()})`);
+
+    // The texts move. Edited elsewhere, a thought keeps its parts and each says its text has moved. A statement
+    // edited out leaves the mark and the count. The other thought's words edited out: the part stands, and says so.
+    await edit(O1, "[143] The exporter ships on Friday. The count stands at 40. The review is open. The budget is 10k. A line added later.");
+    const elsewhere = await mark(O1);
+    await edit(O1, "[143] The exporter ships on Friday. The count was taken again. The review is open. The budget is 10k. A line added later.");
+    const out = await mark(O1);
+    await edit(N1, "[143] the exporter went out early; the count is 52 now; the review closed on Monday; the budget went to 12k");
+    const shown = await mark(O1);
+    assert(elsewhere?.total === 3 && elsewhere.parts.every((p) => p.edited === true && p.shown_by_in_text === true)
+        && out?.total === 2 && ids(out) === [pShip, pReview].join()
+        && shown?.total === 2 && shown.parts[0].part === pShip && shown.parts[0].shown_by_in_text === false && shown.parts[1].shown_by_in_text === true
+        && (await one<{ s: string }>(`SELECT status AS s FROM settled_parts WHERE id = $1::uuid`, [pCount])).s === "accepted",
+      `a text edited elsewhere keeps its parts, each saying it has moved; a statement edited out of its thought leaves the mark and its count, its row still accepted; the other thought's words edited out, the part stands and says they are no longer there (${elsewhere?.total} → ${out?.total}; ${shown?.parts.map((p) => p.shown_by_in_text).join()})`);
+
+    // A role that may not read the parts: the mark is null, the key there, and part is in unread; the validity state
+    // is as the owner reads it. Under a custom plan and a generic one, with no permission error: the read is behind
+    // its own IF. Granted the table, the role reads the mark.
+    await db.exec(`DROP ROLE IF EXISTS ob1_143_reader; CREATE ROLE ob1_143_reader;
+      GRANT SELECT ON thoughts, ob1_superseded_by, supersession_proposals, deliverable_events, thought_facets, derivations, thought_chunks, thought_entities, ob1_entity_edges, thought_audit, thought_forgotten TO ob1_143_reader`);
+    const asReader = async (list: string[], plan: string): Promise<V[]> => {
+      await db.exec(`SET ROLE ob1_143_reader; SET plan_cache_mode = ${plan}`);
+      try { return await read(list); }
+      catch (e) { return [{ id: `raised ${String((e as { code?: string }).code ?? "?")}`, found: false, unread: [] }]; }
+      finally { await db.exec(`RESET plan_cache_mode; RESET ROLE`); }
+    };
+    const unreadSaid = (ts: V[]) => ts.map((t) => `${t.validity?.state}|${t.validity !== undefined && "settled" in t.validity ? JSON.stringify(t.validity.settled) : "no key"}|${t.unread.join()}`).join(" ");
+    const custom = await asReader([O1, S_O, BARE], "force_custom_plan"), generic = await asReader([O1, S_O, BARE], "force_generic_plan");
+    await db.exec(`GRANT SELECT ON settled_parts TO ob1_143_reader`);
+    const granted = await asReader([O1, S_O, BARE], "force_generic_plan");
+    await db.exec(`REVOKE ALL ON thoughts, ob1_superseded_by, supersession_proposals, deliverable_events, thought_facets, derivations, thought_chunks, thought_entities, ob1_entity_edges, thought_audit, thought_forgotten, settled_parts FROM ob1_143_reader; DROP ROLE ob1_143_reader`);
+    const UNREAD = "unchallenged|null|part superseded|null|part unchallenged|null|part";
+    assert(unreadSaid(custom) === UNREAD && unreadSaid(generic) === UNREAD
+        && granted.map((t) => `${t.validity?.state}|${t.validity?.settled?.total}|${t.unread.join()}`).join(" ") === "unchallenged|2| superseded|1| unchallenged|0|",
+      `a role that may not read settled_parts gets null for the mark, the key there, and part in unread, its validity state as the owner reads it, under a custom plan and a generic one and with no permission error; granted the table, it reads the mark (${unreadSaid(custom)} ; ${unreadSaid(generic)} ; ${granted.map((t) => t.validity?.settled?.total).join()})`);
+
+    // It reads only: the parts' rows are as they were written and decided, and the one pointer here is the one set.
+    const marks = await one<{ pointed: number; accepted: number; rejected: number }>(`SELECT (SELECT count(*)::int FROM thoughts WHERE content LIKE '[143]%' AND supersedes IS NOT NULL) AS pointed,
+        (SELECT count(*)::int FROM settled_parts WHERE status = 'accepted') AS accepted, (SELECT count(*)::int FROM settled_parts WHERE status = 'rejected') AS rejected`);
+    assert(marks.pointed === 1 && marks.accepted === 28 && marks.rejected === 1, `the read writes nothing: the one pointer of the section is the one it set, and the parts stand as decided, twenty-eight accepted and one rejected (${marks.pointed}, ${marks.accepted}, ${marks.rejected})`);
+
+    // A re-apply is a no-op: one function, the read the same.
+    const was = JSON.stringify(await read(ALL));
+    const again = await reapply(file.slice(0, 4));
+    assert(again === file && (await functionsNamed("thought_validity")) === 1 && JSON.stringify(await read(ALL)) === was, `a re-apply is a no-op: one function, the read as it was (${again})`);
+  } catch (e) {
+    assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
+  } finally {
+    await db.exec(`RESET ROLE`);
+    await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+    await restoreShipped("thought_validity");
+    // The parts and the proposal go with their thoughts (151's and 029's cascades), and their lineage rows with them.
+    await db.exec(`DELETE FROM thoughts WHERE content LIKE '[143]%'`);
+    await db.exec(`DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob1_143_reader') THEN EXECUTE 'DROP OWNED BY ob1_143_reader'; EXECUTE 'DROP ROLE ob1_143_reader'; END IF; END $$`);
+    await db.exec(`DELETE FROM ob1_agents WHERE label = '[143] op'`);
+  }
+  // No part and no part's lineage row is left for a later section's re-apply of an older file to trip on.
+  const left = (await db.query<{ parts: number; rows: number }>(`SELECT (SELECT count(*)::int FROM settled_parts) AS parts, (SELECT count(*)::int FROM derivations WHERE artifact_kind = 'part') AS rows`)).rows[0];
+  assert(left.parts === 0 && left.rows === 0, `the section leaves no part and no part's lineage row behind (${left.parts}, ${left.rows})`);
 }
 
 // The suite's total is published to the wiki's Test-counts page on a push to

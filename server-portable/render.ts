@@ -39,7 +39,7 @@ import type { ItemProposal, OpenItem, OpenItemEvent } from "./open-items.ts";
 import type { CaptureDeliverableCode, CaptureDeliverableResult, CaptureSummary, DeliverableHistoryCode, DeliverableHistoryResult, VerifyDeliverableCode, VerifyDeliverableResult } from "./core/deliverables.ts";
 import type { Deliverable, DeliverableEvent, DeliverableVerification } from "./deliverables.ts";
 import type { ValidityCode, ValidityResult } from "./core/validity.ts";
-import type { ValidityFound, ValidityRecord, ValidityThought } from "./validity.ts";
+import { VALIDITY_PARTS, type ValidityFound, type ValidityPart, type ValidityRecord, type ValidityThought } from "./validity.ts";
 import { closedBySync, TAKEN_OVER, type ClaimLapse, type ClaimWorkCode, type ClaimWorkResult, type CapSet, type CapSetCode, type HolderRelease, type HolderReleaseCode, type ListClaimsResult, type ReleaseClaimCode, type ReleaseClaimResult, type RenewClaimCode, type RenewClaimResult } from "./core/claims.ts";
 import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/workers.ts";
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
@@ -3341,6 +3341,9 @@ export const renderVerifyDeliverable = (o: Outcome<VerifyDeliverableResult, Veri
 // The value is the read's JSON (AS_JSON): each axis's records are data a client reads. The text gives each thought's
 // three states (validity's found state under an unknown), the first three records behind its validity, its newest three
 // review records with who decided or checked, its orphaned lineage rows counted, and what was not read; the rest is the value's.
+// Since migration 158 (SMD-4446 PR 3c-3) the validity state is followed by the partly settled mark, where the thought
+// holds an accepted settled part: how many, then the first three, each by its id, what it says of a statement, and the
+// thought that shows it. No statement is quoted: the mark carries none, and fetch shows each.
 
 const UNCALIBRATED = "uncalibrated";
 /** One record a validity state was read from, on one line, in the record's own words. */
@@ -3367,12 +3370,28 @@ const TEXT_RECORDS = 3;
 const newestFirst = (rs: ValidityRecord[]): ValidityRecord[] =>
   [...rs].sort((a, b) => (a.at == null ? 0 : 1) - (b.at == null ? 0 : 1) || String(b.at ?? "").localeCompare(String(a.at ?? "")));
 const orphanCount = (t: ValidityFound): number => t.freshness.records.filter((r) => r.state === "orphaned").length;
+/**
+ * How many accepted settled parts stand on a thought, by the mark: null when the parts were not read. A value with
+ * no mark at all (a REST core from before it, behind this renderer) reads as not read too.
+ */
+const settledCount = (t: ValidityFound): number | null => (t.validity.settled == null ? null : t.validity.settled.length + (t.validity.settledMore ?? 0));
+/** The mark beside the validity state: how many statements are settled, or that the parts were not read; nothing for a thought with none. */
+const settledMark = (t: ValidityFound): string => {
+  const n = settledCount(t);
+  return n === null ? ", partly settled not read" : n > 0 ? `, partly settled (${n} statement${n === 1 ? "" : "s"})` : "";
+};
+/** One part of the mark, on one line: what it says of a statement of the thought, and the thought that shows it. */
+const validityPartLine = (p: ValidityPart): string =>
+  `  - settled part ${p.id}: a statement of it ${p.group === null ? "is settled" : SETTLED_SAID[p.group]} (the writer's word: ${snipText(p.word, 40)}), shown by ${p.by.id}, the ${p.otherIs} of the pair`
+  + `${p.shownByInText ? "" : " (whose text no longer holds the words that showed it)"}${p.acceptedAt ? `, accepted ${p.acceptedAt}` : ""}${p.editedSince ? "; the thought's text has moved since it was judged" : ""}`;
 const validityFoundLines = (t: ValidityFound): string[] => [
-  `- ${t.id}: validity ${t.validity.state}${t.validity.state === "unknown" ? ` (found ${t.validity.found})` : ""}; review ${t.review.state}; freshness ${t.freshness.state}`
+  `- ${t.id}: validity ${t.validity.state}${t.validity.state === "unknown" ? ` (found ${t.validity.found})` : ""}${settledMark(t)}; review ${t.review.state}; freshness ${t.freshness.state}`
     + `${t.freshness.kinds.length ? ` (${t.freshness.kinds.map((k) => `${k.kind} ${k.state}${k.no_pool ? ", no pool re-runs it" : ""}`).join("; ")})` : ""}`
     + `; version ${t.version.fingerprint.slice(0, 12)}${t.version.seq === null ? "" : `, seq ${t.version.seq}`}`,
   ...t.validity.records.slice(0, TEXT_RECORDS).map(validityRecordLine),
   ...(t.validity.records.length > TEXT_RECORDS ? [`  validity: ${t.validity.records.length - TEXT_RECORDS} more record(s) (the value lists them)`] : []),
+  ...(t.validity.settled ?? []).slice(0, TEXT_RECORDS).map(validityPartLine),
+  ...((settledCount(t) ?? 0) > TEXT_RECORDS ? [`  partly settled: ${(settledCount(t) ?? 0) - TEXT_RECORDS} more settled part(s) (the value lists the first ${VALIDITY_PARTS})`] : []),
   ...newestFirst(t.review.records).slice(0, TEXT_RECORDS).map(reviewRecordLine),
   ...(t.review.records.length > TEXT_RECORDS ? [`  review: ${t.review.records.length - TEXT_RECORDS} more record(s) (the value lists them)`] : []),
   ...(orphanCount(t) ? [`  freshness: ${orphanCount(t)} lineage row(s) whose artifact is gone, not read (orphaned)`] : []),
@@ -3382,9 +3401,16 @@ const validityLines = (t: ValidityThought): string[] =>
   t.found ? validityFoundLines(t)
   : [`- ${t.id}: not a thought${t.forgotten === true ? `, forgotten${t.forgottenAt ? ` at ${t.forgottenAt}` : ""}` : t.forgotten === null ? " (whether it was forgotten was not read)" : ""}`];
 
+/** What the mark means, said once a reply where a thought carries it. */
+const PARTLY_SETTLED = "Partly settled: a reviewer accepted that another thought settles a statement of this one (it no longer holds, or is done), while the thought itself stands; the mark sits beside the validity state and changes none. fetch shows each statement and the words that show it.";
+/** …and where the parts could not be read. */
+const PARTLY_SETTLED_UNREAD = "Partly settled not read: whether a statement of the thought is settled could not be read (a server role without SELECT on settled_parts, or a brain before migration 158); it may hold one.";
+
 export const renderValidity = (o: Outcome<ValidityResult, ValidityCode>): Reply => render(o, (v) =>
   [
     `${v.thoughts.length} thought(s) on three axes — validity, review, freshness (up to ${v.cap} ids a call). A judge's confidence is raw model output, ${UNCALIBRATED}.`,
+    ...(v.thoughts.some((t) => t.found && (settledCount(t) ?? 0) > 0) ? [PARTLY_SETTLED] : []),
+    ...(v.thoughts.some((t) => t.found && settledCount(t) === null) ? [PARTLY_SETTLED_UNREAD] : []),
     ...v.thoughts.flatMap(validityLines),
   ].join("\n"),
   unknownRefusal, AS_JSON);
