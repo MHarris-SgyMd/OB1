@@ -2841,6 +2841,26 @@ else {
       && leftSome.endsWith(`none pending; 2 stale (a text moved under the verdict; the next pass ${NEXT_WORDS}, but for 1 ${LEFT_WORDS}) — the next pass settles the others, and a decide-mode pass those; ${SOONER}`)
       && leftDecideMode.endsWith(`none pending; 1 stale (a text moved under the verdict; the next pass ${NEXT_WORDS}) — the next pass settles them; ${SOONER}`),
     `a stale proposal on a pair that holds an undecided settled part is said to be a decide-mode pass's where this server's pass runs judge mode: the one, then one of two, and none on a decide-mode server or once the part is decided (${leftAll.slice(-330)} | ${leftSome.slice(-330)} | ${leftDecideMode.slice(-200)} | ${leftDecided.slice(-200)})`);
+  // The settled parts row (SMD-4446 PR 3a-3, migration 151), from the record's own read: the pending counted with the
+  // oldest pending part's age, the stale beside them, a decided part not counted, and the age the oldest PENDING
+  // part's, an older stale one beside it. The parts are rows made by hand, as the one above is, each with a time of
+  // its own given at the insert: 151's trigger keeps a row's judged_at.
+  const partsBase = (await claims`SELECT count(*) FILTER (WHERE status = 'pending')::int AS pending, count(*) FILTER (WHERE status = 'stale')::int AS stale FROM settled_parts`)[0] as { pending: number; stale: number };
+  const handPart = (o: string, n: string, statement: string, status: string, age: string) =>
+    `('${o}'::uuid, '${n}'::uuid, 'older', '${statement}', 'the words that show it', 'resolves', 'for the settled parts row', ${fpNow(o)}, ${fpNow(n)}, 'consolidate:for-the-parts-row@p4d6', now() - interval '${age}', '${status}', ${status === "accepted" || status === "rejected" ? "now()" : "NULL"})`;
+  const insertParts = async (values: string[]) => ((await claims.unsafe(`
+    INSERT INTO settled_parts (older_id, newer_id, holder, statement, shown_by, word, reason, older_fingerprint, newer_fingerprint, judge_key, judged_at, status, reviewed_at)
+    VALUES ${values.join(", ")} RETURNING id::text AS id`)) as { id: string }[]).map((r) => r.id);
+  const queueParts = await insertParts([handPart(ids[0], ids[1], "a pending statement", "pending", "3 days"), handPart(ids[0], ids[1], "a stale statement", "stale", "10 days"),
+    handPart(ids[1], ids[2], "a rejected statement", "rejected", "20 days"), handPart(ids[1], ids[2], "an accepted statement", "accepted", "30 days")]);
+  const partsQueued = await run(SQL_ENV);
+  await claims.unsafe(`DELETE FROM settled_parts WHERE id IN (${queueParts.map((id) => `'${id}'`).join(", ")})`);
+  const partsEmptied = await run(SQL_ENV);
+  const PARTS_LIST = "cd db && bun consolidate.ts --url $DATABASE_URL --parts";
+  assert(queueParts.length === 4 && partsBase.pending === 0 && partsBase.stale === 0
+      && row(partsQueued.out, "settled parts").trimEnd().endsWith(`  1 pending, the oldest judged 3 d ago; 1 stale — the list_settled_parts tool, or ${PARTS_LIST}, shows each with its two quotes (status stale, or --parts stale, for the stale ones)`)
+      && /^\s*✓\s+settled parts\s+1 pending, /m.test(partsQueued.out) && /^\s*✓\s+settled parts\s+none pending\s*$/m.test(partsEmptied.out),
+    `the settled parts row counts the pending with the oldest pending part's age and the stale beside them, not a decided part and not an older stale one's age, ok — a queue, not a fault; with none it says so (${row(partsQueued.out, "settled parts").trim().slice(0, 240)} | ${row(partsEmptied.out, "settled parts").trim()})`);
   await claims`SELECT record_supersession_proposal(${ids[0]}::uuid, ${ids[2]}::uuid, 'newer_supersedes_older', 0.8, 'stub reason', 0.9, ${CONS}, NULL)`;
   const consBoth = await run(SQL_ENV);
   assert(/^\s*✓\s+proposals\s+1 pending review, the oldest judged \d+ s ago; 1 stale \(a text moved under the verdict[^)]*\) — review with cd db && bun consolidate\.ts --url \$DATABASE_URL --list \(--list stale for the stale ones\), or the list_supersession_proposals tool/m.test(consBoth.out),
@@ -3874,6 +3894,12 @@ else {
       assert(heldParts && lineageLine(noParts.out).includes(unreadParts) && !/not checked — this role cannot read settled_parts/.test(noParts.out) && /settled part\(s\) stale and \d+ pending at a text that has moved since/.test(lineageLine(missingBoth.out))
              && !/settled part/.test(lineageLine(noFnNoParts.out)) && lineageLine(noFnNoParts.out).slice(0, 12) === lineageLine(missingBoth.out).slice(0, 12),
              `the lineage row reads the settled parts where the role may, says they were not read where it may not, the check standing, and says nothing of them on a brain without their table (${lineageLine(missingBoth.out).slice(-150)} | ${lineageLine(noParts.out).slice(-120)} | ${lineageLine(noFnNoParts.out).slice(-90)})`);
+      // The settled parts row (SMD-4446 PR 3a-3) reads the record's own queue: without SELECT on settled_parts it warns
+      // with the server group's grant, never skips as if 151 were not applied; on a brain without the table it skips.
+      assert(/^\s*!\s+settled parts\s+could not verify: permission denied for table settled_parts/m.test(noParts.out)
+             && /^\s*→ Grant the server's role SELECT on settled_parts — the server group's row \(SMD-4446, migration 151\): cd db && bun migrate\.ts --url <the owner's connection string> --grant <role> --groups capture,server/.test(fix(noParts.out, "settled parts"))
+             && /^\s*·\s+settled parts\s+not checked — settled_parts does not exist \(migration 151 not applied\)\s*$/m.test(noFnNoParts.out),
+        `…and the settled parts row: without SELECT on settled_parts a warning with the server group's grant, not a skip; a skip on a brain without the table (${row(noParts.out, "settled parts").trim().slice(0, 160)} | ${row(noFnNoParts.out, "settled parts").trim()})`);
       // …and the work claims (review pass 2), which place a waiting part behind a failed one: a server's role holds no
       // SELECT there unless extraction or the subject pool is on. One part is made to wait, between two thoughts with
       // no vector, and the role's SELECT taken back: the check stands and counts the part, places it by what needs no

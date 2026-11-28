@@ -51,7 +51,7 @@ export const COUNTED_TABLES = ["thoughts", "thought_audit", "thought_chunks", "o
 export type CountedTable = (typeof COUNTED_TABLES)[number];
 
 /** The tables the read asks after: the counted ones, the config, the ledger, where consolidation's findings stand (SMD-2680) and what became of those posted to the board (SMD-2682). */
-const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings", "work_claim_cap_settings", "subject_repo_settings", "priority_findings"] as const;
+const KNOWN_TABLES = ["ob1_config", "schema_migrations", ...COUNTED_TABLES, "supersession_proposals", "thought_facets", "board_findings_posted", "priority_weight_settings", "work_claim_cap_settings", "subject_repo_settings", "priority_findings", "settled_parts"] as const;
 type KnownTable = (typeof KNOWN_TABLES)[number];
 
 export interface HnswIndex {
@@ -146,6 +146,15 @@ export interface DatabaseFacts {
    * preflight's proposals row reads it.
    */
   proposals: ProposalQueue | null;
+  /**
+   * The settled parts' queue (151, SMD-4446 PR 3a-3): the parts a decide-mode pass recorded that no reviewer has
+   * decided. `pending` and `stale` by status, as stored, and the oldest pending part's age in seconds since it was
+   * judged, by the database's clock (null when none is pending). A pending part whose text has moved since it was
+   * judged counts as pending here: which parts wait for the pass, and for what, is consolidate.ts --status's count
+   * and preflight's lineage row's, which compare the texts. Null when the table is absent (no `unread` entry: before
+   * 151) or not read (`unread` names it). Not a stats read: preflight's settled parts row reads it.
+   */
+  settledParts: SettledPartsQueue | null;
   /**
    * The judged relations standing (084, SMD-2680): `relation` facets with no
    * valid_until and origin judged — a work thread's edges (120, SMD-3306)
@@ -1138,6 +1147,13 @@ export interface ProposalQueue {
   boardPairs: number | null;
 }
 
+/** The settled parts' queue as the record carries it (SMD-4446 PR 3a-3): counts and a number of seconds, no word of a part. */
+export interface SettledPartsQueue {
+  pending: number;
+  stale: number;
+  oldestPendingS: number | null;
+}
+
 /** The standing judged relations as the record carries them (SMD-2680). */
 export interface StandingRelations {
   related: number;
@@ -1176,6 +1192,18 @@ const PROPOSALS_SQL = (sql: SqlTag) => sql`
          extract(epoch FROM now() - min(p.judged_at) FILTER (WHERE p.status = 'pending'))::float8 AS oldest_s
     FROM supersession_proposals p
    WHERE p.status IN ('pending', 'stale')`;
+
+/**
+ * The settled parts' queue (SMD-4446 PR 3a-3): the pending and the stale rows of 151's table, as the proposals' read
+ * counts its own. The decided ones are history and are not counted: the table grows while these do not, and 156's
+ * listing index leads with the status.
+ */
+const SETTLED_PARTS_SQL = (sql: SqlTag) => sql`
+  SELECT count(*) FILTER (WHERE s.status = 'pending')::int AS pending,
+         count(*) FILTER (WHERE s.status = 'stale')::int AS stale,
+         extract(epoch FROM now() - min(s.judged_at) FILTER (WHERE s.status = 'pending'))::float8 AS oldest_s
+    FROM settled_parts s
+   WHERE s.status IN ('pending', 'stale')`;
 
 /**
  * The priority review's findings (SMD-3671 PR 2): the pending by kind, the oldest pending one's age, and the decided in
@@ -1386,6 +1414,16 @@ export function proposalsValue(row: { pending?: unknown; stale?: unknown; oldest
   return { pending, stale: countOf("proposals", row.stale), oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)), boardPairs: null };
 }
 
+/** The settled parts' queue as the record carries it (SMD-4446 PR 3a-3): counts, and a whole number of seconds for the oldest pending part. */
+export function settledPartsValue(row: { pending?: unknown; stale?: unknown; oldest_s?: unknown } | undefined): SettledPartsQueue {
+  if (!row) throw new Error("the settled parts read answered no row");
+  const pending = countOf("settled parts", row.pending);
+  const age = row.oldest_s == null ? null : Number(row.oldest_s);
+  if (age !== null && !Number.isFinite(age)) throw new Error("the settled parts read answered an age that is not a number");
+  // judged_at is the pass's clock's; a clock moved back can leave it ahead of the read's: held at 0.
+  return { pending, stale: countOf("settled parts", row.stale), oldestPendingS: pending === 0 || age === null ? null : Math.max(0, Math.round(age)) };
+}
+
 /** `byKind.other`: pending findings of kinds this server does not know (a brain migrated ahead), so the counts sum to `pending`. */
 export type PriorityFindingsFact = { pending: number; oldestPendingS: number | null; byKind: Record<FindingKind, number> & { other: number }; decided30d: number };
 /**
@@ -1445,6 +1483,28 @@ export function priorityFindingsRow(f: PriorityFindingsFact | null, u: Unread | 
     ...(f.byKind.other > 0 ? [`${f.byKind.other} of kinds this server does not know`] : [])].join(", ");
   const oldest = f.oldestPendingS === null ? "at an unknown time" : `${ago(f.oldestPendingS)} ago`;
   return { status: "ok", detail: `${f.pending} pending (${kinds}), the oldest found ${oldest}${decided} — an operator key reviews them: list_priority_findings, then review_priority_finding for each` };
+}
+
+/** The server group's grant on the parts' store, as preflight's settled parts row names it. */
+export const PARTS_GRANT_FIX = "Grant the server's role SELECT on settled_parts — the server group's row (SMD-4446, migration 151): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role).";
+
+/**
+ * The settled parts' queue, in one wording for brain_info's row and preflight's (SMD-4446 PR 3a-3): ok with the pending,
+ * the oldest's age and the stale, and where each part is shown; a skip before 151; a warning when the read was refused
+ * or did not answer. A queue, not a fault, so a pending or a stale part never warns. A function of the fact alone, as
+ * priorityFindingsRow is.
+ */
+export function settledPartsRow(f: SettledPartsQueue | null, u: Unread | undefined): { status: "ok" | "warn" | "skip"; detail: string; fix?: string } {
+  if (f === null) {
+    if (!u) return { status: "skip", detail: "not checked — settled_parts does not exist (migration 151 not applied)" };
+    return unreadRow(u, { refused: PARTS_GRANT_FIX, timeout: "A migration or a long transaction may hold settled_parts; run preflight again once it has finished.", reads: "settled_parts" });
+  }
+  if (f.pending === 0 && f.stale === 0) return { status: "ok", detail: "none pending" };
+  const LIST = "cd db && bun consolidate.ts --url $DATABASE_URL --parts";
+  // Stale alone: the default listing is the pending one's, so the row names the status that shows them.
+  if (f.pending === 0) return { status: "ok", detail: `none pending; ${f.stale} stale — the list_settled_parts tool with status stale, or ${LIST} stale, shows each` };
+  const oldest = f.oldestPendingS === null ? "at an unknown time" : `${ago(f.oldestPendingS)} ago`;
+  return { status: "ok", detail: `${f.pending} pending, the oldest judged ${oldest}${f.stale ? `; ${f.stale} stale` : ""} — the list_settled_parts tool, or ${LIST}, shows each with its two quotes${f.stale ? " (status stale, or --parts stale, for the stale ones)" : ""}` };
 }
 
 /** The standing relations as the record carries them. */
@@ -1843,12 +1903,13 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
                'priority_weight_settings', to_regclass('priority_weight_settings') IS NOT NULL,
                'work_claim_cap_settings', to_regclass('work_claim_cap_settings') IS NOT NULL,
                'subject_repo_settings', to_regclass('subject_repo_settings') IS NOT NULL,
-               'priority_findings', to_regclass('priority_findings') IS NOT NULL) AS resolved,
+               'priority_findings', to_regclass('priority_findings') IS NOT NULL,
+               'settled_parts', to_regclass('settled_parts') IS NOT NULL) AS resolved,
              (SELECT COALESCE(jsonb_object_agg(relname, schemas), '{}'::jsonb) FROM (
                 SELECT c.relname::text AS relname, string_agg(n.nspname::text, ', ' ORDER BY n.nspname) AS schemas
                   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
                  WHERE c.relkind IN ('r', 'p')
-                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'work_claim_cap_settings', 'subject_repo_settings', 'priority_findings')
+                   AND c.relname IN ('ob1_config', 'schema_migrations', 'thoughts', 'thought_audit', 'thought_chunks', 'ob1_entities', 'supersession_proposals', 'thought_facets', 'board_findings_posted', 'priority_weight_settings', 'work_claim_cap_settings', 'subject_repo_settings', 'priority_findings', 'settled_parts')
                    -- Another tool's schema_migrations (Supabase's auth and
                    -- supabase_migrations, Rails, dbmate) is not this ledger:
                    -- only one carrying migrate.ts's sha256 column counts
@@ -1878,6 +1939,7 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
       boardSync: null,
       workers: null,
       proposals: null,
+      settledParts: null,
       relations: null,
       threads: null,
       priorityWeights: null,
@@ -1945,6 +2007,14 @@ export async function readDatabaseFacts(client: SqlClient, opts: ReadOptions = {
         table: "supersession_proposals",
         read: async (sp) => { facts.proposals = proposalsValue((await PROPOSALS_SQL(sp))[0]); },
         clear: () => { facts.proposals = null; },
+      },
+      // The settled parts' queue (SMD-4446 PR 3a-3, migration 151): the pending and the stale, as stored. Not a stats
+      // read: preflight's settled parts row reads it.
+      {
+        field: "settledParts",
+        table: "settled_parts",
+        read: async (sp) => { facts.settledParts = settledPartsValue((await SETTLED_PARTS_SQL(sp))[0]); },
+        clear: () => { facts.settledParts = null; },
       },
       // The operator's priority weights (SMD-4193 PR 2): one row at most, read by 132's function, which says what is
       // wrong with a stored setting without raising.
@@ -2632,6 +2702,17 @@ function proposalsLine(db: DatabaseSummary): string {
   return `${p.pending} pending (the oldest judged ${p.oldestPendingS === null ? "?" : `${ago(p.oldestPendingS)} ago`}${boardTail(p.boardPairs, db.unread["proposals.boardPairs"])})${stale}`;
 }
 
+/** The Settled parts row (SMD-4446 PR 3a-3): the queue, none, or why it was not read. */
+export function settledPartsLine(db: Pick<DatabaseSummary, "settledParts" | "unread">): string {
+  const f = db.settledParts;
+  if (f === null) {
+    const u = db.unread.settledParts;
+    return u ? `? (${deniedObject(u.message)?.name ?? "settled_parts"} ${unreadWords(u)})` : "no table — migration 151 is not applied";
+  }
+  // Read, the words are preflight's row's (settledPartsRow): one wording.
+  return settledPartsRow(f, undefined).detail;
+}
+
 /** The Priority findings row (SMD-3671 PR 2): the pending by kind and the oldest's age, none, or why not read. */
 export function priorityFindingsLine(db: Pick<DatabaseSummary, "priorityFindings" | "unread">): string {
   const f = db.priorityFindings;
@@ -2917,6 +2998,7 @@ export function brainInfoRows(info: BrainInfo): [label: string, value: string][]
     );
   }
   lines.push(row("Proposals", proposalsLine(db)));
+  lines.push(row("Settled parts", settledPartsLine(db)));
   lines.push(row("Threads", threadsLine(db)));
   lines.push(row("Priority weights", priorityWeightsLine(db)));
   lines.push(row("Work-claim cap", workClaimCapLine(db)));

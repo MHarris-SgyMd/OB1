@@ -952,8 +952,8 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     if (/server_version/.test(text)) {
       return [{
         postgres: "16.15", vec_version: "0.8.6", vec_schema: "public",
-        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true, board_findings_posted: catalogFindings },
-        anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public", ...(catalogFindings ? { board_findings_posted: "public" } : {}) },
+        resolved: { ob1_config: true, schema_migrations: true, thoughts: true, thought_audit: false, thought_chunks: false, ob1_entities: true, supersession_proposals: true, thought_facets: true, board_findings_posted: catalogFindings, settled_parts: catalogParts },
+        anywhere: { ob1_config: "public", schema_migrations: "public", thoughts: "public", thought_audit: "vault", ob1_entities: "public", ...(catalogFindings ? { board_findings_posted: "public" } : {}), ...(catalogParts ? { settled_parts: "public" } : partsElsewhere ? { settled_parts: "vault" } : {}) },
         hnsw: [{ index: "thoughts_embedding_idx", table: "thoughts", opts: "m=24,ef_construction=100" }],
         tickets_linked: catalogLinked,
         thread_relink: catalogThreads,
@@ -971,6 +971,7 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
     if (/FROM thought_facets/.test(text)) return [relationsAnswer];
     if (/FROM ob1_config/.test(text)) return [{ key: "schema_version", value: "1.1.0+upstream.9543c29" }];
     if (lockThoughts && /FROM thoughts\b/.test(text) && /count\(\*\)::float8/.test(text)) throw pgError("canceling statement due to lock timeout", "55P03");
+    if (/FROM settled_parts/.test(text)) return [partsAnswer];
     if (/count\(\*\)/.test(text)) return [{ n: 7 }];
     throw new Error(`unexpected statement: ${text.slice(0, 60)}`);
   };
@@ -990,6 +991,10 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   let findingsAnswer: Record<string, unknown>[] = [];
   let failRelease: RegExp | null = null;
   let proposalsAnswer: Record<string, unknown> = { pending: 6, stale: 2, oldest_s: 3 * 86400 + 7.4, board_pairs: 4 };
+  // 151's table (SMD-4446 PR 3a-3): absent from the catalog unless a case puts it there, or in a schema this role does not resolve.
+  let catalogParts = false;
+  let partsElsewhere = false;
+  let partsAnswer: Record<string, unknown> = { pending: 3, stale: 1, oldest_s: 2 * 86400 + 5.4 };
   const slow = new Set<string>();
   let censusValues: unknown[] = [];
   const tag = (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -1109,6 +1114,36 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
   assert(JSON.stringify(facts.proposals) === JSON.stringify({ pending: 6, stale: 2, oldestPendingS: 259207, boardPairs: 4 }) && JSON.stringify(leanFindings.proposals) === JSON.stringify(facts.proposals)
       && JSON.stringify(facts.relations) === JSON.stringify({ related: 9, evolves: 4, duplicate: 1, distinct: 3, boardPairs: 11 }) && leanFindings.relations === null && !statements.some((t) => /FROM thought_facets f\b/.test(t)),
     `the queue is read with or without the stats, the relations with them only (${JSON.stringify(leanFindings.proposals)}, ${JSON.stringify(leanFindings.relations)})`);
+  // The settled parts' queue (SMD-4446 PR 3a-3): read where 151's table resolves, with the stats or without, for
+  // preflight's settled parts row; null and unnamed without the table; invisible, and not queried, where the table is
+  // out of this role's reach; an answer that is not counts, unread with the rest standing.
+  const partsFrom = statements.length;
+  catalogParts = true;
+  const withParts = await readDatabaseFacts(fake), leanParts = await readDatabaseFacts(fake, { stats: false });
+  const partsSent = statements.slice(partsFrom).filter((t) => /FROM settled_parts s\b/.test(t));
+  const partsCatalog = statements.slice(partsFrom).find((t) => /server_version/.test(t)) ?? "";
+  partsAnswer = { pending: 1, stale: "two", oldest_s: 1 };
+  const oddParts = await readDatabaseFacts(fake);
+  partsAnswer = { pending: 3, stale: 1, oldest_s: 2 * 86400 + 5.4 };
+  catalogParts = false;
+  partsElsewhere = true;
+  const hiddenFrom = statements.length;
+  const hiddenParts = await readDatabaseFacts(fake);
+  const hiddenSent = statements.slice(hiddenFrom).filter((t) => /FROM settled_parts/.test(t)).length;
+  partsElsewhere = false;
+  catalogParts = true;
+  failRelease = /FROM settled_parts/;
+  const partsReleaseFailed = await readDatabaseFacts(fake);
+  failRelease = null;
+  catalogParts = false;
+  assert(facts.settledParts === null && !("settledParts" in facts.unread)
+      && JSON.stringify(withParts.settledParts) === JSON.stringify({ pending: 3, stale: 1, oldestPendingS: 172805 }) && JSON.stringify(leanParts.settledParts) === JSON.stringify(withParts.settledParts)
+      && /'settled_parts', to_regclass\('settled_parts'\) IS NOT NULL/.test(partsCatalog) && /c\.relname IN \([^)]*'settled_parts'\)/.test(partsCatalog)
+      && partsSent.length === 2 && partsSent.every((t) => /WHERE s\.status IN \('pending', 'stale'\)/.test(t) && /min\(s\.judged_at\) FILTER \(WHERE s\.status = 'pending'\)/.test(t))
+      && oddParts.settledParts === null && oddParts.unread.settledParts?.reason === "error" && /not a count/.test(oddParts.unread.settledParts.message) && oddParts.proposals?.pending === 6
+      && hiddenParts.settledParts === null && hiddenParts.unread.settledParts?.reason === "invisible" && /schema vault/.test(hiddenParts.unread.settledParts.message) && hiddenSent === 0
+      && partsReleaseFailed.settledParts === null && partsReleaseFailed.unread.settledParts?.reason === "error" && partsReleaseFailed.proposals?.pending === 6,
+    `the settled parts' queue is read where 151's table resolves, with the stats or without: the catalog asked whether it resolves and where it is, then one statement a read, of the pending and the stale alone, the age the oldest pending part's; null and unnamed without the table; invisible and not queried where the role cannot reach it; an answer that is not counts unread, the queue beside it read; a release that fails after the read leaves it null and unread, never both read and unread (${JSON.stringify(withParts.settledParts)} | ${partsSent.length} | ${JSON.stringify(oddParts.unread.settledParts)} | ${JSON.stringify(hiddenParts.unread.settledParts)} | ${JSON.stringify(partsReleaseFailed.settledParts)} ${JSON.stringify(partsReleaseFailed.unread.settledParts)})`);
   // What became of the findings posted to the board (SMD-2682): a stats read
   // where 087's table resolves, each (pair, word) by its outcome, the found
   // apart; null and unnamed without the table; refused, malformed or behind a
@@ -1677,6 +1712,18 @@ console.log("\n[13a] brain-info.ts's rules, without a database: the ledger's jud
       && /^Proposals: +\? \(supersession_proposals not readable by this role\)$/m.test(lostFindings) && /^Proposals: +2 pending \(the oldest judged 60 s ago\)$/m.test(pre079) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(not read in time\)\)$/m.test(boardLost) && /^Relations: +2 standing \(2 related, 0 evolves, 0 duplicate; board pairs \? \(not read in time\)\)$/m.test(relBoardLost) && /^Proposals: +6 pending \(the oldest judged 60 s ago; board pairs \? \(079's predicate not executable by this role\)\)$/m.test(execLost) && /^Relations: +\? \(thought_facets not read in time\)$/m.test(lostFindings)
       && /^Proposals: +no table — migration 029 is not applied$/m.test(noTables) && /^Relations: +no table — migration 042 is not applied$/m.test(noTables),
     `the table's findings rows: the counts, none (before 084, why), ? when not read, no table (${[readText, quiet, staleOnly, lostFindings, noTables, pre084].map((t) => `${line(t, "Proposals")} + ${line(t, "Relations")}`).join(" / ")})`);
+  // The Settled parts row (SMD-4446 PR 3a-3), under the Proposals row: the queue in the words preflight's row has, the
+  // record carrying the counts; no table before 151; `?` and a Not read entry where the read did not answer.
+  const partsInfo = await brainInfo(server, async () => planted(156, { settledParts: { pending: 3, stale: 1, oldestPendingS: 172805 } }), 1000);
+  const partsTable = renderBrainInfo(partsInfo).split("\n");
+  const partsLost = renderBrainInfo(await brainInfo(server, async () => planted(156, { settledParts: null, unread: { settledParts: { reason: "refused", message: "permission denied for table settled_parts" } } }), 1000));
+  const partsAt = partsTable.findIndex((l) => l.startsWith("Settled parts:"));
+  assert(partsAt > 0 && partsTable[partsAt - 1].startsWith("Proposals:")
+      && partsTable[partsAt] === "Settled parts:   3 pending, the oldest judged 2 d ago; 1 stale — the list_settled_parts tool, or cd db && bun consolidate.ts --url $DATABASE_URL --parts, shows each with its two quotes (status stale, or --parts stale, for the stale ones)"
+      && JSON.stringify((partsInfo.database as { settledParts?: unknown }).settledParts) === JSON.stringify({ pending: 3, stale: 1, oldestPendingS: 172805 })
+      && /^Settled parts: +no table — migration 151 is not applied$/m.test(readText)
+      && /^Settled parts: +\? \(settled_parts not readable by this role\)$/m.test(partsLost) && /^Not read: +settledParts — not readable by this role: permission denied for table settled_parts$/m.test(partsLost),
+    `the table's Settled parts row stands under the Proposals row and says the queue, the record carrying its counts; no table before 151; ? and a Not read entry where the role may not read it (${partsTable[partsAt]} | ${line(readText, "Settled parts")} | ${line(partsLost, "Settled parts")})`);
   // The census's row: one whose wanted edges are not its thoughts less its threads lost members to its join — a
   // thoughts table earlier on the role's search_path — and is an error, not every thread unlinked (review pass 3).
   {
@@ -9847,6 +9894,57 @@ console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the
       && partsHint("function list_settled_parts(text, integer, text, timestamp with time zone, uuid, integer) does not exist") === " — migration 156 is not applied (db/migrations/156_parts_listing.sql, the settled parts' listing): cd db && bun migrate.ts --url <url>"
       && partsHint('relation "supersession_proposals" does not exist') === "" && partsHint("boom") === "",
     "a cursor that is none of this listing's, and one made under other filters, with a key or without, are refused in the listing's own words with the filters in the value; an error that names the missing listing gets the hint naming its file, and no other error does");
+
+  // brain_info (PR 3a-3): the queue as the record carries it, its row for each state, and preflight's row in the same
+  // words. Counts and a number of seconds alone: the record reaches a client unguarded.
+  const { settledPartsValue, settledPartsLine, settledPartsRow } = await import("./brain-info.ts");
+  const queue = (r: unknown) => { try { return JSON.stringify(settledPartsValue(r as never)); } catch { return "threw"; } };
+  const queued = [{ pending: 3, stale: 1, oldest_s: 2 * 86400 + 5.4 }, { pending: "3", stale: "0", oldest_s: "60.6" }, { pending: 0, stale: 2, oldest_s: null }, { pending: 0, stale: 0, oldest_s: 99 }, { pending: 2, stale: 0, oldest_s: -4 }, { pending: 2, stale: 0, oldest_s: null }].map(queue);
+  assert(queued.join(" ") === '{"pending":3,"stale":1,"oldestPendingS":172805} {"pending":3,"stale":0,"oldestPendingS":61} {"pending":0,"stale":2,"oldestPendingS":null} {"pending":0,"stale":0,"oldestPendingS":null} {"pending":2,"stale":0,"oldestPendingS":0} {"pending":2,"stale":0,"oldestPendingS":null}',
+    `the queue's value: the two counts and the oldest pending part's age in whole seconds, rounded; counts and an age sent as text read; no age where none is pending, whatever the read gives; an age before the clock's held at 0; an age not given left unknown (${queued.join(" ")})`);
+  const badQueue = [undefined, { pending: "x", stale: 0 }, { pending: 1, stale: "two", oldest_s: 1 }, { pending: 1, stale: 0, oldest_s: "soon" }, { pending: -1, stale: 0 }, { pending: 1.5, stale: 0 }, { pending: 1 }, { stale: 1 }].map(queue);
+  assert(badQueue.every((v) => v === "threw"), `a read that answers no row, a count that is none, below 0, not whole or missing, or an age that is no number throws, so the fact is unread and never a guess (${badQueue.join(",")})`);
+  const queueOf = (pending: number, stale: number, oldest_s: number | null) => settledPartsValue({ pending, stale, oldest_s });
+  const SHOWN = "the list_settled_parts tool, or cd db && bun consolidate.ts --url $DATABASE_URL --parts, shows each with its two quotes";
+  const partLines = [
+    settledPartsLine({ settledParts: null, unread: {} }),
+    settledPartsLine({ settledParts: null, unread: { settledParts: { reason: "refused", message: "permission denied for table settled_parts" } } }),
+    settledPartsLine({ settledParts: null, unread: { settledParts: { reason: "timeout", message: "canceling statement due to lock timeout" } } }),
+    settledPartsLine({ settledParts: queueOf(0, 0, null), unread: {} }),
+    settledPartsLine({ settledParts: queueOf(3, 0, 2 * 86400 + 5.4), unread: {} }),
+    settledPartsLine({ settledParts: queueOf(3, 2, 75), unread: {} }),
+    settledPartsLine({ settledParts: queueOf(0, 2, null), unread: {} }),
+    settledPartsLine({ settledParts: queueOf(1, 0, null), unread: {} }),
+  ];
+  assert(partLines[0] === "no table — migration 151 is not applied" && partLines[1] === "? (settled_parts not readable by this role)" && partLines[2] === "? (settled_parts not read in time)"
+      && partLines[3] === "none pending" && partLines[4] === `3 pending, the oldest judged 2 d ago — ${SHOWN}`
+      && partLines[5] === `3 pending, the oldest judged 75 s ago; 2 stale — ${SHOWN} (status stale, or --parts stale, for the stale ones)`
+      && partLines[6] === "none pending; 2 stale — the list_settled_parts tool with status stale, or cd db && bun consolidate.ts --url $DATABASE_URL --parts stale, shows each"
+      && partLines[7] === `1 pending, the oldest judged at an unknown time — ${SHOWN}`,
+    `brain_info's Settled parts row: before 151, unread by a refusal or a timeout, none, the pending with the oldest's age and where each is shown, the stale beside them with the status that lists them, the stale alone, and an age not known (${partLines.join(" | ")})`);
+  // Preflight's row and brain_info's are one wording (settledPartsRow): each state, a queue never a warning, and each
+  // reason a read did not answer with its own remedy.
+  const unreadPart = (reason: string, message: string) => settledPartsRow(null, { reason, message } as never);
+  const partRows = [
+    settledPartsRow(null, undefined),
+    unreadPart("refused", "permission denied for table settled_parts"),
+    unreadPart("timeout", "canceling statement due to lock timeout"),
+    unreadPart("invisible", "settled_parts exists (schema vault) but does not resolve for this role — not on its search_path, or no USAGE on that schema"),
+    unreadPart("deadline", "not read before the deadline"),
+    unreadPart("error", "boom"),
+    settledPartsRow(queueOf(3, 2, 75), undefined),
+    settledPartsRow(queueOf(0, 2, null), undefined),
+    settledPartsRow(queueOf(0, 0, null), undefined),
+  ];
+  assert(partRows[0].status === "skip" && partRows[0].detail === "not checked — settled_parts does not exist (migration 151 not applied)" && partRows[0].fix === undefined
+      && partRows[1].status === "warn" && partRows[1].detail === "could not verify: permission denied for table settled_parts"
+      && partRows[1].fix === "Grant the server's role SELECT on settled_parts — the server group's row (SMD-4446, migration 151): cd db && bun migrate.ts --url <the owner's connection string> --grant <role> --groups capture,server (db/README.md, Grants for a capturing role)."
+      && partRows[2].status === "warn" && partRows[2].fix === "A migration or a long transaction may hold settled_parts; run preflight again once it has finished."
+      && partRows[3].status === "warn" && /search_path/.test(partRows[3].fix ?? "") && partRows[4].status === "warn" && /^The whole read's time ran out/.test(partRows[4].fix ?? "")
+      && partRows[5].status === "warn" && partRows[5].detail === "could not verify: boom" && partRows[5].fix === "The check reads settled_parts; the message says why it failed."
+      && partRows[6].status === "ok" && partRows[6].detail === partLines[5] && partRows[6].fix === undefined && partRows[7].status === "ok" && partRows[7].detail === partLines[6]
+      && partRows[8].status === "ok" && partRows[8].detail === "none pending",
+    `preflight's settled parts row: a skip before 151; a refusal, a timeout, a table out of reach, the deadline and any other failure each warned with its own remedy; the queue ok in brain_info's words, pending or stale, and none (${partRows.map((r) => `${r.status}: ${r.detail.slice(0, 50)}`).join(" | ")})`);
 }
 
 report();
