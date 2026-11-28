@@ -459,6 +459,24 @@ const boundWords = (what: string): string | undefined => BOUND_WORDS.find(([re])
      "consolidate's reviewProblem admits a decision beside --list or --stale, and --status or --dry-run alone");
   ok(reviewProblem({ accept: ID, status: true, dryRun: true })?.startsWith("--dry-run writes nothing, and --accept writes a decision") === true && reviewProblem({ reject: ID, list: "all", status: true })?.startsWith("--status writes nothing, and --reject") === true,
      "…refuses the pass's report beside a decision first — before a listing beside it");
+  // SMD-4446 PR 3a: --parts is a listing of its own, with --key and a cursor of its own.
+  const { partsCursor, proposalCursor: aProposalsCursor } = await import("../server-portable/core/list-cursor.ts");
+  const PCUR = partsCursor({ list: "parts", status: "pending", judgeKey: null }, "2026-11-27 00:00:00.5+00", ID);
+  ok(reviewProblem({ parts: "pending" }) === null && reviewProblem({ parts: "all", key: "consolidate:a+b@p4d6" }) === null && reviewProblem({ parts: "pending", after: PCUR }) === null && reviewProblem({ parts: "stale", accept: ID }) === null,
+     "consolidate's reviewProblem admits --parts alone, with --key, with a --parts page's own cursor, and beside a decision");
+  ok(reviewProblem({ parts: "lineage" })?.startsWith("--parts takes pending, accepted, rejected, stale or all") === true
+      && reviewProblem({ parts: "pending", list: "pending" })?.startsWith("--list and --parts are one listing each") === true
+      && reviewProblem({ key: "consolidate:a@p4" })?.startsWith("--key goes with --list or --parts") === true,
+     "…refuses a word that is no status of a part, --list beside --parts, and --key with neither");
+  ok(reviewProblem({ parts: "pending", after: aProposalsCursor({ status: "pending", lineage: null, judgeKey: null }, "0.90", "2026-11-27 00:00:00+00", ID) })?.startsWith("--after takes the cursor a --parts page printed") === true
+      && reviewProblem({ list: "pending", after: PCUR })?.startsWith("--after takes the cursor a --list page printed") === true
+      && reviewProblem({ parts: "accepted", after: PCUR })?.startsWith("--after's cursor was made for --parts pending:") === true
+      && reviewProblem({ parts: "pending", key: "consolidate:a@p4", after: PCUR })?.startsWith("--after's cursor was made for --parts pending:") === true
+      && reviewProblem({ after: PCUR })?.startsWith("--after goes with --list <pending|accepted|rejected|stale|all> or --parts") === true,
+     "…refuses a --list page's cursor beside --parts and a --parts page's beside --list, a cursor made under another status or key by the flags it was made for, and --after with no listing");
+  ok(reviewProblem({ parts: "pending", status: true })?.startsWith("--status reports on the pass, and --parts takes the pass's place") === true
+      && reviewProblem({ parts: "pending", limit: 3 })?.startsWith("--limit is the pass's thought cap and goes with a run; --parts prints") === true,
+     "…and the pass's report or its thought cap beside --parts");
   // A caller's client: the narrow one, the handles, a keyed run or decision without a URL; never closed.
   let closed = false;
   const stub = (extra: Record<string, unknown> = {}) => Object.assign(() => { throw new Error("stub queried"); }, { options: { max: 3 }, close: async () => { closed = true; }, unsafe: () => { throw new Error("stub queried"); } }, extra);

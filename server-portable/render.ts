@@ -50,6 +50,7 @@ import type { PlanContextResult, PlanGap } from "./core/plan.ts";
 import { marksOn, showsFailure, type Markable, type MarkItem } from "./core/marks.ts";
 import type { Captured, Deleted, EvidenceAppended, EvidenceCode, ForgetCode, Forgotten, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
+import { PART_CONTEXT, PART_GROUP_WORDS, type PartQuote, type SettledPart } from "./part-listing.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
@@ -546,6 +547,74 @@ export function walkCappedLine(): string {
 /** The side an accepted proposal's superseding_id names, in capitals, or null (SMD-2707: an accept may go against the verdict with --direction). */
 export function stoodSide(p: { status: string; supersedingId: string | null; older: { id: string }; newer: { id: string } }): string | null {
   return p.status !== "accepted" || !p.supersedingId ? null : p.supersedingId === p.newer.id ? "NEWER" : p.supersedingId === p.older.id ? "OLDER" : null;
+}
+
+/**
+ * One of a settled part's two quotes in its thought's text, on one line (SMD-4446 PR 3a): the text either side as the
+ * listing gave it and the quote between « and », each cleaned as every quoted thought text is. A context as long as
+ * the listing gives at most (`context` characters, counted as 156 counts them) was cut from a longer text and is
+ * marked so; a shorter one reached the text's edge. The space between a context and its quote is the text's own, kept
+ * as one space. Where the text holds the quote only as a part's identity reads it (in other capitals or spacing), or
+ * no longer holds it, that is said and the row's own words follow alone.
+ */
+export function partQuoteText(q: PartQuote, context = PART_CONTEXT): string {
+  const words = `«${snipText(q.text, PROPOSAL_TEXT_MAX)}»`;
+  if (q.before === null || q.after === null) return q.inText ? `in other capitals or spacing than the part recorded: ${words}` : `no longer in its text: ${words}`;
+  const cut = (c: string) => [...c].length >= context;
+  const before = oneLine(q.before), after = oneLine(q.after);
+  const lead = before ? `${cut(q.before) ? "…" : ""}${before}${/\s$/.test(q.before) ? " " : ""}` : "";
+  const trail = after ? `${/^\s/.test(q.after) ? " " : ""}${after}${cut(q.after) ? "…" : ""}` : "";
+  return `${lead}${words}${trail}`;
+}
+
+/** A whole-thought proposal's verdict as the proposals' listing words it. */
+const wholeVerdictWords = (v: string): string =>
+  v === "newer_supersedes_older" ? "the newer thought supersedes the older" : v === "older_supersedes_newer" ? "the older thought supersedes the newer" : "one is out of date, which not stated";
+
+/**
+ * A settled part as every listing prints it (SMD-4446 PR 3a), `indent` before each line and each date through `day`
+ * (a reply's displayDate by default; the CLI gives its own, as its proposals' listing prints days): its place and status, the
+ * group its word falls in and the word, the reason, each thought of its pair with the quote the part takes from it
+ * shown in its text as it stands, the part's id and the pass that judged it, who decided it, and what else a reviewer
+ * should know before deciding: an undecided part that waits for the pass (stale, or at a text that has moved), an
+ * accepted one whose text has moved since, and a whole-thought proposal on the same pair.
+ * Every text a thought, a judge or a reviewer wrote is on one line behind a label, so none starts an `ID:` line
+ * (SMD-2533's rule for the proposals' listing). One definition for db/consolidate.ts --parts and the
+ * list_settled_parts reply.
+ */
+export function partBlock(p: SettledPart, n: number, o: { indent?: string; day?: (d: string | null) => string } = {}): string {
+  const indent = o.indent ?? "";
+  const day = o.day ?? ((d: string | null) => displayDate(d) ?? "undated");
+  const decided = p.status === "accepted" || p.status === "rejected";
+  const note = p.reviewNote === null ? "" : snipText(p.reviewNote, PROPOSAL_TEXT_MAX);
+  const reason = snipText(p.reason, PROPOSAL_TEXT_MAX);
+  const side = (label: "older" | "newer"): string[] => {
+    const s = p[label];
+    const holds = p.holder === label;
+    const head = snipText(s.head, 100);
+    return [
+      `${indent}   ${label} [${day(s.created_at)}]${s.edited ? " (edited since judged)" : ""} ${holds ? "holds the statement" : "shows it"}: ${partQuoteText(holds ? p.statement : p.shownBy)}`,
+      ...(head ? [`${indent}      begins: ${head}`] : []),
+      `${indent}      ID: ${s.id}`,
+    ];
+  };
+  const moved = p.older.edited || p.newer.edited;
+  const w = p.whole;
+  const stood = w && w.status === "accepted" && w.supersedingId ? (w.supersedingId === p.newer.id ? "newer" : w.supersedingId === p.older.id ? "older" : null) : null;
+  return [
+    `${indent}${n}. [${p.status}${decided && p.reviewedAt ? ` ${day(p.reviewedAt)}` : ""}] ${PART_GROUP_WORDS[p.group] ?? snipText(String(p.group), 40)} (the writer's word: ${snipText(p.word, 40)})`,
+    ...(reason ? [`${indent}   reason: ${reason}`] : []),
+    ...side("older"),
+    ...side("newer"),
+    `${indent}   part ${p.id} — judged by ${judgeKeyText(p.judgeKey)} on ${day(p.judgedAt)}`,
+    ...(decided ? [`${indent}   decided by: ${p.reviewer ? reviewerText(p.reviewer) : "not recorded — no actor named the decision"}`] : []),
+    ...(decided && note ? [`${indent}   note: ${note}`] : []),
+    ...(!decided && (p.status === "stale" || moved)
+      ? [`${indent}   WAITS: ${p.status === "stale" ? `a rebuild marked this part stale${moved ? ", a text having moved since it was judged" : ""}` : "a text has moved since this part was judged"} — a decide-mode pass takes such a part up, its pair judged again or, where nothing will judge the pair again, the part removed (consolidate.ts --status says what each waits for)`]
+      : []),
+    ...(p.status === "accepted" && moved ? [`${indent}   MOVED: a text has moved since this part was judged — it was accepted on the earlier text`] : []),
+    ...(w ? [`${indent}   WHOLE: this pair also holds a whole-thought proposal, ${snipText(w.status, 20)}${stood ? `, the ${stood} thought standing` : ` (${wholeVerdictWords(w.verdict)})`} — proposal ${w.id}`] : []),
+  ].join("\n");
 }
 
 /** The line a listing from before 094 carries once: it returns no writer to show. */

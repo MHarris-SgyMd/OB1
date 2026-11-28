@@ -21414,6 +21414,74 @@ if (want("16")) {
           await sql`UPDATE thoughts SET embedding = NULL WHERE id IN (${foundryOld}::uuid, ${gantryNew}::uuid)`;
           await sql`UPDATE thoughts SET content_fingerprint = NULL WHERE id = ${hayloftOld}::uuid`;
           await sql`UPDATE thoughts SET content_fingerprint = content_fingerprint_of('a text the hayloft thought never held') WHERE id = ${hayloftNew}::uuid`;
+          // SMD-4446 PR 3a: --parts lists the parts as they stand here, before the pass takes any up, and writes
+          // nothing. The counts it must show are read from the table by this row's own statement.
+          {
+            const now = (await sql`SELECT count(*) FILTER (WHERE s.status = 'pending')::int AS pending, count(*) FILTER (WHERE s.status = 'stale')::int AS stale,
+                count(*) FILTER (WHERE s.status = 'pending' AND (s.older_fingerprint <> content_fingerprint_of(o.content) OR s.newer_fingerprint <> content_fingerprint_of(n.content)))::int AS moved
+              FROM settled_parts s JOIN thoughts o ON o.id = s.older_id JOIN thoughts n ON n.id = s.newer_id`)[0] as { pending: number; stale: number; moved: number };
+            const rowsBefore = JSON.stringify(await sql`SELECT id::text AS id, status, reviewed_at::text AS r FROM settled_parts ORDER BY id`);
+            const listed = await decide(denv, "--parts"), listedStale = await decide(denv, "--parts", "stale"), listedKeyed = await decide(denv, "--parts", "pending", "--key", DKEY);
+            const linesOf = (out: string, re: RegExp) => out.split("\n").filter((l) => re.test(l)).length;
+            assert(now.pending > 0 && now.pending <= 50 && now.moved === 13 && now.stale === 1 && listed.code === 0
+                && listed.out.includes(`  ${now.pending} pending settled part(s), oldest judged first. Each is a statement in one thought that the other thought of its pair shows is no longer true or no longer open; both thoughts stand whatever is decided, and a part writes no thought:`)
+                && linesOf(listed.out, /^ {2}\d+\. \[pending\] (no longer holds|done or settled) \(the writer's word: [a-z]+\)$/) === now.pending
+                && linesOf(listed.out, /^ {8}ID: [0-9a-f-]{36}$/) === 2 * now.pending && linesOf(listed.out, /^ {5}part [0-9a-f-]{36} — judged by /) === now.pending
+                && linesOf(listed.out, /^ {5}WAITS: a text has moved since this part was judged — /) === now.moved && linesOf(listed.out, /^ {5}(older|newer) \[\d{4}-\d{2}-\d{2}\] \(edited since judged\) /) >= now.moved
+                && !/next page:/.test(listed.out) && !/\[stale/.test(listed.out),
+              `--parts lists the pending parts, oldest judged first: one block each with its two thoughts' ids and its own, the thirteen at a moved text said to wait for the pass, and no next page under fifty (${now.pending} pending, ${now.moved} moved; exit ${listed.code})`);
+            const staleBlock = listedStale.out.split("\n");
+            assert(listedStale.code === 0 && listedStale.out.includes("  1 stale settled part(s), oldest judged first.")
+                && staleBlock.includes("  1. [stale] done or settled (the writer's word: resolves)") && staleBlock.includes("     reason: the shelf was stocked")
+                && staleBlock.some((l) => /^ {5}older \[\d{4}-\d{2}-\d{2}\] holds the statement: \[16d\] The pantry «shelf is bare»\.$/.test(l)) && staleBlock.includes(`        ID: ${pantryOld}`)
+                && staleBlock.some((l) => /^ {5}newer \[\d{4}-\d{2}-\d{2}\] shows it: \[16d\] The pantry «shelf was stocked in May»\.$/.test(l)) && staleBlock.includes(`        ID: ${pantryNew}`)
+                && staleBlock.includes("        begins: [16d] The pantry shelf is bare.")
+                && staleBlock.some((l) => l.startsWith("     WAITS: a rebuild marked this part stale — a decide-mode pass takes such a part up,"))
+                && staleBlock.some((l) => /^ {5}WHOLE: this pair also holds a whole-thought proposal, pending \(the newer thought supersedes the older\) — proposal [0-9a-f-]{36}$/.test(l)),
+              `--parts stale lists the one stale part: each quote in its thought's text between its marks, the thought's first words and its id, that a rebuild marked it, and the whole-thought proposal on its pair (exit ${listedStale.code}: ${staleBlock.find((l) => l.includes("holds the statement"))?.trim()})`);
+            assert(listedKeyed.code === 0 && linesOf(listedKeyed.out, /^ {2}\d+\. \[pending\] /) === now.pending && listedKeyed.out.includes(`pending settled part(s) judged by ${DKEY}, oldest judged first`)
+                && (await decide(denv, "--parts", "pending", "--key", "consolidate:no-such+pass@p4d6")).out.includes("  no pending settled parts judged by consolidate:no-such+pass@p4d6")
+                && JSON.stringify(await sql`SELECT id::text AS id, status, reviewed_at::text AS r FROM settled_parts ORDER BY id`) === rowsBefore,
+              `--parts with --key lists that pass's parts alone, and says so of a key no part carries; every part's row is as it was after the listings (${linesOf(listedKeyed.out, /^ {2}\d+\. \[pending\] /)})`);
+            // A capped page and the line that lists the next: 55 parts of a pass of their own on two thoughts made for
+            // this, written by hand with their times, and gone with their thoughts before the life goes on.
+            const PKEY = "consolidate:paged+writer@p4d6";
+            const [pagedOld, pagedNew] = await Promise.all(["[16d] paged: an older thought made for the listing's pages", "[16d] paged: a newer thought made for the listing's pages"]
+              .map(async (c) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${c}, content_fingerprint_of(${c})) RETURNING id`)[0].id)));
+            await sql`INSERT INTO settled_parts (older_id, newer_id, holder, statement, shown_by, word, reason, older_fingerprint, newer_fingerprint, judge_key, judged_at)
+                      SELECT ${pagedOld}::uuid, ${pagedNew}::uuid, 'older', 'paged statement ' || g, 'paged showing ' || g, 'updates', 'paged', 'fp-o', 'fp-n', ${PKEY},
+                             timestamptz '2026-10-01 00:00:00+00' + make_interval(secs => g) FROM generate_series(1, 55) g`;
+            const page1 = await decide(denv, "--parts", "pending", "--key", PKEY);
+            const next = /^ {2}next page: (--parts pending --key consolidate:paged\+writer@p4d6 --after [A-Za-z0-9_-]+)$/m.exec(page1.out)?.[1] ?? "";
+            const page2 = next ? await decide(denv, ...next.split(" ")) : { code: -1, out: "no next page line" };
+            const statementsOf = (out: string) => [...out.matchAll(/«paged statement (\d+)»/g)].map((m) => Number(m[1]));
+            const refusedCursor = await decide(denv, "--parts", "stale", "--key", PKEY, "--after", next.split(" ").at(-1) ?? "x");
+            // A cursor of the right shape whose time Postgres cannot read, which only a hand-made one holds: the caller's, refused in --parts' own words.
+            const { partsCursor: handMade } = await import("../server-portable/core/list-cursor.ts");
+            const yearZero = await decide(denv, "--parts", "pending", "--after", handMade({ list: "parts", status: "pending", judgeKey: null }, "0000-01-01 00:00:00+00", pagedOld));
+            await sql`DELETE FROM thoughts WHERE id IN (${pagedOld}::uuid, ${pagedNew}::uuid)`;
+            assert(page1.code === 0 && page1.out.includes(`  50 pending settled part(s) judged by ${PKEY}, oldest judged first — the first 50 of 55.`) && statementsOf(page1.out).join() === Array.from({ length: 50 }, (_, i) => i + 1).join()
+                && page2.code === 0 && page2.out.includes(`  5 pending settled part(s) judged by ${PKEY} past the cursor, oldest judged first.`) && statementsOf(page2.out).join() === "51,52,53,54,55" && !/next page:/.test(page2.out)
+                && refusedCursor.code === 2 && refusedCursor.out.includes(`--after's cursor was made for --parts pending --key ${PKEY}: pass those with it`)
+                && yearZero.code === 2 && yearZero.out.includes("--after takes the cursor a --parts page printed (next page: … --after <cursor>), as it was given: this one's time is not one Postgres reads.")
+                && Number((await sql`SELECT count(*)::int AS c FROM settled_parts WHERE judge_key = ${PKEY}`)[0].c) === 0,
+              `a capped --parts page says how many there are and prints the line that lists the next; that line lists the rest, oldest first, and ends the walk; its cursor under another status is refused by the flags it was made for, and one whose time Postgres cannot read in --parts' own words (${statementsOf(page1.out).length} + ${statementsOf(page2.out).length}; ${refusedCursor.out.trim().slice(0, 90)})`);
+            // An unrelated failure inside the listing is shown as itself; a brain without the listing names its file.
+            // The unrelated failure is the listing itself, its body replaced under its own arguments and columns.
+            const the156 = String((await sql`SELECT name FROM schema_migrations WHERE name ~ '^[0-9]{3}_parts_listing[.]sql$'`)[0].name);
+            await sql.unsafe(`DO $do$ DECLARE f regprocedure := 'list_settled_parts(text, int, text, timestamptz, uuid, int)'::regprocedure; BEGIN
+              EXECUTE format('CREATE OR REPLACE FUNCTION list_settled_parts(%s) RETURNS %s LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION ''boom: an unrelated failure inside the listing''; END $f$',
+                             pg_get_function_arguments(f), pg_get_function_result(f)); END $do$`);
+            const partsBoom = await decide(denv, "--parts");
+            await sql.unsafe(`DROP FUNCTION list_settled_parts(text, int, text, timestamptz, uuid, int)`);
+            const partsShort = await decide(denv, "--parts");
+            await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => f === the156 });
+            const partsBack = await decide(denv, "--parts", "stale");
+            assert(partsShort.code === 1 && /--parts: the settled parts' listing needs migration 156 \(db\/migrations\/156_parts_listing\.sql\), which this brain has not applied: cd db && bun migrate\.ts --url <url>/.test(partsShort.out) && !/PostgresError/.test(partsShort.out)
+                && partsBoom.code !== 0 && /boom: an unrelated failure inside the listing/.test(partsBoom.out) && !/needs migration 156/.test(partsBoom.out)
+                && partsBack.code === 0 && partsBack.out.includes("  1 stale settled part(s), oldest judged first."),
+              `on a brain without the listing --parts names its file, not a driver error; an unrelated error inside the listing is shown as itself; the file applied again, it lists (exit ${partsShort.code}, ${partsBoom.code}, ${partsBack.code}: ${partsShort.out.trim().split("\n").at(-1)?.slice(0, 120)})`);
+          }
           const lifeStatus = await decide(denv, "--status");
           const lifeDry = await decide(denv, "--dry-run");
           /** db/rebuild.ts --status' line for the parts: the pass's own read of them (partsStandingSql). */

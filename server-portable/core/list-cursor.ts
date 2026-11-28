@@ -164,6 +164,42 @@ export function parseProposalCursor(raw: string): { selection: ProposalSelection
 export const sameSelection = (a: ProposalSelection, b: ProposalSelection): boolean => a.status === b.status && a.lineage === b.lineage && a.judgeKey === b.judgeKey;
 
 /**
+ * What a list_settled_parts page selected (SMD-4446 PR 3a): its status word (`all` for every state) and its judge key
+ * (null: every pass), the CLI's --parts and --key alike. Tagged `list: "parts"`, as a findings selection is tagged, so
+ * a refusal's `made` says which listing's it is.
+ */
+export type PartSelection = { list: "parts"; status: ProposalSelection["status"]; judgeKey: string | null };
+/** Whether two selections are the same listing — a cursor's and the call's it is passed with (sameSelection's rule, for parts). */
+export const samePartSelection = (a: PartSelection, b: PartSelection): boolean => a.status === b.status && a.judgeKey === b.judgeKey;
+
+/**
+ * list_settled_parts' cursor (SMD-4446 PR 3a): the selection the page was listed under, then the last listed row's
+ * place on the listing's order, its judged_at as Postgres's text (to the microsecond) and its id, as base64url of
+ * `["parts", status, judgeKey, judgedAt, id]`. A part's row is one judgement, and no update moves its judged_at or
+ * its id (151's settled_parts_keep_judgement), so the two values are the row's place for as long as it stands. The
+ * selection, so a cursor passed with other filters is refused rather than starting that listing at a place in another
+ * (the proposals' rule). The tag keeps it apart from the other listings' cursors, so one listing's is refused by
+ * another.
+ */
+export function partsCursor(sel: PartSelection, judgedAt: string, id: string): string {
+  return Buffer.from(JSON.stringify(["parts", sel.status, sel.judgeKey, judgedAt, id])).toString("base64url");
+}
+
+/** A list_settled_parts cursor read back, or null for anything that is not one. */
+export function parsePartsCursor(raw: string): { selection: PartSelection; judgedAt: string; id: string } | null {
+  const v = decodeCursor(raw, 5);
+  if (!v) return null;
+  const [tag, status, judgeKey, judgedAt, id] = v;
+  if (tag !== "parts") return null;
+  if (!isProposalStatus(status)) return null;
+  // pass-key.ts's one rule, the tool's and --key's input rule, so a cursor carries no key either door refuses.
+  if (judgeKey !== null && (typeof judgeKey !== "string" || !PASS_KEY_CHARS.test(judgeKey))) return null;
+  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
+  const selection: PartSelection = { list: "parts", status, judgeKey };
+  return pgStamp(judgedAt) ? { selection, judgedAt, id: id.toLowerCase() } : null;
+}
+
+/**
  * What a list_work_claims page selected (SMD-3606 PR 2): the ticket filter (null: every ticket), the holder filter
  * (null: every holder) and whether ended claims are included — the tool's `ticket`, `holder` and `include_ended`.
  */
