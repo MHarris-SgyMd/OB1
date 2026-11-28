@@ -5719,10 +5719,10 @@ PR 3c): what a read of a thought shows of its accepted parts.
   accepted: a page of ten thoughts took 1.4 ms through it and 4.1 ms without.
   A page of ten that hold none, which is most pages, took 0.14 ms against
   2.8 ms.
-- **`fetch` carries them** (PR 3c-1; `server-portable/README.md`), through the
-  one read the server's store makes (`server-portable/parts-on.ts`). The
-  search and list pages follow (PR 3c-2), and the validity read's mark (PR
-  3c-3). Nothing ranks, demotes or supersedes by a part.
+- **`fetch` carries them** (PR 3c-1; `server-portable/README.md`), and the
+  search and list pages mark them (PR 3c-2), through the one read the
+  server's store makes (`server-portable/parts-on.ts`). The validity read's
+  mark follows (PR 3c-3). Nothing ranks, demotes or supersedes by a part.
 
 It is SECURITY INVOKER and reads `settled_parts` and `thoughts`. The server
 group holds the first since 151 and the capture group the second. A role

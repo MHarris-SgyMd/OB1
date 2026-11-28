@@ -8,6 +8,8 @@ import type { PartGroup } from "./part-listing.ts";
 
 /** How many parts of one thought fetch shows; the rest are counted (157's p_per admits 1 to 50). */
 export const PARTS_ON_FETCH = 20;
+/** How many parts of one result a search or list page shows; the rest are counted, and fetch shows them. */
+export const PARTS_ON_PAGE = 3;
 
 /**
  * The other thought of a part's pair, which holds the words that show the part: its id, capture time, trust

@@ -1227,7 +1227,7 @@ console.log("\n[9c] fetch shows the accepted settled parts standing on a thought
     const [{ r }] = await sql`SELECT review_settled_part(${id}::uuid, ${decision}, 'made up', ${{ name: "e2e-reviewer", via: "e2e" }}::jsonb) AS r`;
     if ((r as { ok?: boolean }).ok !== true) throw new Error(`not decided: ${JSON.stringify(r)}`);
   };
-  type By = { id: string; title: string; trust: string | null; created_at: string | null; supersededBy: string | null };
+  type By = { id: string; title?: string; trust: string | null; created_at: string | null; supersededBy: string | null };
   type Shown = { id: string; group: string | null; word: string; statement: string; shownBy: string; otherIs: string; by: By; acceptedAt: string | null; editedSince: boolean; shownByInText: boolean };
   type Fetched = { id: string; title: string; text: string; settled?: Shown[] | null; settledMore?: number; settledNote?: string };
   const fetched = async (id: string) => { const r = await result("fetch", { id }); return { raw: r.text, v: JSON.parse(r.text) as Fetched, sc: r.sc as Fetched | undefined }; };
@@ -1249,14 +1249,14 @@ console.log("\n[9c] fetch shows the accepted settled parts standing on a thought
   const [ship, count] = mine.v.settled ?? [];
   assert(!("settled" in before.v) && !before.v.title.includes("settled") && mine.v.settled?.length === 2 && !("settledMore" in mine.v) && !("settledNote" in mine.v)
       && ship.id === pShip && ship.statement === "we ship the exporter by Friday" && ship.shownBy === "the exporter shipped on Thursday" && ship.word === "implements" && ship.group === "done_or_settled"
-      && ship.otherIs === "newer" && ship.by.id === newer && ship.by.trust === "ingested" && /^\[ingested\] .* - on-thought newer: the exporter shipped on Thursday/.test(ship.by.title) && ship.by.supersededBy === null
+      && ship.otherIs === "newer" && ship.by.id === newer && ship.by.trust === "ingested" && /^\[ingested\] .* - on-thought newer: the exporter shipped on Thursday/.test(ship.by.title ?? "") && ship.by.supersededBy === null
       && typeof ship.acceptedAt === "string" && ship.editedSince === false && ship.shownByInText === true
       && count.id === pCount && count.group === "done_or_settled" && !mine.v.settled.some((p) => p.id === pReview || p.id === pRota),
     `with nothing accepted, fetch carries no part; then the accepted parts of its thought, in the order the text says them and not the order they were recorded in, each with its statement, the words that show it, its word and group, and the thought they are from, marked as outside text; a pending and a rejected part on no read (${mine.v.settled?.length}: ${ship?.id === pShip}/${count?.id === pCount})`);
   assert(mine.v.title.startsWith("[settled in part: 2] ") && /on-thought older/.test(mine.v.title) && mine.v.text.startsWith("on-thought older: we ship the exporter by Friday") && !mine.raw.includes("\x1b")
       && JSON.stringify(mine.sc) === JSON.stringify(mine.v)
       && theirs.v.settled?.length === 1 && theirs.v.settled[0].id === pBack && theirs.v.settled[0].otherIs === "older" && theirs.v.settled[0].by.id === older && theirs.v.settled[0].by.trust !== "ingested"
-      && !theirs.v.settled[0].by.title.startsWith("[ingested]") && theirs.v.settled[0].group === "no_longer_holds" && /\[settled in part: 1\] /.test(theirs.v.title),
+      && theirs.v.settled[0].by.title?.startsWith("[ingested]") === false && theirs.v.settled[0].group === "no_longer_holds" && /\[settled in part: 1\] /.test(theirs.v.title),
     `the title says how many parts stand, the text is the thought's own, no escape sequence reaches the reply, and the structured value is the reply's; the newer thought's own part names the older as the one that shows it, unmarked (${mine.v.title.slice(0, 40)} | ${theirs.v.title.slice(0, 60)})`);
 
   // An edit elsewhere in the text: the parts stand and say their thought has moved. An edit that takes a statement
@@ -1270,7 +1270,7 @@ console.log("\n[9c] fetch shows the accepted settled parts standing on a thought
   const unshown = await fetched(older);
   assert(elsewhere.v.settled?.length === 2 && elsewhere.v.settled.every((p) => p.editedSince === true)
       && out.v.settled?.length === 1 && out.v.settled[0].id === pShip && out.v.title.startsWith("[settled in part: 1] ")
-      && unshown.v.settled?.length === 1 && unshown.v.settled[0].shownByInText === false && unshown.v.settled[0].shownBy === "the exporter shipped on Thursday" && /on-thought newer: the exporter went out early/.test(unshown.v.settled[0].by.title),
+      && unshown.v.settled?.length === 1 && unshown.v.settled[0].shownByInText === false && unshown.v.settled[0].shownBy === "the exporter shipped on Thursday" && /on-thought newer: the exporter went out early/.test(unshown.v.settled[0].by.title ?? ""),
     `a text edited elsewhere keeps its parts, each saying it has moved since; a statement edited out of its thought is on no read, and the title counts what is left; the words that show a part edited out of the other thought are still given, and said to be no longer in it (${elsewhere.v.settled?.length} → ${out.v.settled?.length}; ${unshown.v.settled?.[0]?.shownByInText})`);
 
   // A brain without the read: fetch goes on, and says the parts were not read.
@@ -1283,6 +1283,116 @@ console.log("\n[9c] fetch shows the accepted settled parts standing on a thought
     `on a brain without the read, fetch still answers the thought, its parts null, its title and a note saying they were not read; the file applied, they are read again (${pre157.v.title.slice(0, 40)})`);
 
   await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid)`;
+  await sql.close();
+}
+
+console.log("\n[9d] the search and list pages mark a result that holds an accepted settled part (SMD-4446 PR 3c-2): one line a result, each statement with what settled it and the thought that shows it by its place on the page or its id; the rank, order and scores, the same with the part as without; no word of the other thought on a page, a filtered one included; the ChatGPT-shape search carries none; a brain without the read says the parts were not read, and each page goes on");
+{
+  const sql = new SQL({ url: URL_, max: 1 });
+  const vec = `[${new Array(EMBEDDING_DIM).fill(0).map((_, i) => (i === 7 ? 1 : 0)).join(",")}]`;
+  const seed = async (content: string, daysAgo: number, event?: Record<string, unknown>) => {
+    const id = ((await sql`SELECT upsert_thought(${content}, ${{ metadata: {}, ...(event ? { event } : {}) }}::jsonb, ${vec}::vector) AS r`)[0].r as { id: string }).id;
+    await sql`UPDATE thoughts SET created_at = now() - make_interval(days => ${daysAgo}) WHERE id = ${id}::uuid`;
+    return id;
+  };
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (o: string, n: string, holder: string, statement: string, shown: string, word: string) =>
+    String(((await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, ${holder}, ${statement}, ${shown}, ${word}, 'a made-up reason', ${KEY},
+        (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${o}::uuid), (SELECT content_fingerprint_of(content) FROM thoughts WHERE id = ${n}::uuid), '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  const decide = async (id: string, decision: string) => {
+    const [{ r }] = await sql`SELECT review_settled_part(${id}::uuid, ${decision}, 'made up', ${{ name: "e2e-reviewer", via: "e2e" }}::jsonb) AS r`;
+    if ((r as { ok?: boolean }).ok !== true) throw new Error(`not decided: ${JSON.stringify(r)}`);
+  };
+  type Mark = { id: string; group: string | null; word: string | null; otherIs: string; by: { id: string; trust: string | null; supersededBy: string | null }; editedSince: boolean; shownByInText: boolean };
+  type Hit = { id: string; similarity?: number | null; score?: number | null; fused?: number | null; settled?: Mark[] | null; settledMore?: number };
+  const lineOf = (text: string) => text.split("\n").filter((l) => l.includes("⚠ Settled in part:"));
+
+  // A pair whose texts share a phrase no other thought holds, so one keyword page and one search hold both. The newer
+  // is outside text. The older says three things; two are settled, recorded out of the order its text says them.
+  const older = await seed("pagemark older zq7: we bill monthly; the cap is 40 seats; the pilot is open", 9);
+  const newer = await seed("pagemark newer zq7: we bill annually now; the cap is 60 seats; the pilot closed", 0, { trust: "ingested" });
+  const pCap = await part(older, newer, "older", "the cap is 40 seats", "the cap is 60 seats", "updates");
+  const pBill = await part(older, newer, "older", "we bill monthly", "we bill annually now", "revises");
+  const pPilot = await part(older, newer, "older", "the pilot is open", "the pilot closed", "resolves");
+
+  // The rank before any part is accepted: the order and each result's scores.
+  const ASK = { query: "\"pagemark\" zq7 billing and seats", limit: 10 };
+  const ranked = async () => ((await result("search_thoughts", ASK)).sc?.hits as Hit[]).map((h) => ({ id: h.id, similarity: h.similarity, score: h.score, fused: h.fused }));
+  const before = await ranked();
+  const plainSearch = await result("search_thoughts", ASK);
+  await decide(pCap, "accept"); await decide(pBill, "accept"); await decide(pPilot, "reject");
+  const after = await ranked();
+  assert(before.length >= 2 && before.some((h) => h.id === older) && before.some((h) => h.id === newer) && JSON.stringify(after) === JSON.stringify(before) && lineOf(plainSearch.text).length === 0,
+    `a search ranks as it did once a result holds accepted parts: the same results in the same order with the same scores; and with none accepted no page prints a line (${before.length} results; ${JSON.stringify(after) === JSON.stringify(before)})`);
+
+  // search_thoughts: one line on the result that holds the parts, in its text's order, the thought that shows them
+  // named by its place on the page; the value carries the parts' ids and flags and no statement.
+  const st = await result("search_thoughts", ASK);
+  const stHits = st.sc?.hits as Hit[];
+  const place = (hits: Hit[], id: string) => hits.findIndex((h) => h.id === id) + 1;
+  const mine = stHits.find((h) => h.id === older);
+  assert(lineOf(st.text).length === 1 && lineOf(st.text)[0] === `⚠ Settled in part: «we bill monthly» no longer holds, shown by Result ${place(stHits, newer)}; «the cap is 40 seats» is done or settled, shown by Result ${place(stHits, newer)} — fetch shows each with the words that show it`
+      && mine?.settled?.length === 2 && mine.settled[0].id === pBill && mine.settled[0].group === "no_longer_holds" && mine.settled[0].word === "revises" && mine.settled[0].otherIs === "newer" && mine.settled[0].by.id === newer
+      && mine.settled[0].by.trust === "ingested" && mine.settled[1].id === pCap && mine.settledMore === 0 && stHits.find((h) => h.id === newer)?.settled?.length === 0
+      && !/we bill monthly|cap is 40/.test(JSON.stringify(stHits)) && !st.text.includes("could not be read"),
+    `search_thoughts prints one line on the result that holds the accepted parts, in the order its text says them, the thought that shows them named by its place on the page; a rejected part is on no line; the value carries each part's id, group, word and the other thought's id and trust, and no statement (${lineOf(st.text)[0]?.slice(0, 80)})`);
+
+  // plan_context's knowledge hits are search_thoughts' hits, read and printed by the same code: they carry the mark.
+  const plan = await result("plan_context", { request: "\"pagemark\" zq7 billing and seats", limit: 10 });
+  // Its value is lean (SMD-4191): per hit, how many of each label it holds.
+  const planHits = (plan.sc?.knowledge as { hits?: { id: string; settled?: number | null; relations?: number | null }[] } | undefined)?.hits ?? [];
+  assert(!plan.isError && lineOf(plan.text).length === 1 && lineOf(plan.text)[0].includes("«we bill monthly» no longer holds, shown by Result ") && lineOf(plan.text)[0].includes("«the cap is 40 seats» is done or settled")
+      && planHits.find((h) => h.id === older)?.settled === 2 && planHits.find((h) => h.id === newer)?.settled === 0,
+    `plan_context's knowledge section prints the same line on the result that holds the parts, and its value counts them, two on that result and none on the other (${lineOf(plan.text)[0]?.slice(0, 70)}; ${planHits.length} hits)`);
+
+  // The keyword page and the list page print the same line, each naming the other result as that page does.
+  const kw = await result("search_thoughts_keyword", { query: "zq7" });
+  const kwHits = kw.sc?.hits as Hit[];
+  const ls = await result("list_thoughts", { limit: 50 });
+  const lsHits = ls.sc?.thoughts as Hit[];
+  const lsLine = lineOf(ls.text).find((l) => l.includes("we bill monthly")) ?? "";
+  assert(lineOf(kw.text).length === 1 && lineOf(kw.text)[0].includes(`«we bill monthly» no longer holds, shown by Result ${place(kwHits, newer)}; «the cap is 40 seats» is done or settled, shown by Result ${place(kwHits, newer)}`)
+      && kwHits.find((h) => h.id === older)?.settled?.length === 2
+      && lsLine.startsWith("   ⚠ Settled in part: «we bill monthly» no longer holds, shown by ") && lsLine.includes(`shown by item ${place(lsHits, newer)}`) && lsHits.find((h) => h.id === older)?.settled?.[0].id === pBill,
+    `the keyword page and the list page print the line too, each naming the other result as that page names one, and their values carry the parts (${lineOf(kw.text)[0]?.slice(0, 60)} | ${lsLine.trim().slice(0, 60)})`);
+
+  // A page whose trust floor leaves out the thought that shows a part: the line names that thought by its id, and
+  // no word of it is in the reply. A pair of its own: the holder is outside text, which a floor of `ingested`
+  // keeps, and the thought that shows its part carries no trust, which that floor leaves out. The ChatGPT-shape
+  // search carries no part.
+  const kept = await seed("filtermark older zq8: the rota is with Ana", 5, { trust: "ingested" });
+  const left = await seed("filtermark newer zq8: the rota went to Cy on Monday", 0);
+  await decide(await part(kept, left, "older", "the rota is with Ana", "the rota went to Cy on Monday", "revises"), "accept");
+  const filtered = await result("search_thoughts_keyword", { query: "zq8", min_trust: "ingested" });
+  const compat = await result("search", { query: "pagemark zq7" });
+  const compatValue = JSON.parse(compat.text) as { results: Record<string, unknown>[] };
+  assert((filtered.sc?.hits as Hit[]).length === 1 && (filtered.sc?.hits as Hit[])[0].id === kept && lineOf(filtered.text).length === 1
+      && lineOf(filtered.text)[0] === `⚠ Settled in part: «the rota is with Ana» no longer holds, shown by ${left} — fetch shows each with the words that show it`
+      && !/went to Cy|on Monday|filtermark newer/.test(filtered.text) && (filtered.sc?.hits as Hit[])[0].settled?.[0].by.id === left && (filtered.sc?.hits as Hit[])[0].settled?.[0].by.trust === null
+      && compatValue.results.length > 0 && compatValue.results.every((r) => !("settled" in r)) && !compat.text.includes("Settled in part"),
+    `on a page whose trust floor leaves out the thought that shows a part, the line names that thought by its id and the reply carries no word of it; the ChatGPT-shape search carries no part (${lineOf(filtered.text)[0]?.slice(0, 70)})`);
+
+  // A statement edited out of its thought leaves the line; the one still said stays.
+  await sql`SELECT update_thought(${older}::uuid, ${"pagemark older zq7: we bill by the quarter; the cap is 40 seats; the pilot is open"}, NULL::jsonb, NULL::vector, NULL::jsonb, NULL::timestamptz, NULL::jsonb, NULL::text)`;
+  const edited = await result("search_thoughts_keyword", { query: "zq7" });
+  assert(lineOf(edited.text).length === 1 && !lineOf(edited.text)[0].includes("we bill monthly") && lineOf(edited.text)[0].includes("«the cap is 40 seats» is done or settled")
+      && (edited.sc?.hits as Hit[]).find((h) => h.id === older)?.settled?.length === 1 && (edited.sc?.hits as Hit[]).find((h) => h.id === older)?.settled?.[0].editedSince === true,
+    "a statement edited out of its thought is on no page's line; the part still said stays, and says its thought has moved since");
+
+  // A brain without the read: each page goes on, and says once that the parts were not read.
+  await sql`DROP FUNCTION settled_parts_on(uuid[], int)`;
+  const NOTE = "Settled parts could not be read: a result without a `⚠ Settled in part` line may still hold a statement a later record settled.";
+  const unread = [await result("search_thoughts", ASK), await result("search_thoughts_keyword", { query: "zq7" }), await result("list_thoughts", { limit: 50 }),
+    await result("plan_context", { request: "\"pagemark\" zq7 billing and seats", limit: 10 })];
+  const fetchedStill = JSON.parse((await result("fetch", { id: older })).text) as { settled?: unknown; title: string };
+  await applyMigrations(URL_, { dim: EMBEDDING_DIM, model: EMBEDDING_MODEL, only: (f) => /^\d{3}_parts_on_thoughts\.sql$/.test(f) });
+  const readAgain = await result("search_thoughts_keyword", { query: "zq7" });
+  assert(unread.every((r) => !r.isError && r.text.split(NOTE).length === 2 && lineOf(r.text).length === 0) && (unread[0].sc?.hits as Hit[]).every((h) => h.settled === null)
+      && (unread[2].sc?.thoughts as Hit[]).every((h) => h.settled === null) && ((unread[3].sc?.knowledge as { hits: { settled: unknown }[] }).hits).every((h) => h.settled === null)
+      && fetchedStill.settled === null && lineOf(readAgain.text).length === 1,
+    "on a brain without the read each page still answers, plan_context's knowledge among them, says once that the parts were not read and prints no line, its value carrying null; the file applied, the line is back");
+
+  await sql`DELETE FROM thoughts WHERE id IN (${older}::uuid, ${newer}::uuid, ${kept}::uuid, ${left}::uuid)`;
   await sql.close();
 }
 

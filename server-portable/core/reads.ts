@@ -24,7 +24,8 @@ import type { SettledPart } from "../part-listing.ts";
 import { parseSince } from "./since.ts";
 import { fetchedThreads, type FetchedThread } from "./threads.ts";
 import { relationsLabel, relationsOf, relationsResult } from "./relations.ts";
-import { settledOf, settledResult } from "./settled.ts";
+import { settledLabel, settledOf, settledResult } from "./settled.ts";
+import { PARTS_ON_FETCH } from "../parts-on.ts";
 import { SCAN_DEFAULT, SCAN_MAX, type Input } from "./schemas.ts";
 import { weightsRefused } from "./weights.ts";
 import { itemKey, marksOn, type Markable, type MarkItem } from "./marks.ts";
@@ -308,7 +309,7 @@ export async function fetchThought(ctx: Ctx, principal: Principal, { id }: Input
   if (!thought) return refuse({ code: "NOT_FOUND", retryable: false, id });
   // Click-through relevance (034): the caller opened this id after a
   // search. Only on a hit — a fetch of a missing id labels nothing.
-  const [, claimed, threads, related, priority, settled] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id), relationsOf(store, [thought], RELATIONS_FETCHED, true), priorityOf(store, [thought]), settledOf(store, [thought])]);
+  const [, claimed, threads, related, priority, settled] = await Promise.all([ctx.logActions(principal, [{ tool: "fetch", targetId: id }]), claimedOf(store, principal, [thought]), fetchedThreads(store, thought.id), relationsOf(store, [thought], RELATIONS_FETCHED, true), priorityOf(store, [thought]), settledOf(store, [thought], PARTS_ON_FETCH, true)]);
   return ok({
     id: thought.id,
     title: thoughtTitle(thought.content, thought.created_at),
@@ -341,11 +342,12 @@ export type QueryFacts = Pick<ThoughtHybridMatch, "needles" | "needleCounts" | "
 /**
  * A hybrid hit, with the newer thought that supersedes it (025), if any, and
  * the tickets it names that moved since it was written (095, SMD-2540):
+ * and `settled`, the accepted settled parts standing on it (SMD-4446 PR 3c-2), null when not read;
  * `moved` null when they were not checked (superseded, a ticket row or a note
  * under one, no written time, a brain before 095), empty when checked and none
  * moved or it names none; `movedNotRead` the keys past the first 50, not checked.
  */
-export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number } & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel>;
+export type SearchHit = Pick<ThoughtHybridMatch, "id" | "content" | "metadata" | "created_at" | "similarity" | "matchedNeedles" | "score" | "fused" | "demoted"> & { supersededBy: string | null; moved: Moved[] | null; movedNotRead: number } & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel> & ReturnType<typeof settledLabel>;
 export type SearchThoughtsResult = {
   query: string;
   preferCurrent: boolean;
@@ -905,15 +907,15 @@ export async function labelHits(ctx: Ctx, principal: Principal, data: readonly T
 export async function labelHitsRead(ctx: Ctx, principal: Principal, data: readonly ThoughtHybridMatch[], labels?: Promise<Record<string, PriorityHit> | null> | null,
   marks?: MarkOpts): Promise<{ hits: SearchHit[]; unread: UnreviewedRead["failed"] }> {
   const store = await ctx.store();
-  const claims = claimedOf(store, principal, data), relating = relationsOf(store, data);
+  const claims = claimedOf(store, principal, data), relating = relationsOf(store, data), settling = settledOf(store, data);
   const prios = labels ? labels.then((l) => ({ labels: l, unread: null })) : priorityRead(store, data, undefined, undefined, marks);
   const superseded = await store.supersededAmong(data.map((t) => t.id));
-  const [moved, claimed, related, prioritised] = await Promise.all([movedOf(store, data, superseded), claims, relating, prios]);
+  const [moved, claimed, related, prioritised, settled] = await Promise.all([movedOf(store, data, superseded), claims, relating, prios, settling]);
   return {
     hits: data.map((t) => ({
       id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, similarity: t.similarity,
       matchedNeedles: t.matchedNeedles, score: t.score, fused: t.fused, demoted: t.demoted,
-      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised.labels, t.id),
+      supersededBy: superseded[t.id] ?? null, ...hitLabel(t.content, moved[t.id]), ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised.labels, t.id), ...settledLabel(settled, t.id),
     })),
     unread: prioritised.unread,
   };
@@ -1002,7 +1004,7 @@ export async function searchThoughts(ctx: Ctx, principal: Principal, input: Inpu
   });
 }
 
-export type KeywordHit = Pick<ThoughtKeywordMatch, "id" | "content" | "metadata" | "created_at" | "occurrences"> & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel>;
+export type KeywordHit = Pick<ThoughtKeywordMatch, "id" | "content" | "metadata" | "created_at" | "occurrences"> & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel> & ReturnType<typeof settledLabel>;
 export type KeywordResult = { query: string; offset: number; total: number | null; hits: KeywordHit[] };
 
 export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, input: Input<"search_thoughts_keyword">): Promise<Outcome<KeywordResult>> {
@@ -1015,19 +1017,19 @@ export async function searchThoughtsKeyword(ctx: Ctx, principal: Principal, inpu
   // arm='keyword' (034 logged only the semantic path).
   const { rows } = await runSearch(ctx, principal, { tool: "search_thoughts_keyword", arm: "keyword", query, limit, offset, filter: f.filter, minTrust: min_trust });
   const store = rows.length ? await ctx.store() : null;
-  const [claimed, related, prioritised] = store ? await Promise.all([claimedOf(store, principal, rows), relationsOf(store, rows), priorityOf(store, rows)]) : [{}, {}, {}];
+  const [claimed, related, prioritised, settled] = store ? await Promise.all([claimedOf(store, principal, rows), relationsOf(store, rows), priorityOf(store, rows), settledOf(store, rows)]) : [{}, {}, {}, {}];
   return ok({
     query,
     offset,
     // The whole match set, not the page: every row carries it. An empty first page is none; an empty later page (an offset past the end) says nothing of the set, so null (review pass 6).
     total: rows.length ? rows[0].totalCount : offset === 0 ? 0 : null,
-    hits: rows.map((t) => ({ id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, occurrences: t.occurrences, ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id) })),
+    hits: rows.map((t) => ({ id: t.id, content: t.content, metadata: t.metadata, created_at: t.created_at, occurrences: t.occurrences, ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id), ...settledLabel(settled, t.id) })),
   });
 }
 
 // ── list_thoughts and list_supersession_proposals ────────────────────────────
 
-export type ListedThought = ThoughtListItem & { supersededBy: string | null } & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel>;
+export type ListedThought = ThoughtListItem & { supersededBy: string | null } & ReturnType<typeof claimedLabel> & ReturnType<typeof relationsLabel> & ReturnType<typeof priorityLabel> & ReturnType<typeof settledLabel>;
 /** A page (SMD-2995): the thoughts, the sort they are in, and the cursor for the next page — null when no more follow. */
 export type ListThoughtsResult = { thoughts: ListedThought[]; sort: ListSort; cursor: string | null };
 
@@ -1059,8 +1061,8 @@ export async function listThoughts(ctx: Ctx, principal: Principal, { limit, type
   // 025 (SMD-1253): mark the listed thoughts a newer thought supersedes,
   // and name the replacement — the same label search_thoughts prints.
   const store = await ctx.store();
-  const [superseded, claimed, related, prioritised] = await Promise.all([store.supersededAmong(page.thoughts.map((t) => t.id)), claimedOf(store, principal, page.thoughts), relationsOf(store, page.thoughts), priorityOf(store, page.thoughts)]);
-  return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null, ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id) })), sort, cursor });
+  const [superseded, claimed, related, prioritised, settled] = await Promise.all([store.supersededAmong(page.thoughts.map((t) => t.id)), claimedOf(store, principal, page.thoughts), relationsOf(store, page.thoughts), priorityOf(store, page.thoughts), settledOf(store, page.thoughts)]);
+  return ok({ thoughts: page.thoughts.map((t) => ({ ...t, supersededBy: superseded[t.id] ?? null, ...claimedLabel(claimed, t.id), ...relationsLabel(related, t.id), ...priorityLabel(prioritised, t.id), ...settledLabel(settled, t.id) })), sort, cursor });
 }
 
 /**
