@@ -1122,12 +1122,14 @@ gives `relations: null` on the reads, and faults the `relations` operation, the 
 ## Settled parts on a thought (SMD-4446)
 
 A settled part is a statement in one thought that the other thought of a pair shows no longer holds, or is done
-(migration 151; `list_settled_parts` lists them). Once a reviewer accepts one, **`fetch` shows it on the thought that
-holds the statement** (PR 3c-1), through migration 157's `settled_parts_on` and the one read every surface makes
-(`parts-on.ts`). The thought is not superseded and not demoted, and nothing ranks by a part.
+(migration 151; `list_settled_parts` lists them). Once a reviewer accepts one, **the reads of a thought show it on the
+thought that holds the statement**: `fetch` whole (PR 3c-1), and `search_thoughts`, `search_thoughts_keyword` and
+`list_thoughts` as a mark (PR 3c-2). All of them read migration 157's `settled_parts_on` through one read
+(`parts-on.ts`). The thought is not superseded and not demoted, and nothing ranks by a part: a search gives the same
+results, in the same order, with the same scores.
 
-- **`settled`** rides only where the thought holds one: the first 20 parts in the order its text says them, with
-  `settledMore` for the rest.
+- **On `fetch`, `settled`** rides only where the thought holds one: the first 20 parts in the order its text says
+  them, with `settledMore` for the rest.
   - **Each part** carries its id; its `group` (`no_longer_holds` or `done_or_settled`; null for a group this server
     doesn't know) and the writer's `word`; `statement`, the thought's own words; `shownBy`, the words that show it;
     and `by`, the thought they are from: its id, title, `trust`, time and `supersededBy`. An outside text's title is
@@ -1143,7 +1145,20 @@ holds the statement** (PR 3c-1), through migration 157's `settled_parts_on` and 
   the thought's own.
 - **`settled: null`** says the parts couldn't be read. The title then starts `[settled parts not read]`, a
   `settledNote` says so, the log says why, and the fetch goes on.
-- **The pages carry none yet.** `search_thoughts`, `search_thoughts_keyword` and `list_thoughts` follow (PR 3c-2).
+- **On a page, every result carries `settled`:** the first 3 parts, with `settledMore` for the rest; `[]` with none.
+  - **Each part** is as fetch's, less the other thought's words: no `shownBy`, and `by` has no title. `statement` is
+    the result's own text. The thought that shows it is named by id. A label must not carry outside text into a read
+    filtered to keep it out, as the relations label was decided.
+  - **MCP prints one line a result:** `⚠ Settled in part: «we bill monthly» no longer holds, shown by Result 3; «the
+    cap is 40 seats» is done or settled, shown by <id> — fetch shows each with the words that show it`. Another result
+    on the page is named by its place, any other thought by its id. A statement is quoted up to 160 characters, on
+    the one line. The line follows the superseded mark.
+  - **MCP's structured value** carries each part's id, group, word and flags and the other thought's id, trust, time
+    and superseding thought. It carries no statement.
+  - **`settled: null`** on a result says its parts couldn't be read. The page says so once, and goes on.
+- **`plan_context`'s knowledge hits** are `search_thoughts`' hits: they print the same line, and its lean value
+  counts the parts on each (`settled`, null when not read).
+- **The ChatGPT-shape `search` carries none.** `fetch` has them. Nor do a thread and the `relations` read.
 
 The read needs SELECT on `settled_parts`, which the server group holds since 151, and on `thoughts`. A role without
 the first, or a brain before 157, gives `settled: null`.

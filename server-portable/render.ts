@@ -45,12 +45,13 @@ import type { ReleaseLeasesCode, RetryFailedCode, RunWorkerCode } from "./core/w
 import type { ThreadResult, ThreadShown } from "./core/threads.ts";
 import { subjectKeyValid } from "./subject.ts";
 import type { RelationShown, RelationsResult } from "./core/relations.ts";
+import type { SettledShown } from "./core/settled.ts";
 import type { ChangesResult, ClaimedOn, FetchedThought, PriorityOn, KeywordResult, ListThoughtsResult, PartsResult, PriorityRanking, ProposalsResult, QueryVectorFailed, SearchHit, SearchResult, SearchThoughtsResult, WorkerStatusResult } from "./core/reads.ts";
 import type { PlanContextResult, PlanGap } from "./core/plan.ts";
 import { marksOn, showsFailure, type Markable, type MarkItem } from "./core/marks.ts";
 import type { Captured, Deleted, EvidenceAppended, EvidenceCode, ForgetCode, Forgotten, HeadWindow, KeptKey, ProposalReview, ProposalReviewCode, StampReset, StampResetCode, Updated } from "./core/writes.ts";
 import type { Reviewer } from "./proposal-review.ts";
-import { PART_CONTEXT, PART_GROUP_WORDS, PART_STATUSES, PARTS_LISTING_MISSING, type PartQuote, type PartSide, type SettledPart } from "./part-listing.ts";
+import { PART_CONTEXT, PART_GROUP_WORDS, PART_STATUSES, PARTS_LISTING_MISSING, type PartGroup, type PartQuote, type PartSide, type SettledPart } from "./part-listing.ts";
 import type { PluginOutcome } from "./plugin-sdk.ts";
 
 /** A tool's reply: the text a model reads and the typed answer a program reads (SMD-1978's `structuredContent`, now every tool's). */
@@ -268,6 +269,18 @@ const relationsField = (relations: readonly RelationShown[] | null | undefined) 
   Array.isArray(relations) ? relations.map((r) => ({ id: r.id, relation: r.relation, otherIs: r.otherIs, other: { id: r.other.id, trust: r.other.trust, created_at: r.other.created_at, supersededBy: r.other.supersededBy }, confidence: r.confidence, judgedAt: r.judgedAt, stale: r.stale })) : null;
 const relationsFields = (h: { relations?: readonly RelationShown[] | null; relationsMore?: number }) =>
   ({ relations: relationsField(h.relations), relationsMore: h.relationsMore ?? 0 });
+/**
+ * A result's settled parts as a typed field (SMD-4446 PR 3c-2): each part's id, group and word, which of its pair the
+ * thought that shows it is, that thought's id, trust, time and superseding thought, when the part was accepted and
+ * its two flags. No statement and no word of either thought: the statement rides the reply's text. A group or a
+ * word this server does not know is not given. Null when the parts were not read, and from a REST core older than
+ * this MCP server.
+ */
+const settledField = (settled: readonly SettledShown[] | null | undefined) =>
+  Array.isArray(settled) ? settled.map((p) => ({ id: p.id, group: p.group === "no_longer_holds" || p.group === "done_or_settled" ? p.group : null, word: oneOf(PART_WORDS, p.word), otherIs: p.otherIs,
+    by: { id: p.by.id, trust: p.by.trust, created_at: p.by.created_at, supersededBy: p.by.supersededBy }, acceptedAt: p.acceptedAt, editedSince: p.editedSince === true, shownByInText: p.shownByInText === true })) : null;
+const settledFields = (h: { settled?: readonly SettledShown[] | null; settledMore?: number }) =>
+  ({ settled: settledField(h.settled), settledMore: h.settledMore ?? 0 });
 
 /** search_thoughts: per hit its id, date, scores, the newer thought that supersedes it, why it was demoted, its trust, its moved tickets and its claims; the window prefer_current read. */
 const safeSearch = (f: MarkFacts): Safe<SearchThoughtsResult> => (v) => ({
@@ -291,18 +304,18 @@ function safeHit(h: SearchHit) {
     // null when the hit's tickets were not checked — and from a REST core older than this MCP server.
     trust: trustOf(h.metadata), moved: Array.isArray(h.moved) ? movedField(h.moved) : null, movedNotRead: h.movedNotRead ?? 0,
     ...claimedFields(h), ...relationsFields(h),
-    ...priorityFields(h),
+    ...priorityFields(h), ...settledFields(h),
   };
 }
 /** search_thoughts_keyword: the page's place in the whole match set, and per hit its id, date, occurrence count, trust and claims. */
 const safeKeyword = (f: MarkFacts): Safe<KeywordResult> => (v) => ({
   offset: v.offset, total: v.total,
-  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h), ...relationsFields(h), ...priorityFields(h) })),
+  hits: v.hits.map((h) => ({ id: h.id, created_at: h.created_at, occurrences: h.occurrences, trust: trustOf(h.metadata), ...claimedFields(h), ...relationsFields(h), ...priorityFields(h), ...settledFields(h) })),
   ...unreviewedReadField(f),
 });
 /** list_thoughts: per thought its id, date, the newer thought that supersedes it, its trust and its claims; the page's sort and the next page's cursor (SMD-2995). */
 const safeList = (f: MarkFacts): Safe<ListThoughtsResult> => (v) => ({
-  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t), ...relationsFields(t), ...priorityFields(t) })),
+  thoughts: v.thoughts.map((t) => ({ id: t.id, created_at: t.created_at, supersededBy: t.supersededBy, trust: trustOf(t.metadata), ...claimedFields(t), ...relationsFields(t), ...priorityFields(t), ...settledFields(t) })),
   sort: v.sort,
   cursor: v.cursor,
   ...unreviewedReadField(f),
@@ -859,6 +872,10 @@ function hitBlocks(data: readonly SearchHit[], literal: string | null): string[]
       // 059: a row prefer_current demoted says by what and why.
       const demotion = demotedLine(t);
       if (demotion) parts.push(demotion);
+      // SMD-4446 PR 3c-2: the statements of its text a later record settled, each named with the thought that
+      // shows it by its place on the page or its id: a label, so the rank above is unchanged.
+      const settled = settledWords(t.settled, t.settledMore ?? 0, onPage);
+      if (settled) parts.push(`⚠ Settled in part: ${settled}`);
       // SMD-2540: the tickets it names that moved since it was written; a
       // label, so the rank above is unchanged.
       const moved = movedWords(movedField(t.moved), t.movedNotRead ?? 0);
@@ -965,6 +982,7 @@ export function renderSearchThoughts(o: Outcome<SearchThoughtsResult>, askedPref
     if (data.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
     notes.push(...unreviewedNotes(marks));
     if (data.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
+    if (data.some((t) => t.settled === null)) notes.push(SETTLED_UNREAD);
     if (anyStale(data)) notes.push(STALE_KEY);
     // prefer_current's window rides the value once; the note reads it off the first row.
     const current = currentNote(data.map((t) => ({ demoted: t.demoted, window: v.window ?? undefined })), reranked);
@@ -1024,6 +1042,9 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
       if (by) parts.push(by);
       const notice = ingestedNotice(m);
       if (notice) parts.push(notice);
+      // SMD-4446 PR 3c-2: the statements of its text a later record settled, the line search_thoughts prints.
+      const settled = settledWords(t.settled, t.settledMore ?? 0, onPage);
+      if (settled) parts.push(`⚠ Settled in part: ${settled}`);
       // SMD-3599: who holds a ticket it names, the line search_thoughts prints.
       const held = claimedWords(t.claimed, t.claimedMore ?? 0, t.claimedNotRead ?? 0);
       if (held) parts.push(`⚠ Claimed: ${held}`);
@@ -1047,7 +1068,7 @@ export function renderSearchThoughtsKeyword(o: Outcome<KeywordResult>): Reply {
         ? ` Call again with offset=${offset + data.length} for the next page.`
         : "";
 
-    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(marks).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
+    return `Showing ${shown} thought(s) containing "${query}".${more}${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(marks).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${data.some((t) => t.settled === null) ? `\n${SETTLED_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}`;
   }, (r) => searchRefusal(r), safeKeyword(marks));
 }
 
@@ -1070,7 +1091,9 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
         const prio = priorityWords(t.priority, t.priorityMore ?? 0, t.priorityNotRead ?? 0, false, t.unreviewedUnchecked?.length ?? 0);
         // SMD-2726: its judged relations, after the claims.
         const related = relationsWords(t.relations, t.relationsMore ?? 0, t.id, onPage);
-        const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}${prio ? `\n   Priority: ${prio}` : ""}${related ? `\n   ↔ Relations: ${related}` : ""}`;
+        // SMD-4446 PR 3c-2: the statements of its text a later record settled, after the superseded mark.
+        const settled = settledWords(t.settled, t.settledMore ?? 0, onPage);
+        const mark = `${t.supersededBy ? `\n   ⚠ Superseded by a newer thought — ID ${t.supersededBy}` : ""}${settled ? `\n   ⚠ Settled in part: ${settled}` : ""}${held ? `\n   ⚠ Claimed: ${held}` : ""}${prio ? `\n   Priority: ${prio}` : ""}${related ? `\n   ↔ Relations: ${related}` : ""}`;
         // SMD-1726: who wrote it, AFTER the id line, indented as the block
         // is — the content-then-ID adjacency stays, which this repo's own
         // e2e suite ([8]) matched on and a client may too.
@@ -1093,7 +1116,7 @@ export function renderListThoughts(o: Outcome<ListThoughtsResult>): Reply {
     const more = cursor ? `\n\nMore follow. Cursor: ${cursor} — pass it as \`after\`${sort === "oldest" ? " with `sort: oldest` and" : " with"} the same filters for the next page.` : "";
     // Newest first keeps main's header, which the old SvelteKit dashboard's parser read until SMD-3310 retired it;
     // oldest first says its order, since a page deep in the walk is not the oldest (review pass 3).
-    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(marks).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
+    return `${data.length} ${sort === "oldest" ? "thought(s), oldest first" : "recent thought(s)"}:${data.some((t) => t.claimed === null) ? `\n${CLAIMS_UNREAD}` : ""}${data.some((t) => t.priority === null) ? `\n${PRIORITY_UNREAD}` : ""}${unreviewedNotes(marks).map((n) => `\n${n}`).join("")}${data.some((t) => t.relations === null) ? `\n${RELATIONS_UNREAD}` : ""}${data.some((t) => t.settled === null) ? `\n${SETTLED_UNREAD}` : ""}${anyStale(data) ? `\n${STALE_KEY}` : ""}${data.some((t) => (t.claimed?.length ?? 0) > 0) ? `\n${CLAIMED_KEY}` : ""}\n\n${results.join("\n\n")}${more}`;
   }, (r) => r.code === "REFUSED_CURSOR"
     ? r.reason === "sort"
       ? `Refused: that cursor was made with \`sort: ${r.sort}\` — pass the same sort with it, or leave out \`after\` to start the list again.`
@@ -1136,6 +1159,26 @@ function relationsWords(relations: readonly RelationShown[] | null | undefined, 
 }
 /** Relations not read are said, not left to read as none (as the claims are). */
 const RELATIONS_UNREAD = "Judged relations could not be read: a result without a `↔ Relations` line may still have some.";
+/** The page's note where the settled parts were not read (SMD-4446 PR 3c-2). */
+const SETTLED_UNREAD = "Settled parts could not be read: a result without a `⚠ Settled in part` line may still hold a statement a later record settled.";
+/** How many characters of a statement a page's settled line quotes; fetch gives it whole. */
+const SETTLED_QUOTE = 160;
+/** What settled a statement, by its group, as a page's line says it; a group this server does not know is said settled. */
+const SETTLED_SAID: Record<PartGroup, string> = { no_longer_holds: "no longer holds", done_or_settled: "is done or settled" };
+/**
+ * A result's settled parts in words (SMD-4446 PR 3c-2): each statement of its text a later record settled, between
+ * « and » on the line (snipText reads it as one line and cuts it), what settled it by its group, and the thought that
+ * shows it, named by its place on the page or
+ * its id. Never that thought's words or title: a label must not carry outside text into a read filtered to keep it
+ * out, as the relations line names another thought (SMD-2726, review pass 1). Where that thought's text no longer
+ * holds the words that showed it, the line says so. Empty with none, or when they were not read (the page's note says that).
+ */
+function settledWords(settled: readonly SettledShown[] | null | undefined, more: number, onPage: ReadonlyMap<string, string>): string {
+  if (!settled || settled.length === 0) return "";
+  const said = settled.map((p) =>
+    `«${snipText(p.statement, SETTLED_QUOTE)}» ${p.group === "no_longer_holds" || p.group === "done_or_settled" ? SETTLED_SAID[p.group] : "is settled"}, shown by ${onPage.get(p.by.id) ?? p.by.id}${p.shownByInText ? "" : " (whose text no longer holds the words that showed it)"}`);
+  return `${said.join("; ")}${more > 0 ? `; and ${more} more` : ""} — fetch shows each with the words that show it`;
+}
 /** What a stale mark means, once per reply that shows one (review pass 1: the page's lines said it with no key). */
 const STALE_KEY = "A relation marked edited since judged was judged on a text that has changed since: its word may no longer hold — read both thoughts before relying on it.";
 /** Whether a page shows a stale relation, which its reply keys once. */
@@ -2562,7 +2605,7 @@ const fetchedMarked = (v: FetchedThought): FetchedThought => {
   // SMD-4446 PR 3c: the accepted parts standing on it, counted before its title, the last of the marks; the thought
   // that shows each has its title marked where it is outside text, as a related thought's is.
   const parts = Array.isArray(v.settled) ? v.settled.length + (v.settledMore ?? 0) : 0;
-  const settled = Array.isArray(v.settled) ? { settled: v.settled.map((p) => p.by.trust === "ingested" ? { ...p, by: { ...p.by, title: `[ingested] ${p.by.title}` } } : p) } : {};
+  const settled = Array.isArray(v.settled) ? { settled: v.settled.map((p) => p.by.trust === "ingested" && p.by.title !== undefined ? { ...p, by: { ...p.by, title: `[ingested] ${p.by.title}` } } : p) } : {};
   return { ...rest, ...relations, ...settled, title: `${ingested ? "[ingested] " : ""}${held ? `[claimed: ${held}] ` : v.claimed === null ? CLAIMS_UNREAD_TITLE : ""}${prio ? `[priority: ${prio}] ` : priority === null ? PRIORITY_UNREAD_TITLE : ""}${parts ? `[settled in part: ${parts}] ` : v.settled === null ? SETTLED_UNREAD_TITLE : ""}${v.title}`, ...(ingested ? { text: `${INGESTED_NOTICE}\n\n${v.text}` } : {}), ...(v.claimed === null ? { claimsNote: CLAIMS_UNREAD_COMPAT } : {}), ...priorityCompat(priority, priorityMore, priorityNotRead, unreviewedUnchecked), ...(priority === null ? { priorityNote: PRIORITY_UNREAD_COMPAT } : {}), ...unreviewedCompat([v]), ...(v.settled === null ? { settledNote: SETTLED_UNREAD_COMPAT } : {}) } as FetchedThought;
 };
 const inTheWay = (r: Extract<Refusal, { code: "WORK_CLAIMED" }>, own = OWN_KEY) =>
@@ -3152,6 +3195,7 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
     if (k.hits.some((t) => t.claimed === null)) notes.push(CLAIMS_UNREAD);
     if (k.hits.some((t) => t.priority === null)) notes.push(PRIORITY_UNREAD);
     if (k.hits.some((t) => t.relations === null)) notes.push(RELATIONS_UNREAD);
+    if (k.hits.some((t) => t.settled === null)) notes.push(SETTLED_UNREAD);
     if (anyStale(k.hits)) notes.push(STALE_KEY);
     notes.push(...knowledgeMarkNotes);
     // A hit cut to its head says so under its text, and how to read the whole (SMD-4191).
@@ -3212,6 +3256,8 @@ export const renderPlanContext = (o: Outcome<PlanContextResult>): Reply => rende
                  id: h.id, created_at: h.created_at, similarity: h.similarity, supersededBy: h.supersededBy, trust: trustOf(h.metadata), contentChars: h.contentChars,
                  moved: Array.isArray(h.moved) ? h.moved.length : null, claimed: h.claimed === null ? null : h.claimed.length + (h.claimedMore ?? 0),
                  relations: h.relations === null ? null : h.relations.length + (h.relationsMore ?? 0), priority: h.priority === null ? null : h.priority.length + (h.priorityMore ?? 0),
+                 // SMD-4446 PR 3c-2: how many accepted settled parts stand on it; null when not read, and from a REST core older than this server.
+                 settled: h.settled == null ? null : h.settled.length + (h.settledMore ?? 0),
                })) },
   board: v.board.available
     ? { available: true, claimsRead: v.board.claimsRead, claimsLive: v.board.claimsLive, boardSyncAt: v.board.boardSync?.at ?? null,

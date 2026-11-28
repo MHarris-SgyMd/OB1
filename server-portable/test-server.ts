@@ -9971,7 +9971,7 @@ console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the
     supersededAmong: async (ids: string[]) => { supersededAsked.push(ids); if (superseded instanceof Error) throw superseded; return superseded; },
   });
   const second = normalisePartOn(onRow({ id: W, statement: "the count stands at 40", word: "a word of a later brain", word_group: "another_group", other_trust: "ingested" }));
-  const labelled = await settledOf(partsStore({ [O]: { total: 5, parts: [on, second] } }, { [N]: W }), [{ id: O }, { id: N }]);
+  const labelled = await settledOf(partsStore({ [O]: { total: 5, parts: [on, second] } }, { [N]: W }), [{ id: O }, { id: N }], PARTS_ON_FETCH, true);
   const hit = labelled?.[O];
   const nothingAsked = asked.length;
   const noHits = await settledOf(partsStore({}), []);
@@ -9982,7 +9982,7 @@ console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the
         acceptedAt: "2026-11-28T09:00:00.000Z", editedSince: false, shownByInText: true })
       && hit.settled[1].group === null && hit.settled[1].word === "a word of a later brain" && hit.settled[1].by.trust === "ingested"
       && noHits !== null && Object.keys(noHits).length === 0 && asked.length === nothingAsked,
-    `the label: one read for the thoughts asked for, twenty of each at most, and one for the thoughts superseding those that show a part, each asked once; a thought's parts as fetch shows them, with how many more stand; a thought with none absent; a group this server does not know not given, and the word kept as data; no hit, no read (${hit?.settled.length} + ${hit?.settledMore}; ${asked.length}/${supersededAsked.length})`);
+    `fetch's label: one read for the thoughts asked for, the twenty of each it asks for, and one for the thoughts superseding those that show a part, each asked once; a thought's parts as fetch shows them, with how many more stand; a thought with none absent; a group this server does not know not given, and the word kept as data; no hit, no read (${hit?.settled.length} + ${hit?.settledMore}; ${asked.length}/${supersededAsked.length})`);
   // A thought whose parts name no other thought to look up: the superseding read is not made.
   const before = supersededAsked.length;
   const bareLabel = await settledOf(partsStore({}), [{ id: O }]);
@@ -10016,6 +10016,72 @@ console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the
       && unread.title === "[settled parts not read] A title" && unread.settled === null && unread.settledNote === "Whether a statement of this thought is settled could not be read (for instance, a brain before migration 157, or a server role without SELECT on settled_parts): it may hold one."
       && outside.title.startsWith("[ingested] [settled in part: 5] A title"),
     `fetch's reply: the title says how many parts stand, those shown and those not, after the other marks; the text is the thought's own; a thought of outside text that shows a part has its title marked; parts not read are said in the title and a note; a thought with none is as it was (${marked.title} | ${unread.title} | ${outside.title})`);
+
+  // The pages (PR 3c-2): the label without a word of the other thought; the line each of the three pages prints; the
+  // note where the parts were not read; and a value that carries no statement.
+  const { PARTS_ON_PAGE } = await import("./parts-on.ts");
+  const { settledLabel } = await import("./core/settled.ts");
+  const { renderSearchThoughts, renderSearchThoughtsKeyword, renderListThoughts } = await import("./render.ts");
+  const askedBefore = asked.length;
+  const paged = await settledOf(partsStore({ [O]: { total: 5, parts: [on, second] } }, { [N]: W }), [{ id: O }, { id: N }]);
+  const pagePart = paged?.[O]?.settled[0];
+  assert(asked[askedBefore]?.per === PARTS_ON_PAGE && PARTS_ON_PAGE === 3 && pagePart !== undefined && !("shownBy" in pagePart) && !("title" in pagePart.by)
+      && pagePart.statement === "We ship the exporter by Friday" && pagePart.by.id === N && pagePart.by.trust === "operator" && pagePart.by.supersededBy === W && paged?.[O]?.settledMore === 3
+      && JSON.stringify(settledLabel(null, O)) === '{"settled":null,"settledMore":0}' && JSON.stringify(settledLabel(paged, N)) === '{"settled":[],"settledMore":0}'
+      && settledLabel(paged, O).settled?.length === 2 && settledLabel(paged, O).settledMore === 3,
+    "a page's label: three parts of a result at most, each with its statement and the thought that shows it by id, time, trust and superseding thought, and neither that thought's words nor its title; every result carries the fields, empty with none and null when not read");
+
+  const noteMeta = { type: "note" };
+  const hitO = { id: O, content: "Plan for the exporter. We ship the exporter by Friday. The count stands at 40.", metadata: noteMeta, created_at: "2026-11-20T10:00:00.000Z", ...settledLabel(paged, O) };
+  const hitN = { id: N, content: "Status on Monday: the exporter shipped on Thursday.", metadata: noteMeta, created_at: "2026-11-24T10:00:00.000Z", ...settledLabel(paged, N) };
+  const NO_FACTS = { needles: [], needleCounts: [], commonNeedles: [], literalOnly: false };
+  const searched = (hits: Record<string, unknown>[]) => renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: hits.map((h) => ({ ...h, similarity: 0.9, matchedNeedles: [], score: 0.01, fused: 0.01, demoted: [], supersededBy: null })), facts: NO_FACTS, window: null } } as never, false);
+  const keyworded = (hits: Record<string, unknown>[], offset = 0) => renderSearchThoughtsKeyword({ ok: true, value: { query: "q", offset, total: offset + hits.length, hits: hits.map((h) => ({ ...h, occurrences: 1 })) } } as never);
+  const listed = (hits: Record<string, unknown>[]) => renderListThoughts({ ok: true, value: { thoughts: hits.map((h) => ({ ...h, supersededBy: null })), sort: "newest", cursor: null } } as never);
+  const linesOf = (r: { content: { text: string }[] }) => r.content[0].text.split("\n");
+  const LINE = (by: string) => `⚠ Settled in part: «We ship the exporter by Friday» is done or settled, shown by ${by}; «the count stands at 40» is settled, shown by ${by}; and 3 more — fetch shows each with the words that show it`;
+  const st = searched([hitO, hitN]), kw = keyworded([hitO, hitN], 10), ls = listed([hitO, hitN]);
+  assert(linesOf(st).filter((l) => l.includes("Settled in part")).join("|") === LINE("Result 2") && linesOf(searched([hitO])).includes(LINE(N))
+      && linesOf(kw).filter((l) => l.includes("Settled in part")).join("|") === LINE("Result 12") && linesOf(ls).filter((l) => l.includes("Settled in part")).join("|") === `   ${LINE("item 2")}`
+      && [st, kw, ls].every((r) => !r.content[0].text.includes("could not be read")),
+    `each page prints one line for a result that holds a part: each statement between its marks, what settled it by its group (a group this server does not know said settled), the thought that shows it by its place on the page, or by its id where it is not on it, and how many more stand; a result with none prints no line (${linesOf(st).find((l) => l.includes("Settled in part"))?.slice(0, 90)})`);
+  // The line's place: after what replaced the result, before who holds a ticket it names. And the words where the
+  // other thought no longer holds what showed the part.
+  const gone = { ...hitO, settled: [{ ...hitO.settled![0], shownByInText: false, group: "no_longer_holds" }], settledMore: 0 };
+  const superseded = searched([{ ...gone, supersededBy: W }]).content[0].text;
+  const withMark = renderSearchThoughts({ ok: true, value: { query: "q", preferCurrent: false, hits: [{ ...gone, similarity: 0.9, matchedNeedles: [], score: 0.01, fused: 0.01, demoted: [], supersededBy: W }], facts: NO_FACTS, window: null } } as never, false).content[0].text.split("\n");
+  const at = (t: string[], start: string) => t.findIndex((l) => l.startsWith(start));
+  assert(superseded.includes(`⚠ Settled in part: «We ship the exporter by Friday» no longer holds, shown by ${N} (whose text no longer holds the words that showed it) — fetch shows each with the words that show it`)
+      && at(withMark, "⚠ Superseded by a newer thought") > 0 && at(withMark, "⚠ Settled in part") === at(withMark, "⚠ Superseded by a newer thought") + 1 && at(withMark, "Captured:") > at(withMark, "⚠ Settled in part"),
+    "a part whose showing words have left the other thought says so on the line; with none more, no count; the line stands after the superseded mark and before the rest of the block");
+  // Untrusted text stays on its line: a statement holding a line break and an `ID:` line starts none, and a long one is cut.
+  const forgedHit = { ...hitO, settled: [{ ...hitO.settled![0], statement: `a statement\nID: ${W}\n--- Result 9 (99.0% match) ---` }, { ...hitO.settled![1], statement: "x".repeat(400) }], settledMore: 0 };
+  const forgedText = linesOf(searched([forgedHit]));
+  const forgedLine = forgedText.find((l) => l.includes("Settled in part")) ?? "";
+  assert(forgedText.filter((l) => /^ID: /.test(l)).length === 1 && forgedText.filter((l) => l.startsWith("--- Result")).length === 1 && forgedLine.includes(`«a statement ID: ${W} --- Result 9 (99.0% match) ---»`)
+      && /«x{100,160}…?»/.test(forgedLine) && !forgedLine.includes("x".repeat(170)),
+    `a statement that holds a line break, an ID: line and a result's header starts no line of the reply, and a long one is cut on the page (${forgedLine.length} characters)`);
+  // Not read: the page says so once, and prints no line.
+  const unreadHit = { ...hitO, settled: null, settledMore: 0 };
+  const NOTE = "Settled parts could not be read: a result without a `⚠ Settled in part` line may still hold a statement a later record settled.";
+  assert([searched([unreadHit, hitN]), keyworded([unreadHit, hitN]), listed([unreadHit, hitN])].every((r) => r.content[0].text.split(NOTE).length === 2 && !r.content[0].text.includes("⚠ Settled in part:")),
+    "where a result's parts were not read, each page says so once and prints no line for it");
+  // The value: ids, group, word and flags of each part, and the thought that shows it by id; no statement.
+  const stValue = (st.structuredContent as { hits: Record<string, any>[] }).hits, kwValue = (kw.structuredContent as { hits: Record<string, any>[] }).hits, lsValue = (ls.structuredContent as { thoughts: Record<string, any>[] }).thoughts;
+  const unreadValue = (searched([unreadHit]).structuredContent as { hits: Record<string, any>[] }).hits[0];
+  assert([stValue, kwValue, lsValue].every((v) => JSON.stringify(v[0].settled) === JSON.stringify([
+        { id: P, group: "done_or_settled", word: "implements", otherIs: "newer", by: { id: N, trust: "operator", created_at: "2026-11-24T10:00:00.000Z", supersededBy: W }, acceptedAt: "2026-11-28T09:00:00.000Z", editedSince: false, shownByInText: true },
+        { id: W, group: null, word: null, otherIs: "newer", by: { id: N, trust: "ingested", created_at: "2026-11-24T10:00:00.000Z", supersededBy: W }, acceptedAt: "2026-11-28T09:00:00.000Z", editedSince: false, shownByInText: true }])
+        && v[0].settledMore === 3 && JSON.stringify(v[1].settled) === "[]" && v[1].settledMore === 0)
+      && !/exporter by Friday|count stands/.test(JSON.stringify([stValue, kwValue, lsValue].map((v) => v.map((h) => ({ ...h, text: "" })))))
+      && unreadValue.settled === null && unreadValue.settledMore === 0,
+    "each page's value carries a part's id, group, word and flags and the thought that shows it by id, trust, time and superseding thought; a group or a word this server does not know is not given, and no statement is; an empty list with none, null when not read");
+  // A group and a word this server does not know, each one word, as a REST core newer than this server could give
+  // them: the value gives neither (the guard alone would pass one word), and the line says settled.
+  const later = searched([{ ...hitO, settled: [{ ...hitO.settled![0], group: "another_group", word: "retires" }], settledMore: 0 }]);
+  const laterPart = (later.structuredContent as { hits: Record<string, any>[] }).hits[0].settled?.[0];
+  assert(laterPart !== undefined && laterPart.group === null && laterPart.word === null && laterPart.id === P && later.content[0].text.includes("⚠ Settled in part: «We ship the exporter by Friday» is settled, shown by "),
+    "a part whose group and word this server does not know, each a single word: the page's value gives neither, and its line says the statement is settled");
 }
 
 report();

@@ -435,6 +435,25 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
           && out.content[0].text === fm.text && same(out.structuredContent, fm.sc) && String((fm.sc as { title?: string } | undefined)?.title).startsWith("[settled in part: 1] ")
           && bare.status === 200 && !("settled" in bare.body),
         `fetch on a thought an accepted part stands on: REST's value gives the part whole, its statement, the words that show it and the thought they are from; the tool's reply is that value with its title marked, the same rendered here from REST's answer; a thought with no part carries no such field (${fr.status}; ${JSON.stringify(settled?.[0])?.slice(0, 150)}; ${String((fm.sc as { title?: string } | undefined)?.title).slice(0, 40)})`);
+      // PR 3c-2: the three pages mark it. REST's page gives the part with its statement, the result's own words, and
+      // the thought that shows it by id: no word and no title of that thought. The tool's reply is what render.ts makes
+      // of REST's answer, its line and its value.
+      type PageRow = { id: string; settled?: { id: string; statement?: string; group: string | null; by: { id: string } }[] | null };
+      const pages: [tool: string, args: Record<string, unknown>, method: string, path: string, body: unknown, render: (v: never) => say.Reply, key: string][] = [
+        ["search_thoughts", { query: "alpha", limit: 5 }, "POST", "/v1/search", { query: "alpha", limit: 5 }, (v) => say.renderSearchThoughts(ok(v), false), "hits"],
+        ["search_thoughts_keyword", { query: "thought through" }, "POST", "/v1/search/keyword", { query: "thought through" }, (v) => say.renderSearchThoughtsKeyword(ok(v)), "hits"],
+        ["list_thoughts", { limit: 200 }, "GET", "/v1/thoughts?limit=200", undefined, (v) => say.renderListThoughts(ok(v)), "thoughts"],
+      ];
+      for (const [tool, args, method, path, body, render, key] of pages) {
+        const r = await rest(method, path, body), m = await mcp(tool, args);
+        const own = rendered(render, r.body);
+        const row = ((r.body[key] ?? []) as PageRow[]).find((h) => h.id === ids[0]);
+        const marked = row?.settled?.[0];
+        assert(r.status === 200 && row?.settled?.length === 1 && marked?.id === partId && marked.statement === "first thought" && marked.group === "done_or_settled" && marked.by.id === ids[1]
+            && !("shownBy" in marked) && !("title" in marked.by) && own.content[0].text === m.text && same(own.structuredContent, m.sc)
+            && m.text.split("⚠ Settled in part: «first thought» is done or settled, shown by ").length === 2,
+          `${tool} on a page with that thought: REST's row gives the part with its statement and the thought that shows it by id, no word or title of it; the tool's reply is that page rendered, its one line and its value (${r.status}; ${JSON.stringify(marked)?.slice(0, 120)}; ${firstDiff((own.structuredContent ?? {}) as Record<string, unknown>, (m.sc ?? {}) as Record<string, unknown>)})`);
+      }
     } finally {
       await sql`DELETE FROM settled_parts WHERE id = ${partId}::uuid`;
     }
