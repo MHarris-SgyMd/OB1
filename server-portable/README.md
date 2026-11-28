@@ -800,6 +800,7 @@ Database size:   45.2 MB
 Board sync:      2026-10-05T16:57:19.368Z
 Relations:       14 standing (9 related, 4 evolves, 1 duplicate; 11 pair two tickets the board does not link)
 Proposals:       6 pending (the oldest judged 3 d ago; 4 pair two tickets the board does not link); 2 stale
+Settled parts:   3 pending, the oldest judged 2 d ago — the list_settled_parts tool, or cd db && bun consolidate.ts --url $DATABASE_URL --parts, shows each with its two quotes
 Threads:         41 (127 thoughts in them), every one linked
 Findings:        8 posted in 6 comment(s): 3 accepted, 1 rejected, 1 unanswered after 30 d, 2 open, 1 withdrawn — acceptance 60% (3 of 5: accepted over accepted, rejected and unanswered), median 4 d to an answer
 Workers:         board-sync alive (last stamped 2 min ago, every 300 s)
@@ -860,6 +861,15 @@ no longer holds is said gone, and the whole-thought proposal on the same pair
 is named. REST's answer carries each quote with its context; the tool's value
 carries ids, words and flags, and its text the rest. Oldest judged first, by
 `status` and `judge_key`, with a cursor of its own. Nothing decides a part yet.
+`Settled parts` is their queue, as stored (SMD-4446 PR 3a-3): how many are
+pending, how long ago the oldest pending one was judged, the stale ones, and
+where each is shown; `none pending` when there is none, `no table — migration
+151 is not applied` before 151, and `?` when its read did not answer. A pending
+part whose text has moved since it was judged counts as pending here:
+`consolidate.ts --status` and preflight's `lineage` row say which parts wait
+for the pass, and for what. Preflight's `settled parts` row says the queue in
+the same words. It never warns for a queue, only for a read that did not
+answer, and skips before 151.
 
 `consolidate.ts --accept`/`--reject` and the `review_supersession_proposal` tool decide
 them (SMD-3338); `consolidate.ts --list` and the `list_supersession_proposals` tool list
@@ -917,7 +927,8 @@ heartbeats as `workers`, `{ heartbeats, ignored }`, SMD-2261; the queue as
 relations as `relations`, `{ related, evolves, duplicate, distinct, boardPairs }` (`distinct` since SMD-3117: the pairs judged apart, outside the three and the board pairs); what
 became of the findings posted as `findings`, `{ posted, comments, found,
 accepted, rejected, withdrawn, open, unanswered, windowDays, medianAnswerS }`,
-SMD-2682; the work threads' census as `threads`, `{ threads, thoughts, standing, whole, unlinked,
+SMD-2682; the settled parts' queue as `settledParts`, `{ pending, stale, oldestPendingS }`, null before 151,
+SMD-4446; the work threads' census as `threads`, `{ threads, thoughts, standing, whole, unlinked,
 orphaned, keys, complete }` — counts of the keys before the census's first cut, `keys` of them subject keys,
 `complete` false when it stopped at its bound, null before 120 — SMD-3306 PR 7a-2c; each null when not read or absent; each `boardPairs` is a read of its own, last,
 null with `proposals.boardPairs` or `relations.boardPairs` in `unread` when it

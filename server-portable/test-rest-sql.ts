@@ -188,6 +188,11 @@ const proposalIds: string[] = [];
   // both doors: each door rounds its own read's age, and two reads either side
   // of a half second answered 0 and 1 (SMD-3195 review pass 2, under load).
   await sql`UPDATE supersession_proposals SET judged_at = now() + interval '1 hour' WHERE status = 'pending'`;
+  // The settled parts likewise, for brain_info's Settled parts row (SMD-4446 PR 3a-3), each an hour on from its own
+  // time so their order stands. A part keeps its judgement (151's trigger refuses a judged_at that moves), so the
+  // fixture sets that trigger aside for this one statement.
+  await sql.unsafe("ALTER TABLE settled_parts DISABLE TRIGGER settled_parts_keep_judgement");
+  try { await sql`UPDATE settled_parts SET judged_at = judged_at + interval '1 hour' WHERE status = 'pending'`; } finally { await sql.unsafe("ALTER TABLE settled_parts ENABLE TRIGGER settled_parts_keep_judgement"); }
   await sql`INSERT INTO thought_work_claims (thought_id, work_type, status, worker_id, finished_at, last_error) VALUES
     (${ids[0]}::uuid, 'extract:rest@p1', 'failed', 'w', now(), 'boom'),
     (${ids[1]}::uuid, 'extract:mcp@p1', 'failed', 'w', now(), 'boom')`;
@@ -276,6 +281,11 @@ console.log("\n[2] Every read: the MCP reply is what render.ts makes of the REST
   const providerOf = (v: unknown) => (((v as { value?: unknown })?.value ?? v) as { provider?: { status?: string; by?: string } }).provider;
   assert(providerOf(b.body)?.status === "answering" && providerOf(b.body)?.by === "call" && providerOf(m.sc)?.status === "answering" && /^Provider:\s+answering \(an embedding call answered /m.test(m.text),
     `…and the REST core's provider state answering, by a call, after the searches above, through either door (${JSON.stringify(providerOf(b.body))} | ${JSON.stringify(providerOf(m.sc))})`);
+  // The settled parts' queue (SMD-4446 PR 3a-3): the two seeded parts, both pending, in the record and in its row.
+  const partsQueue = ((b.body.database ?? {}) as { settledParts?: unknown }).settledParts;
+  assert(same(partsQueue, { pending: 2, stale: 0, oldestPendingS: 0 })
+      && /^Settled parts:\s+2 pending, the oldest judged 0 s ago — the list_settled_parts tool, or cd db && bun consolidate\.ts --url \$DATABASE_URL --parts, shows each with its two quotes$/m.test(m.text),
+    `…and the settled parts' queue: the two seeded parts pending, none stale, in the record and in the table's row (${JSON.stringify(partsQueue)} | ${m.text.split("\n").find((l) => l.startsWith("Settled parts"))})`);
   covered.add("brain_info");
   // task_status (SMD-3476 PR 3): over a planted heartbeat row, the same tasks
   // through either door and a core of this suite's own — the ages aside, each
