@@ -29,6 +29,7 @@ export const CALLS = {
   list_thought_ids: (c, p, i) => c.listThoughtIds(p, i),
   list_logged_searches: (c, p, i) => c.listLoggedSearches(p, i),
   list_supersession_proposals: (c, p, i) => c.listSupersessionProposals(p, i),
+  list_settled_parts: (c, p, i) => c.listSettledParts(p, i),
   thought_stats: (c, p, i) => c.thoughtStats(p, i),
   thought_changes: (c, p, i) => c.thoughtChanges(p, i),
   worker_status: (c, p, i) => c.workerStatus(p, i),

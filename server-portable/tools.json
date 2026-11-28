@@ -50,6 +50,10 @@
       "scope": "read"
     },
     {
+      "name": "list_settled_parts",
+      "scope": "read"
+    },
+    {
       "name": "thought_stats",
       "scope": "read"
     },

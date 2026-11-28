@@ -371,6 +371,23 @@ export const SPECS = {
       after: z.string().max(512).optional().describe("Keyset cursor — the previous page's `cursor`, given with the same filters (a cursor carries the ones it was made under, and is refused with others); omit for the first page"),
     },
   },
+  // SMD-4446 PR 3a: the settled parts' listing (migration 156), in the proposals' listing's shape.
+  list_settled_parts: {
+    title: "List Settled Parts",
+    description:
+      "List the SETTLED PARTS a decide-mode consolidation pass (db/consolidate.ts) recorded: a statement in one thought of a pair that the other thought shows is no longer true or no longer open, while both thoughts stand. Each part names which thought holds the statement, quotes it, quotes the words of the other thought that show it, and gives the reason, the writer's word and the group the word falls in — no longer holds (corrects, reverses, revises, withdraws) or done or settled (implements, resolves, updates, prioritizes) — and the pass that judged it. Each quote is shown in its thought's text as the text stands now, between « and », with the text either side: a side whose text was edited since the part was judged says so, and a quote its text no longer holds is said gone. A part is a proposal for review, and nothing decides one through this server yet; accepted, it writes no thought, sets no `supersedes` and demotes nothing. Pending by default; `status` lists accepted, rejected or stale ones (stale: a rebuild marked it), or all. An undecided part that is stale, or whose text has moved, waits for the pass, which judges its pair again or removes the part. A part names the whole-thought proposal on the same pair, if one stands (list_supersession_proposals lists those). `judge_key` lists one pass's parts alone. Oldest judged first; the reply says how many follow (`remaining`) and, while more do, carries a cursor: pass it as `after`, with the same filters (one made under others is refused, naming its own), for the next page, until no cursor is given (null). A part recorded during a walk lands past the cursor, and one decided, set stale or replaced during it leaves the selection (migration 156).",
+    annotations: {
+      readOnlyHint: true,
+    },
+    inputSchema: {
+      status: z.enum(["pending", "accepted", "rejected", "stale", "all"]).optional().default("pending"),
+      limit: z.number().int().min(1).max(200).optional().default(10),
+      // pass-key.ts's one rule, as list_supersession_proposals takes a judge key.
+      judge_key: z.string().regex(PASS_KEY_CHARS, "judge_key is a pass key: 1-200 letters, digits and . _ : / @ + -, starting with a letter or digit (in a URL's query, encode + as %2B)").optional()
+        .describe("Only the parts of the pass with exactly this judge key (`consolidate:<decider>+<writer>@p<prompt>d<decide version>`; each part names its own); 1–200 letters, digits and `. _ : / @ + -`, starting with a letter or digit — in a URL's query string, encode `+` as `%2B`; absent: every pass"),
+      after: z.string().max(512).optional().describe("Keyset cursor — the previous page's `cursor`, given with the same filters (a cursor carries the ones it was made under, and is refused with others); omit for the first page"),
+    },
+  },
   thought_stats: {
     title: "Thought Statistics",
     description: "Get a summary of all captured thoughts: totals, types, top topics, and people.",

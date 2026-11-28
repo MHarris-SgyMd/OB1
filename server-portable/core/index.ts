@@ -51,6 +51,7 @@ export function createCore(deps: CoreDeps) {
     searchThoughtsKeyword: bind(ctx, reads.searchThoughtsKeyword),
     listThoughts: bind(ctx, reads.listThoughts),
     listSupersessionProposals: bind(ctx, reads.listSupersessionProposals),
+    listSettledParts: bind(ctx, reads.listSettledParts),
     thoughtStats: bind(ctx, reads.thoughtStats),
     thoughtChanges: bind(ctx, reads.thoughtChanges),
     listThoughtIds: bind(ctx, reads.listThoughtIds),

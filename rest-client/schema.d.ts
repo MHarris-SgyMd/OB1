@@ -213,6 +213,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/settled-parts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Settled Parts
+         * @description List the SETTLED PARTS a decide-mode consolidation pass (db/consolidate.ts) recorded: a statement in one thought of a pair that the other thought shows is no longer true or no longer open, while both thoughts stand. Each part names which thought holds the statement, quotes it, quotes the words of the other thought that show it, and gives the reason, the writer's word and the group the word falls in — no longer holds (corrects, reverses, revises, withdraws) or done or settled (implements, resolves, updates, prioritizes) — and the pass that judged it. Each quote is shown in its thought's text as the text stands now, between « and », with the text either side: a side whose text was edited since the part was judged says so, and a quote its text no longer holds is said gone. A part is a proposal for review, and nothing decides one through this server yet; accepted, it writes no thought, sets no `supersedes` and demotes nothing. Pending by default; `status` lists accepted, rejected or stale ones (stale: a rebuild marked it), or all. An undecided part that is stale, or whose text has moved, waits for the pass, which judges its pair again or removes the part. A part names the whole-thought proposal on the same pair, if one stands (list_supersession_proposals lists those). `judge_key` lists one pass's parts alone. Oldest judged first; the reply says how many follow (`remaining`) and, while more do, carries a cursor: pass it as `after`, with the same filters (one made under others is refused, naming its own), for the next page, until no cursor is given (null). A part recorded during a walk lands past the cursor, and one decided, set stale or replaced during it leaves the selection (migration 156).
+         */
+        get: operations["list_settled_parts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/stats": {
         parameters: {
             query?: never;
@@ -2481,6 +2501,114 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description A page (SMD-3249): `proposals`, most confident first; `cursor` — pass it as the `after` query parameter, with the same status, lineage and judge_key, for the next page; null when no more follow; `remaining`, how many follow this page; `pastCursor`, whether this page followed a cursor; each accepted or rejected proposal's `reviewer` (who decided it: the key's name, whether an agent was recorded, its kind then and the registry's now; null when none is recorded, and on a pending or stale one); and `reviewersRead`, false when a decided row was listed on a brain short of migration 114, which records none (SMD-3338). A cursor that is none of this operation's, an empty one, or one whose time Postgres cannot read is refused REFUSED_CURSOR (400) with `reason: "shape"`; one made under other filters with `reason: "filters"` and `made`, the `status`, `lineage` and `judgeKey` it was made under. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, unknown>;
+                };
+            };
+            /** @description The input does not fit the schema, or is sent the way the route does not read it (REFUSED_INPUT); or a refusal the caller can mend: REFUSED_FILTER, REFUSED_SINCE, REFUSED_CURSOR, REFUSED_THREAD_INPUT, REFUSED_SUPERSEDES_SHAPE, REFUSED_DERIVED_FROM_SHAPE, REFUSED_METADATA_SHAPE, REFUSED_CLIENT_KEY_SHAPE, REFUSED_SOURCE_RESERVED, REFUSED_NOTHING_TO_UPDATE, REFUSED_CONFIRM, REFUSED_CLAIM_INPUT, REFUSED_PRIORITY_INPUT, REFUSED_ITEM_INPUT, REFUSED_WEIGHTS, REFUSED_FINDING_INPUT, REFUSED_REVIEW_ARGUMENT, REFUSED_DIRECTION_REQUIRED, REFUSED_EMPTY_WORK_TYPE, REFUSED_LIVE_LEASE_NEEDS_WORKER. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description No key, a wrong key (UNAUTHORIZED) or a revoked one (REVOKED, naming the key as `name` where the forwarder slot holds a forward-scope key); with `credential: "forwarder"`, the forwarder slot held something other than a forward-scope key, or a revoked one; with `credential: "token"` (and `WWW-Authenticate: Bearer error="invalid_token"`), a bearer token that is not one the authorization server issued for this REST core (SMD-2286); and REVOKED with `credential: "token"`, a token whose subject the agent registry revoked, which no new sign-in clears. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The key's scope does not reach this operation (FORBIDDEN, naming the scope it needs), or a bearer token's scopes name no key scope (FORBIDDEN with `credential: "token"`, `WWW-Authenticate: Bearer error="insufficient_scope"`); or a rule: REFUSED_EGRESS, REFUSED_CLIENT_KEY_SCOPE, REFUSED_NOT_OPERATOR, CLAIM_NOT_YOURS, REFUSED_CLAIM_KEY, ITEM_NOT_YOURS, READ_ONLY_KEY, ITEM_UNOWNABLE, PROPOSAL_YOURS, CONFIRM_NOT_YOURS, WRITE_SCOPE_REQUIRED, VERIFY_NOT_YOURS. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Nothing there: NOT_FOUND, CLAIM_NOT_FOUND, ITEM_NOT_FOUND, ORIGIN_NOT_FOUND, EVIDENCE_NOT_FOUND, PROPOSAL_NOT_FOUND, NOT_A_DELIVERABLE. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A method this path does not take (METHOD_NOT_ALLOWED); `Allow` names those it does. */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description The state conflicts: REFUSED_STALE_READ, REFUSED_DUPLICATE_CONTENT, REFUSED_WOULD_CYCLE, REFUSED_CITED, FORGOTTEN, REFUSED_NOT_CAPTURE_STAMP, REFUSED_THOUGHT_EVIDENCE, WORK_CLAIMED, CLAIM_LIMIT, CLAIM_RELEASED, ITEM_SETTLED, PROPOSAL_DECIDED, SPEC_IS_SELF, ALREADY_A_DELIVERABLE, OUTPUT_EXISTS, ILLEGAL_TRANSITION, REFUSED_FINDING_DECISION, REFUSED_EDITED_SINCE, REFUSED_LINEAGE_PAIR, REFUSED_WRITER, REFUSED_ALREADY_ACCEPTED, REFUSED_ALREADY_SUPERSEDES, REFUSED_PROPOSAL_WOULD_CYCLE. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A reference to nothing, or a refusal the store named: REFUSED_SUPERSEDES_UNKNOWN, DERIVED_FROM_MISSING, REFUSED, SPEC_NOT_FOUND, REFUSED_SUPERSEDED_GONE. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description A fault (FAILED, with its message; no retryable until SMD-2461). */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+            /** @description Retry, after Retry-After: the agent registry is busy (BUSY, naming the caller's key as `name` to a forwarder; with `credential: "forwarder"` on the forwarder's lookup), capture's store fault (STORE_UNAVAILABLE), a bearer token while the authorization server's keys cannot be read (BUSY with `credential: "token"`, Retry-After 30), or EMBEDDING_PROVIDER_UNAVAILABLE, EMBEDDING_PROVIDER_ERROR, SUPERSEDES_UNJUDGED, REPLAYING, THOUGHT_EVIDENCE_BUSY, CLAIM_UNATTRIBUTED, CLAIM_CAP_UNATTRIBUTED, RELEASE_HOLDER_UNATTRIBUTED, PRIORITY_UNATTRIBUTED, ITEM_UNATTRIBUTED, CLAIMS_UNREADABLE, ORDER_UNAVAILABLE — CLAIM_UNATTRIBUTED, PRIORITY_UNATTRIBUTED and ITEM_UNATTRIBUTED with Retry-After for `registry_away` alone, and EMBEDDING_PROVIDER_ERROR while the embedding provider does not answer; their other causes, EMBEDDING_PROVIDER_ERROR's provider answering an error (its key, its model, its address, a gateway's body, or a setting it will not take), and CLAIMS_UNREADABLE (the database role lacks the claims group) and ORDER_UNAVAILABLE (order due on a brain before migration 129), wait on an operator and carry none. */
+            503: {
+                headers: {
+                    /** @description Seconds to wait before retrying. */
+                    "Retry-After"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Refusal"];
+                };
+            };
+        };
+    };
+    list_settled_parts: {
+        parameters: {
+            query?: {
+                status?: "pending" | "accepted" | "rejected" | "stale" | "all";
+                limit?: number;
+                judge_key?: string;
+                after?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The operation's value. */
             200: {
                 headers: {
                     [name: string]: unknown;

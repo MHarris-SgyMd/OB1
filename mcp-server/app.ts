@@ -331,6 +331,8 @@ const WORDS: Record<ToolName, Words> = {
   // Judged relations (SMD-2726; SMD-3306 PR 7a-2b).
   relations: { render: (o) => say.renderRelations(o), fault: readFault() },
   list_supersession_proposals: { render: (o) => say.renderSupersessionProposals(o), fault: readFault(() => say.proposalsHint) },
+  // The settled parts' listing (SMD-4446 PR 3a).
+  list_settled_parts: { render: (o) => say.renderSettledParts(o), fault: readFault(() => say.partsHint) },
   thought_stats: { render: (o) => say.renderThoughtStats(o), fault: readFault() },
   thought_changes: { render: (o) => say.renderThoughtChanges(o), fault: readFault(() => say.changesHint) },
   list_thought_ids: { render: (o) => say.renderThoughtIds(o), fault: readFault() },
