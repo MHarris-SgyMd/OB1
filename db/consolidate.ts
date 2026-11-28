@@ -42,6 +42,8 @@
  *   bun db/consolidate.ts --url … --list <status> [--key <judge key>] --after <cursor>   # the next page: the line a capped page printed, its --list and --key with its cursor (110, SMD-3249)
  *   bun db/consolidate.ts --url … --accept <proposal-id> [--direction newer|older] [--note "…"] [--force]   # --force: a text edited since judged, a stale row, a lineage pair (070), or a WRITER flag (094)
  *   bun db/consolidate.ts --url … --reject <proposal-id> [--note "…"]
+ *   bun db/consolidate.ts --url … --parts [pending|accepted|rejected|stale|all]   # the settled parts (151), oldest judged first, each with its two quotes in their thoughts' texts as they stand (156, SMD-4446)
+ *   bun db/consolidate.ts --url … --parts [<status>] [--key <judge key>] --after <cursor>   # one pass's alone, and the next page: the line a capped page printed
  *   bun db/consolidate.ts --url … --stale [DAYS]          # entities nothing has mentioned within DAYS (90; at most 2000000, inside Postgres's timestamp range)
  *   await run({ url, dryRun: true })                      # a dry run, in-process: import { run } from "./consolidate.ts" (SMD-2304)
  *   --k N (3)   --min-sim F (0.6)   --min-confidence F (0.5)
@@ -267,8 +269,9 @@ import { actorPayload, isoDay, normaliseProposal, timeCastFailed, withWriters, W
 import { proposalRecipe } from "../server-portable/lineage.ts";
 import { reviewersOf, reviewProposal, type Reviewer } from "../server-portable/proposal-review.ts";
 import { judgeKeyText, selectableKey } from "../server-portable/pass-key.ts";
-import { parseProposalCursor, proposalCursor, sameSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
-import { ingestedNotice, lapsesLine, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
+import { parsePartsCursor, parseProposalCursor, partsCursor, proposalCursor, samePartSelection, sameSelection, type PartSelection, type ProposalSelection } from "../server-portable/core/list-cursor.ts";
+import { listParts, PARTS_LISTING_HINT, PARTS_LISTING_MISSING, type PartStatus } from "../server-portable/part-listing.ts";
+import { ingestedNotice, lapsesLine, partBlock, PROPOSAL_TEXT_MAX, proposalWriterLine, snipText, standingFlags, standingFlagText, stoodSide, supersededLine, walkCappedLine, writerFlagAdvice, writerFlagsText, REVIEWERS_UNREAD, WRITERS_UNREAD, type StandingFlag } from "../server-portable/render.ts";
 import { asPass, withCallWaits } from "../server-portable/model-call.ts";
 import { DEFAULT_HEARTBEAT_S, DEFAULT_TTL_S, describeHolder, heartbeatFor, reportLost, leaseHolders, leaseRefusal, MAX_BATCH, MAX_WORKERS, sleepUnless, stopOnSignals, STOPPED_EARLY, AdmitThrow, admitted, AbortedInHand, idleWhile, inHandCalls, callWaitsFor, pausableTimeout, claimAfterWait, type Admit, type InHandAbort, type PassStop } from "./lease.ts";
 import { endOnRefusal, passStamper, stampKey, type PassStamper } from "./pass-stamp.ts";
@@ -287,12 +290,19 @@ import { closeThenExit, databaseUrl, databaseUrlProblem, NO_DATABASE_URL, openSq
 const FLAGS = {
   url: "one", workers: "one", batch: "one", ttl: "one", heartbeat: "one", timeout: "one",
   k: "one", "min-sim": "one", "min-confidence": "one", limit: "one", follow: "optional", stale: "optional", dump: "one",
-  list: "optional", key: "one", after: "one", accept: "one", reject: "one", direction: "one", note: "one", force: "none",
+  list: "optional", parts: "optional", key: "one", after: "one", accept: "one", reject: "one", direction: "one", note: "one", force: "none",
   status: "none", "dry-run": "none", "retry-failed": "none",
 } as const;
-const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all|relations]", key: "<judge key> (with --list)", after: "<cursor> (with the --list and --key of the page that printed it)", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
+const HINTS = { url: "<postgres://…>", follow: "[SECONDS]", stale: "[DAYS]", dump: "<verdicts.jsonl>", list: "[pending|accepted|rejected|stale|lineage|all|relations]", parts: "[pending|accepted|rejected|stale|all]", key: "<judge key> (with --list or --parts)", after: "<cursor> (with the --list or --parts, and the --key, of the page that printed it)", accept: "<proposal id>", reject: "<proposal id>", direction: "<newer|older>", note: "<text>", force: "(with --accept)" };
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LIST_STATUSES = ["pending", "accepted", "rejected", "stale", "lineage", "all", "relations"];
+/** What --parts lists (SMD-4446 PR 3a): one status of 151's four, or all. */
+const PARTS_STATUSES = ["pending", "accepted", "rejected", "stale", "all"];
+/** A --parts page's selection: its status word (`all` for --parts all) and its --key. */
+const partsSelection = (parts: string, key: string | undefined): PartSelection =>
+  ({ list: "parts", status: parts as PartSelection["status"], judgeKey: key ?? null });
+/** The flags that list a parts selection, as selectionFlags gives a proposals listing's. */
+const partsFlags = (sel: PartSelection): string => `--parts ${sel.status}${sel.judgeKey === null ? "" : ` --key ${sel.judgeKey}`}`;
 /** A --list page's selection (SMD-3249): its status word (`all` for --list all), no lineage filter, its --key. */
 const cliSelection = (list: string, key: string | undefined): ProposalSelection =>
   ({ status: list as ProposalSelection["status"], lineage: null, judgeKey: key ?? null });
@@ -412,9 +422,11 @@ export interface ConsolidateOptions {
   /** --dump <file>: append every verdict as JSONL (below). */
   dump?: string;
   list?: string;
-  /** --key <judge key>, with --list: one pass's proposals or relations alone, by its judge key exactly (109, SMD-3248). */
+  /** --parts [status]: the settled parts in one status, or all, oldest judged first (156, SMD-4446 PR 3a). A listing of its own: not beside --list. */
+  parts?: string;
+  /** --key <judge key>, with --list or --parts: one pass's proposals, relations or parts alone, by its judge key exactly (109, SMD-3248). */
   key?: string;
-  /** --after <cursor>, with the --list <status> and --key that page had: the page after the one that printed the cursor (110, SMD-3249). */
+  /** --after <cursor>, with the --list or --parts and the --key that page had: the page after the one that printed the cursor (110, SMD-3249). */
   after?: string;
   accept?: string;
   reject?: string;
@@ -532,13 +544,18 @@ function numbers(opts: ConsolidateOptions): Numbers | string {
  * --list or --stale they were dropped without a word (SMD-2405). --list and
  * --stale do combine with a decision: they only read, after it is written.
  */
-export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "after" | "accept" | "reject" | "direction" | "force" | "note" | "limit" | "stale" | "status" | "dryRun">): string | null {
+export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "parts" | "key" | "after" | "accept" | "reject" | "direction" | "force" | "note" | "limit" | "stale" | "status" | "dryRun">): string | null {
   const { list, accept, reject, direction, note } = { list: opts.list ?? undefined, accept: opts.accept ?? undefined, reject: opts.reject ?? undefined, direction: opts.direction ?? undefined, note: opts.note ?? undefined };
   if (list !== undefined && !LIST_STATUSES.includes(list)) return "--list takes pending, accepted, rejected, stale, lineage, all or relations (or nothing, for pending).";
+  // SMD-4446 PR 3a: the settled parts' listing, a listing of its own. Beside --list, one --key and one --after
+  // would have to serve two selections, so the two are one each.
+  const parts = opts.parts ?? undefined;
+  if (parts !== undefined && !PARTS_STATUSES.includes(parts)) return "--parts takes pending, accepted, rejected, stale or all (or nothing, for pending).";
+  if (parts !== undefined && list !== undefined) return "--list and --parts are one listing each, and --key and --after go with one; pass one.";
   // SMD-3248: read only by a listing — beside anything else it would be dropped without a word (SMD-2015's kind). The
   // tool's bounds (pass-key.ts's PASS_KEY_CHARS), so the two doors take the same keys.
   const key = opts.key ?? undefined;
-  if (key !== undefined && list === undefined) return "--key goes with --list: it lists one pass's proposals or relations alone, by its judge key.";
+  if (key !== undefined && list === undefined && parts === undefined) return "--key goes with --list or --parts: it lists one pass's proposals, relations or settled parts alone, by its judge key.";
   if (key !== undefined && (key.length < 1 || key.length > 200)) return "--key takes a judge key of 1 to 200 characters, as each listed row names it (judged by consolidate:…).";
   // A pass key's own characters (pass-key.ts; review passes 1 and 3): one outside them is a typo that would select
   // nothing, or a key no selection takes, said instead.
@@ -546,8 +563,15 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
   // SMD-3249: --after is a proposal listing's — not relations' (another listing) nor lineage's (two listings, pending
   // then stale) — and one of its own cursors, refused here rather than read as a cast error.
   const after = opts.after ?? undefined;
-  if (after !== undefined && (list === undefined || list === "relations" || list === "lineage")) return "--after goes with --list <pending|accepted|rejected|stale|all>: it lists the page after the one that printed the cursor.";
-  const cursor = after === undefined ? undefined : parseProposalCursor(after);
+  if (parts !== undefined && after !== undefined) {
+    // A --parts page's own cursor, made for this selection: a proposals page's, or one made under another status
+    // or key, is refused as --list refuses its own, rather than listed from a place in another selection.
+    const made = parsePartsCursor(after);
+    if (made === null) return "--after takes the cursor a --parts page printed (next page: … --after <cursor>), as it was given.";
+    if (!samePartSelection(made.selection, partsSelection(parts, key))) return `--after's cursor was made for ${partsFlags(made.selection)}: pass those with it, as its next page line printed them, or leave out --after for the first page.`;
+  }
+  if (parts === undefined && after !== undefined && (list === undefined || list === "relations" || list === "lineage")) return "--after goes with --list <pending|accepted|rejected|stale|all> or --parts: it lists the page after the one that printed the cursor.";
+  const cursor = after === undefined || parts !== undefined ? undefined : parseProposalCursor(after);
   if (cursor === null) return "--after takes the cursor a --list page printed (next page: … --after <cursor>), as it was given.";
   // Review pass 1: a cursor carries the selection it was made under, and another selection's is refused rather than
   // listed from a place in the wrong one — rows above that place skipped without a word.
@@ -563,8 +587,8 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
     return `${report} writes nothing, and ${accept !== undefined ? "--accept" : "--reject"} writes a decision; pass one (--list shows the proposal without deciding it).`;
   }
   // A listing takes the pass's place: the pass's report beside it was dropped without a word (SMD-2015's kind, SMD-2405).
-  if (report !== undefined && (list !== undefined || (opts.stale ?? 0) > 0)) {
-    return `${report} reports on the pass, and ${list !== undefined ? "--list" : "--stale"} takes the pass's place, so ${report} would be dropped without a word; pass one.`;
+  if (report !== undefined && (list !== undefined || parts !== undefined || (opts.stale ?? 0) > 0)) {
+    return `${report} reports on the pass, and ${list !== undefined ? "--list" : parts !== undefined ? "--parts" : "--stale"} takes the pass's place, so ${report} would be dropped without a word; pass one.`;
   }
   if (direction !== undefined && (!accept || !["newer", "older"].includes(direction))) return "--direction takes newer or older, and only with --accept.";
   if (opts.force === true && !accept) return "--force goes with --accept: it accepts a proposal whose thought was edited after it was judged, one gone stale, one standing on a lineage pair (070), or one flagged WRITER (094).";
@@ -572,6 +596,7 @@ export function reviewProblem(opts: Pick<ConsolidateOptions, "list" | "key" | "a
   // listing prints up to 50 of a status and --status counts each status (adversarial re-run, third review pass), and,
   // since SMD-3248, the pending by pass.
   if (opts.limit != null && list !== undefined) return "--limit is the pass's thought cap and goes with a run; --list prints up to 50 of a status (--status counts each status, and the pending by pass).";
+  if (opts.limit != null && parts !== undefined) return "--limit is the pass's thought cap and goes with a run; --parts prints up to 50 of a status, and a capped page prints the line that lists the next (--status counts the parts by status).";
   // Read only by the decision: beside anything else it would be dropped without a word (SMD-2015's kind).
   if (note !== undefined && !accept && !reject) return "--note goes with --accept or --reject: it is recorded with the decision.";
   // 067: the marker is the pass's own — a person's note beginning with it would
@@ -607,7 +632,7 @@ async function runPass(opts: ConsolidateOptions): Promise<number> {
   };
   // A blank value where the CLI's scanner refuses one first, in its words and
   // with its flag list: `--job ""` reaches no run (SMD-2425, as reembed's).
-  const blank = blankProblem(FLAGS, { dump: opts.dump, list: opts.list, accept: opts.accept, reject: opts.reject, direction: opts.direction, note: opts.note });
+  const blank = blankProblem(FLAGS, { dump: opts.dump, list: opts.list, parts: opts.parts, accept: opts.accept, reject: opts.reject, direction: opts.direction, note: opts.note });
   if (blank !== null) return usage(`${blank}\n${flagList(FLAGS, HINTS)}`);
   // databaseUrl's two refusals without its exit, then the numbers and the
   // review flags. A URL beside a caller's client is the worker key's (above),
@@ -687,8 +712,11 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
   const DRY_RUN = opts.dryRun === true;
   const RETRY_FAILED = opts.retryFailed === true;
   const LIST = opts.list ?? undefined;
+  const PARTS = opts.parts ?? undefined;
   const KEY = opts.key ?? undefined;
-  const AFTER = opts.after === undefined ? undefined : parseProposalCursor(opts.after) ?? undefined;
+  // --after is one listing's cursor: a --parts page's beside --parts, else a --list page's (reviewProblem held it to that).
+  const AFTER = opts.after === undefined || PARTS !== undefined ? undefined : parseProposalCursor(opts.after) ?? undefined;
+  const PARTS_AFTER = opts.after === undefined || PARTS === undefined ? undefined : parsePartsCursor(opts.after) ?? undefined;
   const ACCEPT = opts.accept ?? undefined;
   const REJECT = opts.reject ?? undefined;
   const DIRECTION = opts.direction ?? undefined;
@@ -713,7 +741,7 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
    * without --follow, and a read or review beside it, still rejects on the
    * error (review pass 3).
    */
-  const REVIEW_ONLY = LIST !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
+  const REVIEW_ONLY = LIST !== undefined || PARTS !== undefined || ACCEPT !== undefined || REJECT !== undefined || STALE_DAYS > 0;
   const startSaid = { down: false };
   const atStart = <T>(run: () => Promise<T>): Promise<T | null> =>
     FOLLOW && !STATUS_ONLY && !DRY_RUN && !REVIEW_ONLY ? throughOutage(run, { wake: opts.signal ?? new AbortController().signal, said: startSaid, out, err }) : run();
@@ -1175,6 +1203,26 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     return rows.length;
   }
 
+  /**
+   * --parts (SMD-4446 PR 3a): the settled parts in one status, or all, oldest judged first, each as partBlock prints
+   * it (the list_settled_parts reply's words). Migration 156's listing through the one read the server's store makes
+   * too (server-portable/part-listing.ts). Up to 50 a page; a capped page ends with the line that lists the next.
+   */
+  async function printParts(word: string, limit = 50): Promise<number> {
+    const sel = partsSelection(word, KEY);
+    const page = await listParts(sql, { status: word === "all" ? null : word as PartStatus, limit, ...(KEY === undefined ? {} : { judgeKey: KEY }), ...(PARTS_AFTER ? { after: { judgedAt: PARTS_AFTER.judgedAt, id: PARTS_AFTER.id } } : {}) });
+    const what = `${word === "all" ? "" : `${word} `}settled parts${KEY === undefined ? "" : ` judged by ${judgeKeyText(KEY)}`}`;
+    const nextPage = page.next ? `  next page: ${partsFlags(sel)} --after ${partsCursor(sel, page.next.judgedAt, page.next.id)}` : null;
+    if (page.parts.length === 0) {
+      out(PARTS_AFTER ? `  no more ${what} past this cursor — the listing ends here` : `  no ${what}`);
+      return 0;
+    }
+    out(`  ${page.parts.length} ${what.replace("settled parts", "settled part(s)")}${PARTS_AFTER ? " past the cursor" : ""}, oldest judged first${page.remaining > 0 ? ` — the first ${page.parts.length} of ${page.parts.length + page.remaining}` : ""}. Each is a statement in one thought that the other thought of its pair shows is no longer true or no longer open; both thoughts stand whatever is decided, and a part writes no thought:\n`);
+    page.parts.forEach((p, i) => out(`${partBlock(p, i + 1, { indent: "  ", day })}\n`));
+    if (nextPage) out(nextPage);
+    return page.parts.length;
+  }
+
   async function printStale(days: number): Promise<void> {
     const rows = (await sql`SELECT entity_id, entity_type, name, thoughts, newest_at FROM stale_entities(make_interval(days => ${days}), 50)`) as
       { entity_id: string; entity_type: string; name: string; thoughts: number; newest_at: Stamp }[];
@@ -1195,9 +1243,9 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
     // A --after time Postgres cannot read — a year 0, past its range, which the cursor's shape admits — is the caller's,
     // refused in --after's words before anything is written (review pass 2: refused at the listing, it came after a
     // --reject beside it had written, and its exit 2 replaced the decision's). Only a hand-made cursor reaches here.
-    if (AFTER) {
-      if (!(await sql`SELECT ${AFTER.judgedAt}::timestamptz`.then(() => true, (e: unknown) => (timeCastFailed(e) ? false : Promise.reject(e))))) {
-        err("--after takes the cursor a --list page printed (next page: … --after <cursor>), as it was given: this one's time is not one Postgres reads.");
+    if (AFTER ?? PARTS_AFTER) {
+      if (!(await sql`SELECT ${(AFTER ?? PARTS_AFTER)!.judgedAt}::timestamptz`.then(() => true, (e: unknown) => (timeCastFailed(e) ? false : Promise.reject(e))))) {
+        err(`--after takes the cursor a ${PARTS_AFTER ? "--parts" : "--list"} page printed (next page: … --after <cursor>), as it was given: this one's time is not one Postgres reads.`);
         return 2;
       }
     }
@@ -1262,6 +1310,14 @@ async function consolidateWith(sql: SQL, opts: ConsolidateOptions, settled: Numb
       try { await printList(LIST === "all" ? undefined : LIST); } catch (e) {
         if (!/list_supersession_proposals\(text, ?integer, ?boolean, ?text, ?numeric, ?timestamp with time zone, ?uuid\) does not exist/.test((e as Error).message)) throw e;
         err("  --list needs migration 110 (db/migrations/110_listing_pages.sql), which this brain has not applied: cd db && bun migrate.ts --url <url>");
+        code = 1;
+      }
+    }
+    if (PARTS !== undefined) {
+      // A brain short of 156 under this tree has no listing: the one error --parts meets there, named with its file.
+      try { await printParts(PARTS); } catch (e) {
+        if (!PARTS_LISTING_MISSING.test((e as Error).message)) throw e;
+        err(`  --parts: ${PARTS_LISTING_HINT}`);
         code = 1;
       }
     }
@@ -3564,10 +3620,11 @@ if (import.meta.main) {
   const follow = cli.has("follow") ? cli.int("follow", { absent: 0, bare: 15, min: 1 }) : undefined;
   const stale = cli.has("stale") ? cli.int("stale", { absent: 0, bare: 90, min: 1, max: MAX_STALE_DAYS }) : undefined;
   const list = cli.has("list") ? (cli.value("list") ?? "pending") : undefined;
+  const parts = cli.has("parts") ? (cli.value("parts") ?? "pending") : undefined;
   // The review flags' rules before the client, where the script refused them:
   // a URL Bun's client rejects then still meets a bad --list word first, as on
   // main (review pass 3). run() refuses through the same function.
-  const review = reviewProblem({ list, key: cli.value("key"), after: cli.value("after"), accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit, stale, status: cli.has("status"), dryRun: cli.has("dry-run") });
+  const review = reviewProblem({ list, parts, key: cli.value("key"), after: cli.value("after"), accept: cli.value("accept"), reject: cli.value("reject"), direction: cli.value("direction"), force: cli.has("force"), note: cli.value("note"), limit, stale, status: cli.has("status"), dryRun: cli.has("dry-run") });
   if (review !== null) {
     console.error(review);
     process.exit(2);
@@ -3584,6 +3641,7 @@ if (import.meta.main) {
       sql, url, workers, batch, ttl, heartbeat, timeout, k, minSim, minConfidence, limit, follow, stale,
       dump: cli.value("dump"),
       list,
+      parts,
       key: cli.value("key"),
       after: cli.value("after"),
       accept: cli.value("accept"),

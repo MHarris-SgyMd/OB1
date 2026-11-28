@@ -814,11 +814,12 @@ console.log("\n[7] --reapply onto a 020 under a ledger of every file — every m
   // or 151's settled_parts ([20cq]); 155 redefines 153's set_subject_repo
   // and record_thought_subjects with a GitHub link's repository first,
   // refusing by name without 016, 046, 061, 111, 113, 115, 130 or 153
-  // ([20cr]) —
+  // ([20cr]); 156 adds the settled parts' listing and the index it reads,
+  // refusing by name without 016, 029, 046 or 151 ([20cs]) —
   // all recorded by the planted ledger with their prerequisites present, so
   // none becomes the plain-run failure point above).
   const last = MIGRATIONS.find((f) => f.startsWith("030_"))!;
-  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 126, `030 is among the last one hundred and twenty-six migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
+  assert(last !== undefined && MIGRATIONS.indexOf(last) >= MIGRATIONS.length - 127, `030 is among the last one hundred and twenty-seven migrations (${last}) — a migration landed past the window: extend the enumeration above and move this guard`);
   await sql`DELETE FROM schema_migrations WHERE name = ${last}`;
   const plainRun = await migrate();
   const plainOk = plainRun.code === 1 && /030_label_from_claims_excludes_accepted\.sql\s+FAILED: migration 030 needs 015 \(thought_work_claims\) and 021 \(thoughts\.embedding_model\); this schema lacks thoughts\.embedding_model/.test(plainRun.out) &&
@@ -7954,6 +7955,84 @@ console.log("\n[20cr] Migration 155: onto a populated brain at the file before i
   } finally {
     await sql.close();
   }
+}
+
+console.log("\n[20cs] Migration 156: onto a populated brain at the file before it — refused by name without 151's settled_parts or 046's ob1_registry_kind, no listing and no index made; then applied: the parts standing are kept as they are and the listing gives them, the pending one by default with both quotes in their thoughts' texts, the decided one under its status; the index is there and valid; a role that reads the parts, the thoughts and the proposals lists, and one without the proposals is refused by the table; applied again a no-op (SMD-4446)");
+{
+  const the156 = MIGRATIONS.find((f) => /^\d{3}_parts_listing\.sql$/.test(f))!;  // by name: renumbered when main takes its number
+  const NUM = the156.slice(0, 3);
+  await dropSchema(URL_);
+  await applyMigrations(URL_, { ...OPTS, only: (f) => f < the156 });
+  const sql = new SQL({ url: URL_, max: 1 });
+  const thought = async (content: string) => String((await sql`INSERT INTO thoughts (content, content_fingerprint) VALUES (${content}, content_fingerprint_of(${content})) RETURNING id`)[0].id);
+  const fp = async (id: string) => String((await sql`SELECT content_fingerprint_of(content) AS f FROM thoughts WHERE id = ${id}::uuid`)[0].f);
+  const KEY = "consolidate:stub+writer@p4d6";
+  const part = async (o: string, n: string, statement: string, shown: string) =>
+    String(((await sql`SELECT record_settled_part(${o}::uuid, ${n}::uuid, 'older', ${statement}, ${shown}, 'updates', 'made up for the upgrade', ${KEY}, ${await fp(o)}, ${await fp(n)}, '{"deterministic": false, "model": "stub"}'::jsonb) AS r`)[0].r as { id: string }).id);
+  const SIG = "list_settled_parts(text, int, text, timestamptz, uuid, int)";
+  const made = async () => { const [r] = await sql`SELECT to_regprocedure(${SIG}) IS NOT NULL AS f, to_regclass('settled_parts_listing_idx') IS NOT NULL AS i`; return `${r.f}/${r.i}`; };
+  const parts = async () => JSON.stringify(await sql`SELECT id::text AS id, status, statement, shown_by, older_fingerprint, newer_fingerprint, judged_at::text AS judged_at FROM settled_parts ORDER BY id`);
+  const apply156 = () => applyMigrations(URL_, { ...OPTS, only: (f) => f === the156 }).then(() => "applied", (e: Error) => e.message);
+
+  // A brain at the file before it: a pair with two parts, one of them accepted.
+  const O = await thought("upgrade 156: the count stands at 40; the review is open");
+  const N = await thought("upgrade 156: the count is 52 now; the review closed");
+  const undecided = await part(O, N, "the count stands at 40", "the count is 52 now");
+  const decided = await part(O, N, "the review is open", "the review closed");
+  await sql`SELECT review_settled_part(${decided}::uuid, 'accept')`;
+  const before = await parts();
+
+  // Without 151's settled_parts the file is refused by name, the table and each of its columns the listing reads;
+  // without 046's ob1_registry_kind, by that name alone. Neither makes the listing or its index.
+  await sql`ALTER TABLE settled_parts RENAME TO settled_parts_away`;
+  const without = await apply156();
+  await sql`ALTER TABLE settled_parts_away RENAME TO settled_parts`;
+  await sql`ALTER FUNCTION ob1_registry_kind(uuid, text) RENAME TO ob1_registry_kind_away`;
+  const withoutKind = await apply156();
+  const madeWithout = await made();
+  await sql`ALTER FUNCTION ob1_registry_kind_away(uuid, text) RENAME TO ob1_registry_kind`;
+  const NEEDS = `migration ${NUM} needs 016, 029, 046 and 151; this schema lacks `;
+  assert(without === `${NEEDS}settled_parts, settled_parts.holder, settled_parts.word_group, settled_parts.older_fingerprint, settled_parts.newer_fingerprint, settled_parts.judged_at, settled_parts.reviewed_by_kind`
+         && withoutKind === `${NEEDS}ob1_registry_kind(uuid, text)` && madeWithout === "false/false",
+    `without 151's settled_parts the file is refused by name, the table and its six columns, and without 046's ob1_registry_kind, by that one; neither the listing nor its index is made (${without}; ${withoutKind}; ${madeWithout})`);
+
+  const applied = await apply156();
+  type Listed = { id: string; status: string; statement_in_text: boolean; statement_before: string | null; statement_after: string | null; shown_by_in_text: boolean; shown_by_before: string | null; older_edited: boolean; newer_edited: boolean; reviewed_by: string | null; remaining: string | number };
+  const list = async (status: string | null) => (await sql`SELECT id::text AS id, status, statement_in_text, statement_before, statement_after, shown_by_in_text, shown_by_before, older_edited, newer_edited, reviewed_by, remaining
+                                                             FROM list_settled_parts(${status}::text, 20, NULL::text, NULL::timestamptz, NULL::uuid, 12)`) as Listed[];
+  const dflt = (await sql`SELECT id::text AS id FROM list_settled_parts()`) as { id: string }[];
+  const pending = await list("pending"), accepted = await list("accepted"), every = await list(null);
+  const index = (await sql`SELECT i.indisvalid AS valid, i.indisready AS ready, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i WHERE i.indexrelid = to_regclass('settled_parts_listing_idx')`)[0] as { valid: boolean; ready: boolean; def: string } | undefined;
+  assert(applied === "applied" && (await made()) === "true/true" && (await parts()) === before
+         && dflt.length === 1 && dflt[0].id === undecided && pending.length === 1 && pending[0].id === undecided && Number(pending[0].remaining) === 1
+         && pending[0].statement_in_text && pending[0].statement_before === "pgrade 156: " && pending[0].statement_after === "; the review" && pending[0].shown_by_in_text && pending[0].shown_by_before === "pgrade 156: "
+         && !pending[0].older_edited && !pending[0].newer_edited
+         && accepted.length === 1 && accepted[0].id === decided && accepted[0].status === "accepted" && accepted[0].reviewed_by === null && every.length === 2,
+    `applied, the parts standing are as they were, and the listing gives them: the pending one by default, each quote in its thought's text with its context, neither text moved; the accepted one under its status, its decision naming nobody; both for NULL (${applied}; ${dflt.length}/${pending.length}/${accepted.length}/${every.length}; ${JSON.stringify([pending[0]?.statement_before, pending[0]?.statement_after])})`);
+  assert(index !== undefined && index.valid === true && index.ready === true && /ON public\.settled_parts USING btree \(status, judged_at, id\)$/.test(index.def),
+    `the listing's index is there, valid and ready, on (status, judged_at, id) (${index?.def})`);
+
+  // Who reads: a role holding SELECT on the parts, the thoughts and the proposals lists; one without the proposals
+  // is refused by that table (the listing joins the whole-thought proposal on a part's pair), whatever the page holds.
+  const READER = "ob1_upgrade_156_reader", NARROW = "ob1_upgrade_156_narrow";
+  await sql.unsafe(`CREATE ROLE ${READER} NOLOGIN; CREATE ROLE ${NARROW} NOLOGIN;
+                    GRANT SELECT ON settled_parts, thoughts, supersession_proposals TO ${READER}; GRANT SELECT ON settled_parts, thoughts TO ${NARROW}`);
+  const as = async (role: string) => {
+    try {
+      return await sql.begin(async (tx: SQL) => { await tx.unsafe(`SET LOCAL ROLE ${role}`); return `listed ${((await tx.unsafe(`SELECT id FROM list_settled_parts()`)) as unknown[]).length}`; });
+    } catch (e) { return `${String((e as { errno?: unknown }).errno ?? "?")}: ${(e as Error).message}`; }
+  };
+  const asReader = await as(READER), asNarrow = await as(NARROW);
+  for (const role of [READER, NARROW]) await sql.unsafe(`DROP OWNED BY ${role}; DROP ROLE ${role}`);
+  assert(asReader === "listed 1" && asNarrow === "42501: permission denied for table supersession_proposals",
+    `a role that reads the parts, the thoughts and the proposals lists the pending part; one without the proposals is refused by that table (${asReader}; ${asNarrow})`);
+
+  // A re-apply is a no-op: the parts, the index and the listing as they were.
+  const again = await apply156();
+  assert(again === "applied" && (await parts()) === before && (await made()) === "true/true" && JSON.stringify(await list(null)) === JSON.stringify(every),
+    `applied again is a no-op: the parts, the index and the listing as they were (${again})`);
+
+  await sql.close();
 }
 
 console.log("\n[21] test-support's schema reset leaves nothing of Daemonic Brain's in public — every table, function and type a migration creates is on its drop lists (SMD-1749)");

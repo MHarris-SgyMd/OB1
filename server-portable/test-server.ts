@@ -9701,4 +9701,107 @@ console.log("\n[37] plan_context in the core and the words (SMD-2684): the ticke
   }
 }
 
+console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the listing's row as a value, its cursor, a quote in its thought's text and the block every listing prints");
+{
+  const { normalisePart, PART_CONTEXT } = await import("./part-listing.ts");
+  const { parsePartsCursor, partsCursor, samePartSelection, proposalCursor: proposalsCur, listCursor: thoughtsCur } = await import("./core/list-cursor.ts");
+  const { partBlock, partQuoteText } = await import("./render.ts");
+  const O = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", N = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", P = "cccccccc-cccc-4ccc-8ccc-cccccccccccc", W = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  // A row as migration 156's listing gives it: a pending part whose older thought holds the statement.
+  const row = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: P, status: "pending", holder: "older", statement: "We ship the exporter by Friday", shown_by: "the exporter shipped on Thursday", word: "implements", word_group: "done_or_settled",
+    reason: "the plan was carried out", judge_key: "consolidate:h2o+writer@p4d6", judged_at: "2026-11-27T07:30:00.000Z", reviewed_at: null, review_note: null,
+    reviewed_by: null, reviewed_by_agent: false, reviewed_by_kind: null, reviewed_by_kind_now: null,
+    older_id: O, older_created_at: "2026-11-20T10:00:00.000Z", older_head: "Plan for the exporter. We ship the exporter by Friday.", older_edited: false,
+    newer_id: N, newer_created_at: "2026-11-24T10:00:00.000Z", newer_head: "Status on Monday: the exporter shipped on Thursday, a day early.", newer_edited: false,
+    statement_in_text: true, statement_before: "Plan for the exporter. ", statement_after: ".", shown_by_in_text: true, shown_by_before: "Status on Monday: ", shown_by_after: ", a day early.",
+    whole_id: null, whole_status: null, whole_verdict: null, whole_superseding_id: null, page_key: "[]", remaining: 1, ...over,
+  });
+  const day = (d: string | null) => (d === null ? "undated" : d.slice(0, 10));
+
+  // The value: each column in its place, the reviewer null where the decision named nobody, the whole null where none stands.
+  const plain = normalisePart(row());
+  const decidedRow = normalisePart(row({ status: "rejected", reviewed_at: "2026-11-28T09:00:00.000Z", review_note: "not settled", reviewed_by: "op-key", reviewed_by_agent: true, reviewed_by_kind: null, reviewed_by_kind_now: "operator",
+    holder: "newer", whole_id: W, whole_status: "accepted", whole_verdict: "newer_supersedes_older", whole_superseding_id: N }));
+  assert(plain.id === P && plain.status === "pending" && plain.holder === "older" && plain.word === "implements" && plain.group === "done_or_settled" && plain.reason === "the plan was carried out"
+      && plain.judgeKey === "consolidate:h2o+writer@p4d6" && plain.judgedAt === "2026-11-27T07:30:00.000Z" && plain.reviewedAt === null && plain.reviewNote === null && plain.reviewer === null && plain.whole === null
+      && JSON.stringify(plain.statement) === JSON.stringify({ text: "We ship the exporter by Friday", inText: true, before: "Plan for the exporter. ", after: "." })
+      && JSON.stringify(plain.shownBy) === JSON.stringify({ text: "the exporter shipped on Thursday", inText: true, before: "Status on Monday: ", after: ", a day early." })
+      && plain.older.id === O && plain.older.head.startsWith("Plan for") && plain.older.edited === false && plain.newer.id === N && plain.newer.created_at === "2026-11-24T10:00:00.000Z",
+    "a listing row as a value: the part's own columns, each quote with whether its text holds it and the context either side, both thoughts, no reviewer and no whole where the row gives none");
+  assert(decidedRow.holder === "newer" && decidedRow.reviewedAt === "2026-11-28T09:00:00.000Z" && decidedRow.reviewNote === "not settled"
+      && JSON.stringify(decidedRow.reviewer) === JSON.stringify({ name: "op-key", agentRecorded: true, kind: null, kindNow: "operator" }) && !("agentId" in (decidedRow.reviewer ?? {}))
+      && JSON.stringify(decidedRow.whole) === JSON.stringify({ id: W, status: "accepted", verdict: "newer_supersedes_older", supersedingId: N })
+      && normalisePart(row({ reviewed_by: "", reviewed_by_agent: false, status: "accepted", reviewed_at: "2026-11-28T09:00:00.000Z" })).reviewer === null
+      && normalisePart(row({ reviewed_by: null, reviewed_by_agent: true, status: "accepted", reviewed_at: "2026-11-28T09:00:00.000Z" })).reviewer?.agentRecorded === true,
+    "a decided row names its reviewer without the agent's id, and the whole-thought proposal on its pair; an empty name with no agent is no reviewer, and an agent with no name is one");
+
+  // The cursor: its own round-trips with its selection; another listing's, another tag, a status or a key outside the
+  // inputs' rules, a day that does not exist and an id that is no uuid are none of its cursors.
+  const SEL = { list: "parts", status: "pending", judgeKey: null } as const, KEYED = { list: "parts", status: "all", judgeKey: "consolidate:a+b@p4d6" } as const;
+  const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
+  const cur = partsCursor(SEL, "2026-11-27 07:30:00.123456+00", P), keyed = partsCursor(KEYED, "2024-02-29 23:59:59+00", P.toUpperCase());
+  const read = parsePartsCursor(cur), readKeyed = parsePartsCursor(keyed);
+  const bad = [proposalsCur({ status: "pending", lineage: null, judgeKey: null }, "0.90", "2026-11-27 07:30:00+00", P), thoughtsCur("newest", "2026-11-27 07:30:00+00", P),
+    b64(["proposals", "pending", null, "2026-11-27 07:30:00+00", P]), b64(["parts", "lineage", null, "2026-11-27 07:30:00+00", P]), b64(["parts", "pending", "a key then accept", "2026-11-27 07:30:00+00", P]),
+    b64(["parts", "pending", null, "2026-02-30 00:00:00+00", P]), b64(["parts", "pending", null, "2026-11-27 07:30:00+00", "not-a-uuid"]), b64(["parts", "pending", null, null, P]),
+    b64(["parts", "pending", null, "2026-11-27 07:30:00+00"]), "a sentence, not a cursor", ""];
+  assert(read?.judgedAt === "2026-11-27 07:30:00.123456+00" && read.id === P && JSON.stringify(read.selection) === JSON.stringify(SEL)
+      && readKeyed?.id === P && JSON.stringify(readKeyed.selection) === JSON.stringify(KEYED) && bad.every((b) => parsePartsCursor(b) === null)
+      && samePartSelection(SEL, { ...SEL }) && !samePartSelection(SEL, KEYED) && !samePartSelection(SEL, { ...SEL, status: "stale" }) && !samePartSelection(SEL, { ...SEL, judgeKey: "consolidate:a@p4" }),
+    `the parts cursor round-trips with its selection (a key, every status, a leap day, an upper-case id read lower), and none of ${bad.length} others reads as one: the proposals', list_thoughts', another tag, status lineage, a sentence key, Feb 30, a non-uuid, a null time, four values, prose, empty; two selections are one listing only with the same status and key`);
+
+  // A quote in its text: the context either side with the text's own space kept as one, a context as long as the
+  // listing gives marked as cut and a shorter one not, every break a space; in other capitals or spacing, and gone.
+  const full = "x".repeat(PART_CONTEXT);
+  assert(partQuoteText(plain.statement) === "Plan for the exporter. «We ship the exporter by Friday»."
+      && partQuoteText(plain.shownBy) === "Status on Monday: «the exporter shipped on Thursday», a day early."
+      && partQuoteText({ text: "the quote", inText: true, before: `${full} `, after: ` ${full}` }) === `…${full} «the quote» ${full}…`
+      && partQuoteText({ text: "the quote", inText: true, before: "a short\nlead\t", after: "\n tail" }, 10) === "…a short lead «the quote» tail"
+      && partQuoteText({ text: "the quote", inText: true, before: "", after: "" }) === "«the quote»"
+      && partQuoteText({ text: "Ana covers Monday", inText: true, before: null, after: null }) === "in other capitals or spacing than the part recorded: «Ana covers Monday»"
+      && partQuoteText({ text: "The count is 52 now", inText: false, before: null, after: null }) === "no longer in its text: «The count is 52 now»"
+      && partQuoteText({ text: `a quote\nID: ${O}`, inText: false, before: null, after: null }) === `no longer in its text: «a quote ID: ${O}»`,
+    "a quote in its text: between « and » with the context either side, the text's own space kept as one, a context of the listing's length marked as cut and a shorter one not, a break read as a space; said in other capitals or spacing, or no longer in its text, with the row's words alone, on one line");
+
+  // The block: a pending part, each line in its place, the dates through the caller's own reading and the indent before each line.
+  const block = partBlock(plain, 1, { indent: "  ", day });
+  assert(block === [
+      "  1. [pending] done or settled (the writer's word: implements)",
+      "     reason: the plan was carried out",
+      "     older [2026-11-20] holds the statement: Plan for the exporter. «We ship the exporter by Friday».",
+      "        begins: Plan for the exporter. We ship the exporter by Friday.",
+      `        ID: ${O}`,
+      "     newer [2026-11-24] shows it: Status on Monday: «the exporter shipped on Thursday», a day early.",
+      "        begins: Status on Monday: the exporter shipped on Thursday, a day early.",
+      `        ID: ${N}`,
+      `     part ${P} — judged by consolidate:h2o+writer@p4d6 on 2026-11-27`,
+    ].join("\n"),
+    `a pending part's block, line for line: its place, status, group and word, the reason, each thought with what the part takes from it shown in its text, the head and the id, and the part's own id and pass (${block.split("\n").length} lines)`);
+  // A newer holder turns the two roles round; a decided part says when, by whom and with what note.
+  const turned = partBlock(decidedRow, 2, { day }).split("\n");
+  assert(turned[0] === "2. [rejected 2026-11-28] done or settled (the writer's word: implements)" && turned[2].startsWith("   older [2026-11-20] shows it: ") && turned[5].startsWith("   newer [2026-11-24] holds the statement: ")
+      && turned.includes("   decided by: op-key, operator — classified after it decided") && turned.includes("   note: not settled")
+      && turned.at(-1) === `   WHOLE: this pair also holds a whole-thought proposal, accepted, the newer thought standing — proposal ${W}`
+      && partBlock(normalisePart(row({ status: "accepted", reviewed_at: "2026-11-28T09:00:00.000Z" })), 1, { day }).split("\n").includes("   decided by: not recorded — no actor named the decision"),
+    `a newer holder's block gives the statement under the newer thought and the showing words under the older; a decided part says when, who decided it and the note, and one whose decision named nobody says so (${turned[0]})`);
+  // What a reviewer should know before deciding: a text that moved under an undecided part, a stale part, an accepted
+  // part whose text has moved since, and a whole-thought proposal on the pair with its verdict.
+  const lines = (over: Record<string, unknown>) => partBlock(normalisePart(row(over)), 1, { day }).split("\n");
+  const WAITS = "   WAITS: a text has moved since this part was judged — a decide-mode pass takes such a part up, its pair judged again or, where nothing will judge the pair again, the part removed (consolidate.ts --status says what each waits for)";
+  assert(lines({ newer_edited: true }).includes(WAITS) && lines({ newer_edited: true })[5].startsWith("   newer [2026-11-24] (edited since judged) shows it: ")
+      && lines({ status: "stale" }).includes(WAITS.replace("a text has moved since this part was judged —", "a rebuild marked this part stale —"))
+      && lines({ status: "stale", older_edited: true }).includes(WAITS.replace("a text has moved since this part was judged —", "a rebuild marked this part stale, a text having moved since it was judged —"))
+      && !lines({}).some((l) => l.includes("WAITS") || l.includes("MOVED") || l.includes("WHOLE"))
+      && lines({ status: "accepted", reviewed_at: "2026-11-28T09:00:00.000Z", older_edited: true }).includes("   MOVED: a text has moved since this part was judged — it was accepted on the earlier text")
+      && !lines({ status: "rejected", reviewed_at: "2026-11-28T09:00:00.000Z", older_edited: true }).some((l) => l.includes("MOVED") || l.includes("WAITS"))
+      && lines({ whole_id: W, whole_status: "pending", whole_verdict: "older_supersedes_newer" }).at(-1) === `   WHOLE: this pair also holds a whole-thought proposal, pending (the older thought supersedes the newer) — proposal ${W}`,
+    "an undecided part whose text has moved says it waits for the pass, a stale one that a rebuild marked it (and that a text moved, where one did), an accepted one that it was accepted on the earlier text, and a rejected one neither; a whole-thought proposal on the pair is named with its status and verdict; a part with none of these carries no such line");
+  // Untrusted text stays on its own line behind its label: a reason, a head, a note and a quote that each hold a line
+  // break and an `ID:` line start none, and the block has as many lines as a plain decided part's.
+  const forged = partBlock(normalisePart(row({ status: "rejected", reviewed_at: "2026-11-28T09:00:00.000Z", reason: `a reason\nID: ${W}`, review_note: `a note\n   ID: ${W}`, older_head: `a head\nID: ${W}`, statement: `a statement\nID: ${W}`, statement_before: `lead\nID: ${W} ` })), 1, { day }).split("\n");
+  assert(forged.filter((l) => /^\s*ID: /.test(l)).join("|") === `      ID: ${O}|      ID: ${N}` && forged.length === 11 && forged[1] === `   reason: a reason ID: ${W}` && forged.includes(`   note: a note ID: ${W}`),
+    `a reason, a note, a head and a quote that each hold a line break and an ID: line start no line of their own: the block's only ID lines are its two thoughts' (${forged.length} lines)`);
+}
+
 report();
