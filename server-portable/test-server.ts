@@ -9945,6 +9945,77 @@ console.log("\n[38] Settled parts as a listing prints them (SMD-4446 PR 3a): the
       && partRows[6].status === "ok" && partRows[6].detail === partLines[5] && partRows[6].fix === undefined && partRows[7].status === "ok" && partRows[7].detail === partLines[6]
       && partRows[8].status === "ok" && partRows[8].detail === "none pending",
     `preflight's settled parts row: a skip before 151; a refusal, a timeout, a table out of reach, the deadline and any other failure each warned with its own remedy; the queue ok in brain_info's words, pending or stale, and none (${partRows.map((r) => `${r.status}: ${r.detail.slice(0, 50)}`).join(" | ")})`);
+
+  // The read (PR 3c-1): the accepted parts that stand on a thought, as fetch carries them. The row as a value; the
+  // label, best-effort; the fields fetch gives; and the marks its reply adds.
+  const { normalisePartOn, PARTS_ON_FETCH } = await import("./parts-on.ts");
+  const { settledOf, settledResult } = await import("./core/settled.ts");
+  const { renderFetch } = await import("./render.ts");
+  const onRow = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    holder_id: O, id: P, statement: "We ship the exporter by Friday", shown_by: "the exporter shipped on Thursday", word: "implements", word_group: "done_or_settled",
+    other_is: "newer", other_id: N, other_created_at: "2026-11-24T10:00:00.000Z", other_trust: "operator", other_head: "Status on Monday: the exporter shipped on Thursday, a day early.",
+    judged_at: "2026-11-27T07:30:00.000Z", accepted_at: "2026-11-28T09:00:00.000Z", holder_edited: false, shown_by_in_text: true, place: 24, total: 5, ...over,
+  });
+  const on = normalisePartOn(onRow()), turnedOn = normalisePartOn(onRow({ other_is: "older", other_trust: null, other_created_at: null, judged_at: null, accepted_at: null, holder_edited: true, shown_by_in_text: false, other_head: null }));
+  assert(JSON.stringify(on) === JSON.stringify({ id: P, statement: "We ship the exporter by Friday", shownBy: "the exporter shipped on Thursday", word: "implements", group: "done_or_settled", otherIs: "newer",
+        other: { id: N, created_at: "2026-11-24T10:00:00.000Z", trust: "operator", head: "Status on Monday: the exporter shipped on Thursday, a day early." },
+        judgedAt: "2026-11-27T07:30:00.000Z", acceptedAt: "2026-11-28T09:00:00.000Z", holderEdited: false, shownByInText: true })
+      && turnedOn.otherIs === "older" && turnedOn.other.trust === null && turnedOn.other.created_at === null && turnedOn.other.head === "" && turnedOn.judgedAt === null && turnedOn.acceptedAt === null
+      && turnedOn.holderEdited === true && turnedOn.shownByInText === false && normalisePartOn(onRow({ other_is: "sideways" })).otherIs === "newer",
+    "a row of the read as a value: the part's own words, the other thought of its pair with its time, trust and first words, the part's two times, and the two flags; neither its place nor its holder, which the read groups by; a time, a trust or first words not given are none");
+
+  // The label: one read for the thoughts asked for and one for the thoughts superseding the ones that show a part.
+  const asked: { ids: string[]; per: number }[] = [], supersededAsked: string[][] = [];
+  const partsStore = (read: Record<string, { total: number; parts: ReturnType<typeof normalisePartOn>[] }> | Error, superseded: Record<string, string> | Error = {}) => ({
+    settledPartsAmong: async (ids: string[], per: number) => { asked.push({ ids, per }); if (read instanceof Error) throw read; return read; },
+    supersededAmong: async (ids: string[]) => { supersededAsked.push(ids); if (superseded instanceof Error) throw superseded; return superseded; },
+  });
+  const second = normalisePartOn(onRow({ id: W, statement: "the count stands at 40", word: "a word of a later brain", word_group: "another_group", other_trust: "ingested" }));
+  const labelled = await settledOf(partsStore({ [O]: { total: 5, parts: [on, second] } }, { [N]: W }), [{ id: O }, { id: N }]);
+  const hit = labelled?.[O];
+  const nothingAsked = asked.length;
+  const noHits = await settledOf(partsStore({}), []);
+  assert(labelled !== null && Object.keys(labelled).join() === O && hit !== undefined && hit.settled.length === 2 && hit.settledMore === 3
+      && asked.length === 1 && asked[0].ids.join() === [O, N].join() && asked[0].per === PARTS_ON_FETCH && PARTS_ON_FETCH === 20 && supersededAsked.length === 1 && supersededAsked[0].join() === N
+      && JSON.stringify(hit.settled[0]) === JSON.stringify({ id: P, group: "done_or_settled", word: "implements", statement: "We ship the exporter by Friday", shownBy: "the exporter shipped on Thursday", otherIs: "newer",
+        by: { id: N, title: `${new Date("2026-11-24T10:00:00.000Z").toLocaleDateString()} - Status on Monday: the exporter shipped on Thursday, a day early.`, trust: "operator", created_at: "2026-11-24T10:00:00.000Z", supersededBy: W },
+        acceptedAt: "2026-11-28T09:00:00.000Z", editedSince: false, shownByInText: true })
+      && hit.settled[1].group === null && hit.settled[1].word === "a word of a later brain" && hit.settled[1].by.trust === "ingested"
+      && noHits !== null && Object.keys(noHits).length === 0 && asked.length === nothingAsked,
+    `the label: one read for the thoughts asked for, twenty of each at most, and one for the thoughts superseding those that show a part, each asked once; a thought's parts as fetch shows them, with how many more stand; a thought with none absent; a group this server does not know not given, and the word kept as data; no hit, no read (${hit?.settled.length} + ${hit?.settledMore}; ${asked.length}/${supersededAsked.length})`);
+  // A thought whose parts name no other thought to look up: the superseding read is not made.
+  const before = supersededAsked.length;
+  const bareLabel = await settledOf(partsStore({}), [{ id: O }]);
+  assert(bareLabel !== null && Object.keys(bareLabel).length === 0 && supersededAsked.length === before, "a page that holds no part asks nothing about superseding thoughts");
+  // A trust this server does not know is not given, as a relation's other thought's is not.
+  const oddTrust = await settledOf(partsStore({ [O]: { total: 1, parts: [normalisePartOn(onRow({ other_trust: "of a later brain" }))] } }), [{ id: O }]);
+  assert(oddTrust?.[O]?.settled[0].by.trust === null && oddTrust[O].settledMore === 0, "the trust of the thought that shows a part is one of the brain's words, or none: a word this server does not know is not given");
+  // Best-effort: a read that fails, the parts' or the superseding one after it, is not read, said once in the log.
+  const loggedParts: string[] = [];
+  const realError = console.error;
+  console.error = (l: unknown) => { loggedParts.push(String(l)); };
+  let failed: Awaited<ReturnType<typeof settledOf>>, failedAfter: Awaited<ReturnType<typeof settledOf>>;
+  try {
+    failed = await settledOf(partsStore(Object.assign(new Error("function settled_parts_on(uuid[], integer) does not exist"), { errno: "42883" })), [{ id: O }]);
+    failedAfter = await settledOf(partsStore({ [O]: { total: 1, parts: [on] } }, Object.assign(new Error("permission denied for table thoughts"), { errno: "42501" })), [{ id: O }]);
+  } finally { console.error = realError; }
+  assert(failed === null && failedAfter === null && loggedParts.length === 2
+      && loggedParts[0] === "settled: the settled parts read failed (42883): function settled_parts_on(uuid[], integer) does not exist; results carry settled: null" && loggedParts[1].startsWith("settled: the settled parts read failed (42501): permission denied for table thoughts"),
+    `a read that fails, on a brain without the function or a role without a table, gives null, not read, and the log says why once a read (${loggedParts.map((l) => l.slice(0, 60)).join(" | ")})`);
+  // fetch's fields: only where the thought holds a part, the count of the rest only where there is one, and null when not read.
+  assert(JSON.stringify(settledResult(null, O)) === '{"settled":null}' && JSON.stringify(settledResult(labelled, N)) === "{}" && JSON.stringify(settledResult({}, O)) === "{}"
+      && settledResult(labelled, O).settled?.length === 2 && settledResult(labelled, O).settledMore === 3 && !("settledMore" in settledResult({ [O]: { settled: hit!.settled, settledMore: 0 } }, O)),
+    "fetch's fields: the parts and the count of the rest where the thought holds some, no count where none is left out, nothing where it holds none, and null where they were not read");
+  // The reply's marks: how many parts stand before the title, after the others' marks; the thought that shows a part
+  // marked where it is outside text; a read that failed said in the title and a note; a thought with none as it was.
+  const fetchedBase = { id: O, title: "A title", text: "The text.", url: "https://example.test/t", metadata: {} };
+  const reply = (v: Record<string, unknown>) => JSON.parse(renderFetch({ ok: true, value: { ...fetchedBase, ...v } } as never).content[0].text) as { title: string; text: string; settled?: { by: { title: string } }[] | null; settledNote?: string };
+  const marked = reply({ ...settledResult(labelled, O) }), plainFetch = reply({}), unread = reply({ settled: null }), outside = reply({ metadata: { trust: "ingested" }, ...settledResult(labelled, O) });
+  assert(marked.title === "[settled in part: 5] A title" && marked.text === "The text." && marked.settled?.length === 2 && !marked.settled[0].by.title.startsWith("[ingested]") && marked.settled[1].by.title.startsWith("[ingested] ")
+      && !("settledNote" in marked) && plainFetch.title === "A title" && !("settled" in plainFetch) && !("settledNote" in plainFetch)
+      && unread.title === "[settled parts not read] A title" && unread.settled === null && unread.settledNote === "Whether a statement of this thought is settled could not be read (for instance, a brain before migration 157, or a server role without SELECT on settled_parts): it may hold one."
+      && outside.title.startsWith("[ingested] [settled in part: 5] A title"),
+    `fetch's reply: the title says how many parts stand, those shown and those not, after the other marks; the text is the thought's own; a thought of outside text that shows a part has its title marked; parts not read are said in the title and a note; a thought with none is as it was (${marked.title} | ${unread.title} | ${outside.title})`);
 }
 
 report();

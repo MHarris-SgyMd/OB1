@@ -27,6 +27,7 @@ import type { Lineage } from "./lineage.ts";
 import type { FindingKind, FindingStatus } from "./priority-kinds.ts";
 import { reviewersOf, reviewProposal, type ReviewResult } from "./proposal-review.ts";
 import { listParts, type PartPage, type PartPosition, type PartStatus } from "./part-listing.ts";
+import { partsOn, type PartsOn } from "./parts-on.ts";
 import { ItemRefused, itemProblemOf, normaliseItemAnswer, normaliseItemRecord, normaliseOpenItem, type ItemAnswer, type ItemListRow, type ItemRecord, type ItemStatus } from "./open-items.ts";
 import { normaliseDeliverableAnswer, normaliseDeliverableRecord, type DeliverableAnswer, type DeliverableRecord, type VerifyStatus } from "./deliverables.ts";
 import { normaliseValidity, type ValidityAnswer } from "./validity.ts";
@@ -1721,6 +1722,12 @@ export class SqlStore implements ThoughtStore {
     // Migration 156, through the one read the CLI's --parts makes (part-listing.ts): its six arguments and its
     // columns by name, and a cursor whose time Postgres cannot read refused as the caller's.
     return listParts(this.sql, opts);
+  }
+
+  async settledPartsAmong(ids: string[], per: number): Promise<Record<string, PartsOn>> {
+    // Migration 157, through the one read of a thought's standing parts (parts-on.ts). Not best-effort here, as
+    // supersededAmong is: the label's reader (core/settled.ts) says a failed read as not read, and logs why.
+    return partsOn(this.sql, idList(ids), per);
   }
 
   async listChanges(f: ChangeFilters): Promise<AuditChange[]> {

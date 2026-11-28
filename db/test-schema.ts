@@ -22910,11 +22910,12 @@ console.log("\n[136] Migration 151: settled parts — a statement in one thought
     const trg = (await q<{ n: string; f: string }>(`SELECT t.tgname AS n, p.proname AS f FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid WHERE t.tgrelid = 'settled_parts'::regclass AND NOT t.tgisinternal ORDER BY 1`)).map((r) => `${r.n}=${r.f}`).join();
     const kindCheck = (await q<{ n: string; d: string }>(`SELECT conname AS n, pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conrelid = 'derivations'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%artifact_kind = ANY%'`));
     const cols = (await q<{ a: string }>(`SELECT attname AS a FROM pg_attribute WHERE attrelid = 'settled_parts'::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum`)).map((r) => r.a).join();
-    // The listing's index is the parts' listing file's, a later one ([141]); this file's two stand beside the key's.
-    assert(named.test(tableComment) && idx.map((i) => i.n).join() === "settled_parts_listing_idx,settled_parts_newer_idx,settled_parts_one_statement,settled_parts_pkey"
+    // The listing's index is the parts' listing file's, a later one ([141]), and the accepted parts' by holder the
+    // read's ([142]); this file's two stand beside the key's.
+    assert(named.test(tableComment) && idx.map((i) => i.n).join() === "settled_parts_accepted_holder_idx,settled_parts_listing_idx,settled_parts_newer_idx,settled_parts_one_statement,settled_parts_pkey"
         && cols === "id,older_id,newer_id,holder,holder_id,statement,shown_by,word,word_group,reason,older_fingerprint,newer_fingerprint,judge_key,judged_at,canonical_agent_id,status,reviewed_at,review_note,reviewed_by,reviewed_by_agent_id,reviewed_by_kind"
         && trg === "settled_parts_drop_derivation=ob1_drop_part_derivation,settled_parts_keep_judgement=ob1_keep_part_judgement,settled_parts_stamp_reviewer=ob1_stamp_proposal_reviewer",
-      `the table, commented, its twenty-one columns and no other; its two indexes beside the key's, and the listing's, which a later file adds; three triggers, the reviewer's running 114's function (${idx.map((i) => i.n).join()}; ${trg}; ${cols.split(",").length} columns)`);
+      `the table, commented, its twenty-one columns and no other; its two indexes beside the key's, and the listing's and the read's, which later files add; three triggers, the reviewer's running 114's function (${idx.map((i) => i.n).join()}; ${trg}; ${cols.split(",").length} columns)`);
     // Each index by what it is, not by its name: the identity unique over the statement's fingerprint, and the newer side.
     assert(/^CREATE UNIQUE INDEX settled_parts_one_statement ON public\.settled_parts USING btree \(older_id, newer_id, holder, content_fingerprint_of\(statement\)\)$/.test(idxOf("settled_parts_one_statement"))
         && /USING btree \(newer_id\)$/.test(idxOf("settled_parts_newer_idx")),
@@ -24827,6 +24828,181 @@ console.log("\n[141] Migration 156: the settled parts' listing — list_settled_
     // The parts go with their thoughts (151's cascade), and their lineage rows with them.
     await db.exec(`DELETE FROM thoughts WHERE content LIKE '[141]%'`);
     await db.exec(`DELETE FROM ob1_agents WHERE label IN ('[141] op', '[141] late')`);
+  }
+}
+
+console.log("\n[142] Migration 157: the settled parts that stand on a thought — settled_parts_on gives, for each thought asked for, its accepted parts whose statement its text still says, read as the part's identity reads a statement; the first few of each in the order the text says them, with how many stand in all; each with its own words and the other thought of the pair; a pending, rejected or stale part on no read, and a statement edited out of its thought on none; through an index on the holder for accepted rows (SMD-4446 PR 3c)");
+{
+  const q = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await db.query<T>(sql, params)).rows;
+  const one = async <T extends Record<string, unknown>>(sql: string, params: unknown[] = []) => (await q<T>(sql, params))[0];
+  const file = files.find((f) => f.endsWith("_parts_on_thoughts.sql")) ?? "no _parts_on_thoughts.sql";  // by name: renumbered when main takes its number
+  const NUM = file.slice(0, 3);
+  const SIG = "settled_parts_on(uuid[], int)";
+  await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+  await restoreShipped("settled_parts_on", "record_settled_part", "review_settled_part", "update_thought");
+  await db.exec(`DELETE FROM thoughts WHERE content LIKE '[142]%'`);
+  await db.exec(`SELECT set_agent_kind('[142] op', 'operator')`);
+
+  try {
+    // The shape: one function, this file its last definer, STABLE and SECURITY INVOKER, its columns in order, its
+    // comment, its two sentinels, and the index: the holder, for accepted rows alone.
+    const meta = await one<{ d: boolean; v: string; cols: string }>(`SELECT p.prosecdef AS d, p.provolatile AS v,
+        array_to_string(array(SELECT n FROM unnest(p.proargnames, p.proargmodes) AS u(n, m) WHERE m = 't'), ',') AS cols FROM pg_proc p WHERE p.oid = $1::regprocedure`, [SIG]);
+    const comment = (await one<{ c: string | null }>(FUNCTION_COMMENT_SQL, [SIG])).c ?? "";
+    const body = String((await one<{ s: string }>(`SELECT prosrc AS s FROM pg_proc WHERE oid = $1::regprocedure`, [SIG])).s);
+    const COLS = "holder_id,id,statement,shown_by,word,word_group,other_is,other_id,other_created_at,other_trust,other_head,judged_at,accepted_at,holder_edited,shown_by_in_text,place,total";
+    const index = (await one<{ d: string | null }>(`SELECT indexdef AS d FROM pg_indexes WHERE indexname = 'settled_parts_accepted_holder_idx'`))?.d ?? "";
+    assert((await functionsNamed("settled_parts_on")) === 1 && lastDefinerOf("settled_parts_on") === file && meta.d === false && meta.v === "s" && meta.cols === COLS
+        && new RegExp(`Migration ${NUM} / SMD-4446\\.$`).test(comment) && /ob1:parts-on-a-thought/.test(body) && /ob1:a-part-shows-while-its-thought-says-it/.test(body)
+        && /ON (public\.)?settled_parts USING btree \(holder_id\) WHERE \(status = 'accepted'(::text)?\)$/.test(index)
+        // The read asks the index's own terms: the status and the holder, and nothing that would read the rest of the table.
+        && /WHERE s\.status = 'accepted' AND s\.holder_id = ANY\(p_ids\)/.test(body)
+        // …and gives its rows in one order: by thought, then where its text says each, then the part's id.
+        && /ORDER BY g\.holder_id, g\.place, g\.id;\s*END\s*$/.test(body),
+      `one settled_parts_on, this file its last definer, STABLE and SECURITY INVOKER, its ${COLS.split(",").length} columns in order, its comment naming ${NUM}, the two sentinels, the index on the holder for accepted rows, the read asking by that index's terms, and its rows in one order (${meta.d}/${meta.v}; ${index.slice(-70)})`);
+
+    type Row = {
+      holder_id: string; id: string; statement: string; shown_by: string; word: string; word_group: string; other_is: string; other_id: string; other_created_at: Date | string | null;
+      other_trust: string | null; other_head: string; judged_at: Date | string | null; accepted_at: Date | string | null; holder_edited: boolean; shown_by_in_text: boolean; place: number; total: number;
+    };
+    const on = (ids: (string | null)[] | null, per?: number | null) =>
+      per === undefined ? q<Row>(`SELECT * FROM settled_parts_on($1::uuid[])`, [ids]) : q<Row>(`SELECT * FROM settled_parts_on($1::uuid[], $2::int)`, [ids, per]);
+    const JUDGE = "consolidate:stub+writer@p4d6";
+    const RECIPE = JSON.stringify({ deterministic: false, model: "stub-writer" });
+    type T = { id: string };
+    const cap = async (content: string, at: number, event?: Record<string, unknown>) =>
+      (await one<{ r: T }>(`SELECT upsert_thought($1::text, $2::jsonb, $3::vector) AS r`, [content, JSON.stringify({ metadata: { source: "mcp" }, embedding_model: EMBEDDING_MODEL, ...(event ? { event } : {}) }), unit(at)])).r.id;
+    const edit = async (id: string, content: string) =>
+      (await one<{ r: { ok: boolean } }>(`SELECT update_thought($1::uuid, $2::text, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL) AS r`, [id, content])).r;
+    type Rec = { action?: string; id?: string };
+    const part = async (o: string, n: string, holder: string, statement: string, shown: string, word: string) => {
+      const r = (await one<{ r: Rec }>(`SELECT record_settled_part($1::uuid, $2::uuid, $3, $4, $5, $6, '[142] a reason', $7, content_fingerprint_of((SELECT content FROM thoughts WHERE id = $1::uuid)), content_fingerprint_of((SELECT content FROM thoughts WHERE id = $2::uuid)), $8::jsonb) AS r`,
+        [o, n, holder, statement, shown, word, JUDGE, RECIPE])).r;
+      if (r.action !== "recorded" || !r.id) throw new Error(`not recorded: ${JSON.stringify(r)}`);
+      return r.id;
+    };
+    const OP = (await one<{ id: string }>(`SELECT canonical_agent_id::text AS id FROM ob1_agents WHERE label = '[142] op'`)).id;
+    const decide = async (id: string, decision: string) => {
+      const r = (await one<{ r: { ok?: boolean; status?: string } }>(`SELECT review_settled_part($1::uuid, $2, '[142] a note', $3::jsonb, true) AS r`, [id, decision, JSON.stringify({ name: "[142] op", agent_id: OP })])).r;
+      await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+      if (r.ok !== true) throw new Error(`not decided: ${JSON.stringify(r)}`);
+    };
+
+    // One pair, the older thought holding four statements and the newer one; the parts recorded out of the order the
+    // older text says them, so the read's order is the text's and not the rows'.
+    const O1 = await cap("[142] The exporter ships on Friday. The count stands at 40. The review is open. The budget is 10k. Once more: The count stands at 40.", 90);
+    const N1 = await cap("[142] the exporter shipped on Thursday; the count is 52 now; the review closed on Monday; the budget went to 12k", 91, { trust: "ingested" });
+    const pCount = await part(O1, N1, "older", "The count stands at 40", "the count is 52 now", "updates");
+    const pShip = await part(O1, N1, "older", "The exporter ships on Friday", "the exporter shipped on Thursday", "implements");
+    const pReview = await part(O1, N1, "older", "The review is open", "the review closed on Monday", "resolves");
+    const pBudget = await part(O1, N1, "older", "The budget is 10k", "the budget went to 12k", "revises");
+    const pNewer = await part(O1, N1, "newer", "the budget went to 12k", "The budget is 10k", "corrects");
+
+    // Before any decision: a pending part is on no read.
+    const none = await on([O1, N1], 50);
+    await decide(pCount, "accept"); await decide(pShip, "accept"); await decide(pNewer, "accept"); await decide(pBudget, "reject");
+    const first = await on([O1, N1], 50);
+    const mine = first.filter((r) => r.holder_id === O1), theirs = first.filter((r) => r.holder_id === N1);
+    const [ship, count] = mine;
+    assert(none.length === 0 && mine.length === 2 && theirs.length === 1 && !first.some((r) => r.id === pReview || r.id === pBudget)
+        && ship.id === pShip && ship.statement === "The exporter ships on Friday" && ship.shown_by === "the exporter shipped on Thursday" && ship.word === "implements" && ship.word_group === "done_or_settled"
+        && ship.other_is === "newer" && ship.other_id === N1 && ship.other_trust === "ingested" && ship.other_head === "[142] the exporter shipped on Thursday; the count is 52 now; the review closed on Monday; the budget went to 12k"
+        && ship.other_created_at !== null && ship.judged_at !== null && ship.accepted_at !== null && ship.holder_edited === false && ship.shown_by_in_text === true && Number(ship.total) === 2
+        && theirs[0].id === pNewer && theirs[0].other_is === "older" && theirs[0].other_id === O1 && theirs[0].other_trust === null && theirs[0].word_group === "no_longer_holds" && Number(theirs[0].total) === 1,
+      `with none accepted, none on any read; then the accepted parts alone, a pending and a rejected one on none: each with its own words, its word and group, the other thought of the pair (which it is, its trust, its first words), its times, and how many stand on its thought; a newer holder's part names the older as the other (${none.length} → ${mine.length} + ${theirs.length})`);
+
+    // The order is the text's: the exporter (said first) before the count, though the count's row is the older; a
+    // statement the text says twice stands at its first place.
+    assert(count.id === pCount && Number(ship.place) === "[142] ".length + 1 && Number(count.place) === "[142] The exporter ships on Friday. ".length + 1 && Number(ship.place) < Number(count.place),
+      `the parts of one thought come in the order its text says them, not the order they were recorded in, and a statement said twice stands at its first place (${ship.place}, ${count.place})`);
+
+    // A stale part is on no read either: a rebuild's mark says it is to be judged again.
+    await db.query(`UPDATE settled_parts SET status = 'stale' WHERE id = $1::uuid`, [pReview]);
+    const withStale = await on([O1], 50);
+    await db.query(`UPDATE settled_parts SET status = 'pending' WHERE id = $1::uuid`, [pReview]);
+    await decide(pReview, "accept");
+    const three = await on([O1], 50);
+    assert(withStale.length === 2 && three.length === 3 && three.map((r) => r.id).join() === [pShip, pCount, pReview].join() && three.every((r) => Number(r.total) === 3),
+      `a stale part is on no read; accepted, it joins the others in its place in the text, and each row counts the three (${withStale.length} → ${three.map((r) => r.place).join(", ")})`);
+
+    // How many of each thought: three by default and for NULL, as many as asked from one to fifty, one below one; the
+    // total says how many stand whatever is shown.
+    const per = async (n: number | null | undefined) => { const r = await on([O1], n); return `${r.length}/${r[0] ? Number(r[0].total) : 0}`; };
+    const BULK_O = await cap(`[142] bulk: ${Array.from({ length: 52 }, (_, i) => `item ${String(i + 1).padStart(2, "0")} stands;`).join(" ")}`, 92);
+    const BULK_N_TEXT = `[142] bulk, later: every item was closed. ${"z".repeat(220)}`;
+    const BULK_N = await cap(BULK_N_TEXT, 93);
+    await db.query(`INSERT INTO settled_parts (older_id, newer_id, holder, statement, shown_by, word, reason, older_fingerprint, newer_fingerprint, judge_key, judged_at, status, reviewed_at)
+                    SELECT $1::uuid, $2::uuid, 'older', 'item ' || lpad(g::text, 2, '0') || ' stands', 'every item was closed', 'resolves', '[142] bulk', 'fp-o', 'fp-n', $3::text,
+                           timestamptz '2026-10-01 00:00:00+00', 'accepted', timestamptz '2026-10-02 00:00:00+00'
+                      FROM generate_series(1, 52) g`, [BULK_O, BULK_N, JUDGE]);
+    const bulk = await on([BULK_O], 1000), two = await on([O1, BULK_O], 2);
+    assert((await per(undefined)) === "3/3" && (await per(null)) === "3/3" && (await per(2)) === "2/3" && (await per(1)) === "1/3" && (await per(0)) === "1/3" && (await per(-4)) === "1/3"
+        && bulk.length === 50 && Number(bulk[0].total) === 52 && bulk[0].statement === "item 01 stands" && bulk[49].statement === "item 50 stands"
+        && two.filter((r) => r.holder_id === O1).length === 2 && two.filter((r) => r.holder_id === BULK_O).length === 2 && two.filter((r) => r.holder_id === BULK_O).every((r) => Number(r.total) === 52)
+        // Three of a thought that holds fifty-two, by default and for NULL; the other thought's first 200 characters; the row's own two times.
+        && (await on([BULK_O])).length === 3 && (await on([BULK_O], null)).length === 3 && bulk[0].other_head === BULK_N_TEXT.slice(0, 200) && bulk[0].other_head.length === 200
+        && new Date(String(bulk[0].judged_at)).toISOString() === "2026-10-01T00:00:00.000Z" && new Date(String(bulk[0].accepted_at)).toISOString() === "2026-10-02T00:00:00.000Z",
+      `three parts of a thought by default and for NULL, as many as asked from one to fifty and one below one, each thought counted apart; the total says how many stand whatever is shown; the other thought's first 200 characters, and the part's own two times, judged and accepted (${await per(undefined)}, ${await per(2)}, ${await per(0)}; ${bulk.length} of ${bulk[0]?.total})`);
+
+    // What is asked: a thought with none, an id that is no thought, NULL and an empty list give no row; an id asked
+    // twice gives its parts once; a NULL among the ids is passed over.
+    const BARE = await cap("[142] a thought no part names", 94);
+    assert((await on([BARE], 50)).length === 0 && (await on(["00000000-0000-4000-8000-0000000000aa"], 50)).length === 0 && (await on(null, 50)).length === 0 && (await on([], 50)).length === 0
+        && (await on([O1, O1, null, BARE], 50)).length === 3,
+      "a thought with no part, an id that is no thought, NULL and an empty list give no row; an id asked twice gives its parts once, and a NULL among the ids is passed over");
+
+    // The fold: a text edited in capitals and spacing alone still says the statement, as the part's identity reads
+    // it. Its fingerprint has not moved, and the part's place is its place in the folded text. Both places the text
+    // says it are edited: one left as written would be found first, as the row's own characters.
+    await edit(O1, "[142] The exporter ships on Friday. THE   COUNT stands at 40. The review is open. The budget is 10k. Once more: the COUNT  stands at 40.");
+    const folded = await on([O1], 50);
+    assert(folded.length === 3 && folded.map((r) => r.id).join() === [pShip, pCount, pReview].join() && folded.every((r) => r.holder_edited === false)
+        && Number(folded[1].place) === "[142] the exporter ships on friday. ".length + 1,
+      `a text edited in capitals and spacing alone still says its statement: the part stands, in its place among the others, and its thought does not read as edited (${folded.map((r) => r.place).join(", ")})`);
+    // Edited elsewhere: the parts stand, and each says its thought has moved since it was judged.
+    await edit(O1, "[142] The exporter ships on Friday. THE   COUNT stands at 40. The review is open. The budget is 10k. A line added later.");
+    const elsewhere = await on([O1], 50);
+    // Edited out: the statement leaves its thought, and the part is on no read. Its row stays, accepted, and the
+    // listing still has it.
+    await edit(O1, "[142] The exporter ships on Friday. The count was taken again. The review is open. The budget is 10k. A line added later.");
+    const out = await on([O1], 50);
+    const kept = await one<{ status: string; listed: number }>(`SELECT s.status, (SELECT count(*)::int FROM list_settled_parts('accepted', 200) l WHERE l.id = s.id AND NOT l.statement_in_text) AS listed FROM settled_parts s WHERE s.id = $1::uuid`, [pCount]);
+    assert(elsewhere.length === 3 && elsewhere.every((r) => r.holder_edited === true)
+        && out.map((r) => r.id).join() === [pShip, pReview].join() && out.every((r) => Number(r.total) === 2 && r.holder_edited === true) && kept.status === "accepted" && kept.listed === 1,
+      `a text edited elsewhere keeps its parts, each saying its thought has moved; a statement edited out of its thought is on no read and is not counted, while its row stays accepted and the listing still has it, its quote said gone (${elsewhere.length} → ${out.length} of ${out[0]?.total})`);
+
+    // The other thought's side. Its words in other capitals and spacing are still its words, as the fold reads
+    // them; edited out, the row says so, and the part still stands on its holder.
+    await edit(N1, "[142] THE EXPORTER   shipped on thursday; the count is 52 now; the review closed on Monday; the budget went to 12k");
+    const shownFolded = (await on([O1], 50))[0];
+    await edit(N1, "[142] the exporter went out early; the count is 52 now; the review closed on Monday; the budget went to 12k");
+    const shown = await on([O1], 50);
+    assert(shownFolded.id === pShip && shownFolded.shown_by_in_text === true && shown.length === 2 && shown[0].id === pShip && shown[0].shown_by_in_text === false && shown[0].shown_by === "the exporter shipped on Thursday" && shown[1].shown_by_in_text === true
+        && shown[0].other_head.startsWith("[142] the exporter went out early"),
+      `the words that show a part in other capitals and spacing are still in the other thought, as the fold reads them; edited out of it, the part still stands on its holder, with the words as its row keeps them, said to be no longer in that text, and the other thought's first words as they are now (${shown[0].shown_by_in_text}, ${shown[1].shown_by_in_text})`);
+
+    // The other thought deleted takes the part with it (151's cascade): nothing stands on the holder.
+    const before = (await on([BULK_O], 50)).length;
+    await db.query(`SELECT delete_thought($1::uuid)`, [BULK_N]);
+    assert(before === 50 && (await on([BULK_O], 50)).length === 0, `a part goes with either of its thoughts: the other thought deleted, nothing stands on the holder (${before} → 0)`);
+
+    // It reads only: no thought's pointer is set, and no row of the table moved.
+    const marks = await one<{ pointed: number; rows: number }>(`SELECT (SELECT count(*)::int FROM thoughts WHERE content LIKE '[142]%' AND supersedes IS NOT NULL) AS pointed, (SELECT count(*)::int FROM settled_parts WHERE reason LIKE '[142]%') AS rows`);
+    assert(marks.pointed === 0 && marks.rows === 5, `no thought of the section is superseded, and the parts' rows are as they were written: five, with no read having moved one (${marks.pointed}, ${marks.rows})`);
+
+    // A re-apply is a no-op: one function, the index as it was, the read the same.
+    const was = JSON.stringify(await on([O1, N1], 50));
+    const again = await reapply(file.slice(0, 4));
+    assert(again === file && (await functionsNamed("settled_parts_on")) === 1 && JSON.stringify(await on([O1, N1], 50)) === was
+        && (await one<{ c: number }>(`SELECT count(*)::int AS c FROM pg_indexes WHERE tablename = 'settled_parts' AND indexname = 'settled_parts_accepted_holder_idx'`)).c === 1,
+      `a re-apply is a no-op: one function, one index, the read as it was (${again})`);
+  } catch (e) {
+    assert(false, `the section ran to its end (it threw: ${(e as Error).message.slice(0, 200)})`);
+  } finally {
+    await db.exec(`SELECT set_config('ob1.actor', '', false)`);
+    // The parts go with their thoughts (151's cascade), and their lineage rows with them.
+    await db.exec(`DELETE FROM thoughts WHERE content LIKE '[142]%'`);
+    await db.exec(`DELETE FROM ob1_agents WHERE label = '[142] op'`);
   }
 }
 
