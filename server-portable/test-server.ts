@@ -9322,6 +9322,65 @@ console.log("\n[36i] The unreviewed mark on a priority (SMD-3671 PR 3): a pendin
     `search's and fetch's replies carry the key where an item is marked and the unread note where a read failed, once, as priorityNote; none where nothing is said (${String(compatBad.unreviewedNote).slice(0, 60)})`);
 }
 
+console.log("\n[36j] The operator's subject-key repository in brain_info (SMD-3887 PR 3b-1, migration 153): subject_repo_setting()'s jsonb read, a reply with no source a fault; the row before 153, unread, none, the operator's, the operator's refused, with the setter's name and the refusal cut");
+{
+  const { subjectRepoValue, subjectRepoLine } = await import("./brain-info.ts");
+  const none = subjectRepoValue({ repo: null, source: "none" });
+  const set = subjectRepoValue({ repo: "mharris-sgymd/ob1", source: "operator", set_at: "2026-11-24T10:00:00.5+00:00", set_by: "op-key", refused: null });
+  const refused = subjectRepoValue({ repo: "Bad", source: "operator", set_at: "2026-11-24T10:00:00+00:00", set_by: "op-key", refused: "a repository is lowercase" });
+  const unread = { reason: "refused", message: "permission denied for table subject_repo_settings" } as never;
+  const lines = [
+    subjectRepoLine({ subjectRepo: null, unread: {} }),
+    subjectRepoLine({ subjectRepo: null, unread: { subjectRepo: unread } }),
+    subjectRepoLine({ subjectRepo: none, unread: {} }),
+    subjectRepoLine({ subjectRepo: set, unread: {} }),
+    subjectRepoLine({ subjectRepo: refused, unread: {} }),
+  ];
+  const badRead = [{ repo: "o/r" }, { source: "builtin" }, [], 3].map((r) => { try { subjectRepoValue(r); return "read"; } catch { return "threw"; } });
+  const no155 = subjectRepoLine({ subjectRepo: subjectRepoValue({ repo: "mharris-sgymd/ob1", source: "operator", set_at: "2026-11-24T10:00:00+00:00", set_by: "op-key", refused: null }, false), unread: {} });
+  const long = subjectRepoLine({ subjectRepo: subjectRepoValue({ repo: "o/r", source: "operator", set_at: "2026-11-24T10:00:00+00:00", set_by: "k".repeat(200), refused: "r".repeat(1000) }), unread: {} });
+  assert(lines[0] === "none — migration 153 is not applied, so pr: and version: keys stay unscoped" && /^\? \(subject_repo_settings /.test(lines[1])
+      && lines[2] === "none: pr: and version: keys stay unscoped"
+      && lines[3] === "mharris-sgymd/ob1 (set 2026-11-24T10:00:00.500Z by op-key): a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one"
+      && lines[4] === "Bad, REFUSED, so no bare pr: or version: key can be written (set 2026-11-24T10:00:00.000Z by op-key): a repository is lowercase. An operator key sets it again, or clears it, with SELECT set_subject_repo(<repo or NULL>, <its actor envelope>) (over REST and MCP in SMD-3887 PR 3b-2)"
+      && no155 === "mharris-sgymd/ob1 (set 2026-11-24T10:00:00.000Z by op-key): a bare pr: or version: key is scoped to it — migration 155 is not applied, so a GitHub link names no other repository"
+      && badRead.every((r) => r === "threw") && subjectRepoValue(null) === null
+      && long.length < 700 && long.includes(` by ${"k".repeat(79)}…)`) && long.includes(`${"r".repeat(299)}…. An operator key`),
+    `brain_info's Subject repository row: before 153, unread, none, the operator's, the operator's refused, cut; a reply with no source throws (${lines.join(" | ")} | ${badRead.join(",")})`);
+
+  // The thread read resolves a bare key to the setting's repository, and reads it bare when the setting cannot be read
+  // (review pass 3: it faulted), saying so in the log.
+  const { thread } = await import("./core/threads.ts");
+  const asked: string[] = [];
+  const stub = (repo: () => Promise<string | null>) => ({ door: "test", store: async () => ({
+    subjectRepo: repo,
+    threadPage: async (k: string) => { asked.push(k); return { key: k, total: 0, members: [], links: [], linksMore: false }; },
+    supersededAmong: async () => ({}),
+  }) }) as never;
+  const said: string[] = [];
+  const realError = console.error;
+  console.error = (...a: unknown[]) => { said.push(a.map(String).join(" ")); };
+  // A throw out of the read is this row's failure, not the suite's.
+  let readBare: { ok: boolean } = { ok: false }, scoped: { ok: boolean } = { ok: false };
+  try {
+    readBare = await thread(stub(async () => { throw new Error("permission denied for table subject_repo_settings"); }), {} as never, { key: "pr:12", limit: 10 } as never);
+    scoped = await thread(stub(async () => "o/r"), {} as never, { key: "PR:012", limit: 10 } as never);
+  } catch (e) {
+    said.push(`the read threw: ${(e as Error).message}`);
+  } finally { console.error = realError; }
+  // The answer says it was read unscoped, in its value and its words (review pass 5: it answered as if no thought held
+  // the key); one the repository was read for says nothing.
+  const say = await import("./render.ts");
+  // Rendered only when the read answered (a throw above leaves no outcome to render).
+  const bareText = readBare.ok ? say.renderThread(readBare as never) : null, scopedText = scoped.ok ? say.renderThread(scoped as never) : null;
+  assert((readBare as { value?: { scopeUnread?: boolean } }).value?.scopeUnread === true && (scoped as { value?: { scopeUnread?: boolean } }).value?.scopeUnread === undefined
+         && bareText?.structuredContent.scopeUnread === true && /The subject-key repository could not be read, or is stored refused, so this bare key was read as written/.test(bareText?.content[0].text ?? "")
+         && scopedText?.structuredContent.scopeUnread === undefined && !/could not be read/.test(scopedText?.content[0].text ?? "could not be read"),
+    `a bare key read unscoped says so, in the value and the text (${bareText?.content[0].text.slice(-120) ?? "no answer"})`);
+  assert(readBare.ok && scoped.ok && asked.join(",") === "pr:12,pr:o/r#12" && said.length === 1 && /subject-key repository could not be read, so pr:12 is read as written: permission denied/.test(said[0]),
+    `the thread read reads a bare key as the setting's repository, and bare when the setting cannot be read, said in the log (${asked.join(",")}; ${said[0]?.slice(0, 100)})`);
+}
+
 console.log("\n[37] plan_context in the core and the words (SMD-2684): the tickets its hits name, as the agenda takes keys, the first 100 and the rest counted; the knowledge gaps; the board in one agenda call, every flag on, under what is left of the deadline, and each way it is not read a gap, never a failure; the tools a key's scope may call; the reply's sections, a hit fenced and the value holding no thought's or board's words");
 {
   const { boardKeysOf, knowledgeGaps, boardOf, toolsFor, planContext, BOARD_KEYS, BOARD_LIMIT, LITTLE_BAR, LITTLE_MEASURED_ON } = await import("./core/plan.ts");

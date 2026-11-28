@@ -3913,6 +3913,59 @@ else {
              && noFnUnread.out.includes(`Apply db/migrations/149_thought_validity.sql, then db/migrations/${STALE_PARTS_FILE} — ${STALE_PARTS_FILE.slice(0, 3)} last defines thought_validity (149's, with an arm for a settled part's lineage row), so 149 alone leaves a read that takes a part's row as standing whatever a reviewer decided.`)
              && /!  validity\s+thought_validity\(uuid\[\]\) missing, and /.test(noFnNoParts.out) && /Apply db\/migrations\/149_thought_validity\.sql\./.test(noFnNoParts.out) && !/_stale_parts\.sql/.test(noFnNoParts.out),
              `…and the validity row names a table its read cannot SELECT, a warning, the settled parts' among them; with every table readable, ok; the function gone while the ledger records 149, a failure, and to a role that cannot read the ledger a warning whose by-hand remedy names the stale parts' file after 149, and on a brain without the parts' table 149 alone (${validityLine(noAudit.out)} | ${validityLine(noParts.out)} | ${validityLine(missingBoth.out)} | ${validityLine(noFn.out)} | ${validityLine(noFnUnread.out)})`);
+      // 153 and 155's subject-key repository (SMD-3887 PR 3b-1): ok with none set; the role unable to read it, a stored
+      // value the refusal names, and a repository set without 155's link rule, each a warning; a repository set, ok.
+      const repoLine = (out: string) => out.split("\n").find((l) => /^\s*\S+\s+subject repository\s/.test(l))?.trim() ?? "(no subject repository row)";
+      let repoUnread: { out: string }, repoSet: { out: string }, repoNoLinks: { out: string }, repoRefused: { out: string };
+      await claims.unsafe("REVOKE SELECT ON subject_repo_settings FROM ob1_pf_capture");
+      try { repoUnread = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL }); } finally { await claims.unsafe("GRANT SELECT ON subject_repo_settings TO ob1_pf_capture"); }
+      // The setting planted raw, the guard off, and taken out after, as test-rest-sql [16b] plants one: the setter's
+      // mapping would move every bare key this database holds for the sections after (review pass 3).
+      await claims.unsafe("ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history");
+      const [{ id: pfRepo }] = await claims`INSERT INTO subject_repo_settings (repo, set_by, set_by_agent_id, set_at) VALUES ('o/pf', 'test', gen_random_uuid(), now()) RETURNING id`;
+      await claims.unsafe("ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history");
+      try {
+        repoSet = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
+        await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key(text, text) RENAME TO ob1_subject_linked_key_away_pf");
+        try { repoNoLinks = await run({ ...SQL_ENV, DATABASE_URL: LIVE }); } finally { await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key_away_pf(text, text) RENAME TO ob1_subject_linked_key"); }
+        await claims.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history; UPDATE subject_repo_settings SET repo = 'Bad' WHERE id = ${Number(pfRepo)}; ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+        repoRefused = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
+      } finally {
+        await claims.unsafe(`ALTER TABLE subject_repo_settings DISABLE TRIGGER subject_repo_settings_history; DELETE FROM subject_repo_settings WHERE id = ${Number(pfRepo)}; ALTER TABLE subject_repo_settings ENABLE TRIGGER subject_repo_settings_history`);
+      }
+      assert(/✓  subject repository\s+none set: pr: and version: keys stay unscoped; the server's role reads the setting/.test(missingBoth.out)
+             && /!  subject repository\s+the server's role cannot SELECT subject_repo_settings: a subject write of a bare pr: or version: key faults, and a thread read by one reads it unscoped/.test(repoUnread.out)
+             && /✓  subject repository\s+o\/pf: a bare pr: or version: key is scoped to it, and a pr: key whose GitHub link names another repository to that one/.test(repoSet.out)
+             && /!  subject repository\s+o\/pf is set but migration 155 is not applied: a key its GitHub link names for another repository is scoped to o\/pf/.test(repoNoLinks.out)
+             && /!  subject repository\s+the stored repository "Bad" is refused \(a repository is lowercase.*: no bare pr: or version: key can be written/.test(repoRefused.out)
+             && (await claims`SELECT ob1_subject_repo() AS r`)[0].r === null,
+             `…and the subject repository row: none set, ok; the role unable to read it, a warning; set, ok; set without 155, a warning; a stored value the refusal names, a warning; the test's setting cleared after (${[missingBoth, repoUnread, repoSet, repoNoLinks, repoRefused].map((r) => repoLine(r.out)).join(" | ").slice(0, 600)})`);
+      // …and the schema half there (review pass 1): the table without its reader, a failure; 155 recorded without its link
+      // rule, a failure whether or not a repository is set (a ledger planted as the validity rows above plant one).
+      let repoNoFn: { out: string }, repoNo155: { out: string }, repoNo155Unread: { out: string };
+      await claims.unsafe("ALTER FUNCTION subject_repo_setting() RENAME TO subject_repo_setting_away_pf");
+      try { repoNoFn = await run({ ...SQL_ENV, DATABASE_URL: LIVE }); } finally { await claims.unsafe("ALTER FUNCTION subject_repo_setting_away_pf() RENAME TO subject_repo_setting"); }
+      const plantedLedger155 = (await claims`SELECT to_regclass('schema_migrations') IS NULL AS absent`)[0].absent as boolean;
+      if (plantedLedger155) await claims.unsafe(`CREATE TABLE schema_migrations (name text PRIMARY KEY, sha256 text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())`);
+      const added155 = (await claims.unsafe(`INSERT INTO schema_migrations (name, sha256) VALUES ('155_subject_key_links.sql', 'test') ON CONFLICT DO NOTHING RETURNING name`)).length > 0;
+      // …and to a role that cannot read the ledger, a warning (review pass 2): a planted ledger is the owner's alone; a
+      // kept one, the role's own SELECT held back.
+      const roleReads155 = !plantedLedger155 && Boolean((await claims`SELECT has_table_privilege('ob1_pf_capture', 'schema_migrations', 'SELECT') AS r`)[0].r);
+      await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key(text, text) RENAME TO ob1_subject_linked_key_away_pf");
+      try {
+        repoNo155 = await run({ ...SQL_ENV, DATABASE_URL: LIVE });
+        if (roleReads155) await claims.unsafe("REVOKE SELECT ON schema_migrations FROM ob1_pf_capture");
+        repoNo155Unread = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
+      } finally {
+        await claims.unsafe("ALTER FUNCTION ob1_subject_linked_key_away_pf(text, text) RENAME TO ob1_subject_linked_key");
+        if (roleReads155) await claims.unsafe("GRANT SELECT ON schema_migrations TO ob1_pf_capture");
+        if (plantedLedger155) await claims.unsafe(`DROP TABLE schema_migrations`);
+        else if (added155) await claims.unsafe(`DELETE FROM schema_migrations WHERE name = '155_subject_key_links.sql' AND sha256 = 'test'`);
+      }
+      assert(/✗  subject repository\s+migration 153's subject_repo_setting\(\) missing beside its table: brain_info's row reads unread, and a thread read by a bare pr: or version: key reads it as written, saying so \(scopeUnread\)/.test(repoNoFn.out)
+             && /✗  subject repository\s+migration 155's ob1_subject_linked_key\(text, text\) missing though the ledger records 155/.test(repoNo155.out)
+             && /!  subject repository\s+ob1_subject_linked_key\(text, text\) missing, and .*so whether migration 155 is recorded is unknown/.test(repoNo155Unread.out),
+             `…and the table without its reader, and 155 recorded without its link rule, each a failure, the latter a warning to a role that cannot read the ledger (${repoLine(repoNoFn.out).slice(0, 120)} | ${repoLine(repoNo155.out).slice(0, 120)} | ${repoLine(repoNo155Unread.out).slice(0, 120)})`);
       // Without SELECT too, every read's claimed label goes (SMD-3599, review pass 3: the wording was unreached).
       await claims.unsafe("REVOKE SELECT ON work_claims FROM ob1_pf_capture");
       const noSelect = await run({ ...SQL_ENV, DATABASE_URL: CAPTURE_URL });
